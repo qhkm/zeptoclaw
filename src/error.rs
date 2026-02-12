@@ -1,12 +1,12 @@
-//! Error types for PicoClaw
+//! Error types for ZeptoClaw
 //!
-//! This module defines all error types used throughout the PicoClaw framework.
+//! This module defines all error types used throughout the ZeptoClaw framework.
 //! Uses `thiserror` for ergonomic error handling with automatic `Display` and
 //! `Error` trait implementations.
 
 use thiserror::Error;
 
-/// The primary error type for PicoClaw operations.
+/// The primary error type for ZeptoClaw operations.
 #[derive(Error, Debug)]
 pub enum PicoError {
     /// Configuration-related errors (invalid config, missing required fields, etc.)
@@ -52,9 +52,13 @@ pub enum PicoError {
     /// Authentication or authorization failures
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    /// Security violations (path traversal attempts, blocked commands, etc.)
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
 }
 
-/// A specialized `Result` type for PicoClaw operations.
+/// A specialized `Result` type for ZeptoClaw operations.
 pub type Result<T> = std::result::Result<T, PicoError>;
 
 #[cfg(test)]
@@ -93,5 +97,15 @@ mod tests {
         let _ = PicoError::BusClosed;
         let _ = PicoError::NotFound("test".into());
         let _ = PicoError::Unauthorized("test".into());
+        let _ = PicoError::SecurityViolation("test".into());
+    }
+
+    #[test]
+    fn test_security_violation_display() {
+        let err = PicoError::SecurityViolation("path traversal attempt detected".to_string());
+        assert_eq!(
+            err.to_string(),
+            "Security violation: path traversal attempt detected"
+        );
     }
 }
