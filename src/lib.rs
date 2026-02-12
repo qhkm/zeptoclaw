@@ -21,6 +21,6 @@ pub use providers::{
     ChatOptions, ClaudeProvider, LLMProvider, LLMResponse, LLMToolCall, OpenAIProvider,
     ToolDefinition, Usage,
 };
-pub use security::{validate_path_in_workspace, SafePath};
+pub use security::{validate_path_in_workspace, SafePath, ShellSecurityConfig};
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 pub use tools::{EchoTool, Tool, ToolContext, ToolRegistry};

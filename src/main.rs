@@ -1,6 +1,6 @@
-//! PicoClaw CLI - Ultra-lightweight personal AI assistant
+//! ZeptoClaw CLI - Ultra-lightweight personal AI assistant
 //!
-//! This is the main entry point for the PicoClaw command-line interface.
+//! This is the main entry point for the ZeptoClaw command-line interface.
 //! It provides commands for running the AI agent in interactive mode,
 //! starting the multi-channel gateway, and managing configuration.
 
@@ -12,18 +12,18 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use picoclaw::agent::AgentLoop;
-use picoclaw::bus::{InboundMessage, MessageBus};
-use picoclaw::channels::{ChannelManager, TelegramChannel};
-use picoclaw::config::Config;
-use picoclaw::providers::ClaudeProvider;
-use picoclaw::session::SessionManager;
-use picoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
-use picoclaw::tools::shell::ShellTool;
-use picoclaw::tools::EchoTool;
+use zeptoclaw::agent::AgentLoop;
+use zeptoclaw::bus::{InboundMessage, MessageBus};
+use zeptoclaw::channels::{ChannelManager, TelegramChannel};
+use zeptoclaw::config::{Config, ProviderConfig};
+use zeptoclaw::providers::{ClaudeProvider, OpenAIProvider, RUNTIME_SUPPORTED_PROVIDERS};
+use zeptoclaw::session::SessionManager;
+use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
+use zeptoclaw::tools::shell::ShellTool;
+use zeptoclaw::tools::EchoTool;
 
 #[derive(Parser)]
-#[command(name = "picoclaw")]
+#[command(name = "zeptoclaw")]
 #[command(about = "Ultra-lightweight personal AI assistant", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -63,6 +63,62 @@ enum AuthAction {
     Status,
 }
 
+fn configured_api_key(provider: &Option<ProviderConfig>) -> Option<&str> {
+    provider
+        .as_ref()
+        .and_then(|p| p.api_key.as_deref())
+        .and_then(|k| if k.is_empty() { None } else { Some(k) })
+}
+
+fn configured_provider_names(config: &Config) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if configured_api_key(&config.providers.anthropic).is_some() {
+        names.push("anthropic");
+    }
+    if configured_api_key(&config.providers.openai).is_some() {
+        names.push("openai");
+    }
+    if configured_api_key(&config.providers.openrouter).is_some() {
+        names.push("openrouter");
+    }
+    if configured_api_key(&config.providers.groq).is_some() {
+        names.push("groq");
+    }
+    if configured_api_key(&config.providers.zhipu).is_some() {
+        names.push("zhipu");
+    }
+    if configured_api_key(&config.providers.vllm).is_some() {
+        names.push("vllm");
+    }
+    if configured_api_key(&config.providers.gemini).is_some() {
+        names.push("gemini");
+    }
+    names
+}
+
+fn configured_unsupported_provider_names(config: &Config) -> Vec<&'static str> {
+    configured_provider_names(config)
+        .into_iter()
+        .filter(|name| !RUNTIME_SUPPORTED_PROVIDERS.contains(name))
+        .collect()
+}
+
+fn runtime_provider(config: &Config) -> Option<(&'static str, &str, Option<&str>)> {
+    // Priority: Anthropic > OpenAI
+    if let Some(api_key) = configured_api_key(&config.providers.anthropic) {
+        return Some(("anthropic", api_key, None));
+    }
+    if let Some(api_key) = configured_api_key(&config.providers.openai) {
+        let api_base = config
+            .providers
+            .openai
+            .as_ref()
+            .and_then(|p| p.api_base.as_deref());
+        return Some(("openai", api_key, api_base));
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -100,15 +156,32 @@ async fn main() -> Result<()> {
 
 /// Display version information
 fn cmd_version() {
-    println!("picoclaw {}", env!("CARGO_PKG_VERSION"));
+    println!("zeptoclaw {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Ultra-lightweight personal AI assistant framework");
-    println!("https://github.com/picoclaw/picoclaw");
+    println!("https://github.com/zeptoclaw/zeptoclaw");
+}
+
+/// Read a line from stdin, trimming whitespace
+fn read_line() -> Result<String> {
+    let mut input = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut input)
+        .with_context(|| "Failed to read input")?;
+    Ok(input.trim().to_string())
+}
+
+/// Read a password/API key from stdin (no echo if possible)
+fn read_secret() -> Result<String> {
+    // For now, just read normally. Could use rpassword crate for hidden input.
+    read_line()
 }
 
 /// Initialize configuration directory and save default config
 async fn cmd_onboard() -> Result<()> {
-    println!("Initializing PicoClaw...");
+    println!("Initializing ZeptoClaw...");
+    println!();
 
     // Create config directory
     let config_dir = Config::dir();
@@ -128,25 +201,129 @@ async fn cmd_onboard() -> Result<()> {
         .with_context(|| format!("Failed to create sessions directory: {:?}", sessions_dir))?;
     println!("  Created sessions directory: {:?}", sessions_dir);
 
-    // Save default config if it doesn't exist
+    // Load existing config or create default
     let config_path = Config::path();
-    if !config_path.exists() {
-        let config = Config::default();
-        config
-            .save()
-            .with_context(|| "Failed to save default configuration")?;
-        println!("  Created default config: {:?}", config_path);
-    } else {
+    let mut config = if config_path.exists() {
         println!("  Config already exists: {:?}", config_path);
-    }
+        Config::load().unwrap_or_default()
+    } else {
+        println!("  Creating new config: {:?}", config_path);
+        Config::default()
+    };
 
     println!();
-    println!("PicoClaw initialized successfully!");
+    println!("API Key Setup");
+    println!("=============");
+    println!();
+    println!("Which AI provider would you like to configure?");
+    println!("  1. Anthropic (Claude) - Recommended");
+    println!("  2. OpenAI (GPT-4, etc.)");
+    println!("  3. Both");
+    println!("  4. Skip (configure later)");
+    println!();
+    print!("Enter choice [1-4]: ");
+    io::stdout().flush()?;
+
+    let choice = read_line()?;
+
+    match choice.as_str() {
+        "1" | "1." => {
+            configure_anthropic(&mut config)?;
+        }
+        "2" | "2." => {
+            configure_openai(&mut config)?;
+        }
+        "3" | "3." => {
+            configure_anthropic(&mut config)?;
+            println!();
+            configure_openai(&mut config)?;
+        }
+        "4" | "4." | "" => {
+            println!("Skipping API key setup. You can configure later by:");
+            println!("  - Editing {:?}", config_path);
+            println!("  - Setting environment variables:");
+            println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
+            println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
+        }
+        _ => {
+            println!("Invalid choice. Skipping API key setup.");
+        }
+    }
+
+    // Save config
+    config
+        .save()
+        .with_context(|| "Failed to save configuration")?;
+
+    println!();
+    println!("ZeptoClaw initialized successfully!");
     println!();
     println!("Next steps:");
-    println!("  1. Edit {:?} to add your API keys", config_path);
-    println!("  2. Run 'picoclaw agent' to start the interactive agent");
-    println!("  3. Run 'picoclaw gateway' to start the multi-channel gateway");
+    println!("  1. Run 'zeptoclaw agent' to start the interactive agent");
+    println!("  2. Run 'zeptoclaw gateway' to start the multi-channel gateway");
+    println!("  3. Run 'zeptoclaw status' to check your configuration");
+
+    Ok(())
+}
+
+/// Configure Anthropic provider
+fn configure_anthropic(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Anthropic (Claude) Setup");
+    println!("------------------------");
+    println!("Get your API key from: https://console.anthropic.com/");
+    println!();
+    print!("Enter Anthropic API key (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let api_key = read_secret()?;
+
+    if !api_key.is_empty() {
+        let provider_config = config
+            .providers
+            .anthropic
+            .get_or_insert_with(Default::default);
+        provider_config.api_key = Some(api_key);
+        println!("  Anthropic API key configured.");
+    } else {
+        println!("  Skipped Anthropic configuration.");
+    }
+
+    Ok(())
+}
+
+/// Configure OpenAI provider
+fn configure_openai(config: &mut Config) -> Result<()> {
+    println!();
+    println!("OpenAI Setup");
+    println!("------------");
+    println!("Get your API key from: https://platform.openai.com/api-keys");
+    println!();
+    print!("Enter OpenAI API key (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let api_key = read_secret()?;
+
+    if !api_key.is_empty() {
+        let provider_config = config.providers.openai.get_or_insert_with(Default::default);
+        provider_config.api_key = Some(api_key);
+        println!("  OpenAI API key configured.");
+
+        // Ask about custom base URL
+        println!();
+        println!("Do you want to use a custom API base URL?");
+        println!("(For Azure OpenAI, local models, or OpenAI-compatible APIs)");
+        print!("Enter custom base URL (or press Enter for default): ");
+        io::stdout().flush()?;
+
+        let base_url = read_line()?;
+        if !base_url.is_empty() {
+            provider_config.api_base = Some(base_url);
+            println!("  Custom base URL configured.");
+        }
+    } else {
+        println!("  Skipped OpenAI configuration.");
+    }
 
     Ok(())
 }
@@ -168,22 +345,36 @@ async fn create_agent(config: Config, bus: Arc<MessageBus>) -> Result<Arc<AgentL
     agent.register_tool(Box::new(WriteFileTool)).await;
     agent.register_tool(Box::new(ListDirTool)).await;
     agent.register_tool(Box::new(EditFileTool)).await;
-    agent.register_tool(Box::new(ShellTool)).await;
+    agent.register_tool(Box::new(ShellTool::new())).await;
 
-    info!(
-        "Registered {} tools",
-        agent.tool_count().await
-    );
+    info!("Registered {} tools", agent.tool_count().await);
 
-    // Set up provider if API key is configured
-    if let Some(ref anthropic) = config.providers.anthropic {
-        if let Some(ref api_key) = anthropic.api_key {
-            if !api_key.is_empty() {
+    // Set up provider
+    if let Some((provider_name, api_key, api_base)) = runtime_provider(&config) {
+        match provider_name {
+            "anthropic" => {
                 let provider = ClaudeProvider::new(api_key);
                 agent.set_provider(Box::new(provider)).await;
-                info!("Configured Claude provider");
             }
+            "openai" => {
+                let provider = if let Some(base_url) = api_base {
+                    OpenAIProvider::with_base_url(api_key, base_url)
+                } else {
+                    OpenAIProvider::new(api_key)
+                };
+                agent.set_provider(Box::new(provider)).await;
+            }
+            _ => {}
         }
+        info!("Configured runtime provider: {}", provider_name);
+    }
+
+    let unsupported = configured_unsupported_provider_names(&config);
+    if !unsupported.is_empty() {
+        warn!(
+            "Configured provider(s) not yet supported by runtime: {}",
+            unsupported.join(", ")
+        );
     }
 
     Ok(agent)
@@ -200,16 +391,24 @@ async fn cmd_agent(message: Option<String>) -> Result<()> {
     // Create agent
     let agent = create_agent(config.clone(), bus.clone()).await?;
 
-    // Check if provider is configured
-    let has_provider = config.providers.anthropic
-        .as_ref()
-        .and_then(|p| p.api_key.as_ref())
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
-
-    if !has_provider {
-        eprintln!("Warning: No AI provider configured. Set PICOCLAW_PROVIDERS_ANTHROPIC_API_KEY");
-        eprintln!("or add your API key to {:?}", Config::path());
+    // Check whether the runtime can use at least one configured provider.
+    if runtime_provider(&config).is_none() {
+        let configured = configured_provider_names(&config);
+        if configured.is_empty() {
+            eprintln!(
+                "Warning: No AI provider configured. Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY"
+            );
+            eprintln!("or add your API key to {:?}", Config::path());
+        } else {
+            eprintln!(
+                "Warning: Configured provider(s) are not supported by this runtime: {}",
+                configured.join(", ")
+            );
+            eprintln!(
+                "Currently supported runtime providers: {}",
+                RUNTIME_SUPPORTED_PROVIDERS.join(", ")
+            );
+        }
         eprintln!();
     }
 
@@ -227,7 +426,7 @@ async fn cmd_agent(message: Option<String>) -> Result<()> {
         }
     } else {
         // Interactive mode
-        println!("PicoClaw Interactive Agent");
+        println!("ZeptoClaw Interactive Agent");
         println!("Type your message and press Enter. Type 'quit' or 'exit' to stop.");
         println!();
 
@@ -282,29 +481,36 @@ async fn cmd_agent(message: Option<String>) -> Result<()> {
 
 /// Start multi-channel gateway
 async fn cmd_gateway() -> Result<()> {
-    println!("Starting PicoClaw Gateway...");
+    println!("Starting ZeptoClaw Gateway...");
 
     // Load configuration
     let config = Config::load().with_context(|| "Failed to load configuration")?;
+
+    // Validate provider before starting services.
+    let runtime_provider_name = runtime_provider(&config).map(|(name, _, _)| name);
+    if runtime_provider_name.is_none() {
+        let configured = configured_provider_names(&config);
+        if configured.is_empty() {
+            error!("No AI provider configured. Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY");
+            error!("or add your API key to {:?}", Config::path());
+        } else {
+            error!(
+                "Configured provider(s) are not supported by this runtime: {}",
+                configured.join(", ")
+            );
+            error!(
+                "Currently supported runtime providers: {}",
+                RUNTIME_SUPPORTED_PROVIDERS.join(", ")
+            );
+        }
+        std::process::exit(1);
+    }
 
     // Create message bus
     let bus = Arc::new(MessageBus::new());
 
     // Create agent
     let agent = create_agent(config.clone(), bus.clone()).await?;
-
-    // Check if provider is configured
-    let has_provider = config.providers.anthropic
-        .as_ref()
-        .and_then(|p| p.api_key.as_ref())
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
-
-    if !has_provider {
-        error!("No AI provider configured. Set PICOCLAW_PROVIDERS_ANTHROPIC_API_KEY");
-        error!("or add your API key to {:?}", Config::path());
-        std::process::exit(1);
-    }
 
     // Create channel manager
     let channel_manager = ChannelManager::new(bus.clone(), config.clone());
@@ -325,7 +531,10 @@ async fn cmd_gateway() -> Result<()> {
     // Check if any channels are registered
     let channel_count = channel_manager.channel_count().await;
     if channel_count == 0 {
-        warn!("No channels configured. Enable channels in {:?}", Config::path());
+        warn!(
+            "No channels configured. Enable channels in {:?}",
+            Config::path()
+        );
         warn!("The agent loop will still run but won't receive messages from external sources.");
     } else {
         info!("Registered {} channel(s)", channel_count);
@@ -381,7 +590,7 @@ async fn cmd_auth(action: AuthAction) -> Result<()> {
             println!();
             println!("To configure API keys, either:");
             println!("  1. Set environment variables:");
-            println!("     export PICOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
+            println!("     export ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
             println!();
             println!("  2. Edit your config file:");
             println!("     {:?}", Config::path());
@@ -410,7 +619,13 @@ async fn cmd_auth_status() -> Result<()> {
         .anthropic
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  Anthropic (Claude): {}", anthropic_status);
 
@@ -420,7 +635,13 @@ async fn cmd_auth_status() -> Result<()> {
         .openai
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  OpenAI:             {}", openai_status);
 
@@ -430,7 +651,13 @@ async fn cmd_auth_status() -> Result<()> {
         .openrouter
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  OpenRouter:         {}", openrouter_status);
 
@@ -440,7 +667,13 @@ async fn cmd_auth_status() -> Result<()> {
         .groq
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  Groq:               {}", groq_status);
 
@@ -450,7 +683,13 @@ async fn cmd_auth_status() -> Result<()> {
         .gemini
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  Gemini:             {}", gemini_status);
 
@@ -460,9 +699,24 @@ async fn cmd_auth_status() -> Result<()> {
         .zhipu
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set");
     println!("  Zhipu:              {}", zhipu_status);
+
+    println!();
+    println!("Runtime Provider Support");
+    println!("------------------------");
+    println!("  Supported: {}", RUNTIME_SUPPORTED_PROVIDERS.join(", "));
+    let unsupported = configured_unsupported_provider_names(&config);
+    if !unsupported.is_empty() {
+        println!("  Configured but unsupported: {}", unsupported.join(", "));
+    }
 
     println!();
 
@@ -530,8 +784,8 @@ async fn cmd_auth_status() -> Result<()> {
 async fn cmd_status() -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
-    println!("PicoClaw Status");
-    println!("===============");
+    println!("ZeptoClaw Status");
+    println!("================");
     println!();
 
     // Version
@@ -572,9 +826,18 @@ async fn cmd_status() -> Result<()> {
     println!("Agent Defaults");
     println!("--------------");
     println!("  Model:              {}", config.agents.defaults.model);
-    println!("  Max tokens:         {}", config.agents.defaults.max_tokens);
-    println!("  Temperature:        {}", config.agents.defaults.temperature);
-    println!("  Max tool iterations: {}", config.agents.defaults.max_tool_iterations);
+    println!(
+        "  Max tokens:         {}",
+        config.agents.defaults.max_tokens
+    );
+    println!(
+        "  Temperature:        {}",
+        config.agents.defaults.temperature
+    );
+    println!(
+        "  Max tool iterations: {}",
+        config.agents.defaults.max_tool_iterations
+    );
     println!();
 
     // Gateway
@@ -585,8 +848,19 @@ async fn cmd_status() -> Result<()> {
     println!();
 
     // Provider status
-    let has_provider = config.get_api_key().is_some();
-    println!("Provider: {}", if has_provider { "configured" } else { "not configured" });
+    let runtime_provider_name = runtime_provider(&config).map(|(name, _, _)| name);
+    println!(
+        "Runtime provider: {}",
+        runtime_provider_name.unwrap_or("not configured")
+    );
+    let unsupported = configured_unsupported_provider_names(&config);
+    if !unsupported.is_empty() {
+        println!("Configured but unsupported: {}", unsupported.join(", "));
+    }
+    println!(
+        "Runtime supports: {}",
+        RUNTIME_SUPPORTED_PROVIDERS.join(", ")
+    );
     println!();
 
     // Registered tools (static list)

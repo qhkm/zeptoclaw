@@ -23,9 +23,9 @@
 //! # Example
 //!
 //! ```rust
-//! use picoclaw::tools::{Tool, ToolContext, ToolRegistry, EchoTool};
-//! use picoclaw::tools::filesystem::ReadFileTool;
-//! use picoclaw::tools::shell::ShellTool;
+//! use zeptoclaw::tools::{Tool, ToolContext, ToolRegistry, EchoTool};
+//! use zeptoclaw::tools::filesystem::ReadFileTool;
+//! use zeptoclaw::tools::shell::ShellTool;
 //! use serde_json::json;
 //!
 //! # tokio_test::block_on(async {
@@ -33,7 +33,7 @@
 //! let mut registry = ToolRegistry::new();
 //! registry.register(Box::new(EchoTool));
 //! registry.register(Box::new(ReadFileTool));
-//! registry.register(Box::new(ShellTool));
+//! registry.register(Box::new(ShellTool::new()));
 //!
 //! // Execute a tool
 //! let result = registry.execute("echo", json!({"message": "Hello!"})).await;
@@ -66,7 +66,7 @@ use crate::error::Result;
 /// # Example
 ///
 /// ```rust
-/// use picoclaw::tools::{Tool, ToolContext, EchoTool};
+/// use zeptoclaw::tools::{Tool, ToolContext, EchoTool};
 /// use serde_json::json;
 ///
 /// # tokio_test::block_on(async {
@@ -143,7 +143,9 @@ mod tests {
         let tool = EchoTool;
         let ctx = ToolContext::new();
 
-        let result = tool.execute(json!({"message": "Hello, World!"}), &ctx).await;
+        let result = tool
+            .execute(json!({"message": "Hello, World!"}), &ctx)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello, World!");
     }
