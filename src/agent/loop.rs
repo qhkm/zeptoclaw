@@ -260,9 +260,12 @@ impl AgentLoop {
             session.add_message(assistant_msg);
 
             // Execute each tool call
+            // Use workspace_path() to expand ~ to home directory
+            let workspace = self.config.workspace_path();
+            let workspace_str = workspace.to_string_lossy();
             let tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
-                .with_workspace(&self.config.agents.defaults.workspace);
+                .with_workspace(&workspace_str);
 
             for tool_call in &response.tool_calls {
                 info!(tool = %tool_call.name, id = %tool_call.id, "Executing tool");

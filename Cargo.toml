@@ -9,56 +9,101 @@ readme = "README.md"
 repository = "https://github.com/zeptoclaw/zeptoclaw"
 
 [dependencies]
-# Async runtime
+# =============================================================================
+# ASYNC RUNTIME
+# =============================================================================
+# Tokio async runtime - using "full" features because teloxide/reqwest
+# transitively pull in most features anyway (fs, net, etc.)
+# Minimal features don't reduce binary size due to transitive deps.
 tokio = { version = "1.35", features = ["full"] }
 
-# Serialization
+# =============================================================================
+# SERIALIZATION
+# =============================================================================
+# JSON handling for LLM API requests/responses and config files
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# HTTP client
+# =============================================================================
+# HTTP CLIENT
+# =============================================================================
+# Reqwest with rustls (no OpenSSL dependency) for LLM provider APIs
+# - json: Automatic JSON serialization in requests
+# - rustls-tls: Pure Rust TLS implementation (smaller than native-tls)
+# - default-features = false: Excludes unnecessary features
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# =============================================================================
 # CLI
+# =============================================================================
+# Command-line argument parsing with derive macros
 clap = { version = "4.4", features = ["derive"] }
 
-# Logging
+# =============================================================================
+# LOGGING & DIAGNOSTICS
+# =============================================================================
+# Structured logging with span support for debugging agent loops
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Error handling
+# =============================================================================
+# ERROR HANDLING
+# =============================================================================
+# thiserror: Define custom error types with Display/Error derives
+# anyhow: Ergonomic error handling with context
 thiserror = "1.0"
 anyhow = "1.0"
 
-# Async utilities
+# =============================================================================
+# SECURITY
+# =============================================================================
+# Regex for shell command pattern matching (blocklist bypass prevention)
+regex = "1.10"
+
+# =============================================================================
+# ASYNC UTILITIES
+# =============================================================================
+# async-trait: Enable async fn in trait definitions (LLMProvider, Tool, Channel)
+# futures: Stream combinators for message bus
 async-trait = "0.1"
 futures = "0.3"
 
-# Environment
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+# Environment variable loading (.env files)
 dotenvy = "0.15"
-
-# Global state
+# Lazy static initialization for global config
 once_cell = "1.19"
-
-# File paths
+# Platform-specific paths (~/.config/zeptoclaw)
 dirs = "5.0"
 
-# UUID for session IDs
+# =============================================================================
+# SESSION MANAGEMENT
+# =============================================================================
+# UUID v4 for unique session identifiers
 uuid = { version = "1.6", features = ["v4"] }
-
-# Time handling
+# Timestamps for message history
 chrono = { version = "0.4", features = ["serde"] }
 
-# WebSocket
+# =============================================================================
+# CHANNELS
+# =============================================================================
+# WebSocket support for future real-time channels
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
-
-# Telegram bot
+# Telegram bot SDK (minimal features to reduce bloat)
 teloxide = { version = "0.12", features = ["macros"], default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
 tempfile = "3.10"
+# Benchmarking framework
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "message_bus"
+harness = false
 
 [profile.release]
 opt-level = "z"

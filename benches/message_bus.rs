@@ -5,7 +5,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use zeptoclaw::bus::{InboundMessage, MessageBus, OutboundMessage};
+use zeptoclaw::bus::{InboundMessage, MessageBus};
 
 fn benchmark_publish_inbound(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
