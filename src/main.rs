@@ -14,16 +14,19 @@ use tracing_subscriber::EnvFilter;
 
 use zeptoclaw::agent::AgentLoop;
 use zeptoclaw::bus::{InboundMessage, MessageBus};
-use zeptoclaw::channels::{ChannelManager, TelegramChannel};
+use zeptoclaw::channels::{register_configured_channels, ChannelManager};
 use zeptoclaw::config::{Config, RuntimeType};
+use zeptoclaw::cron::CronService;
 use zeptoclaw::providers::{
     configured_provider_names, configured_unsupported_provider_names, resolve_runtime_provider,
     ClaudeProvider, OpenAIProvider, RUNTIME_SUPPORTED_PROVIDERS,
 };
 use zeptoclaw::runtime::{available_runtimes, create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
+use zeptoclaw::tools::cron::CronTool;
 use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
 use zeptoclaw::tools::shell::ShellTool;
+use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::EchoTool;
 
 #[derive(Parser)]
@@ -416,6 +419,11 @@ async fn create_agent(config: Config, bus: Arc<MessageBus>) -> Result<Arc<AgentL
     // Create agent loop
     let agent = Arc::new(AgentLoop::new(config.clone(), session_manager, bus));
 
+    // Create and start cron service for scheduled tasks.
+    let cron_store_path = Config::dir().join("cron").join("jobs.json");
+    let cron_service = Arc::new(CronService::new(cron_store_path, agent.bus().clone()));
+    cron_service.start().await?;
+
     // Create runtime from config
     let runtime = match create_runtime(&config.runtime).await {
         Ok(r) => {
@@ -448,6 +456,15 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     agent.register_tool(Box::new(EditFileTool)).await;
     agent
         .register_tool(Box::new(ShellTool::with_runtime(runtime)))
+        .await;
+    agent
+        .register_tool(Box::new(CronTool::new(cron_service.clone())))
+        .await;
+    agent
+        .register_tool(Box::new(SpawnTool::new(
+            Arc::downgrade(&agent),
+            agent.bus().clone(),
+        )))
         .await;
 
     info!("Registered {} tools", agent.tool_count().await);
@@ -618,21 +635,8 @@ async fn cmd_gateway() -> Result<()> {
     // Create channel manager
     let channel_manager = ChannelManager::new(bus.clone(), config.clone());
 
-    // Register Telegram channel if enabled
-    if let Some(ref telegram_config) = config.channels.telegram {
-        if telegram_config.enabled {
-            if telegram_config.token.is_empty() {
-                warn!("Telegram channel enabled but token is empty");
-            } else {
-                let telegram = TelegramChannel::new(telegram_config.clone(), bus.clone());
-                channel_manager.register(Box::new(telegram)).await;
-                info!("Registered Telegram channel");
-            }
-        }
-    }
-
-    // Check if any channels are registered
-    let channel_count = channel_manager.channel_count().await;
+    // Register channels via factory.
+    let channel_count = register_configured_channels(&channel_manager, bus.clone(), &config).await;
     if channel_count == 0 {
         warn!(
             "No channels configured. Enable channels in {:?}",
@@ -991,6 +995,8 @@ async fn cmd_status() -> Result<()> {
     println!("  - list_dir");
     println!("  - edit_file");
     println!("  - shell");
+    println!("  - cron");
+    println!("  - spawn");
     println!();
 
     Ok(())

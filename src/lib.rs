@@ -4,6 +4,7 @@ pub mod agent;
 pub mod bus;
 pub mod channels;
 pub mod config;
+pub mod cron;
 pub mod error;
 pub mod providers;
 pub mod runtime;
@@ -17,6 +18,7 @@ pub use agent::{AgentLoop, ContextBuilder};
 pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 pub use channels::{BaseChannelConfig, Channel, ChannelManager, TelegramChannel};
 pub use config::Config;
+pub use cron::{CronJob, CronPayload, CronSchedule, CronService};
 pub use error::{PicoError, Result};
 pub use providers::{
     ChatOptions, ClaudeProvider, LLMProvider, LLMResponse, LLMToolCall, OpenAIProvider,
@@ -29,6 +31,8 @@ pub use runtime::{
 
 #[cfg(target_os = "macos")]
 pub use runtime::AppleContainerRuntime;
-pub use security::{validate_path_in_workspace, SafePath, ShellSecurityConfig};
+pub use security::{
+    validate_extra_mounts, validate_path_in_workspace, SafePath, ShellSecurityConfig,
+};
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
-pub use tools::{EchoTool, Tool, ToolContext, ToolRegistry};
+pub use tools::{cron::CronTool, spawn::SpawnTool, EchoTool, Tool, ToolContext, ToolRegistry};

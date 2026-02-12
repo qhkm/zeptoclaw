@@ -108,10 +108,12 @@
 //! # })
 //! ```
 
+mod factory;
 mod manager;
 pub mod telegram;
 mod types;
 
+pub use factory::register_configured_channels;
 pub use manager::ChannelManager;
 pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};

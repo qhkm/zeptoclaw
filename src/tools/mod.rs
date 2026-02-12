@@ -45,9 +45,11 @@
 //! # });
 //! ```
 
+pub mod cron;
 pub mod filesystem;
 mod registry;
 pub mod shell;
+pub mod spawn;
 mod types;
 
 pub use registry::ToolRegistry;

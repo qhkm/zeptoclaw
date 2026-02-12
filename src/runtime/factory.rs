@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::config::{RuntimeConfig, RuntimeType};
+use crate::security::validate_extra_mounts;
 
 use super::docker::DockerRuntime;
 use super::native::NativeRuntime;
@@ -16,9 +17,13 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
     match config.runtime_type {
         RuntimeType::Native => Ok(Arc::new(NativeRuntime::new())),
         RuntimeType::Docker => {
+            let extra_mounts =
+                validate_extra_mounts(&config.docker.extra_mounts, &config.mount_allowlist_path)
+                    .map_err(|e| RuntimeError::NotAvailable(e.to_string()))?;
+
             let runtime = DockerRuntime::new(&config.docker.image)
                 .with_network(&config.docker.network)
-                .with_extra_mounts(config.docker.extra_mounts.clone());
+                .with_extra_mounts(extra_mounts);
 
             let runtime = if let Some(ref mem) = config.docker.memory_limit {
                 runtime.with_memory_limit(mem)
@@ -43,13 +48,17 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
         RuntimeType::AppleContainer => {
             #[cfg(target_os = "macos")]
             {
+                let extra_mounts =
+                    validate_extra_mounts(&config.apple.extra_mounts, &config.mount_allowlist_path)
+                        .map_err(|e| RuntimeError::NotAvailable(e.to_string()))?;
+
                 let runtime = if config.apple.image.is_empty() {
                     AppleContainerRuntime::new()
                 } else {
                     AppleContainerRuntime::with_image(&config.apple.image)
                 };
 
-                let runtime = runtime.with_extra_mounts(config.apple.extra_mounts.clone());
+                let runtime = runtime.with_extra_mounts(extra_mounts);
 
                 if !runtime.is_available().await {
                     return Err(RuntimeError::NotAvailable(
@@ -106,5 +115,21 @@ mod tests {
     async fn test_available_runtimes_includes_native() {
         let available = available_runtimes().await;
         assert!(available.contains(&"native"));
+    }
+
+    #[tokio::test]
+    async fn test_create_docker_runtime_with_extra_mounts_requires_allowlist() {
+        let mut config = RuntimeConfig::default();
+        config.runtime_type = RuntimeType::Docker;
+        config.mount_allowlist_path = "/nonexistent/allowlist.json".to_string();
+        config
+            .docker
+            .extra_mounts
+            .push("/tmp:/workspace/tmp".to_string());
+
+        let result = create_runtime(&config).await;
+        assert!(result.is_err());
+        let err_text = result.err().map(|err| err.to_string()).unwrap_or_default();
+        assert!(err_text.contains("allowlist"));
     }
 }

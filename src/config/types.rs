@@ -370,10 +370,17 @@ pub struct RuntimeConfig {
     pub runtime_type: RuntimeType,
     /// Whether to fall back to native runtime if configured runtime is unavailable
     pub allow_fallback_to_native: bool,
+    /// Path to JSON allowlist used to validate runtime extra mounts
+    #[serde(default = "default_mount_allowlist_path")]
+    pub mount_allowlist_path: String,
     /// Docker-specific configuration
     pub docker: DockerConfig,
     /// Apple Container-specific configuration (macOS)
     pub apple: AppleContainerConfig,
+}
+
+fn default_mount_allowlist_path() -> String {
+    "~/.zeptoclaw/mount-allowlist.json".to_string()
 }
 
 impl Default for RuntimeConfig {
@@ -381,6 +388,7 @@ impl Default for RuntimeConfig {
         Self {
             runtime_type: RuntimeType::Native,
             allow_fallback_to_native: false,
+            mount_allowlist_path: default_mount_allowlist_path(),
             docker: DockerConfig::default(),
             apple: AppleContainerConfig::default(),
         }
