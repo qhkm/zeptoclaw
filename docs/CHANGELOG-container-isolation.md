@@ -42,6 +42,8 @@ Added selectable container runtime support to ZeptoClaw, allowing shell commands
 | `1b44a6e` | chore: fix code formatting |
 | `3da5dcd` | docs: add container isolation implementation changelog |
 | `788926b` | fix: address code review findings |
+| `eceeea4` | docs: update changelog with code review fixes |
+| `ee274e6` | fix(runtime): add functional validation to Apple runtime availability check |
 
 ## Code Review Fixes
 
@@ -56,15 +58,21 @@ Added selectable container runtime support to ZeptoClaw, allowing shell commands
 - Added same support to `AppleContainerRuntime`
 - Updated factory to pass `extra_mounts` from config to runtimes
 
-### Finding 2 (Medium): Apple runtime experimental status not clear
+### Finding 2 (Medium): Apple runtime CLI compatibility risk
 
-**Problem:** Apple Container runtime is based on assumed CLI interface, may fail at runtime even if availability check passes.
+**Problem:** Apple Container runtime is based on assumed CLI interface, may fail at runtime even if availability check passes. Original `is_available()` only checked `container --version`.
 
-**Fix:**
+**Fix (Phase 1 - Warnings):**
 - Added prominent warning in module-level documentation
 - Added warning in struct documentation
 - Added runtime warning log in `execute()` method
-- Clarified that availability check only validates `container --version`
+
+**Fix (Phase 2 - Functional Validation):**
+- Enhanced `is_available()` with two-step validation:
+  1. Check `container --version` succeeds (tool exists)
+  2. Check `container run --help` succeeds (CLI syntax compatible)
+- If syntax check fails, `is_available()` returns false with warning
+- This ensures fail-fast at `create_runtime()` rather than confusing errors at execution time
 
 ### Already Implemented: Opt-in native fallback
 
