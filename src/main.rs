@@ -288,7 +288,10 @@ fn configure_anthropic(config: &mut Config) -> Result<()> {
             .anthropic
             .get_or_insert_with(Default::default);
         provider_config.api_key = Some(api_key);
+        // Set Claude model as default when Anthropic is configured
+        config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
         println!("  Anthropic API key configured.");
+        println!("  Default model set to: claude-sonnet-4-5-20250929");
     } else {
         println!("  Skipped Anthropic configuration.");
     }
@@ -311,6 +314,18 @@ fn configure_openai(config: &mut Config) -> Result<()> {
     if !api_key.is_empty() {
         let provider_config = config.providers.openai.get_or_insert_with(Default::default);
         provider_config.api_key = Some(api_key);
+        // Set OpenAI model as default when OpenAI is configured (and Anthropic isn't)
+        if config
+            .providers
+            .anthropic
+            .as_ref()
+            .and_then(|p| p.api_key.as_ref())
+            .map(|k| k.is_empty())
+            .unwrap_or(true)
+        {
+            config.agents.defaults.model = "gpt-4o".to_string();
+            println!("  Default model set to: gpt-4o");
+        }
         println!("  OpenAI API key configured.");
 
         // Ask about custom base URL

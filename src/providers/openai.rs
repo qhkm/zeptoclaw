@@ -27,7 +27,7 @@
 //! ```
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -59,6 +59,9 @@ struct OpenAIRequest {
     /// Maximum tokens to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Maximum completion tokens for newer OpenAI reasoning models
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     /// Temperature for sampling
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -71,7 +74,7 @@ struct OpenAIRequest {
 }
 
 /// A message in OpenAI's format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAIMessage {
     /// Role: "system", "user", "assistant", or "tool"
     role: String,
@@ -87,7 +90,7 @@ struct OpenAIMessage {
 }
 
 /// A tool call in a request (assistant requesting tool execution).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAIToolCallRequest {
     /// Unique identifier for this tool call
     id: String,
@@ -98,7 +101,7 @@ struct OpenAIToolCallRequest {
 }
 
 /// Function call details.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAIFunctionCall {
     /// Name of the function to call
     name: String,
@@ -107,7 +110,7 @@ struct OpenAIFunctionCall {
 }
 
 /// OpenAI tool definition.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAITool {
     /// Type of tool (always "function")
     r#type: String,
@@ -116,7 +119,7 @@ struct OpenAITool {
 }
 
 /// OpenAI function definition.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAIFunctionDef {
     /// Function name
     name: String,
@@ -184,6 +187,13 @@ struct OpenAIErrorResponse {
 struct OpenAIError {
     message: String,
     r#type: String,
+}
+
+/// Which token limit field to send to OpenAI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaxTokenField {
+    MaxTokens,
+    MaxCompletionTokens,
 }
 
 // ============================================================================
@@ -363,6 +373,49 @@ fn convert_response(response: OpenAIResponse) -> LLMResponse {
     llm_response
 }
 
+/// Build an OpenAI request payload with the requested token field variant.
+fn build_request(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    options: &ChatOptions,
+    token_field: MaxTokenField,
+) -> OpenAIRequest {
+    let (max_tokens, max_completion_tokens) = match token_field {
+        MaxTokenField::MaxTokens => (options.max_tokens, None),
+        MaxTokenField::MaxCompletionTokens => (None, options.max_tokens),
+    };
+
+    OpenAIRequest {
+        model: model.to_string(),
+        messages: convert_messages(messages.to_vec()),
+        tools: if tools.is_empty() {
+            None
+        } else {
+            Some(convert_tools(tools.to_vec()))
+        },
+        max_tokens,
+        max_completion_tokens,
+        temperature: options.temperature,
+        top_p: options.top_p,
+        stop: options.stop.clone(),
+    }
+}
+
+/// Detect OpenAI's response when a model rejects `max_tokens` and requires
+/// `max_completion_tokens`.
+fn is_max_tokens_unsupported_error(error_text: &str) -> bool {
+    let maybe_message = serde_json::from_str::<OpenAIErrorResponse>(error_text)
+        .ok()
+        .map(|r| r.error.message);
+
+    let message = maybe_message.unwrap_or_else(|| error_text.to_string());
+    let message_lower = message.to_lowercase();
+    message_lower.contains("unsupported parameter")
+        && message_lower.contains("max_tokens")
+        && message_lower.contains("max_completion_tokens")
+}
+
 // ============================================================================
 // LLMProvider Implementation
 // ============================================================================
@@ -377,38 +430,50 @@ impl LLMProvider for OpenAIProvider {
         options: ChatOptions,
     ) -> Result<LLMResponse> {
         let model = model.unwrap_or(DEFAULT_MODEL);
-        let openai_messages = convert_messages(messages);
-        let openai_tools = if tools.is_empty() {
-            None
-        } else {
-            Some(convert_tools(tools))
-        };
+        let mut token_field = MaxTokenField::MaxTokens;
+        let mut retried_for_token_field = false;
 
-        let request = OpenAIRequest {
-            model: model.to_string(),
-            messages: openai_messages,
-            tools: openai_tools,
-            max_tokens: options.max_tokens,
-            temperature: options.temperature,
-            top_p: options.top_p,
-            stop: options.stop,
-        };
+        loop {
+            let request = build_request(model, &messages, &tools, &options, token_field);
+            debug!("OpenAI request to model {} with {:?}", model, token_field);
 
-        debug!("OpenAI request to model {}", model);
+            let response = self
+                .client
+                .post(format!("{}/chat/completions", self.api_base))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| PicoError::Provider(format!("OpenAI request failed: {}", e)))?;
 
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| PicoError::Provider(format!("OpenAI request failed: {}", e)))?;
+            if response.status().is_success() {
+                let openai_response: OpenAIResponse = response.json().await.map_err(|e| {
+                    PicoError::Provider(format!("Failed to parse OpenAI response: {}", e))
+                })?;
 
-        if !response.status().is_success() {
+                info!("OpenAI response received");
+                return Ok(convert_response(openai_response));
+            }
+
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
+
+            // Retry once for models that require max_completion_tokens.
+            if status == StatusCode::BAD_REQUEST
+                && !retried_for_token_field
+                && token_field == MaxTokenField::MaxTokens
+                && options.max_tokens.is_some()
+                && is_max_tokens_unsupported_error(&error_text)
+            {
+                info!(
+                    "OpenAI model '{}' rejected max_tokens; retrying with max_completion_tokens",
+                    model
+                );
+                token_field = MaxTokenField::MaxCompletionTokens;
+                retried_for_token_field = true;
+                continue;
+            }
 
             // Try to parse as OpenAI error response
             if let Ok(error_response) = serde_json::from_str::<OpenAIErrorResponse>(&error_text) {
@@ -423,14 +488,6 @@ impl LLMProvider for OpenAIProvider {
                 status, error_text
             )));
         }
-
-        let openai_response: OpenAIResponse = response
-            .json()
-            .await
-            .map_err(|e| PicoError::Provider(format!("Failed to parse OpenAI response: {}", e)))?;
-
-        info!("OpenAI response received");
-        Ok(convert_response(openai_response))
     }
 
     fn default_model(&self) -> &str {
@@ -650,6 +707,7 @@ mod tests {
             }],
             tools: None,
             max_tokens: Some(1000),
+            max_completion_tokens: None,
             temperature: Some(0.7),
             top_p: None,
             stop: None,
@@ -681,6 +739,7 @@ mod tests {
                 },
             }]),
             max_tokens: None,
+            max_completion_tokens: None,
             temperature: None,
             top_p: None,
             stop: None,
@@ -724,5 +783,63 @@ mod tests {
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].function.name, "tool_a");
         assert_eq!(tool_calls[1].function.name, "tool_b");
+    }
+
+    #[test]
+    fn test_build_request_with_max_tokens_field() {
+        let messages = vec![Message::user("Hello")];
+        let tools = vec![];
+        let options = ChatOptions::new().with_max_tokens(123);
+
+        let request = build_request(
+            "gpt-4o",
+            &messages,
+            &tools,
+            &options,
+            MaxTokenField::MaxTokens,
+        );
+
+        assert_eq!(request.max_tokens, Some(123));
+        assert_eq!(request.max_completion_tokens, None);
+    }
+
+    #[test]
+    fn test_build_request_with_max_completion_tokens_field() {
+        let messages = vec![Message::user("Hello")];
+        let tools = vec![];
+        let options = ChatOptions::new().with_max_tokens(123);
+
+        let request = build_request(
+            "gpt-5",
+            &messages,
+            &tools,
+            &options,
+            MaxTokenField::MaxCompletionTokens,
+        );
+
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.max_completion_tokens, Some(123));
+    }
+
+    #[test]
+    fn test_detect_max_tokens_unsupported_error() {
+        let err = r#"{
+            "error": {
+                "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                "type": "invalid_request_error"
+            }
+        }"#;
+        assert!(is_max_tokens_unsupported_error(err));
+    }
+
+    #[test]
+    fn test_detect_max_tokens_unsupported_error_negative_case() {
+        let err = r#"{
+            "error": {
+                "message": "Invalid API key",
+                "type": "invalid_request_error"
+            }
+        }"#;
+        assert!(!is_max_tokens_unsupported_error(err));
     }
 }
