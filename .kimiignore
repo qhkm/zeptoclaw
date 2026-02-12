@@ -1,0 +1,44 @@
+# Files and directories to exclude from Kimi context
+# Similar to .gitignore but for AI context window
+
+# Build artifacts
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation build
+doc/
+*.md
+
+# Test data (if large)
+tests/fixtures/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Large asset files
+assets/
+*.png
+*.jpg
+*.gif
+*.svg
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Keep these in context despite above rules
+!docs/PERFORMANCE.md
+!docs/BENCHMARK_RESULTS.md
+!docs/LAUNCH_BENCHMARK.md
+!README.md
