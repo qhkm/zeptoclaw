@@ -29,6 +29,8 @@
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{PicoError, Result};
@@ -211,6 +213,8 @@ pub struct OpenAIProvider {
     api_base: String,
     /// HTTP client for making requests
     client: Client,
+    /// Preferred token field by model to avoid repeated fallback retries
+    model_token_fields: Mutex<HashMap<String, MaxTokenField>>,
 }
 
 impl OpenAIProvider {
@@ -234,6 +238,7 @@ impl OpenAIProvider {
             api_key: api_key.to_string(),
             api_base: OPENAI_API_URL.to_string(),
             client: Client::new(),
+            model_token_fields: Mutex::new(HashMap::new()),
         }
     }
 
@@ -256,6 +261,7 @@ impl OpenAIProvider {
             api_key: api_key.to_string(),
             api_base: api_base.trim_end_matches('/').to_string(),
             client: Client::new(),
+            model_token_fields: Mutex::new(HashMap::new()),
         }
     }
 
@@ -273,6 +279,23 @@ impl OpenAIProvider {
             api_key: api_key.to_string(),
             api_base: api_base.trim_end_matches('/').to_string(),
             client,
+            model_token_fields: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get the preferred token field for a model, defaulting to `max_tokens`.
+    fn token_field_for_model(&self, model: &str) -> MaxTokenField {
+        self.model_token_fields
+            .lock()
+            .ok()
+            .and_then(|fields| fields.get(model).copied())
+            .unwrap_or(MaxTokenField::MaxTokens)
+    }
+
+    /// Remember the preferred token field for a model.
+    fn remember_token_field(&self, model: &str, token_field: MaxTokenField) {
+        if let Ok(mut fields) = self.model_token_fields.lock() {
+            fields.insert(model.to_string(), token_field);
         }
     }
 }
@@ -430,8 +453,8 @@ impl LLMProvider for OpenAIProvider {
         options: ChatOptions,
     ) -> Result<LLMResponse> {
         let model = model.unwrap_or(DEFAULT_MODEL);
-        let mut token_field = MaxTokenField::MaxTokens;
-        let mut retried_for_token_field = false;
+        let mut token_field = self.token_field_for_model(model);
+        let mut retried_for_token_field = token_field == MaxTokenField::MaxCompletionTokens;
 
         loop {
             let request = build_request(model, &messages, &tools, &options, token_field);
@@ -471,6 +494,7 @@ impl LLMProvider for OpenAIProvider {
                     model
                 );
                 token_field = MaxTokenField::MaxCompletionTokens;
+                self.remember_token_field(model, MaxTokenField::MaxCompletionTokens);
                 retried_for_token_field = true;
                 continue;
             }
@@ -527,6 +551,25 @@ mod tests {
         let client = Client::new();
         let provider = OpenAIProvider::with_client("test-key", "https://api.openai.com/v1", client);
         assert_eq!(provider.name(), "openai");
+    }
+
+    #[test]
+    fn test_token_field_for_model_defaults_to_max_tokens() {
+        let provider = OpenAIProvider::new("test-key");
+        assert_eq!(
+            provider.token_field_for_model("gpt-5.1-2025-11-13"),
+            MaxTokenField::MaxTokens
+        );
+    }
+
+    #[test]
+    fn test_remember_token_field_for_model() {
+        let provider = OpenAIProvider::new("test-key");
+        provider.remember_token_field("gpt-5.1-2025-11-13", MaxTokenField::MaxCompletionTokens);
+        assert_eq!(
+            provider.token_field_for_model("gpt-5.1-2025-11-13"),
+            MaxTokenField::MaxCompletionTokens
+        );
     }
 
     #[test]

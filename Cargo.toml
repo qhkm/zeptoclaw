@@ -92,7 +92,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # WebSocket support for future real-time channels
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 # Telegram bot SDK (minimal features to reduce bloat)
-teloxide = { version = "0.12", features = ["macros"], default-features = false }
+teloxide = { version = "0.12", features = ["macros", "rustls"], default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4"

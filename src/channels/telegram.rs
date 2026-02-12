@@ -36,6 +36,7 @@
 //! ```
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -72,6 +73,8 @@ pub struct TelegramChannel {
     running: Arc<AtomicBool>,
     /// Sender to signal shutdown to the polling task
     shutdown_tx: Option<mpsc::Sender<()>>,
+    /// Cached bot instance for sending messages (avoids rebuilding HTTP client)
+    bot: Option<teloxide::Bot>,
 }
 
 impl TelegramChannel {
@@ -112,6 +115,7 @@ impl TelegramChannel {
             bus,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
+            bot: None,
         }
     }
 
@@ -123,6 +127,20 @@ impl TelegramChannel {
     /// Returns whether the channel is enabled in configuration.
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    /// Build a Telegram bot client with explicit proxy behavior.
+    ///
+    /// We disable automatic system proxy detection to avoid macOS dynamic-store
+    /// crashes seen in some sandboxed/runtime environments.
+    fn build_bot(token: &str) -> Result<teloxide::Bot> {
+        let client = teloxide::net::default_reqwest_settings()
+            .no_proxy()
+            .build()
+            .map_err(|e| {
+                PicoError::Channel(format!("Failed to build Telegram HTTP client: {}", e))
+            })?;
+        Ok(teloxide::Bot::with_client(token.to_string(), client))
     }
 }
 
@@ -177,75 +195,103 @@ impl Channel for TelegramChannel {
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
 
+        let bot = match Self::build_bot(&token) {
+            Ok(bot) => bot,
+            Err(e) => {
+                self.running.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
+
+        // Cache the bot for send() calls
+        self.bot = Some(bot.clone());
+
         // Spawn the bot polling task
         tokio::spawn(async move {
             use teloxide::prelude::*;
 
-            let bot = Bot::new(token);
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                // Perform a startup check so connectivity/token errors are surfaced
+                // as logged channel failures instead of dispatcher panics.
+                if let Err(e) = bot.get_me().await {
+                    error!("Telegram startup check failed: {}", e);
+                    return;
+                }
 
-            // Create the handler for incoming messages
-            let handler = Update::filter_message().endpoint(
-                |_bot: Bot,
-                 msg: Message,
-                 (bus, allowlist): (Arc<MessageBus>, Vec<String>)| async move {
-                    // Extract user ID
-                    let user_id = msg
-                        .from()
-                        .map(|u| u.id.0.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                // Create the handler for incoming messages
+                // Note: dptree injects dependencies separately, not as tuples
+                let handler =
+                    Update::filter_message().endpoint(
+                        |_bot: Bot,
+                         msg: Message,
+                         bus: Arc<MessageBus>,
+                         allowlist: Vec<String>| async move {
+                            // Extract user ID
+                            let user_id = msg
+                                .from()
+                                .map(|u| u.id.0.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
 
-                    // Check allowlist (empty = allow all)
-                    if !allowlist.is_empty() && !allowlist.contains(&user_id) {
-                        info!(
-                            "Telegram: User {} not in allowlist, ignoring message",
-                            user_id
-                        );
-                        return Ok(());
-                    }
-
-                    // Only process text messages
-                    if let Some(text) = msg.text() {
-                        let chat_id = msg.chat.id.0.to_string();
-
-                        info!(
-                            "Telegram: Received message from user {} in chat {}: {}",
-                            user_id,
-                            chat_id,
-                            if text.len() > 50 {
-                                format!("{}...", &text[..50])
-                            } else {
-                                text.to_string()
+                            // Check allowlist (empty = allow all)
+                            if !allowlist.is_empty() && !allowlist.contains(&user_id) {
+                                info!(
+                                    "Telegram: User {} not in allowlist, ignoring message",
+                                    user_id
+                                );
+                                return Ok(());
                             }
-                        );
 
-                        // Create and publish the inbound message
-                        let inbound = InboundMessage::new("telegram", &user_id, &chat_id, text);
+                            // Only process text messages
+                            if let Some(text) = msg.text() {
+                                let chat_id = msg.chat.id.0.to_string();
 
-                        if let Err(e) = bus.publish_inbound(inbound).await {
-                            error!("Failed to publish inbound message to bus: {}", e);
-                        }
+                                info!(
+                                    "Telegram: Received message from user {} in chat {}: {}",
+                                    user_id,
+                                    chat_id,
+                                    if text.len() > 50 {
+                                        format!("{}...", &text[..50])
+                                    } else {
+                                        text.to_string()
+                                    }
+                                );
+
+                                // Create and publish the inbound message
+                                let inbound =
+                                    InboundMessage::new("telegram", &user_id, &chat_id, text);
+
+                                if let Err(e) = bus.publish_inbound(inbound).await {
+                                    error!("Failed to publish inbound message to bus: {}", e);
+                                }
+                            }
+
+                            // Acknowledge the message (required by teloxide)
+                            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                        },
+                    );
+
+                // Build the dispatcher with dependencies
+                let mut dispatcher = Dispatcher::builder(bot, handler)
+                    .dependencies(dptree::deps![bus, allowlist])
+                    .build();
+
+                info!("Telegram bot dispatcher started, waiting for messages...");
+
+                // Run until shutdown signal
+                tokio::select! {
+                    _ = dispatcher.dispatch() => {
+                        info!("Telegram dispatcher completed");
                     }
-
-                    // Acknowledge the message (required by teloxide)
-                    Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-                },
-            );
-
-            // Build the dispatcher with dependencies
-            let mut dispatcher = Dispatcher::builder(bot, handler)
-                .dependencies(dptree::deps![bus, allowlist])
-                .build();
-
-            info!("Telegram bot dispatcher started, waiting for messages...");
-
-            // Run until shutdown signal
-            tokio::select! {
-                _ = dispatcher.dispatch() => {
-                    info!("Telegram dispatcher completed");
+                    _ = shutdown_rx.recv() => {
+                        info!("Telegram channel shutdown signal received");
+                    }
                 }
-                _ = shutdown_rx.recv() => {
-                    info!("Telegram channel shutdown signal received");
-                }
+            })
+            .catch_unwind()
+            .await;
+
+            if task_result.is_err() {
+                error!("Telegram polling task panicked");
             }
 
             running_clone.store(false, Ordering::SeqCst);
@@ -273,6 +319,9 @@ impl Channel for TelegramChannel {
                 warn!("Telegram shutdown channel already closed");
             }
         }
+
+        // Clear cached bot
+        self.bot = None;
 
         info!("Telegram channel stopped");
         Ok(())
@@ -307,8 +356,11 @@ impl Channel for TelegramChannel {
 
         info!("Telegram: Sending message to chat {}", chat_id);
 
-        // Create bot and send message
-        let bot = Bot::new(&self.config.token);
+        // Use cached bot instance
+        let bot = self
+            .bot
+            .as_ref()
+            .ok_or_else(|| PicoError::Channel("Telegram bot not initialized".to_string()))?;
 
         bot.send_message(ChatId(chat_id), &msg.content)
             .await

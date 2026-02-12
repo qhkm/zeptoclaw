@@ -251,6 +251,9 @@ async fn cmd_onboard() -> Result<()> {
         }
     }
 
+    // Configure Telegram channel
+    configure_telegram(&mut config)?;
+
     // Configure runtime for shell command isolation
     configure_runtime(&mut config)?;
 
@@ -342,6 +345,34 @@ fn configure_openai(config: &mut Config) -> Result<()> {
         }
     } else {
         println!("  Skipped OpenAI configuration.");
+    }
+
+    Ok(())
+}
+
+/// Configure Telegram channel
+fn configure_telegram(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Telegram Bot Setup");
+    println!("------------------");
+    println!("To create a bot: Open Telegram, message @BotFather, send /newbot");
+    println!();
+    print!("Enter Telegram bot token (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let token = read_line()?;
+
+    if !token.is_empty() {
+        let telegram_config = config
+            .channels
+            .telegram
+            .get_or_insert_with(Default::default);
+        telegram_config.token = token;
+        telegram_config.enabled = true;
+        println!("  Telegram bot configured.");
+        println!("  Run 'zeptoclaw gateway' to start the bot.");
+    } else {
+        println!("  Skipped Telegram configuration.");
     }
 
     Ok(())
