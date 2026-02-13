@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ZeptoClaw — Ultra-Lightweight AI Assistant</title>
-    <meta name="description" content="A personal AI assistant framework that fits in 3MB. Multi-provider, tool-enabled, and blazing fast.">
+    <meta name="description" content="A personal AI assistant framework that fits in ~5MB. Multi-provider, 16+ tools, container isolation, and blazing fast.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -598,6 +598,202 @@
             color: var(--text-muted);
         }
 
+        /* Family Section */
+        .family {
+            padding: 6rem 2rem;
+        }
+
+        .family-story {
+            max-width: 700px;
+            margin: 0 auto 3rem;
+            text-align: center;
+        }
+
+        .family-story p {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            line-height: 1.8;
+            margin-bottom: 1rem;
+        }
+
+        .family-story .highlight-text {
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .family-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        @media (max-width: 900px) {
+            .family-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 500px) {
+            .family-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .family-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            position: relative;
+            transition: border-color 0.2s;
+        }
+
+        .family-card:hover {
+            border-color: var(--text-muted);
+        }
+
+        .family-card.current {
+            border-color: var(--accent);
+            background: linear-gradient(135deg, var(--bg-secondary) 0%, rgba(242, 78, 30, 0.05) 100%);
+        }
+
+        .family-card.current::after {
+            content: 'YOU ARE HERE';
+            position: absolute;
+            top: -10px;
+            right: 12px;
+            background: var(--accent);
+            color: white;
+            font-size: 0.625rem;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 4px;
+            letter-spacing: 0.05em;
+        }
+
+        .family-card h4 {
+            font-size: 1.125rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+
+        .family-lang {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 0.75rem;
+        }
+
+        .family-card p {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: 0.75rem;
+        }
+
+        .family-traits {
+            list-style: none;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .family-traits li {
+            padding: 0.15rem 0;
+        }
+
+        .family-traits li::before {
+            content: '→ ';
+            color: var(--accent);
+        }
+
+        /* Audience Section */
+        .audience {
+            padding: 4rem 2rem;
+            background: var(--bg-secondary);
+        }
+
+        .audience-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        @media (max-width: 768px) {
+            .audience-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .audience-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            text-align: center;
+        }
+
+        .audience-card .audience-icon {
+            font-size: 2rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .audience-card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .audience-card p {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        /* Install Section */
+        .install {
+            padding: 6rem 2rem;
+        }
+
+        .install-steps {
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        .install-step {
+            margin-bottom: 1.5rem;
+        }
+
+        .install-step h4 {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+        }
+
+        .install-code {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1rem 1.25rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8125rem;
+            color: var(--text-primary);
+            overflow-x: auto;
+        }
+
+        .install-code .comment {
+            color: var(--text-muted);
+        }
+
+        .install-code .prompt {
+            color: var(--accent);
+            user-select: none;
+        }
+
         /* Mobile Menu */
         .mobile-menu-btn {
             display: none;
@@ -646,8 +842,9 @@
             </a>
             <ul class="nav-links">
                 <li><a href="#features">Features</a></li>
+                <li><a href="#family">Family</a></li>
                 <li><a href="#architecture">Architecture</a></li>
-                <li><a href="https://github.com/zeptoclaw/zeptoclaw">GitHub</a></li>
+                <li><a href="https://github.com/qhkm/zeptoclaw">GitHub</a></li>
             </ul>
             <a href="#install" class="nav-cta">Get Started</a>
             <button class="mobile-menu-btn">☰</button>
@@ -657,15 +854,15 @@
     <section class="hero">
         <div class="hero-content">
             <div class="badge">v0.1.0 — Now Available</div>
-            <h1>AI Assistant That Fits<br>in <span class="highlight">3 Megabytes</span></h1>
+            <h1>AI Assistant That Fits<br>in <span class="highlight">5 Megabytes</span></h1>
             <p class="hero-subtitle">
-                Ultra-lightweight personal AI assistant framework. Multi-provider support, 
-                extensible tools, container runtime isolation — all in a binary smaller than a selfie.
+                Ultra-lightweight personal AI assistant framework. 16+ tools, multi-provider support,
+                container isolation, cron scheduling, and agent swarms — all in a single binary.
             </p>
             <div class="hero-stats">
-                <div class="hero-stat">⚡ <span>3MB</span> binary</div>
-                <div class="hero-stat">🔒 <span>Zero</span> dependencies</div>
-                <div class="hero-stat">🤖 <span>7+</span> LLM providers</div>
+                <div class="hero-stat">⚡ <span>~5MB</span> binary</div>
+                <div class="hero-stat">🛠️ <span>16+</span> built-in tools</div>
+                <div class="hero-stat">🤖 <span>7</span> LLM providers</div>
             </div>
             <div class="hero-cta">
                 <a href="#install" class="btn btn-primary">Install ZeptoClaw</a>
@@ -691,7 +888,7 @@
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-ai">→</span>
-                        <span class="terminal-command">Found 37 Rust source files across 12 modules</span>
+                        <span class="terminal-command">Found 40+ Rust source files across 17 modules</span>
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-ai">→</span>
@@ -703,7 +900,7 @@
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-ai">→</span>
-                        <span class="terminal-command">Tools: shell, read_file, write_file, list_dir, edit_file</span>
+                        <span class="terminal-command">Tools: shell, filesystem, web, memory, cron, whatsapp + 10 more</span>
                     </div>
                     <div class="terminal-output">
                         <span style="color: var(--success)">✓</span> Analysis complete in 1.2s
@@ -723,8 +920,8 @@
                 <div class="section-tag">Features</div>
                 <h2>Small Binary, Big Capabilities</h2>
                 <p class="section-subtitle">
-                    ZeptoClaw proves that size isn't everything. Packed with features 
-                    typically found in frameworks 10x larger.
+                    ZeptoClaw proves that size isn't everything. 17 modules and 16+ tools
+                    in a single binary smaller than most app icons.
                 </p>
             </div>
 
@@ -732,37 +929,133 @@
                 <div class="feature-card">
                     <div class="feature-icon">🤖</div>
                     <h3>Multi-Provider LLM</h3>
-                    <p>Seamlessly switch between Claude, GPT-4, Gemini, Groq, and more. Use the best model for each task without changing your workflow.</p>
+                    <p>Seamlessly switch between Claude, GPT-4, Gemini, Groq, and more. Provider registry with priority-based fallback resolution.</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="feature-icon">🛠️</div>
-                    <h3>Extensible Tools</h3>
-                    <p>Built-in tools for file operations, shell commands, and web search. Write custom tools in Rust with the simple Tool trait.</p>
+                    <h3>16+ Built-in Tools</h3>
+                    <p>Shell, filesystem, web search, web fetch, memory, cron scheduling, spawn, WhatsApp, Google Sheets, and more. Extend with the simple Tool trait.</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="feature-icon">📦</div>
-                    <h3>Container Runtime Isolation</h3>
+                    <h3>Container Isolation</h3>
                     <p>Execute shell commands in Docker or Apple Container for security. Falls back to native runtime when containers aren't available.</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="feature-icon">💬</div>
                     <h3>Multi-Channel Gateway</h3>
-                    <p>Chat with your AI via Telegram, Discord, Slack, or CLI. Same assistant, your choice of interface.</p>
+                    <p>Chat via Telegram, Slack, WhatsApp, or CLI. Channel factory with per-channel configuration and unified message bus.</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="feature-icon">🧠</div>
-                    <h3>Session Persistence</h3>
-                    <p>Long-running conversations with context. Sessions survive restarts with filesystem or in-memory storage.</p>
+                    <h3>Memory &amp; Sessions</h3>
+                    <p>Long-running conversations with context. Persistent memory search and retrieval. Sessions survive restarts with filesystem storage.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">⏰</div>
+                    <h3>Cron &amp; Scheduling</h3>
+                    <p>Schedule recurring tasks with cron expressions. Heartbeat service for proactive check-ins. Background agent spawning for async work.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">📊</div>
+                    <h3>Health &amp; Observability</h3>
+                    <p>Built-in health endpoints, usage metrics with atomic counters, structured JSON logging, and per-request tracing with tenant isolation.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Web &amp; Integrations</h3>
+                    <p>Web search, web fetch, Google Sheets read/write, WhatsApp messaging, and proactive outbound messages across all channels.</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="feature-icon">🦀</div>
                     <h3>Written in Rust</h3>
                     <p>Memory safety without garbage collection. Zero runtime crashes. Minimal resource usage even under heavy load.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="family" id="family">
+        <div class="container">
+            <div class="section-header">
+                <div class="section-tag">The OpenClaw Family</div>
+                <h2>One Vision, Four Languages</h2>
+            </div>
+
+            <div class="family-story">
+                <p>
+                    It started with <span class="highlight-text">OpenClaw</span> — a TypeScript
+                    powerhouse with 52+ modules and 12 channels. It could do everything. But
+                    "everything" comes at a cost: complexity, dependencies, and resource bloat.
+                </p>
+                <p>
+                    So we asked: what if we stripped it down? <span class="highlight-text">NanoClaw</span>
+                    was born — a forkable, understandable assistant in ~5,000 lines of TypeScript.
+                    Then <span class="highlight-text">PicoClaw</span> pushed further — a Go binary
+                    that runs on a $10 RISC-V board with under 10MB RAM.
+                </p>
+                <p>
+                    <span class="highlight-text">ZeptoClaw</span> is the final form: Rust's memory
+                    safety, async performance, and container isolation — built for teams who need
+                    security and multi-tenancy without sacrificing simplicity.
+                </p>
+            </div>
+
+            <div class="family-grid">
+                <div class="family-card">
+                    <h4>OpenClaw</h4>
+                    <div class="family-lang">TypeScript</div>
+                    <p>The comprehensive one. Every feature, every channel, every integration.</p>
+                    <ul class="family-traits">
+                        <li>52+ modules</li>
+                        <li>12 chat channels</li>
+                        <li>Voice + Live Canvas</li>
+                        <li>Full production stack</li>
+                    </ul>
+                </div>
+
+                <div class="family-card">
+                    <h4>NanoClaw</h4>
+                    <div class="family-lang">TypeScript</div>
+                    <p>The hackable one. Fork it, read it, make it yours.</p>
+                    <ul class="family-traits">
+                        <li>~5,000 LOC</li>
+                        <li>Agent swarms</li>
+                        <li>Skills-based extensibility</li>
+                        <li>Container-native</li>
+                    </ul>
+                </div>
+
+                <div class="family-card">
+                    <h4>PicoClaw</h4>
+                    <div class="family-lang">Go</div>
+                    <p>The tiny one. Runs on hardware that costs less than lunch.</p>
+                    <ul class="family-traits">
+                        <li>&lt;10MB RAM</li>
+                        <li>ARM64 + RISC-V</li>
+                        <li>7 LLM providers</li>
+                        <li>$10 hardware ready</li>
+                    </ul>
+                </div>
+
+                <div class="family-card current">
+                    <h4>ZeptoClaw</h4>
+                    <div class="family-lang">Rust</div>
+                    <p>The secure one. Multi-tenant, containerized, zero crashes.</p>
+                    <ul class="family-traits">
+                        <li>~5MB binary</li>
+                        <li>16+ tools</li>
+                        <li>Container isolation</li>
+                        <li>Multi-tenant ready</li>
+                    </ul>
                 </div>
             </div>
         </div>
@@ -799,7 +1092,7 @@
             <div class="arch-grid">
                 <div class="arch-card">
                     <h4>Channels</h4>
-                    <p>Telegram, Discord, Slack, CLI — unified message interface</p>
+                    <p>Telegram, Slack, WhatsApp, CLI — unified message interface</p>
                 </div>
                 <div class="arch-arrow">→</div>
                 <div class="arch-card">
@@ -815,23 +1108,91 @@
         </div>
     </section>
 
+    <section class="audience">
+        <div class="container">
+            <div class="section-header">
+                <div class="section-tag">Who It's For</div>
+                <h2>Built for Builders</h2>
+            </div>
+
+            <div class="audience-grid">
+                <div class="audience-card">
+                    <div class="audience-icon">🏠</div>
+                    <h4>Self-Hosters</h4>
+                    <p>Run your own AI assistant on a VPS or home server. Single binary, no runtime dependencies, Docker-ready.</p>
+                </div>
+
+                <div class="audience-card">
+                    <div class="audience-icon">🔒</div>
+                    <h4>Security-Conscious Teams</h4>
+                    <p>Container isolation, SSRF prevention, path traversal detection, shell command blocklists. Security by default.</p>
+                </div>
+
+                <div class="audience-card">
+                    <div class="audience-icon">🏢</div>
+                    <h4>Multi-Tenant Operators</h4>
+                    <p>Deploy one binary for many users. Isolated workspaces, per-tenant config, health endpoints, and usage metrics.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <section class="stats">
         <div class="stats-grid">
             <div class="stat-item">
-                <div class="stat-value">3MB</div>
+                <div class="stat-value">~5MB</div>
                 <div class="stat-label">Release Binary</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value">12</div>
+                <div class="stat-value">17</div>
                 <div class="stat-label">Core Modules</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value">7</div>
-                <div class="stat-label">LLM Providers</div>
+                <div class="stat-value">16+</div>
+                <div class="stat-label">Built-in Tools</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value">0</div>
                 <div class="stat-label">Runtime Crashes</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="install" id="install">
+        <div class="container">
+            <div class="section-header">
+                <div class="section-tag">Getting Started</div>
+                <h2>Up and Running in 60 Seconds</h2>
+            </div>
+
+            <div class="install-steps">
+                <div class="install-step">
+                    <h4>1. Build from source</h4>
+                    <div class="install-code">
+                        <span class="prompt">$</span> git clone https://github.com/qhkm/zeptoclaw.git<br>
+                        <span class="prompt">$</span> cd zeptoclaw && cargo build --release
+                    </div>
+                </div>
+
+                <div class="install-step">
+                    <h4>2. Run interactive setup</h4>
+                    <div class="install-code">
+                        <span class="prompt">$</span> ./target/release/zeptoclaw onboard<br>
+                        <span class="comment"># Walks you through provider keys, channels, and workspace config</span>
+                    </div>
+                </div>
+
+                <div class="install-step">
+                    <h4>3. Start your assistant</h4>
+                    <div class="install-code">
+                        <span class="comment"># CLI mode — talk directly</span><br>
+                        <span class="prompt">$</span> zeptoclaw agent -m "Hello, set up my workspace"<br><br>
+                        <span class="comment"># Gateway mode — Telegram/Slack/WhatsApp bot</span><br>
+                        <span class="prompt">$</span> zeptoclaw gateway<br><br>
+                        <span class="comment"># Containerized — full isolation per request</span><br>
+                        <span class="prompt">$</span> zeptoclaw gateway --containerized
+                    </div>
+                </div>
             </div>
         </div>
     </section>
@@ -852,7 +1213,7 @@
             </div>
         </div>
         <div class="footer-bottom">
-            © 2026 ZeptoClaw contributors. MIT License. Built with Rust.
+            © 2026 Kitakod Ventures. Apache License 2.0. Built with Rust.
         </div>
     </footer>
 
