@@ -22,7 +22,7 @@ pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMe
 pub use channels::{BaseChannelConfig, Channel, ChannelManager, SlackChannel, TelegramChannel};
 pub use config::Config;
 pub use cron::{CronJob, CronPayload, CronSchedule, CronService};
-pub use error::{PicoError, Result, ZeptoError};
+pub use error::{Result, ZeptoError};
 pub use heartbeat::{ensure_heartbeat_file, HeartbeatService, HEARTBEAT_PROMPT};
 pub use providers::{
     ChatOptions, ClaudeProvider, LLMProvider, LLMResponse, LLMToolCall, OpenAIProvider,
@@ -37,9 +37,9 @@ pub use config::ContainerAgentBackend;
 #[cfg(target_os = "macos")]
 pub use gateway::is_apple_container_available;
 pub use gateway::{
-    generate_env_file_content, is_docker_available, parse_marked_response, resolve_backend,
-    AgentRequest, AgentResponse, AgentResult, ContainerAgentProxy, ResolvedBackend,
-    RESPONSE_END_MARKER, RESPONSE_START_MARKER,
+    generate_env_file_content, is_docker_available, is_docker_available_with_binary,
+    parse_marked_response, resolve_backend, AgentRequest, AgentResponse, AgentResult,
+    ContainerAgentProxy, ResolvedBackend, RESPONSE_END_MARKER, RESPONSE_START_MARKER,
 };
 
 #[cfg(target_os = "macos")]

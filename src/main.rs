@@ -1100,6 +1100,18 @@ async fn cmd_agent_stdin() -> Result<()> {
 
     let request: zeptoclaw::gateway::AgentRequest =
         serde_json::from_str(&input).map_err(|e| anyhow::anyhow!("Invalid request JSON: {}", e))?;
+
+    if let Err(e) = request.validate() {
+        let response = zeptoclaw::gateway::AgentResponse::error(
+            &request.request_id,
+            &e.to_string(),
+            "INVALID_REQUEST",
+        );
+        println!("{}", response.to_marked_json());
+        io::stdout().flush()?;
+        return Ok(());
+    }
+
     let zeptoclaw::gateway::AgentRequest {
         request_id,
         message,
@@ -1184,7 +1196,8 @@ async fn cmd_gateway(containerized_flag: Option<String>) -> Result<()> {
         // Validate the resolved backend
         match backend {
             zeptoclaw::gateway::ResolvedBackend::Docker => {
-                validate_docker_available().await?;
+                validate_docker_available(configured_docker_binary(&config.container_agent))
+                    .await?;
             }
             #[cfg(target_os = "macos")]
             zeptoclaw::gateway::ResolvedBackend::Apple => {
@@ -1195,7 +1208,8 @@ async fn cmd_gateway(containerized_flag: Option<String>) -> Result<()> {
         // Check image exists (Docker-specific)
         let image = &config.container_agent.image;
         if backend == zeptoclaw::gateway::ResolvedBackend::Docker {
-            let image_check = tokio::process::Command::new("docker")
+            let docker_binary = configured_docker_binary(&config.container_agent);
+            let image_check = tokio::process::Command::new(docker_binary)
                 .args(["image", "inspect", image])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1203,9 +1217,16 @@ async fn cmd_gateway(containerized_flag: Option<String>) -> Result<()> {
                 .await;
 
             if !image_check.map(|s| s.success()).unwrap_or(false) {
-                eprintln!("Warning: Docker image '{}' not found.", image);
-                eprintln!("Build it with: docker build -t {} .", image);
-                return Err(anyhow::anyhow!("Docker image '{}' not found", image));
+                eprintln!(
+                    "Warning: Docker image '{}' not found (checked via '{}').",
+                    image, docker_binary
+                );
+                eprintln!("Build it with: {} build -t {} .", docker_binary, image);
+                return Err(anyhow::anyhow!(
+                    "Docker image '{}' not found (checked via '{}')",
+                    image,
+                    docker_binary
+                ));
             }
         }
 
@@ -1696,13 +1717,23 @@ async fn cmd_auth_status() -> Result<()> {
 }
 
 /// Validate that Docker is available, returning a user-friendly error if not.
-async fn validate_docker_available() -> Result<()> {
-    if !zeptoclaw::gateway::is_docker_available().await {
+async fn validate_docker_available(docker_binary: &str) -> Result<()> {
+    if !zeptoclaw::gateway::is_docker_available_with_binary(docker_binary).await {
         return Err(anyhow::anyhow!(
-            "Docker is not available. Install Docker or run without --containerized."
+            "Docker is not available via '{}'. Install Docker or run without --containerized.",
+            docker_binary
         ));
     }
     Ok(())
+}
+
+fn configured_docker_binary(config: &zeptoclaw::config::ContainerAgentConfig) -> &str {
+    config
+        .docker_binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("docker")
 }
 
 /// Validate that Apple Container is available (macOS only).

@@ -1043,4 +1043,20 @@ fn test_agent_request_serialization() {
     assert_eq!(parsed.request_id, "test-req");
     assert_eq!(parsed.message.content, "Hello");
     assert_eq!(parsed.message.channel, "test");
+    assert!(parsed.validate().is_ok());
+}
+
+#[test]
+fn test_agent_request_validation_rejects_mismatched_session_key() {
+    use zeptoclaw::gateway::AgentRequest;
+    use zeptoclaw::session::Session;
+
+    let request = AgentRequest {
+        request_id: "test-req-2".to_string(),
+        message: InboundMessage::new("test", "user1", "chat1", "Hello"),
+        agent_config: Config::default().agents.defaults,
+        session: Some(Session::new("test:chat-mismatch")),
+    };
+
+    assert!(request.validate().is_err());
 }

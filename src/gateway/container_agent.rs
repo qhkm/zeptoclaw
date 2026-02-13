@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::config::{Config, ContainerAgentBackend, ContainerAgentConfig};
 use crate::error::{Result, ZeptoError};
+use crate::security::mount::validate_mount_not_blocked;
 use crate::session::SessionManager;
 
 use super::ipc::{parse_marked_response, AgentRequest, AgentResponse, AgentResult};
@@ -173,7 +174,9 @@ impl ContainerAgentProxy {
 
         match self.spawn_container(&request).await {
             Ok(response) => match response.result {
-                AgentResult::Success { content, .. } => {
+                AgentResult::Success { content, session } => {
+                    self.persist_session_snapshot(&message.session_key, session)
+                        .await;
                     OutboundMessage::new(&message.channel, &message.chat_id, &content)
                 }
                 AgentResult::Error { message: err, .. } => OutboundMessage::new(
@@ -205,6 +208,37 @@ impl ContainerAgentProxy {
         }
     }
 
+    async fn persist_session_snapshot(
+        &self,
+        expected_session_key: &str,
+        session: Option<crate::session::Session>,
+    ) {
+        let Some(session) = session else {
+            return;
+        };
+
+        if session.key != expected_session_key {
+            warn!(
+                expected = %expected_session_key,
+                actual = %session.key,
+                "Ignoring container session snapshot with mismatched key"
+            );
+            return;
+        }
+
+        let Some(manager) = self.session_manager.as_ref() else {
+            return;
+        };
+
+        if let Err(e) = manager.save(&session).await {
+            warn!(
+                session = %expected_session_key,
+                "Failed to persist container session snapshot: {}",
+                e
+            );
+        }
+    }
+
     /// Spawn a container and communicate via stdin/stdout.
     async fn spawn_container(&self, request: &AgentRequest) -> Result<AgentResponse> {
         let config_root = dirs::home_dir().unwrap_or_default().join(".zeptoclaw");
@@ -224,7 +258,7 @@ impl ContainerAgentProxy {
 
         let invocation = match self.resolved_backend {
             ResolvedBackend::Docker => {
-                self.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path)
+                self.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path)?
             }
             #[cfg(target_os = "macos")]
             ResolvedBackend::Apple => {
@@ -286,11 +320,25 @@ impl ContainerAgentProxy {
             stdin.shutdown().await?;
         }
 
-        // Wait for output with timeout
-        let timeout = Duration::from_secs(self.container_config.timeout_secs);
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
+        // Wait for output with timeout.
+        //
+        // On timeout the inner future (and the `Child`) is dropped. On Unix,
+        // dropping a `tokio::process::Child` sends SIGKILL if the process is
+        // still running, so the container process IS cleaned up.  We log a
+        // warning here to make this implicit behaviour visible in traces.
+        let timeout_duration = Duration::from_secs(self.container_config.timeout_secs);
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| ZeptoError::Config("Container timeout".into()))?
+            .map_err(|_| {
+                warn!(
+                    timeout_secs = self.container_config.timeout_secs,
+                    "Container process timed out; child will be killed on drop (SIGKILL)"
+                );
+                ZeptoError::Config(format!(
+                    "Container timeout after {}s: process killed",
+                    self.container_config.timeout_secs
+                ))
+            })?
             .map_err(|e| ZeptoError::Config(format!("Container failed: {}", e)))?;
 
         if !output.status.success() {
@@ -383,7 +431,7 @@ impl ContainerAgentProxy {
         workspace_dir: &Path,
         sessions_dir: &Path,
         config_path: &Path,
-    ) -> ContainerInvocation {
+    ) -> Result<ContainerInvocation> {
         let mut args = vec![
             "run".to_string(),
             "--rm".to_string(),
@@ -433,8 +481,9 @@ impl ContainerAgentProxy {
             process_env.push((name.clone(), value.clone()));
         }
 
-        // Extra mounts from config
+        // Extra mounts from config — validate against blocked patterns first.
         for mount in &self.container_config.extra_mounts {
+            validate_mount_not_blocked(mount)?;
             args.push("-v".to_string());
             args.push(mount.clone());
         }
@@ -444,19 +493,14 @@ impl ContainerAgentProxy {
         args.push("zeptoclaw".to_string());
         args.push("agent-stdin".to_string());
 
-        ContainerInvocation {
-            binary: self
-                .container_config
-                .docker_binary
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("docker")
-                .to_string(),
+        let binary = validate_docker_binary(&self.container_config)?;
+
+        Ok(ContainerInvocation {
+            binary,
             args,
             env: process_env,
             temp_dir: None,
-        }
+        })
     }
 
     /// Build Apple Container invocation arguments (macOS only).
@@ -505,8 +549,9 @@ impl ContainerAgentProxy {
             ));
         }
 
-        // Extra mounts from config
+        // Extra mounts from config — validate against blocked patterns first.
         for mount in &self.container_config.extra_mounts {
+            validate_mount_not_blocked(mount)?;
             args.push("-v".to_string());
             args.push(mount.clone());
         }
@@ -575,12 +620,12 @@ pub async fn resolve_backend(config: &ContainerAgentConfig) -> Result<ResolvedBa
         ContainerAgentBackend::Docker => Ok(ResolvedBackend::Docker),
         #[cfg(target_os = "macos")]
         ContainerAgentBackend::Apple => Ok(ResolvedBackend::Apple),
-        ContainerAgentBackend::Auto => auto_detect_backend().await,
+        ContainerAgentBackend::Auto => auto_detect_backend(config).await,
     }
 }
 
 /// Auto-detect: on macOS try Apple Container first, then Docker.
-async fn auto_detect_backend() -> Result<ResolvedBackend> {
+async fn auto_detect_backend(config: &ContainerAgentConfig) -> Result<ResolvedBackend> {
     #[cfg(target_os = "macos")]
     {
         if is_apple_container_available().await {
@@ -588,7 +633,7 @@ async fn auto_detect_backend() -> Result<ResolvedBackend> {
         }
     }
 
-    if is_docker_available().await {
+    if is_docker_available_with_binary(configured_docker_binary_raw(config)).await {
         return Ok(ResolvedBackend::Docker);
     }
 
@@ -599,7 +644,17 @@ async fn auto_detect_backend() -> Result<ResolvedBackend> {
 
 /// Check if Docker is available and the daemon is running.
 pub async fn is_docker_available() -> bool {
-    tokio::process::Command::new("docker")
+    is_docker_available_with_binary("docker").await
+}
+
+/// Check if a specific Docker binary is available and the daemon is running.
+pub async fn is_docker_available_with_binary(binary: &str) -> bool {
+    let binary = binary.trim();
+    if binary.is_empty() {
+        return false;
+    }
+
+    tokio::process::Command::new(binary)
         .args(["info"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -607,6 +662,91 @@ pub async fn is_docker_available() -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Well-known Docker-compatible binary names that are accepted without path
+/// validation.
+const ALLOWED_DOCKER_BINARIES: &[&str] = &["docker", "podman"];
+
+/// Resolve and validate the Docker binary from configuration.
+///
+/// Accepts:
+/// - `None` / empty / whitespace-only -> defaults to `"docker"`
+/// - A well-known name: `"docker"` or `"podman"`
+/// - An absolute path that exists and is **not** inside a temp directory
+///
+/// Rejects everything else with a `SecurityViolation`.
+fn validate_docker_binary(config: &ContainerAgentConfig) -> Result<String> {
+    let raw = config
+        .docker_binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let binary = match raw {
+        None => return Ok("docker".to_string()),
+        Some(b) => b,
+    };
+
+    // Allow well-known names without further checks.
+    if ALLOWED_DOCKER_BINARIES.contains(&binary) {
+        return Ok(binary.to_string());
+    }
+
+    // Must be an absolute path.
+    let path = Path::new(binary);
+    if !path.is_absolute() {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "docker_binary '{}' must be an absolute path or one of {:?}",
+            binary, ALLOWED_DOCKER_BINARIES
+        )));
+    }
+
+    // Must exist on disk.
+    if !path.exists() {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "docker_binary '{}' does not exist",
+            binary
+        )));
+    }
+
+    // Block temp directories to prevent untrusted binaries.
+    let temp_prefixes: &[&str] = &["/tmp", "/var/tmp"];
+    #[cfg(target_os = "macos")]
+    let temp_prefixes_extra: &[&str] = &["/private/tmp", "/private/var/tmp"];
+    #[cfg(not(target_os = "macos"))]
+    let temp_prefixes_extra: &[&str] = &[];
+
+    let lowered = binary.to_lowercase();
+    for prefix in temp_prefixes.iter().chain(temp_prefixes_extra.iter()) {
+        if lowered.starts_with(prefix) {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "docker_binary '{}' is in a temporary directory; this is not allowed",
+                binary
+            )));
+        }
+    }
+
+    warn!(
+        docker_binary = binary,
+        "Using non-default Docker binary from configuration"
+    );
+
+    Ok(binary.to_string())
+}
+
+/// Return the configured docker binary **without** validation.
+///
+/// This is only used in contexts where the caller needs the raw value for
+/// probing (e.g. auto-detection).  The spawning code path always uses
+/// [`validate_docker_binary`] instead.
+fn configured_docker_binary_raw(config: &ContainerAgentConfig) -> &str {
+    config
+        .docker_binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("docker")
 }
 
 /// Check if Apple Container CLI is available (macOS only).
@@ -674,7 +814,9 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(&config_path, "{}").unwrap();
 
-        let invocation = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        let invocation = proxy
+            .build_docker_invocation(&workspace_dir, &sessions_dir, &config_path)
+            .expect("build_docker_invocation should succeed with default binary");
 
         assert_eq!(invocation.binary, "docker");
 
@@ -795,6 +937,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_root);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn test_resolve_backend_auto_respects_docker_binary_override() {
+        let mut config = ContainerAgentConfig::default();
+        config.backend = ContainerAgentBackend::Auto;
+        config.docker_binary = Some("/definitely-not-a-real-docker-binary".to_string());
+
+        let result = resolve_backend(&config).await;
+        assert!(result.is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_proxy_end_to_end_with_mocked_docker_binary() {
@@ -802,14 +955,23 @@ mod tests {
 
         let temp_root = tempfile::tempdir().unwrap();
         let script_path = temp_root.path().join("mock-docker.sh");
-        let script = r#"#!/bin/sh
+        let chat_id = format!("chat-{}", Uuid::new_v4());
+        let session_key = format!("test:{}", chat_id);
+        let session_json = format!(
+            r#"{{"request_id":"mock-req","result":{{"Success":{{"content":"mock response","session":{{"key":"{}","messages":[],"summary":null,"created_at":"2026-02-13T00:00:00Z","updated_at":"2026-02-13T00:00:00Z"}}}}}}}}"#,
+            session_key
+        );
+        let script = format!(
+            r#"#!/bin/sh
 cat >/dev/null
 cat <<'EOF'
 <<<AGENT_RESPONSE_START>>>
-{"request_id":"mock-req","result":{"Success":{"content":"mock response","session":null}}}
+{}
 <<<AGENT_RESPONSE_END>>>
 EOF
-"#;
+"#,
+            session_json
+        );
         std::fs::write(&script_path, script).unwrap();
         let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -830,7 +992,7 @@ EOF
         let proxy_task = Arc::clone(&proxy);
         let handle = tokio::spawn(async move { proxy_task.start().await });
 
-        let inbound = InboundMessage::new("test", "u1", "chat1", "hello");
+        let inbound = InboundMessage::new("test", "u1", &chat_id, "hello");
         bus.publish_inbound(inbound).await.unwrap();
 
         let outbound = timeout(Duration::from_secs(2), bus.consume_outbound())
@@ -838,8 +1000,16 @@ EOF
             .expect("should receive outbound within timeout")
             .expect("outbound should be present");
         assert_eq!(outbound.channel, "test");
-        assert_eq!(outbound.chat_id, "chat1");
+        assert_eq!(outbound.chat_id, chat_id);
         assert_eq!(outbound.content, "mock response");
+        let saved_session = proxy
+            .load_session_snapshot(&session_key)
+            .await
+            .expect("session snapshot should be persisted");
+        assert_eq!(saved_session.key, session_key);
+        if let Some(manager) = proxy.session_manager.as_ref() {
+            let _ = manager.delete(&session_key).await;
+        }
 
         proxy.stop();
         timeout(Duration::from_secs(2), handle)

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bus::InboundMessage;
 use crate::config::AgentDefaults;
+use crate::error::ZeptoError;
 use crate::session::Session;
 
 /// Marker for start of response in stdout
@@ -29,6 +30,22 @@ pub struct AgentRequest {
     pub agent_config: AgentDefaults,
     /// Optional session state
     pub session: Option<Session>,
+}
+
+impl AgentRequest {
+    /// Validate request consistency before execution.
+    pub fn validate(&self) -> std::result::Result<(), ZeptoError> {
+        if let Some(session) = &self.session {
+            if session.key != self.message.session_key {
+                return Err(ZeptoError::Session(format!(
+                    "Session key mismatch: request.message.session_key='{}', request.session.key='{}'",
+                    self.message.session_key, session.key
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Response from containerized agent via stdout
@@ -168,5 +185,45 @@ mod tests {
             }
             _ => panic!("Expected Error result"),
         }
+    }
+
+    #[test]
+    fn test_request_validate_ok_without_session() {
+        let request = AgentRequest {
+            request_id: "req-1".to_string(),
+            message: InboundMessage::new("test", "user1", "chat1", "Hello"),
+            agent_config: AgentDefaults::default(),
+            session: None,
+        };
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_request_validate_ok_with_matching_session_key() {
+        let mut session = Session::new("test:chat1");
+        session.summary = Some("seed".to_string());
+
+        let request = AgentRequest {
+            request_id: "req-2".to_string(),
+            message: InboundMessage::new("test", "user1", "chat1", "Hello"),
+            agent_config: AgentDefaults::default(),
+            session: Some(session),
+        };
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_request_validate_rejects_mismatched_session_key() {
+        let request = AgentRequest {
+            request_id: "req-3".to_string(),
+            message: InboundMessage::new("test", "user1", "chat1", "Hello"),
+            agent_config: AgentDefaults::default(),
+            session: Some(Session::new("test:chat999")),
+        };
+
+        let error = request.validate().expect_err("request should be invalid");
+        assert!(matches!(error, ZeptoError::Session(_)));
     }
 }
