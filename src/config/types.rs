@@ -61,6 +61,8 @@ pub struct AgentDefaults {
     pub agent_timeout_secs: u64,
     /// How to handle messages arriving during an active run.
     pub message_queue_mode: MessageQueueMode,
+    /// Whether to stream the final LLM response token-by-token in CLI mode.
+    pub streaming: bool,
 }
 
 /// Default model compile-time configuration.
@@ -80,6 +82,7 @@ impl Default for AgentDefaults {
             max_tool_iterations: 20,
             agent_timeout_secs: 300,
             message_queue_mode: MessageQueueMode::default(),
+            streaming: false,
         }
     }
 }
@@ -777,6 +780,19 @@ mod tests {
         let role = SwarmRole::default();
         assert!(role.system_prompt.is_empty());
         assert!(role.tools.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_defaults_to_false() {
+        let defaults = AgentDefaults::default();
+        assert!(!defaults.streaming);
+    }
+
+    #[test]
+    fn test_streaming_config_deserialize() {
+        let json = r#"{"streaming": true}"#;
+        let defaults: AgentDefaults = serde_json::from_str(json).unwrap();
+        assert!(defaults.streaming);
     }
 
     #[test]

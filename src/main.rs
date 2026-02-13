@@ -58,6 +58,9 @@ enum Commands {
         /// Direct message to process (non-interactive mode)
         #[arg(short, long)]
         message: Option<String>,
+        /// Stream the response token-by-token
+        #[arg(long)]
+        stream: bool,
     },
     /// Start multi-channel gateway
     Gateway {
@@ -160,8 +163,8 @@ async fn main() -> Result<()> {
         Some(Commands::Onboard) => {
             cmd_onboard().await?;
         }
-        Some(Commands::Agent { message }) => {
-            cmd_agent(message).await?;
+        Some(Commands::Agent { message, stream }) => {
+            cmd_agent(message, stream).await?;
         }
         Some(Commands::Gateway { containerized }) => {
             cmd_gateway(containerized).await?;
@@ -1075,7 +1078,7 @@ fn escape_xml(input: &str) -> String {
 }
 
 /// Interactive or single-message agent mode
-async fn cmd_agent(message: Option<String>) -> Result<()> {
+async fn cmd_agent(message: Option<String>, stream: bool) -> Result<()> {
     // Load configuration
     let config = Config::load().with_context(|| "Failed to load configuration")?;
 
@@ -1084,6 +1087,9 @@ async fn cmd_agent(message: Option<String>) -> Result<()> {
 
     // Create agent
     let agent = create_agent(config.clone(), bus.clone()).await?;
+
+    // Streaming flag placeholder (used in Task 5 for actual streaming)
+    let _streaming = stream || config.agents.defaults.streaming;
 
     // Check whether the runtime can use at least one configured provider.
     if resolve_runtime_provider(&config).is_none() {
