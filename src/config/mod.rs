@@ -4,6 +4,7 @@
 //! Configuration is loaded from `~/.zeptoclaw/config.json` with environment variable overrides.
 
 mod types;
+pub mod validate;
 
 pub use types::*;
 

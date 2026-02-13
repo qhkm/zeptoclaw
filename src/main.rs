@@ -89,6 +89,11 @@ enum Commands {
     Version,
     /// Show system status
     Status,
+    /// Validate configuration file
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -119,6 +124,12 @@ enum AuthAction {
     Logout,
     /// Show authentication status
     Status,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Check configuration for errors and warnings
+    Check,
 }
 
 #[tokio::main]
@@ -169,6 +180,9 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => {
             cmd_status().await?;
         }
+        Some(Commands::Config { action }) => {
+            cmd_config(action).await?;
+        }
     }
 
     Ok(())
@@ -180,6 +194,52 @@ fn cmd_version() {
     println!();
     println!("Ultra-lightweight personal AI assistant framework");
     println!("https://github.com/zeptoclaw/zeptoclaw");
+}
+
+async fn cmd_config(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::Check => {
+            let config_path = zeptoclaw::config::Config::path();
+            println!("Config file: {}", config_path.display());
+
+            if !config_path.exists() {
+                println!("[OK] No config file found (using defaults)");
+                return Ok(());
+            }
+
+            let content = std::fs::read_to_string(&config_path)
+                .context("Failed to read config file")?;
+
+            let raw: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("[ERROR] Invalid JSON: {}", e);
+                    return Ok(());
+                }
+            };
+
+            let diagnostics = zeptoclaw::config::validate::validate_config(&raw);
+            for diag in &diagnostics {
+                println!("{}", diag);
+            }
+
+            let errors = diagnostics
+                .iter()
+                .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Error)
+                .count();
+            let warnings = diagnostics
+                .iter()
+                .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Warn)
+                .count();
+
+            if errors == 0 && warnings == 0 {
+                println!("\nConfiguration looks good!");
+            } else {
+                println!("\nFound {} error(s), {} warning(s)", errors, warnings);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read a line from stdin, trimming whitespace
