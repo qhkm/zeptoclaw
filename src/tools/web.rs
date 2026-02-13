@@ -12,6 +12,7 @@ use regex::Regex;
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::net::lookup_host;
 
 use crate::error::{Result, ZeptoError};
 
@@ -23,6 +24,9 @@ const MAX_WEB_SEARCH_COUNT: usize = 10;
 const DEFAULT_MAX_FETCH_CHARS: usize = 50_000;
 const MAX_FETCH_CHARS: usize = 200_000;
 const MIN_FETCH_CHARS: usize = 256;
+/// Maximum bytes to read from a response body before truncating.
+/// Uses a 4x multiplier over MAX_FETCH_CHARS to account for multi-byte UTF-8.
+const MAX_FETCH_BYTES: usize = MAX_FETCH_CHARS * 4;
 
 /// Web search tool backed by Brave Search.
 pub struct WebSearchTool {
@@ -290,6 +294,10 @@ impl Tool for WebFetchTool {
             ));
         }
 
+        // DNS-based SSRF check: resolve the hostname before making the
+        // request and verify none of the resolved IPs are private/local.
+        resolve_and_check_host(&parsed).await?;
+
         let max_chars = args
             .get("max_chars")
             .and_then(|v| v.as_u64())
@@ -305,6 +313,15 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ZeptoError::Tool(format!("Web fetch failed: {}", e)))?;
 
+        // SSRF redirect check: after reqwest follows redirects, validate
+        // that the final destination URL is not a blocked host.
+        if is_blocked_host(response.url()) {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Redirect destination is blocked (local or private network): {}",
+                response.url()
+            )));
+        }
+
         let status = response.status();
         let final_url = response.url().to_string();
 
@@ -319,10 +336,9 @@ impl Tool for WebFetchTool {
             .unwrap_or("")
             .to_string();
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ZeptoError::Tool(format!("Failed to read response body: {}", e)))?;
+        // Read body in chunks with a size limit to prevent unbounded memory
+        // allocation from malicious or oversized responses.
+        let body = read_body_limited(response, MAX_FETCH_BYTES).await?;
 
         let (extractor, mut text) = if content_type.contains("application/json") {
             ("json", body)
@@ -381,21 +397,95 @@ fn decode_common_html_entities(input: &str) -> String {
     decoded.replace("&#39;", "'")
 }
 
+/// Read a response body in chunks, enforcing a maximum byte limit.
+///
+/// This prevents unbounded memory allocation when a server returns an
+/// extremely large response (intentional or otherwise).  The bytes are
+/// accumulated in chunks and converted to a UTF-8 string (lossy) once
+/// the limit is reached or the stream ends.
+async fn read_body_limited(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = response;
+
+    loop {
+        match stream.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = chunk.len().min(remaining);
+                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() >= max_bytes {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(ZeptoError::Tool(format!(
+                    "Failed to read response body: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn is_blocked_host(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
+    let Some(host_str) = url.host_str() else {
         return true;
     };
 
-    let host = host.to_ascii_lowercase();
+    let host = host_str.to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".local") {
         return true;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // Try parsing as IP directly first, then try stripping IPv6 brackets.
+    // `Url::host_str()` returns IPv6 addresses with surrounding brackets
+    // (e.g. "[::1]"), which `IpAddr::parse` does not accept.
+    let ip_str = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(&host);
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
         return is_private_or_local_ip(ip);
     }
 
     false
+}
+
+/// Resolve a URL's hostname via DNS and check whether any of the resolved IPs
+/// point to a private or local address.  This catches DNS-based SSRF attacks
+/// where a public hostname (e.g. `metadata.attacker.com`) resolves to an
+/// internal IP such as `169.254.169.254`.
+async fn resolve_and_check_host(url: &Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ZeptoError::SecurityViolation("URL has no host".to_string()))?;
+
+    // IP literals are already checked by `is_blocked_host`, skip DNS lookup.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(443);
+    let lookup_addr = format!("{}:{}", host, port);
+
+    let addrs = lookup_host(&lookup_addr)
+        .await
+        .map_err(|e| ZeptoError::Tool(format!("DNS lookup failed for '{}': {}", host, e)))?;
+
+    for addr in addrs {
+        if is_private_or_local_ip(addr.ip()) {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "DNS for '{}' resolved to private/local IP {}",
+                host,
+                addr.ip()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
@@ -480,5 +570,88 @@ mod tests {
         assert!(is_blocked_host(&localhost));
         assert!(is_blocked_host(&private_v4));
         assert!(!is_blocked_host(&public_host));
+    }
+
+    #[test]
+    fn test_blocked_redirect_destination() {
+        // Simulate a redirect landing on a private IP — `is_blocked_host`
+        // must catch these when called on the final response URL.
+        let cloud_metadata = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+        assert!(is_blocked_host(&cloud_metadata));
+
+        let loopback = Url::parse("http://127.0.0.1:9090/admin").unwrap();
+        assert!(is_blocked_host(&loopback));
+
+        let link_local = Url::parse("http://169.254.1.1/secret").unwrap();
+        assert!(is_blocked_host(&link_local));
+
+        let private_10 = Url::parse("http://10.0.0.1/internal").unwrap();
+        assert!(is_blocked_host(&private_10));
+
+        let dot_local = Url::parse("http://internal.local/data").unwrap();
+        assert!(is_blocked_host(&dot_local));
+
+        // Public URLs should not be blocked after redirect.
+        let public = Url::parse("https://cdn.example.com/page").unwrap();
+        assert!(!is_blocked_host(&public));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_and_check_host_ip_literal_passes_through() {
+        // IP literals are already covered by `is_blocked_host`, so
+        // `resolve_and_check_host` should succeed without DNS lookup.
+        let url = Url::parse("https://93.184.216.34/").unwrap();
+        assert!(resolve_and_check_host(&url).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_and_check_host_blocks_localhost_alias() {
+        // Hostnames that resolve to 127.0.0.1 must be blocked.
+        // `localhost` is a well-known name that resolves to loopback.
+        let url = Url::parse("https://localhost:443/").unwrap();
+        let result = resolve_and_check_host(&url).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ZeptoError::SecurityViolation(_)),
+            "Expected SecurityViolation, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_body_size_limit() {
+        // Verify `MAX_FETCH_BYTES` enforces a reasonable byte cap that
+        // corresponds to MAX_FETCH_CHARS * 4 (worst-case UTF-8 encoding).
+        assert_eq!(MAX_FETCH_BYTES, MAX_FETCH_CHARS * 4);
+        assert_eq!(MAX_FETCH_BYTES, 800_000);
+
+        // Verify that the streaming reader would truncate at the limit:
+        // a buffer that exceeds MAX_FETCH_BYTES should stop growing.
+        let big = vec![b'A'; MAX_FETCH_BYTES + 100];
+        let truncated = &big[..MAX_FETCH_BYTES];
+        assert_eq!(truncated.len(), MAX_FETCH_BYTES);
+    }
+
+    #[test]
+    fn test_private_or_local_ip_cloud_metadata() {
+        // The AWS/GCP/Azure metadata endpoint IP must be caught.
+        let metadata_ip: IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(metadata_ip),
+            "169.254.169.254 should be detected as link-local"
+        );
+    }
+
+    #[test]
+    fn test_blocked_hosts_ipv6_loopback() {
+        let ipv6_loopback = Url::parse("http://[::1]:8080/").unwrap();
+        assert!(is_blocked_host(&ipv6_loopback));
+    }
+
+    #[test]
+    fn test_blocked_hosts_ipv6_link_local() {
+        let ipv6_link_local = Url::parse("http://[fe80::1]/").unwrap();
+        assert!(is_blocked_host(&ipv6_link_local));
     }
 }

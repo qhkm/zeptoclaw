@@ -598,7 +598,7 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.agents.defaults.model, "claude-sonnet-4-5-20250929");
-        assert_eq!(config.agents.defaults.max_tokens, 8096);
+        assert_eq!(config.agents.defaults.max_tokens, 8192);
         assert_eq!(config.agents.defaults.temperature, 0.7);
         assert_eq!(config.agents.defaults.max_tool_iterations, 20);
         assert_eq!(config.agents.defaults.workspace, "~/.zeptoclaw/workspace");
@@ -631,7 +631,7 @@ mod tests {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("claude-sonnet-4-5-20250929"));
-        assert!(json.contains("8096"));
+        assert!(json.contains("8192"));
     }
 
     #[test]

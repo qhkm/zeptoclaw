@@ -49,8 +49,38 @@ pub struct MemoryReadResult {
     pub text: String,
 }
 
-/// Search memory markdown files in workspace.
-pub fn search_workspace_memory(
+/// Search memory markdown files in workspace (async wrapper).
+///
+/// Offloads the CPU+IO bound search to a blocking thread via
+/// `tokio::task::spawn_blocking` so the Tokio runtime is not blocked.
+pub async fn search_workspace_memory(
+    workspace: &Path,
+    query: &str,
+    config: &MemoryConfig,
+    max_results: Option<usize>,
+    min_score: Option<f32>,
+    include_citations: bool,
+) -> Result<Vec<MemorySearchResult>> {
+    let workspace = workspace.to_path_buf();
+    let query = query.to_string();
+    let config = config.clone();
+
+    tokio::task::spawn_blocking(move || {
+        search_workspace_memory_sync(
+            &workspace,
+            &query,
+            &config,
+            max_results,
+            min_score,
+            include_citations,
+        )
+    })
+    .await
+    .map_err(|e| ZeptoError::Tool(format!("Memory search task failed: {}", e)))?
+}
+
+/// Synchronous implementation of workspace memory search.
+fn search_workspace_memory_sync(
     workspace: &Path,
     query: &str,
     config: &MemoryConfig,
@@ -147,8 +177,30 @@ pub fn search_workspace_memory(
     Ok(results)
 }
 
-/// Read a memory markdown file (optionally line-ranged).
-pub fn read_workspace_memory(
+/// Read a memory markdown file (optionally line-ranged, async wrapper).
+///
+/// Offloads the IO bound read to a blocking thread via
+/// `tokio::task::spawn_blocking` so the Tokio runtime is not blocked.
+pub async fn read_workspace_memory(
+    workspace: &Path,
+    rel_path: &str,
+    from: Option<usize>,
+    lines: Option<usize>,
+    config: &MemoryConfig,
+) -> Result<MemoryReadResult> {
+    let workspace = workspace.to_path_buf();
+    let rel_path = rel_path.to_string();
+    let config = config.clone();
+
+    tokio::task::spawn_blocking(move || {
+        read_workspace_memory_sync(&workspace, &rel_path, from, lines, &config)
+    })
+    .await
+    .map_err(|e| ZeptoError::Tool(format!("Memory read task failed: {}", e)))?
+}
+
+/// Synchronous implementation of workspace memory read.
+fn read_workspace_memory_sync(
     workspace: &Path,
     rel_path: &str,
     from: Option<usize>,
@@ -248,7 +300,22 @@ fn collect_if_markdown(path: &Path, workspace: &str, files: &mut Vec<PathBuf>) {
     }
 }
 
+const MAX_DIR_DEPTH: usize = 10;
+
 fn collect_markdown_dir(dir: &Path, workspace: &str, files: &mut Vec<PathBuf>) {
+    collect_markdown_dir_recursive(dir, workspace, files, 0);
+}
+
+fn collect_markdown_dir_recursive(
+    dir: &Path,
+    workspace: &str,
+    files: &mut Vec<PathBuf>,
+    depth: usize,
+) {
+    if depth > MAX_DIR_DEPTH {
+        return;
+    }
+
     if !dir.exists() || !dir.is_dir() {
         return;
     }
@@ -268,7 +335,7 @@ fn collect_markdown_dir(dir: &Path, workspace: &str, files: &mut Vec<PathBuf>) {
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_markdown_dir(&path, workspace, files);
+            collect_markdown_dir_recursive(&path, workspace, files, depth + 1);
             continue;
         }
         collect_if_markdown(&path, workspace, files);
@@ -368,8 +435,8 @@ mod tests {
     use crate::config::{MemoryBackend, MemoryCitationsMode};
     use tempfile::tempdir;
 
-    #[test]
-    fn test_search_workspace_memory_finds_entries() {
+    #[tokio::test]
+    async fn test_search_workspace_memory_finds_entries() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         fs::write(
@@ -387,6 +454,7 @@ mod tests {
             Some(0.1),
             true,
         )
+        .await
         .unwrap();
 
         assert!(!results.is_empty());
@@ -394,8 +462,8 @@ mod tests {
         assert!(results[0].citation.is_some());
     }
 
-    #[test]
-    fn test_read_workspace_memory_reads_line_window() {
+    #[tokio::test]
+    async fn test_read_workspace_memory_reads_line_window() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         fs::create_dir_all(workspace.join("memory")).unwrap();
@@ -408,6 +476,7 @@ mod tests {
         let config = MemoryConfig::default();
         let result =
             read_workspace_memory(workspace, "memory/2026-02-13.md", Some(2), Some(2), &config)
+                .await
                 .unwrap();
 
         assert_eq!(result.start_line, 2);

@@ -104,7 +104,8 @@ impl Tool for MemorySearchTool {
             max_results,
             min_score,
             include_citations,
-        )?;
+        )
+        .await?;
 
         if results.is_empty() {
             return Ok(format!("No memory entries found for '{}'.", query));
@@ -180,7 +181,8 @@ impl Tool for MemoryGetTool {
             .and_then(Value::as_u64)
             .map(|v| v as usize);
 
-        let result = read_workspace_memory(Path::new(workspace), path, from, lines, &self.config)?;
+        let result =
+            read_workspace_memory(Path::new(workspace), path, from, lines, &self.config).await?;
 
         let mut output = format!(
             "Memory file: {}\nLines: {}-{} of {}\nTruncated: {}",

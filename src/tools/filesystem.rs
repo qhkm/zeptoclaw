@@ -15,17 +15,17 @@ use super::{Tool, ToolContext};
 
 /// Resolve and validate a path relative to the workspace.
 ///
-/// If workspace is set, validates the path stays within workspace boundaries.
-/// If no workspace, returns the path as-is (less secure, but maintains backwards compatibility).
+/// Requires a workspace to be configured. All paths are validated to stay
+/// within workspace boundaries. This is the correct security posture --
+/// filesystem tools must not operate outside a defined workspace.
 fn resolve_path(path: &str, ctx: &ToolContext) -> Result<String> {
-    if let Some(ref workspace) = ctx.workspace {
-        // Validate path stays within workspace
-        let safe_path = validate_path_in_workspace(path, workspace)?;
-        Ok(safe_path.as_path().to_string_lossy().to_string())
-    } else {
-        // No workspace set - allow any path (backwards compatible but less secure)
-        Ok(path.to_string())
-    }
+    let workspace = ctx.workspace.as_ref().ok_or_else(|| {
+        ZeptoError::SecurityViolation(
+            "Workspace not configured; filesystem tools require a workspace for safety".to_string(),
+        )
+    })?;
+    let safe_path = validate_path_in_workspace(path, workspace)?;
+    Ok(safe_path.as_path().to_string_lossy().to_string())
 }
 
 /// Tool for reading file contents.
@@ -372,29 +372,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_tool() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("zeptoclaw_test_read.txt");
+        fs::write(&file_path, "test content").unwrap();
+
         let tool = ReadFileTool;
-        let ctx = ToolContext::new();
-        let temp_path = "/tmp/zeptoclaw_test_read.txt";
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
-        // Setup
-        fs::write(temp_path, "test content").unwrap();
-
-        // Test
-        let result = tool.execute(json!({"path": temp_path}), &ctx).await;
+        let result = tool
+            .execute(json!({"path": "zeptoclaw_test_read.txt"}), &ctx)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "test content");
-
-        // Cleanup
-        fs::remove_file(temp_path).ok();
     }
 
     #[tokio::test]
     async fn test_read_file_tool_not_found() {
+        let dir = tempdir().unwrap();
+        // Use canonical path to avoid macOS /var -> /private/var mismatch
+        let canonical = dir.path().canonicalize().unwrap();
         let tool = ReadFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(canonical.to_str().unwrap());
 
         let result = tool
-            .execute(json!({"path": "/tmp/nonexistent_picoclaw_file.txt"}), &ctx)
+            .execute(json!({"path": "nonexistent_file.txt"}), &ctx)
             .await;
         assert!(result.is_err());
         assert!(result
@@ -406,11 +407,24 @@ mod tests {
     #[tokio::test]
     async fn test_read_file_tool_missing_path() {
         let tool = ReadFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace("/tmp");
 
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Missing 'path'"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_tool_rejects_no_workspace() {
+        let tool = ReadFileTool;
+        let ctx = ToolContext::new();
+
+        let result = tool
+            .execute(json!({"path": "/tmp/some_file.txt"}), &ctx)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Workspace not configured"));
     }
 
     #[tokio::test]
@@ -429,14 +443,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_tool() {
-        let tool = WriteFileTool;
-        let ctx = ToolContext::new();
-        let temp_path = "/tmp/zeptoclaw_test_write.txt";
+        let dir = tempdir().unwrap();
+        // Use canonical path to avoid macOS /var -> /private/var mismatch
+        let canonical = dir.path().canonicalize().unwrap();
 
-        // Test
+        let tool = WriteFileTool;
+        let ctx = ToolContext::new().with_workspace(canonical.to_str().unwrap());
+
         let result = tool
             .execute(
-                json!({"path": temp_path, "content": "written content"}),
+                json!({"path": "write_test.txt", "content": "written content"}),
                 &ctx,
             )
             .await;
@@ -444,36 +460,40 @@ mod tests {
         assert!(result.unwrap().contains("Successfully wrote"));
 
         // Verify
-        assert_eq!(fs::read_to_string(temp_path).unwrap(), "written content");
-
-        // Cleanup
-        fs::remove_file(temp_path).ok();
+        assert_eq!(
+            fs::read_to_string(canonical.join("write_test.txt")).unwrap(),
+            "written content"
+        );
     }
 
     #[tokio::test]
     async fn test_write_file_tool_creates_parent_dirs() {
         let dir = tempdir().unwrap();
-        let nested_path = dir.path().join("a/b/c/test.txt");
+        // Use canonical path to avoid macOS /var -> /private/var mismatch
+        let canonical = dir.path().canonicalize().unwrap();
 
         let tool = WriteFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(canonical.to_str().unwrap());
 
         let result = tool
             .execute(
-                json!({"path": nested_path.to_str().unwrap(), "content": "nested"}),
+                json!({"path": "a/b/c/test.txt", "content": "nested"}),
                 &ctx,
             )
             .await;
         assert!(result.is_ok());
-        assert_eq!(fs::read_to_string(&nested_path).unwrap(), "nested");
+        assert_eq!(
+            fs::read_to_string(canonical.join("a/b/c/test.txt")).unwrap(),
+            "nested"
+        );
     }
 
     #[tokio::test]
     async fn test_write_file_tool_missing_content() {
         let tool = WriteFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace("/tmp");
 
-        let result = tool.execute(json!({"path": "/tmp/test.txt"}), &ctx).await;
+        let result = tool.execute(json!({"path": "test.txt"}), &ctx).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -489,11 +509,9 @@ mod tests {
         fs::create_dir(dir.path().join("subdir")).unwrap();
 
         let tool = ListDirTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
-        let result = tool
-            .execute(json!({"path": dir.path().to_str().unwrap()}), &ctx)
-            .await;
+        let result = tool.execute(json!({"path": "."}), &ctx).await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -504,11 +522,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_dir_tool_not_found() {
+        let dir = tempdir().unwrap();
+        // Use canonical path to avoid macOS /var -> /private/var mismatch
+        let canonical = dir.path().canonicalize().unwrap();
+
         let tool = ListDirTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(canonical.to_str().unwrap());
 
         let result = tool
-            .execute(json!({"path": "/tmp/nonexistent_picoclaw_dir"}), &ctx)
+            .execute(json!({"path": "nonexistent_dir"}), &ctx)
             .await;
         assert!(result.is_err());
         assert!(result
@@ -539,12 +561,12 @@ mod tests {
         fs::write(&file_path, "Hello World").unwrap();
 
         let tool = EditFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
         let result = tool
             .execute(
                 json!({
-                    "path": file_path.to_str().unwrap(),
+                    "path": "edit_test.txt",
                     "old_text": "World",
                     "new_text": "Rust"
                 }),
@@ -566,12 +588,12 @@ mod tests {
         fs::write(&file_path, "foo bar foo baz foo").unwrap();
 
         let tool = EditFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
         let result = tool
             .execute(
                 json!({
-                    "path": file_path.to_str().unwrap(),
+                    "path": "edit_multi.txt",
                     "old_text": "foo",
                     "new_text": "qux"
                 }),
@@ -594,12 +616,12 @@ mod tests {
         fs::write(&file_path, "Hello World").unwrap();
 
         let tool = EditFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
         let result = tool
             .execute(
                 json!({
-                    "path": file_path.to_str().unwrap(),
+                    "path": "edit_notfound.txt",
                     "old_text": "NotPresent",
                     "new_text": "Replacement"
                 }),
@@ -617,11 +639,11 @@ mod tests {
     #[tokio::test]
     async fn test_edit_file_tool_missing_args() {
         let tool = EditFileTool;
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_workspace("/tmp");
 
         // Missing old_text
         let result = tool
-            .execute(json!({"path": "/tmp/test.txt", "new_text": "new"}), &ctx)
+            .execute(json!({"path": "test.txt", "new_text": "new"}), &ctx)
             .await;
         assert!(result.is_err());
         assert!(result
@@ -631,7 +653,7 @@ mod tests {
 
         // Missing new_text
         let result = tool
-            .execute(json!({"path": "/tmp/test.txt", "old_text": "old"}), &ctx)
+            .execute(json!({"path": "test.txt", "old_text": "old"}), &ctx)
             .await;
         assert!(result.is_err());
         assert!(result
@@ -641,11 +663,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_path_relative_without_workspace() {
+    fn test_resolve_path_rejects_without_workspace() {
         let ctx = ToolContext::new();
         let result = resolve_path("relative/path", &ctx);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "relative/path");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Workspace not configured"));
     }
 
     #[test]

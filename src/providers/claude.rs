@@ -72,7 +72,10 @@ impl ClaudeProvider {
     pub fn new(api_key: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 
@@ -109,7 +112,7 @@ impl LLMProvider for ClaudeProvider {
         // Build request
         let request = ClaudeRequest {
             model: model.to_string(),
-            max_tokens: options.max_tokens.unwrap_or(8096),
+            max_tokens: options.max_tokens.unwrap_or(8192),
             messages: claude_messages,
             system,
             tools: if tools.is_empty() {
