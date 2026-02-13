@@ -311,7 +311,7 @@ fn test_config_partial_override() {
 
     assert_eq!(config.agents.defaults.model, "gpt-4");
     // Other defaults should still be set
-    assert_eq!(config.agents.defaults.max_tokens, 8096);
+    assert_eq!(config.agents.defaults.max_tokens, 8192);
     assert_eq!(config.agents.defaults.temperature, 0.7);
     assert_eq!(config.gateway.port, 8080);
 }

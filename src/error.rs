@@ -58,9 +58,6 @@ pub enum ZeptoError {
     SecurityViolation(String),
 }
 
-/// Backward-compatible alias for older code paths.
-pub type PicoError = ZeptoError;
-
 /// A specialized `Result` type for ZeptoClaw operations.
 pub type Result<T> = std::result::Result<T, ZeptoError>;
 

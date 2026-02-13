@@ -1831,6 +1831,7 @@ async fn cmd_status() -> Result<()> {
         }
     }
     println!("  Timeout: {}s", config.container_agent.timeout_secs);
+    println!("  Max concurrent: {}", config.container_agent.max_concurrent);
     println!();
 
     // Runtime info

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -71,6 +71,7 @@ pub struct ContainerAgentProxy {
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     resolved_backend: ResolvedBackend,
+    semaphore: Arc<Semaphore>,
 }
 
 impl ContainerAgentProxy {
@@ -78,6 +79,7 @@ impl ContainerAgentProxy {
     pub fn new(config: Config, bus: Arc<MessageBus>, backend: ResolvedBackend) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let container_config = config.container_agent.clone();
+        let max_concurrent = container_config.max_concurrent.max(1);
         let session_manager = match SessionManager::new() {
             Ok(manager) => Some(manager),
             Err(e) => {
@@ -98,6 +100,7 @@ impl ContainerAgentProxy {
             shutdown_tx,
             shutdown_rx,
             resolved_backend: backend,
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
 
@@ -107,7 +110,11 @@ impl ContainerAgentProxy {
     }
 
     /// Start the proxy loop, processing messages from the bus.
-    pub async fn start(&self) -> Result<()> {
+    ///
+    /// Each inbound message is processed concurrently in its own spawned task,
+    /// gated by a semaphore that limits the number of simultaneous container
+    /// invocations to `container_agent.max_concurrent` (default: 5).
+    pub async fn start(self: Arc<Self>) -> Result<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Err(ZeptoError::Config(
                 "Container agent proxy already running".into(),
@@ -115,8 +122,9 @@ impl ContainerAgentProxy {
         }
 
         info!(
-            "Starting containerized agent proxy (backend={})",
-            self.resolved_backend
+            "Starting containerized agent proxy (backend={}, max_concurrent={})",
+            self.resolved_backend,
+            self.container_config.max_concurrent,
         );
 
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -132,9 +140,22 @@ impl ContainerAgentProxy {
                 msg = self.bus.consume_inbound() => {
                     match msg {
                         Some(inbound) => {
-                            let response = self.process_in_container(&inbound).await;
-                            if let Err(e) = self.bus.publish_outbound(response).await {
-                                error!("Failed to publish response: {}", e);
+                            let permit = self.semaphore.clone().acquire_owned().await;
+                            match permit {
+                                Ok(permit) => {
+                                    let proxy = Arc::clone(&self);
+                                    tokio::spawn(async move {
+                                        let response = proxy.process_in_container(&inbound).await;
+                                        if let Err(e) = proxy.bus.publish_outbound(response).await {
+                                            error!("Failed to publish response: {}", e);
+                                        }
+                                        drop(permit);
+                                    });
+                                }
+                                Err(_) => {
+                                    error!("Concurrency semaphore closed unexpectedly");
+                                    break;
+                                }
                             }
                         }
                         None => {
@@ -916,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_docker_invocation_respects_binary_override() {
+    fn test_build_docker_invocation_rejects_temp_binary() {
         let mut config = Config::default();
         config.container_agent.docker_binary = Some("/tmp/mock-docker".to_string());
         let bus = Arc::new(MessageBus::new());
@@ -931,10 +952,86 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(&config_path, "{}").unwrap();
 
-        let invocation = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
-        assert_eq!(invocation.binary, "/tmp/mock-docker");
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("temporary directory") || err_msg.contains("does not exist"),
+            "Expected temp dir or missing file error, got: {}",
+            err_msg
+        );
 
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_build_docker_invocation_accepts_well_known_binaries() {
+        // "docker" is the default and should always work
+        let config = Config::default();
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-wk-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(&config_path, "{}").unwrap();
+
+        let invocation = proxy
+            .build_docker_invocation(&workspace_dir, &sessions_dir, &config_path)
+            .expect("default 'docker' binary should be accepted");
+        assert_eq!(invocation.binary, "docker");
+
+        // "podman" should also be accepted
+        let mut config2 = Config::default();
+        config2.container_agent.docker_binary = Some("podman".to_string());
+        let bus2 = Arc::new(MessageBus::new());
+        let proxy2 = ContainerAgentProxy::new(config2, bus2, ResolvedBackend::Docker);
+
+        let invocation2 = proxy2
+            .build_docker_invocation(&workspace_dir, &sessions_dir, &config_path)
+            .expect("'podman' binary should be accepted");
+        assert_eq!(invocation2.binary, "podman");
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_validate_docker_binary_rejects_relative_path() {
+        let mut config = ContainerAgentConfig::default();
+        config.docker_binary = Some("./my-docker".to_string());
+        let result = validate_docker_binary(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn test_validate_docker_binary_rejects_nonexistent_absolute_path() {
+        let mut config = ContainerAgentConfig::default();
+        config.docker_binary = Some("/usr/local/bin/nonexistent-docker-zzz".to_string());
+        let result = validate_docker_binary(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_docker_binary_defaults_to_docker_when_empty() {
+        let mut config = ContainerAgentConfig::default();
+
+        // None
+        config.docker_binary = None;
+        assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
+
+        // Empty string
+        config.docker_binary = Some(String::new());
+        assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
+
+        // Whitespace only
+        config.docker_binary = Some("   ".to_string());
+        assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -953,8 +1050,15 @@ mod tests {
     async fn test_proxy_end_to_end_with_mocked_docker_binary() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp_root = tempfile::tempdir().unwrap();
-        let script_path = temp_root.path().join("mock-docker.sh");
+        // Place mock binary under the project target directory (not /tmp) so it
+        // passes the validate_docker_binary temp-directory check.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let mock_dir = std::path::PathBuf::from(manifest_dir)
+            .join("target")
+            .join("test-mocks");
+        std::fs::create_dir_all(&mock_dir).unwrap();
+        let script_path = mock_dir.join(format!("mock-docker-{}.sh", Uuid::new_v4()));
+
         let chat_id = format!("chat-{}", Uuid::new_v4());
         let session_key = format!("test:{}", chat_id);
         let session_json = format!(
@@ -1017,6 +1121,9 @@ EOF
             .expect("proxy should stop quickly")
             .expect("proxy task join should succeed")
             .expect("proxy start should return ok");
+
+        // Clean up mock script
+        let _ = std::fs::remove_file(&script_path);
     }
 
     #[test]
@@ -1041,6 +1148,193 @@ EOF
             let back: ContainerAgentBackend = serde_json::from_str(&json).unwrap();
             assert_eq!(back, ContainerAgentBackend::Apple);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 2: extra_mounts blocked-pattern validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_docker_invocation_rejects_sensitive_extra_mount() {
+        let mut config = Config::default();
+        config.container_agent.extra_mounts =
+            vec!["/home/user/.ssh:/container/.ssh".to_string()];
+
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-mount-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(".ssh"),
+            "Expected .ssh blocked pattern in error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_build_docker_invocation_rejects_env_file_mount() {
+        let mut config = Config::default();
+        config.container_agent.extra_mounts =
+            vec!["/app/.env:/container/.env".to_string()];
+
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-env-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(".env"),
+            "Expected .env blocked pattern in error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_build_docker_invocation_rejects_aws_credentials_mount() {
+        let mut config = Config::default();
+        config.container_agent.extra_mounts =
+            vec!["/home/user/.aws:/container/aws:ro".to_string()];
+
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-aws-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(".aws"),
+            "Expected .aws blocked pattern in error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_build_docker_invocation_rejects_traversal_in_extra_mount() {
+        let mut config = Config::default();
+        config.container_agent.extra_mounts =
+            vec!["/home/user/../etc/passwd:/container/passwd".to_string()];
+
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-trav-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("traversal"),
+            "Expected path traversal error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_build_docker_invocation_accepts_safe_extra_mount() {
+        // Create a real directory to mount — no blocked patterns in path
+        let mount_root =
+            std::env::temp_dir().join(format!("zeptoclaw-safe-mount-{}", Uuid::new_v4()));
+        let safe_dir = mount_root.join("project-data");
+        std::fs::create_dir_all(&safe_dir).unwrap();
+
+        let mut config = Config::default();
+        config.container_agent.extra_mounts =
+            vec![format!("{}:/container/data", safe_dir.display())];
+
+        let bus = Arc::new(MessageBus::new());
+        let proxy = ContainerAgentProxy::new(config, bus, ResolvedBackend::Docker);
+
+        let temp_root =
+            std::env::temp_dir().join(format!("zeptoclaw-safe-test-{}", Uuid::new_v4()));
+        let workspace_dir = temp_root.join("workspace");
+        let sessions_dir = temp_root.join("sessions");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let result = proxy.build_docker_invocation(&workspace_dir, &sessions_dir, &config_path);
+        assert!(result.is_ok(), "Safe mount should be accepted");
+        let invocation = result.unwrap();
+        assert!(
+            invocation.args.iter().any(|a| a.contains("/container/data")),
+            "Extra mount should appear in args"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let _ = std::fs::remove_dir_all(&mount_root);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_mount_not_blocked unit tests (from security::mount)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_mount_not_blocked_rejects_private_key() {
+        let result = validate_mount_not_blocked("/home/user/private_key:/container/key");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("private_key"));
+    }
+
+    #[test]
+    fn test_validate_mount_not_blocked_rejects_docker_dir() {
+        let result = validate_mount_not_blocked("/home/user/.docker:/container/docker");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".docker"));
+    }
+
+    #[test]
+    fn test_validate_mount_not_blocked_rejects_invalid_container_path() {
+        let result = validate_mount_not_blocked("/home/user/data:relative/path");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid container"));
+    }
+
+    #[test]
+    fn test_validate_mount_not_blocked_rejects_container_path_traversal() {
+        let result = validate_mount_not_blocked("/home/user/data:/container/../etc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid container"));
     }
 
     fn has_arg_pair(args: &[String], flag: &str, value: &str) -> bool {

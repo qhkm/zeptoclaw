@@ -97,6 +97,15 @@ impl Tool for CronTool {
 
 impl CronTool {
     async fn execute_add(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+        // Max job count
+        let existing = self.cron.list_jobs(false).await;
+        if existing.len() >= 50 {
+            return Err(ZeptoError::Tool(
+                "Maximum of 50 active cron jobs reached. Remove some before adding new ones."
+                    .to_string(),
+            ));
+        }
+
         let message = args
             .get("message")
             .and_then(|v| v.as_str())
@@ -132,6 +141,15 @@ impl CronTool {
             return Err(ZeptoError::Tool(
                 "Specify exactly one of: every_seconds, cron_expr, at".to_string(),
             ));
+        }
+
+        // Minimum interval rate limiting
+        if let Some(seconds) = every_seconds {
+            if seconds < 60 {
+                return Err(ZeptoError::Tool(
+                    "Minimum interval is 60 seconds".to_string(),
+                ));
+            }
         }
 
         let (schedule, delete_after_run) = if let Some(seconds) = every_seconds {

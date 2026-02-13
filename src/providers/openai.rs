@@ -237,7 +237,10 @@ impl OpenAIProvider {
         Self {
             api_key: api_key.to_string(),
             api_base: OPENAI_API_URL.to_string(),
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
         }
     }
@@ -260,7 +263,10 @@ impl OpenAIProvider {
         Self {
             api_key: api_key.to_string(),
             api_base: api_base.trim_end_matches('/').to_string(),
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
         }
     }

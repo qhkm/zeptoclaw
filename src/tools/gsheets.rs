@@ -204,8 +204,46 @@ impl GoogleSheetsTool {
     }
 }
 
+/// Validate that a spreadsheet ID is safe to interpolate into a URL path.
+///
+/// Google Sheet IDs are base64-like strings containing alphanumeric characters,
+/// hyphens, and underscores. Reject anything else to prevent path injection.
+fn validate_spreadsheet_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(ZeptoError::Tool(
+            "Spreadsheet ID must not be empty".to_string(),
+        ));
+    }
+
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ZeptoError::Tool(format!(
+            "Invalid spreadsheet ID '{}': only alphanumeric characters, hyphens, and underscores are allowed",
+            id
+        )));
+    }
+
+    Ok(())
+}
+
+/// Encode a Google Sheets A1 notation range for use in a URL path.
+///
+/// Handles the special characters that can appear in sheet names and range
+/// notation (e.g., "Sheet 1!A1:B2").
 fn encode_range(range: &str) -> String {
-    range.replace(' ', "%20")
+    range
+        .chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '!' => "%21".to_string(),
+            '#' => "%23".to_string(),
+            '$' => "%24".to_string(),
+            '+' => "%2B".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -253,6 +291,7 @@ impl Tool for GoogleSheetsTool {
             .get("spreadsheet_id")
             .and_then(Value::as_str)
             .ok_or_else(|| ZeptoError::Tool("Missing 'spreadsheet_id'".to_string()))?;
+        validate_spreadsheet_id(spreadsheet_id)?;
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -321,5 +360,44 @@ mod tests {
             .execute(json!({"action":"read"}), &ToolContext::new())
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_spreadsheet_id_valid() {
+        assert!(validate_spreadsheet_id("1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms").is_ok());
+        assert!(validate_spreadsheet_id("abc-def_123").is_ok());
+        assert!(validate_spreadsheet_id("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_spreadsheet_id_invalid() {
+        // Path traversal
+        assert!(validate_spreadsheet_id("../etc/passwd").is_err());
+        // Slash injection
+        assert!(validate_spreadsheet_id("id/values/Sheet1").is_err());
+        // Query string injection
+        assert!(validate_spreadsheet_id("id?key=evil").is_err());
+        // Empty
+        assert!(validate_spreadsheet_id("").is_err());
+        // Spaces
+        assert!(validate_spreadsheet_id("has space").is_err());
+    }
+
+    #[test]
+    fn test_encode_range_special_chars() {
+        // Space encoding
+        assert_eq!(encode_range("Sheet 1"), "Sheet%201");
+        // Exclamation mark (sheet separator)
+        assert_eq!(encode_range("Sheet1!A1:B2"), "Sheet1%21A1:B2");
+        // Combined: space and exclamation
+        assert_eq!(encode_range("My Sheet!A:F"), "My%20Sheet%21A:F");
+        // Dollar sign (absolute reference)
+        assert_eq!(encode_range("Sheet1!$A$1"), "Sheet1%21%24A%241");
+        // Hash
+        assert_eq!(encode_range("Sheet#1"), "Sheet%231");
+        // Plus sign
+        assert_eq!(encode_range("a+b"), "a%2Bb");
+        // Plain range (no encoding needed)
+        assert_eq!(encode_range("A1:B2"), "A1:B2");
     }
 }

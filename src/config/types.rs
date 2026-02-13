@@ -62,7 +62,7 @@ impl Default for AgentDefaults {
         Self {
             workspace: "~/.zeptoclaw/workspace".to_string(),
             model: "claude-sonnet-4-5-20250929".to_string(),
-            max_tokens: 8096,
+            max_tokens: 8192,
             temperature: 0.7,
             max_tool_iterations: 20,
         }
@@ -656,6 +656,8 @@ pub struct ContainerAgentConfig {
     pub network: String,
     /// Extra volume mounts (host:container format).
     pub extra_mounts: Vec<String>,
+    /// Maximum number of concurrent container invocations.
+    pub max_concurrent: usize,
 }
 
 impl Default for ContainerAgentConfig {
@@ -669,6 +671,7 @@ impl Default for ContainerAgentConfig {
             timeout_secs: 300,
             network: "none".to_string(),
             extra_mounts: Vec::new(),
+            max_concurrent: 5,
         }
     }
 }

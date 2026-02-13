@@ -53,6 +53,13 @@ impl Tool for SpawnTool {
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+        // Prevent recursive spawning (fork bomb protection)
+        if ctx.channel.as_deref() == Some("subagent") {
+            return Err(ZeptoError::Tool(
+                "Cannot spawn from within a spawned task (recursion limit)".to_string(),
+            ));
+        }
+
         let task_text = args
             .get("task")
             .and_then(|v| v.as_str())

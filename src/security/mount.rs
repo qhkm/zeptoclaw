@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Result, ZeptoError};
 
-const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[
+pub const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[
     ".ssh",
     ".gnupg",
     ".gpg",
@@ -203,6 +203,48 @@ pub fn validate_extra_mounts(mounts: &[String], allowlist_path: &str) -> Result<
     Ok(normalized)
 }
 
+/// Validate that a mount spec does not reference any blocked sensitive paths.
+///
+/// This performs a lightweight check against [`DEFAULT_BLOCKED_PATTERNS`] without
+/// requiring a full allowlist file.  Useful for contexts (e.g. the container
+/// agent proxy) where the full allowlist may not be configured.
+///
+/// The mount spec must follow `host_path:container_path[:ro]` format.
+pub fn validate_mount_not_blocked(mount_spec: &str) -> Result<()> {
+    let (host, container, _read_only) = parse_mount_spec(mount_spec)?;
+
+    if container.is_empty() || !container.starts_with('/') || container.contains("..") {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Invalid container mount path '{}' in '{}'",
+            container, mount_spec
+        )));
+    }
+
+    // Check host path against default blocked patterns.
+    let blocked: Vec<String> = DEFAULT_BLOCKED_PATTERNS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let host_path = expand_path(&host);
+    if let Some(pattern) = path_contains_blocked_pattern(&host_path, &blocked) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Mount '{}' blocked by sensitive pattern '{}'",
+            mount_spec, pattern
+        )));
+    }
+
+    // Also check for path traversal in host path.
+    if host.contains("..") {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Mount host path '{}' contains path traversal",
+            host
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +315,110 @@ mod tests {
         let mounts = vec![format!("{}:/workspace/data", outside_dir.display())];
         let err = validate_extra_mounts(&mounts, allowlist.to_str().unwrap()).unwrap_err();
         assert!(err.to_string().contains("outside allowedRoots"));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_mount_not_blocked tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_not_blocked_accepts_safe_path() {
+        let temp = tempdir().unwrap();
+        let safe = temp.path().join("project");
+        std::fs::create_dir_all(&safe).unwrap();
+        let spec = format!("{}:/data/project", safe.display());
+        assert!(validate_mount_not_blocked(&spec).is_ok());
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_ssh_dir() {
+        let result = validate_mount_not_blocked("/home/user/.ssh:/secrets");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".ssh"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_gnupg_dir() {
+        let result = validate_mount_not_blocked("/home/user/.gnupg:/gpg");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".gnupg"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_kube_dir() {
+        let result = validate_mount_not_blocked("/home/user/.kube:/kube");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".kube"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_credentials_in_path() {
+        let result = validate_mount_not_blocked("/app/credentials:/creds");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("credentials"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_netrc() {
+        let result = validate_mount_not_blocked("/home/user/.netrc:/netrc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".netrc"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_id_rsa() {
+        let result = validate_mount_not_blocked("/home/user/id_rsa:/key");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("id_rsa"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_id_ed25519() {
+        let result = validate_mount_not_blocked("/home/user/id_ed25519:/key");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("id_ed25519"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_traversal_in_host() {
+        let result = validate_mount_not_blocked("/home/user/../etc:/etc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("traversal"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_relative_container_path() {
+        let temp = tempdir().unwrap();
+        let safe = temp.path().join("data");
+        std::fs::create_dir_all(&safe).unwrap();
+        let spec = format!("{}:relative", safe.display());
+        let result = validate_mount_not_blocked(&spec);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid container"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_container_path_with_dotdot() {
+        let temp = tempdir().unwrap();
+        let safe = temp.path().join("data");
+        std::fs::create_dir_all(&safe).unwrap();
+        let spec = format!("{}:/container/../etc", safe.display());
+        let result = validate_mount_not_blocked(&spec);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid container"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_malformed_mount_spec() {
+        let result = validate_mount_not_blocked("single-value");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid mount format"));
+    }
+
+    #[test]
+    fn test_not_blocked_rejects_invalid_mode() {
+        let result = validate_mount_not_blocked("/data:/container:rw");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid mount mode"));
     }
 }

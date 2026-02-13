@@ -7,6 +7,6 @@ pub mod mount;
 pub mod path;
 pub mod shell;
 
-pub use mount::validate_extra_mounts;
+pub use mount::{validate_extra_mounts, validate_mount_not_blocked, DEFAULT_BLOCKED_PATTERNS};
 pub use path::{validate_path_in_workspace, SafePath};
 pub use shell::ShellSecurityConfig;

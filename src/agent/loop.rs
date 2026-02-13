@@ -3,10 +3,11 @@
 //! This module provides the core agent loop that processes messages,
 //! calls LLM providers, and executes tools.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info};
 
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
@@ -55,8 +56,8 @@ pub struct AgentLoop {
     session_manager: Arc<SessionManager>,
     /// Message bus for input/output
     bus: Arc<MessageBus>,
-    /// The LLM provider to use
-    provider: Arc<RwLock<Option<Box<dyn LLMProvider>>>>,
+    /// The LLM provider to use (Arc<dyn ..> allows cheap cloning without holding the lock)
+    provider: Arc<RwLock<Option<Arc<dyn LLMProvider>>>>,
     /// Registered tools
     tools: Arc<RwLock<ToolRegistry>>,
     /// Whether the loop is currently running
@@ -65,6 +66,8 @@ pub struct AgentLoop {
     context_builder: ContextBuilder,
     /// Shutdown signal sender
     shutdown_tx: watch::Sender<bool>,
+    /// Per-session locks to serialize concurrent messages for the same session
+    session_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl AgentLoop {
@@ -100,6 +103,7 @@ impl AgentLoop {
             running: AtomicBool::new(false),
             context_builder: ContextBuilder::new(),
             shutdown_tx,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -126,6 +130,7 @@ impl AgentLoop {
             running: AtomicBool::new(false),
             context_builder,
             shutdown_tx,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -151,7 +156,7 @@ impl AgentLoop {
     /// ```
     pub async fn set_provider(&self, provider: Box<dyn LLMProvider>) {
         let mut p = self.provider.write().await;
-        *p = Some(provider);
+        *p = Some(Arc::from(provider));
     }
 
     /// Register a tool with the agent.
@@ -204,10 +209,28 @@ impl AgentLoop {
     /// - The LLM call fails
     /// - Session management fails
     pub async fn process_message(&self, msg: &InboundMessage) -> Result<String> {
-        let provider = self.provider.read().await;
-        let provider = provider
-            .as_ref()
-            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
+        // Acquire a per-session lock to serialize concurrent messages for the
+        // same session key. Different sessions can still proceed concurrently.
+        let session_lock = {
+            let mut locks = self.session_locks.lock().await;
+            locks
+                .entry(msg.session_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _session_guard = session_lock.lock().await;
+
+        // Clone the provider Arc early and release the RwLock immediately.
+        // This avoids holding the provider read lock across multi-second LLM
+        // calls and tool executions, which would block set_provider() writes.
+        let provider = {
+            let guard = self.provider.read().await;
+            Arc::clone(
+                guard
+                    .as_ref()
+                    .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?,
+            )
+        };
 
         // Get or create session
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
@@ -217,9 +240,11 @@ impl AgentLoop {
             .context_builder
             .build_messages(session.messages.clone(), &msg.content);
 
-        // Get tool definitions
-        let tools = self.tools.read().await;
-        let tool_definitions = tools.definitions();
+        // Get tool definitions (short-lived read lock)
+        let tool_definitions = {
+            let tools = self.tools.read().await;
+            tools.definitions()
+        };
 
         // Build chat options
         let options = ChatOptions::new()
@@ -228,7 +253,7 @@ impl AgentLoop {
 
         let model = Some(self.config.agents.defaults.model.as_str());
 
-        // Call LLM
+        // Call LLM -- provider lock is NOT held during this await
         let mut response = provider
             .chat(messages, tool_definitions.clone(), model, options.clone())
             .await?;
@@ -270,27 +295,43 @@ impl AgentLoop {
             for tool_call in &response.tool_calls {
                 info!(tool = %tool_call.name, id = %tool_call.id, "Executing tool");
 
-                let args: serde_json::Value =
-                    serde_json::from_str(&tool_call.arguments).unwrap_or_default();
-
-                let result = match tools
-                    .execute_with_context(&tool_call.name, args, &tool_ctx)
-                    .await
-                {
-                    Ok(r) => {
-                        debug!(tool = %tool_call.name, "Tool executed successfully");
-                        r
-                    }
+                let args: serde_json::Value = match serde_json::from_str(&tool_call.arguments) {
+                    Ok(v) => v,
                     Err(e) => {
-                        error!(tool = %tool_call.name, error = %e, "Tool execution failed");
-                        format!("Error: {}", e)
+                        tracing::warn!(tool = %tool_call.name, error = %e, "Invalid JSON in tool arguments");
+                        serde_json::json!({"_parse_error": format!("Invalid arguments JSON: {}", e)})
+                    }
+                };
+
+                // Acquire the tools read lock only for the duration of each
+                // tool execution, then release it between calls.
+                let result = {
+                    let tools = self.tools.read().await;
+                    match tools
+                        .execute_with_context(&tool_call.name, args, &tool_ctx)
+                        .await
+                    {
+                        Ok(r) => {
+                            debug!(tool = %tool_call.name, "Tool executed successfully");
+                            r
+                        }
+                        Err(e) => {
+                            error!(tool = %tool_call.name, error = %e, "Tool execution failed");
+                            format!("Error: {}", e)
+                        }
                     }
                 };
 
                 session.add_message(Message::tool_result(&tool_call.id, &result));
             }
 
-            // Call LLM again with tool results
+            // Get fresh tool definitions for the next LLM call
+            let tool_definitions = {
+                let tools = self.tools.read().await;
+                tools.definitions()
+            };
+
+            // Call LLM again with tool results -- provider lock NOT held
             let messages: Vec<_> = self
                 .context_builder
                 .build_messages(session.messages.clone(), "")
@@ -299,7 +340,7 @@ impl AgentLoop {
                 .collect();
 
             response = provider
-                .chat(messages, tool_definitions.clone(), model, options.clone())
+                .chat(messages, tool_definitions, model, options.clone())
                 .await?;
         }
 

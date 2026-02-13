@@ -209,6 +209,31 @@ impl Tool for R8rTool {
     }
 }
 
+/// Validate that a string is safe to use as a URL path segment.
+///
+/// Only allows alphanumeric characters, hyphens, underscores, and dots.
+/// Returns an error if the name contains characters that could cause
+/// URL path injection (e.g., `/`, `?`, `#`, `..`).
+fn validate_path_segment(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(ZeptoError::Tool(
+            "Path segment must not be empty".to_string(),
+        ));
+    }
+
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ZeptoError::Tool(format!(
+            "Invalid path segment '{}': only alphanumeric characters, hyphens, underscores, and dots are allowed",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
 impl R8rTool {
     /// List all available workflows
     async fn list_workflows(&self) -> Result<String> {
@@ -258,6 +283,7 @@ impl R8rTool {
 
     /// Show workflow details
     async fn show_workflow(&self, name: &str) -> Result<String> {
+        validate_path_segment(name)?;
         let url = format!("{}/api/workflows/{}", self.endpoint, name);
         debug!("R8r show workflow: {}", url);
 
@@ -299,6 +325,7 @@ impl R8rTool {
 
     /// Run a workflow
     async fn run_workflow(&self, name: &str, inputs: Value, wait: bool) -> Result<String> {
+        validate_path_segment(name)?;
         let url = format!("{}/api/workflows/{}/execute", self.endpoint, name);
         debug!("R8r execute workflow: {} (wait={})", url, wait);
 
@@ -469,6 +496,33 @@ mod tests {
         };
         let json_str = serde_json::to_string(&request).unwrap();
         assert!(!json_str.contains("wait"));
+    }
+
+    #[test]
+    fn test_validate_path_segment_valid() {
+        assert!(validate_path_segment("my-workflow").is_ok());
+        assert!(validate_path_segment("workflow_v2").is_ok());
+        assert!(validate_path_segment("test.workflow").is_ok());
+        assert!(validate_path_segment("SimpleName123").is_ok());
+        assert!(validate_path_segment("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_segment_invalid() {
+        // Path traversal
+        assert!(validate_path_segment("../etc/passwd").is_err());
+        // Slash injection
+        assert!(validate_path_segment("foo/bar").is_err());
+        // Query string injection
+        assert!(validate_path_segment("name?admin=true").is_err());
+        // Fragment injection
+        assert!(validate_path_segment("name#section").is_err());
+        // Spaces
+        assert!(validate_path_segment("has space").is_err());
+        // Empty
+        assert!(validate_path_segment("").is_err());
+        // Encoded characters
+        assert!(validate_path_segment("name%2F").is_err());
     }
 
     // Integration tests require a running r8r server
