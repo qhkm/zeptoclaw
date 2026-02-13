@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant framework"
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/zeptoclaw/zeptoclaw"
+repository = "https://github.com/qhkm/zeptoclaw"
 
 [dependencies]
 # =============================================================================
@@ -97,6 +97,8 @@ teloxide = { version = "0.12", features = ["macros", "rustls"], default-features
 base64 = "0.22"
 # Temp directory creation for container env files
 tempfile = "3.10"
+# Secure password input (hidden terminal echo)
+rpassword = "7.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
