@@ -1,18 +1,19 @@
 <p align="center">
-  <h1 align="center">ZeptoClaw</h1>
-  <p align="center">
-    <strong>AI assistant framework that fits in 5 megabytes.</strong>
-  </p>
-  <p align="center">
-    16+ tools &bull; 7 LLM providers &bull; container isolation &bull; multi-tenant &bull; written in Rust
-  </p>
-  <p align="center">
-    <a href="#quick-start">Quick Start</a> &bull;
-    <a href="#features">Features</a> &bull;
-    <a href="#the-openclaw-family">Family</a> &bull;
-    <a href="#tools">Tools</a> &bull;
-    <a href="#architecture">Architecture</a>
-  </p>
+  <img src="assets/mascot.png" width="200" alt="Zippy — ZeptoClaw mascot">
+</p>
+<h1 align="center">ZeptoClaw</h1>
+<p align="center">
+  <strong>AI assistant framework that fits in 5 megabytes.</strong>
+</p>
+<p align="center">
+  16+ tools &bull; 7 LLM providers &bull; container isolation &bull; multi-tenant &bull; written in Rust
+</p>
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#features">Features</a> &bull;
+  <a href="#the-openclaw-family">Family</a> &bull;
+  <a href="#tools">Tools</a> &bull;
+  <a href="#architecture">Architecture</a>
 </p>
 
 ---
