@@ -248,6 +248,16 @@ impl LLMProvider for ProviderRef {
     ) -> Result<LLMResponse> {
         self.0.chat(messages, tools, model, options).await
     }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        model: Option<&str>,
+        options: ChatOptions,
+    ) -> crate::error::Result<tokio::sync::mpsc::Receiver<crate::providers::StreamEvent>> {
+        self.0.chat_stream(messages, tools, model, options).await
+    }
 }
 
 #[cfg(test)]
