@@ -127,6 +127,7 @@ impl LLMProvider for ClaudeProvider {
             temperature: options.temperature,
             top_p: options.top_p,
             stop_sequences: options.stop,
+            stream: None,
         };
 
         // Send request
@@ -160,6 +161,199 @@ impl LLMProvider for ClaudeProvider {
 
         let claude_response: ClaudeResponse = response.json().await?;
         Ok(convert_response(claude_response))
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        model: Option<&str>,
+        options: ChatOptions,
+    ) -> crate::error::Result<tokio::sync::mpsc::Receiver<super::StreamEvent>> {
+        use futures::StreamExt;
+        use super::StreamEvent;
+
+        let model = model.unwrap_or(DEFAULT_MODEL);
+        let (system, claude_messages) = convert_messages(messages)?;
+
+        let request = ClaudeRequest {
+            model: model.to_string(),
+            max_tokens: options.max_tokens.unwrap_or(8192),
+            messages: claude_messages,
+            system,
+            tools: if tools.is_empty() {
+                None
+            } else {
+                Some(convert_tools(tools))
+            },
+            temperature: options.temperature,
+            top_p: options.top_p,
+            stop_sequences: options.stop,
+            stream: Some(true),
+        };
+
+        let response = self
+            .client
+            .post(CLAUDE_API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            if let Ok(error_response) = serde_json::from_str::<ClaudeErrorResponse>(&error_text) {
+                return Err(ZeptoError::Provider(format!(
+                    "Claude API error ({}): {} - {}",
+                    status, error_response.error.r#type, error_response.error.message
+                )));
+            }
+            return Err(ZeptoError::Provider(format!(
+                "Claude API error ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+        let byte_stream = response.bytes_stream();
+
+        tokio::spawn(async move {
+            let mut assembled_content = String::new();
+            let mut tool_calls: Vec<super::LLMToolCall> = Vec::new();
+            let mut current_tool_id: Option<String> = None;
+            let mut current_tool_name: Option<String> = None;
+            let mut current_tool_json = String::new();
+            let mut input_tokens: u32 = 0;
+            let mut output_tokens: u32 = 0;
+            let mut line_buffer = String::new();
+
+            tokio::pin!(byte_stream);
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        let _ = tx.send(StreamEvent::Error(
+                            ZeptoError::Provider(format!("Stream read error: {}", e))
+                        )).await;
+                        return;
+                    }
+                };
+
+                let chunk_str = String::from_utf8_lossy(&chunk);
+                line_buffer.push_str(&chunk_str);
+
+                while let Some(newline_pos) = line_buffer.find('\n') {
+                    let line = line_buffer[..newline_pos].trim().to_string();
+                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() || line.starts_with("event:") {
+                        continue;
+                    }
+
+                    let data = if let Some(stripped) = line.strip_prefix("data: ") {
+                        stripped
+                    } else if let Some(stripped) = line.strip_prefix("data:") {
+                        stripped
+                    } else {
+                        continue;
+                    };
+
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    let sse: SseEvent = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    match sse.event_type.as_str() {
+                        "message_start" => {
+                            if let Some(msg) = &sse.message {
+                                if let Some(usage) = &msg.usage {
+                                    input_tokens = usage.input_tokens.unwrap_or(0);
+                                }
+                            }
+                        }
+                        "content_block_start" => {
+                            if let Some(block) = &sse.content_block {
+                                if block.block_type == "tool_use" {
+                                    current_tool_id = block.id.clone();
+                                    current_tool_name = block.name.clone();
+                                    current_tool_json.clear();
+                                }
+                            }
+                        }
+                        "content_block_delta" => {
+                            if let Some(delta) = &sse.delta {
+                                match delta.delta_type.as_deref() {
+                                    Some("text_delta") => {
+                                        if let Some(text) = &delta.text {
+                                            assembled_content.push_str(text);
+                                            if tx.send(StreamEvent::Delta(text.clone())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Some("input_json_delta") => {
+                                        if let Some(json_chunk) = &delta.partial_json {
+                                            current_tool_json.push_str(json_chunk);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "content_block_stop" => {
+                            if let (Some(id), Some(name)) = (current_tool_id.take(), current_tool_name.take()) {
+                                let args = if current_tool_json.is_empty() {
+                                    "{}".to_string()
+                                } else {
+                                    std::mem::take(&mut current_tool_json)
+                                };
+                                tool_calls.push(super::LLMToolCall::new(&id, &name, &args));
+                            }
+                        }
+                        "message_delta" => {
+                            if let Some(usage) = &sse.usage {
+                                output_tokens = usage.output_tokens.unwrap_or(0);
+                            }
+                        }
+                        "message_stop" => {
+                            if !tool_calls.is_empty() {
+                                let _ = tx.send(StreamEvent::ToolCalls(
+                                    std::mem::take(&mut tool_calls)
+                                )).await;
+                            }
+                            let usage = super::Usage::new(input_tokens, output_tokens);
+                            let _ = tx.send(StreamEvent::Done {
+                                content: assembled_content.clone(),
+                                usage: Some(usage),
+                            }).await;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if !tool_calls.is_empty() {
+                let _ = tx.send(StreamEvent::ToolCalls(
+                    std::mem::take(&mut tool_calls)
+                )).await;
+            }
+            let usage = super::Usage::new(input_tokens, output_tokens);
+            let _ = tx.send(StreamEvent::Done {
+                content: assembled_content,
+                usage: Some(usage),
+            }).await;
+        });
+
+        Ok(rx)
     }
 
     fn default_model(&self) -> &str {
@@ -199,6 +393,9 @@ struct ClaudeRequest {
     /// Stop sequences
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Vec<String>>,
+    /// Whether to stream the response
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 /// A message in Claude's format.
@@ -291,6 +488,68 @@ struct ClaudeUsage {
     input_tokens: u32,
     /// Tokens in the output
     output_tokens: u32,
+}
+
+// ============================================================================
+// Claude SSE Streaming Types
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: Option<SseDelta>,
+    #[serde(default)]
+    content_block: Option<SseContentBlock>,
+    #[serde(default)]
+    usage: Option<SseUsage>,
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(default)]
+    message: Option<SseMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SseDelta {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    delta_type: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    partial_json: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SseContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseUsage {
+    #[serde(default)]
+    input_tokens: Option<u32>,
+    #[serde(default)]
+    output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseMessage {
+    #[serde(default)]
+    usage: Option<SseUsage>,
 }
 
 // ============================================================================
@@ -702,6 +961,7 @@ mod tests {
             temperature: Some(0.7),
             top_p: None,
             stop_sequences: None,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -726,6 +986,7 @@ mod tests {
             temperature: None,
             top_p: None,
             stop_sequences: None,
+            stream: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -796,5 +1057,70 @@ mod tests {
         assert_eq!(llm_tc.id, "call_123");
         assert_eq!(llm_tc.name, "web_search");
         assert_eq!(llm_tc.arguments, r#"{"query": "test"}"#);
+    }
+
+    #[test]
+    fn test_claude_request_with_stream_flag() {
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            max_tokens: 1000,
+            messages: vec![],
+            system: None,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: None,
+            stream: Some(true),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""stream":true"#));
+    }
+
+    #[test]
+    fn test_claude_request_without_stream_flag() {
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            max_tokens: 1000,
+            messages: vec![],
+            system: None,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: None,
+            stream: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn test_parse_sse_content_block_delta() {
+        let line = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["type"].as_str().unwrap(), "content_block_delta");
+        assert_eq!(parsed["delta"]["text"].as_str().unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_parse_sse_message_stop() {
+        let line = r#"{"type":"message_stop"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["type"].as_str().unwrap(), "message_stop");
+    }
+
+    #[test]
+    fn test_parse_sse_message_delta_with_usage() {
+        let line = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["type"].as_str().unwrap(), "message_delta");
+        assert_eq!(parsed["usage"]["output_tokens"].as_u64().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_parse_sse_content_block_start_tool_use() {
+        let line = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"web_search","input":{}}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["content_block"]["type"].as_str().unwrap(), "tool_use");
+        assert_eq!(parsed["content_block"]["name"].as_str().unwrap(), "web_search");
     }
 }
