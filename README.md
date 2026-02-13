@@ -38,9 +38,9 @@ $ zeptoclaw agent "Set up my project workspace"
 
 It started with **OpenClaw** — a TypeScript powerhouse with 52+ modules and 12 channels. It could do everything. But "everything" comes at a cost: complexity, dependencies, and resource bloat.
 
-So we stripped it down. **NanoClaw** was born — a forkable assistant in ~5,000 lines of TypeScript. Then **PicoClaw** pushed further — a Go binary that runs on a $10 RISC-V board.
+Then came **NanoClaw** — a forkable assistant in ~5,000 lines of TypeScript. Then **PicoClaw** pushed further — a Go binary that runs on a $10 RISC-V board.
 
-**ZeptoClaw** is the final form: Rust's memory safety, async performance, and container isolation — built for teams who need security and multi-tenancy without sacrificing simplicity.
+**ZeptoClaw** is the Rust evolution: memory safety, async performance, and container isolation — built for teams who need security and multi-tenancy without sacrificing simplicity.
 
 | | ~5MB binary | ~50ms startup | ~6MB RAM | 589 tests | 0 crashes |
 |---|---|---|---|---|---|
