@@ -23,3 +23,6 @@ target/
 
 # External references
 external/
+
+# Internal planning docs (local-only)
+docs/internal/
