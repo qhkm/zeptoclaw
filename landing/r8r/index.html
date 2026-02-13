@@ -624,21 +624,20 @@
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-prompt">$</span>
-                        <span class="terminal-command">r8r init my-workflow</span>
+                        <span class="terminal-command">r8r server --port 8080</span>
                     </div>
                     <div class="terminal-output">
-                        ✓ Created workflow "my-workflow"<br>
-                        ✓ Added 3 default nodes<br>
-                        ✓ Ready to run
+                        <span style="color: var(--success)">✓</span> Server running on http://localhost:8080<br>
+                        <span style="color: var(--success)">✓</span> Dashboard: http://localhost:8080/<br>
+                        <span style="color: var(--success)">✓</span> Visual Editor: http://localhost:8080/editor<br>
+                        <span style="color: var(--warning)">⚡</span> 4 workflows loaded
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-prompt">$</span>
-                        <span class="terminal-command">r8r run</span>
+                        <span class="terminal-command">r8r completions zsh > ~/.zsh/completions/_r8r</span>
                     </div>
                     <div class="terminal-output">
-                        <span style="color: var(--success)">●</span> Workflow running on http://localhost:3000<br>
-                        <span style="color: var(--warning)">⚡</span> 847 ops/sec · 2ms avg latency<br>
-                        <span class="terminal-comment"># Press Ctrl+C to stop</span>
+                        <span class="terminal-comment"># Tab completion enabled for all commands</span>
                     </div>
                     <div class="terminal-line">
                         <span class="terminal-prompt">$</span>
@@ -696,6 +695,24 @@
                     <h3>Observable</h3>
                     <p>Built-in metrics, tracing, and logging. Export to Prometheus, Jaeger, or OpenTelemetry with zero configuration.</p>
                 </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🖼️</div>
+                    <h3>Visual Dashboard</h3>
+                    <p>Monitor workflows in real-time with the built-in React dashboard. View executions, traces, and logs in a beautiful web UI.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">✏️</div>
+                    <h3>Visual Editor</h3>
+                    <p>Drag-and-drop workflow builder with 13+ node types. Design complex workflows visually and export to YAML.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🧠</div>
+                    <h3>Shell Autocomplete</h3>
+                    <p>Native shell completions for Bash, Zsh, Fish, and PowerShell. Type faster with intelligent command suggestions.</p>
+                </div>
             </div>
         </div>
     </section>
@@ -718,6 +735,14 @@
                 <div class="stat-value">0</div>
                 <div class="stat-label">Runtime Crashes</div>
             </div>
+            <div class="stat-item">
+                <div class="stat-value">20+</div>
+                <div class="stat-label">Node Types</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">5</div>
+                <div class="stat-label">Shell Completions</div>
+            </div>
         </div>
     </section>
 
@@ -726,11 +751,12 @@
             <div class="code-example">
                 <div class="code-content">
                     <div class="section-tag">Define Workflows</div>
-                    <h3>YAML or Code. You Choose.</h3>
+                    <h3>YAML, Code, or Visual. You Choose.</h3>
                     <p>
-                        Define workflows declaratively with YAML for simple automations, 
-                        or write custom nodes in Rust for complex logic. Both approaches 
-                        are first-class citizens.
+                        Define workflows declaratively with YAML, build visually with the 
+                        drag-and-drop editor, or write custom nodes in Rust. All approaches 
+                        are first-class citizens with 20+ built-in node types including 
+                        Email, Slack, Database, and S3.
                     </p>
                     <a href="#" class="btn btn-primary">Explore the DSL</a>
                 </div>
