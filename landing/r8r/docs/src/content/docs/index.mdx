@@ -1,0 +1,36 @@
+---
+title: r8r Documentation
+description: Lightning-fast workflow automation for developers. Built in Rust.
+template: splash
+hero:
+  tagline: Workflow automation that doesn't make you wait.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get Started
+      link: /getting-started/quick-start/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/r8r/r8r
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Next steps
+
+<CardGrid stagger>
+	<Card title="Install r8r" icon="rocket">
+		[Get r8r installed](/getting-started/installation/) in under a minute with a single cargo command.
+	</Card>
+	<Card title="Build your first workflow" icon="document">
+		Follow the [quick start guide](/getting-started/quick-start/) to create your first automation.
+	</Card>
+	<Card title="Explore nodes" icon="setting">
+		Browse the [node reference](/reference/node-types/) to see what's possible.
+	</Card>
+	<Card title="Read the docs" icon="open-book">
+		Learn more in [the core concepts](/concepts/workflows/) documentation.
+	</Card>
+</CardGrid>

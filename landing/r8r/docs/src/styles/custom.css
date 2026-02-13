@@ -1,0 +1,26 @@
+/* Custom styles for r8r docs */
+
+:root {
+  --sl-color-accent: #f24e1e;
+  --sl-color-accent-high: #ff6b3d;
+  --sl-color-accent-low: #c43e18;
+}
+
+/* Dark mode tweaks */
+[data-theme='dark'] {
+  --sl-color-bg: #0a0a0b;
+  --sl-color-bg-nav: #111113;
+  --sl-color-bg-sidebar: #111113;
+  --sl-color-bg-inline-code: #1a1a1d;
+  --sl-color-border: #27272a;
+}
+
+/* Custom font */
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Code blocks */
+code {
+  font-family: 'JetBrains Mono', monospace;
+}
