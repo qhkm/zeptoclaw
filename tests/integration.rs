@@ -1155,3 +1155,34 @@ async fn test_delegate_tool_in_registry() {
     assert!(delegate_def.is_some());
     assert!(delegate_def.unwrap().description.contains("specialist"));
 }
+
+// ============================================================================
+// Streaming Configuration Tests
+// ============================================================================
+
+#[test]
+fn test_streaming_config_default_false() {
+    let config = Config::default();
+    assert!(!config.agents.defaults.streaming);
+}
+
+#[test]
+fn test_streaming_config_json_roundtrip() {
+    let json = r#"{"agents":{"defaults":{"streaming":true}}}"#;
+    let config: Config = serde_json::from_str(json).unwrap();
+    assert!(config.agents.defaults.streaming);
+}
+
+#[tokio::test]
+async fn test_agent_loop_streaming_accessors() {
+    let config = Config::default();
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus);
+
+    assert!(!agent.is_streaming());
+    agent.set_streaming(true);
+    assert!(agent.is_streaming());
+    agent.set_streaming(false);
+    assert!(!agent.is_streaming());
+}
