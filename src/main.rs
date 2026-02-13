@@ -1088,9 +1088,6 @@ async fn cmd_agent(message: Option<String>, stream: bool) -> Result<()> {
     // Create agent
     let agent = create_agent(config.clone(), bus.clone()).await?;
 
-    // Streaming flag placeholder (used in Task 5 for actual streaming)
-    let _streaming = stream || config.agents.defaults.streaming;
-
     // Check whether the runtime can use at least one configured provider.
     if resolve_runtime_provider(&config).is_none() {
         let configured = configured_provider_names(&config);
@@ -1115,13 +1112,42 @@ async fn cmd_agent(message: Option<String>, stream: bool) -> Result<()> {
     if let Some(msg) = message {
         // Single message mode
         let inbound = InboundMessage::new("cli", "user", "cli", &msg);
-        match agent.process_message(&inbound).await {
-            Ok(response) => {
-                println!("{}", response);
+        let streaming = stream || config.agents.defaults.streaming;
+
+        if streaming {
+            use zeptoclaw::providers::StreamEvent;
+            match agent.process_message_streaming(&inbound).await {
+                Ok(mut rx) => {
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            StreamEvent::Delta(text) => {
+                                print!("{}", text);
+                                let _ = io::stdout().flush();
+                            }
+                            StreamEvent::Done { .. } => break,
+                            StreamEvent::Error(e) => {
+                                eprintln!("\nStream error: {}", e);
+                                std::process::exit(1);
+                            }
+                            StreamEvent::ToolCalls(_) => {}
+                        }
+                    }
+                    println!(); // newline after streaming
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
+        } else {
+            match agent.process_message(&inbound).await {
+                Ok(response) => {
+                    println!("{}", response);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
     } else {
@@ -1156,15 +1182,45 @@ async fn cmd_agent(message: Option<String>, stream: bool) -> Result<()> {
 
                     // Process message
                     let inbound = InboundMessage::new("cli", "user", "cli", input);
-                    match agent.process_message(&inbound).await {
-                        Ok(response) => {
-                            println!();
-                            println!("{}", response);
-                            println!();
+                    let streaming = stream || config.agents.defaults.streaming;
+
+                    if streaming {
+                        use zeptoclaw::providers::StreamEvent;
+                        match agent.process_message_streaming(&inbound).await {
+                            Ok(mut rx) => {
+                                println!();
+                                while let Some(event) = rx.recv().await {
+                                    match event {
+                                        StreamEvent::Delta(text) => {
+                                            print!("{}", text);
+                                            let _ = io::stdout().flush();
+                                        }
+                                        StreamEvent::Done { .. } => break,
+                                        StreamEvent::Error(e) => {
+                                            eprintln!("\nStream error: {}", e);
+                                        }
+                                        StreamEvent::ToolCalls(_) => {}
+                                    }
+                                }
+                                println!();
+                                println!();
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                eprintln!();
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            eprintln!();
+                    } else {
+                        match agent.process_message(&inbound).await {
+                            Ok(response) => {
+                                println!();
+                                println!("{}", response);
+                                println!();
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                eprintln!();
+                            }
                         }
                     }
                 }

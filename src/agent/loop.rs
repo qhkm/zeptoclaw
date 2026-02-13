@@ -73,6 +73,8 @@ pub struct AgentLoop {
     session_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Pending messages for sessions with active runs (for queue modes).
     pending_messages: Arc<Mutex<HashMap<String, Vec<InboundMessage>>>>,
+    /// Whether to stream the final LLM response in CLI mode.
+    streaming: AtomicBool,
 }
 
 impl AgentLoop {
@@ -111,6 +113,7 @@ impl AgentLoop {
             shutdown_tx,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            streaming: AtomicBool::new(false),
         }
     }
 
@@ -140,6 +143,7 @@ impl AgentLoop {
             shutdown_tx,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            streaming: AtomicBool::new(false),
         }
     }
 
@@ -410,6 +414,204 @@ impl AgentLoop {
         Ok(response.content)
     }
 
+    /// Process a message with streaming output for the final LLM response.
+    ///
+    /// This method works like `process_message()` but streams the final response
+    /// token-by-token through the returned receiver. Tool loop iterations are
+    /// still non-streaming. The assembled final response is returned via
+    /// `StreamEvent::Done`.
+    pub async fn process_message_streaming(
+        &self,
+        msg: &InboundMessage,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::providers::StreamEvent>> {
+        use crate::providers::StreamEvent;
+
+        // Acquire per-session lock
+        let session_lock = {
+            let mut locks = self.session_locks.lock().await;
+            locks
+                .entry(msg.session_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _session_guard = session_lock.lock().await;
+
+        let provider = {
+            let guard = self.provider.read().await;
+            Arc::clone(
+                guard
+                    .as_ref()
+                    .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?,
+            )
+        };
+
+        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
+        let messages = self
+            .context_builder
+            .build_messages(session.messages.clone(), &msg.content);
+
+        let tool_definitions = {
+            let tools = self.tools.read().await;
+            tools.definitions()
+        };
+
+        let options = ChatOptions::new()
+            .with_max_tokens(self.config.agents.defaults.max_tokens)
+            .with_temperature(self.config.agents.defaults.temperature);
+        let model = Some(self.config.agents.defaults.model.as_str());
+
+        // First call: non-streaming to see if there are tool calls
+        let mut response = provider
+            .chat(messages, tool_definitions.clone(), model, options.clone())
+            .await?;
+
+        session.add_message(Message::user(&msg.content));
+
+        // Tool loop (non-streaming)
+        let max_iterations = self.config.agents.defaults.max_tool_iterations;
+        let mut iteration = 0;
+
+        while response.has_tool_calls() && iteration < max_iterations {
+            iteration += 1;
+
+            let mut assistant_msg = Message::assistant(&response.content);
+            assistant_msg.tool_calls = Some(
+                response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
+                    .collect(),
+            );
+            session.add_message(assistant_msg);
+
+            let workspace = self.config.workspace_path();
+            let workspace_str = workspace.to_string_lossy();
+            let tool_ctx = ToolContext::new()
+                .with_channel(&msg.channel, &msg.chat_id)
+                .with_workspace(&workspace_str);
+
+            let tool_futures: Vec<_> = response
+                .tool_calls
+                .iter()
+                .map(|tool_call| {
+                    let tools = Arc::clone(&self.tools);
+                    let ctx = tool_ctx.clone();
+                    let name = tool_call.name.clone();
+                    let id = tool_call.id.clone();
+                    let raw_args = tool_call.arguments.clone();
+
+                    async move {
+                        let args: serde_json::Value = serde_json::from_str(&raw_args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let result = {
+                            let tools_guard = tools.read().await;
+                            match tools_guard.execute_with_context(&name, args, &ctx).await {
+                                Ok(r) => r,
+                                Err(e) => format!("Error: {}", e),
+                            }
+                        };
+                        let sanitized = crate::utils::sanitize::sanitize_tool_result(
+                            &result,
+                            crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES,
+                        );
+                        (id, sanitized)
+                    }
+                })
+                .collect();
+
+            let results = futures::future::join_all(tool_futures).await;
+            for (id, result) in results {
+                session.add_message(Message::tool_result(&id, &result));
+            }
+
+            let tool_definitions = {
+                let tools = self.tools.read().await;
+                tools.definitions()
+            };
+
+            let messages: Vec<_> = self
+                .context_builder
+                .build_messages(session.messages.clone(), "")
+                .into_iter()
+                .filter(|m| !(m.role == Role::User && m.content.is_empty()))
+                .collect();
+
+            response = provider
+                .chat(messages, tool_definitions, model, options.clone())
+                .await?;
+        }
+
+        // Final call: if no more tool calls, use streaming
+        if !response.has_tool_calls() {
+            // Re-issue the final call via chat_stream
+            let messages: Vec<_> = self
+                .context_builder
+                .build_messages(session.messages.clone(), "")
+                .into_iter()
+                .filter(|m| !(m.role == Role::User && m.content.is_empty()))
+                .collect();
+
+            let tool_definitions = {
+                let tools = self.tools.read().await;
+                tools.definitions()
+            };
+
+            let stream_rx = provider
+                .chat_stream(messages, tool_definitions, model, options)
+                .await?;
+
+            // Wrap in a forwarding task that also saves the session
+            let (out_tx, out_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+            let session_manager = Arc::clone(&self.session_manager);
+            let session_clone = session.clone();
+
+            tokio::spawn(async move {
+                let mut session = session_clone;
+                let mut stream_rx = stream_rx;
+
+                while let Some(event) = stream_rx.recv().await {
+                    match &event {
+                        StreamEvent::Done { content, .. } => {
+                            session.add_message(Message::assistant(content));
+                            let _ = session_manager.save(&session).await;
+                            let _ = out_tx.send(event).await;
+                            return;
+                        }
+                        StreamEvent::ToolCalls(_) => {
+                            // Unexpected tool calls during streaming — emit and let caller handle
+                            let _ = out_tx.send(event).await;
+                            return;
+                        }
+                        _ => {
+                            if out_tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
+            Ok(out_rx)
+        } else {
+            // Still has tool calls after max iterations — return non-streaming result
+            session.add_message(Message::assistant(&response.content));
+            self.session_manager.save(&session).await?;
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let _ = tx
+                .send(StreamEvent::Done {
+                    content: response.content,
+                    usage: response.usage,
+                })
+                .await;
+            Ok(rx)
+        }
+    }
+
     /// Try to queue a message if the session is busy, or return false if lock is free.
     /// Returns `true` if the message was queued (caller should not wait for response).
     pub async fn try_queue_or_process(&self, msg: &InboundMessage) -> bool {
@@ -676,6 +878,16 @@ impl AgentLoop {
         let guard = self.provider.read().await;
         guard.clone()
     }
+
+    /// Set whether to stream the final LLM response.
+    pub fn set_streaming(&self, enabled: bool) {
+        self.streaming.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Check if streaming is enabled.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]
@@ -881,5 +1093,24 @@ mod tests {
         let messages = builder.build_messages(vec![], "Hello");
         assert_eq!(messages.len(), 2);
         assert!(messages[1].content == "Hello");
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_streaming_flag_default() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        assert!(!agent.is_streaming());
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_set_streaming() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        agent.set_streaming(true);
+        assert!(agent.is_streaming());
     }
 }
