@@ -55,6 +55,8 @@ pub struct AgentDefaults {
     pub temperature: f32,
     /// Maximum tool iterations per turn
     pub max_tool_iterations: u32,
+    /// Maximum wall-clock time (seconds) for a single agent run.
+    pub agent_timeout_secs: u64,
 }
 
 /// Default model compile-time configuration.
@@ -72,6 +74,7 @@ impl Default for AgentDefaults {
             max_tokens: 8192,
             temperature: 0.7,
             max_tool_iterations: 20,
+            agent_timeout_secs: 300,
         }
     }
 }

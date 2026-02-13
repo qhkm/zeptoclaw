@@ -484,8 +484,17 @@ impl AgentLoop {
                                 metrics.record_request();
                             }
 
-                            match self.process_message(msg_ref).await {
-                                Ok(response) => {
+                            let timeout_duration = std::time::Duration::from_secs(
+                                self.config.agents.defaults.agent_timeout_secs,
+                            );
+                            let process_result = tokio::time::timeout(
+                                timeout_duration,
+                                self.process_message(msg_ref),
+                            )
+                            .await;
+
+                            match process_result {
+                                Ok(Ok(response)) => {
                                     let latency_ms = start.elapsed().as_millis() as u64;
                                     let (input_tokens, output_tokens) = tokens_before
                                         .and_then(|(ib, ob)| {
@@ -512,7 +521,7 @@ impl AgentLoop {
                                         }
                                     }
                                 }
-                                Err(e) => {
+                                Ok(Err(e)) => {
                                     let latency_ms = start.elapsed().as_millis() as u64;
                                     error!(latency_ms = latency_ms, error = %e, "Request failed");
                                     if let Some(metrics) = usage_metrics.as_ref() {
@@ -525,6 +534,20 @@ impl AgentLoop {
                                         &format!("Error: {}", e),
                                     );
                                     bus_ref.publish_outbound(error_msg).await.ok();
+                                }
+                                Err(_elapsed) => {
+                                    let timeout_secs = self.config.agents.defaults.agent_timeout_secs;
+                                    error!(timeout_secs = timeout_secs, "Agent run timed out");
+                                    if let Some(metrics) = usage_metrics.as_ref() {
+                                        metrics.record_error();
+                                    }
+
+                                    let timeout_msg = OutboundMessage::new(
+                                        &msg_ref.channel,
+                                        &msg_ref.chat_id,
+                                        &format!("Agent run timed out after {}s. Try a simpler request.", timeout_secs),
+                                    );
+                                    bus_ref.publish_outbound(timeout_msg).await.ok();
                                 }
                             }
                         }.instrument(request_span).await;

@@ -78,6 +78,11 @@ impl Config {
                 self.agents.defaults.max_tool_iterations = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_AGENT_TIMEOUT_SECS") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.agent_timeout_secs = v;
+            }
+        }
 
         // Gateway
         if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_HOST") {
@@ -970,5 +975,18 @@ mod tests {
 
         // Should return defaults
         assert_eq!(config.agents.defaults.model, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn test_agent_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.agents.defaults.agent_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_agent_timeout_from_json() {
+        let json = r#"{"agents": {"defaults": {"agent_timeout_secs": 600}}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.agents.defaults.agent_timeout_secs, 600);
     }
 }
