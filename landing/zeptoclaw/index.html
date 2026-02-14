@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ZeptoClaw — Ultra-Lightweight AI Assistant</title>
     <meta name="description" content="Ultra-lightweight AI agent framework in ~5MB. Streaming, agent swarms, plugins, batch mode, 4 channels, container isolation, 1000+ tests.">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -68,12 +69,12 @@
         .logo-icon {
             width: 32px;
             height: 32px;
-            background: var(--accent);
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1rem;
+            flex-shrink: 0;
+        }
+
+        .logo-icon svg {
+            width: 100%;
+            height: 100%;
         }
 
         .nav-links {
@@ -310,6 +311,7 @@
         .terminal-output {
             color: var(--text-secondary);
             margin: 0.5rem 0 1rem 1.5rem;
+            transition: opacity 0.3s ease;
         }
 
         .terminal-comment {
@@ -451,26 +453,22 @@
             padding: 6rem 2rem;
         }
 
-        .arch-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
-            max-width: 900px;
+        .arch-pipeline {
+            display: flex;
+            align-items: stretch;
+            max-width: 1000px;
             margin: 0 auto;
-        }
-
-        @media (max-width: 768px) {
-            .arch-grid {
-                grid-template-columns: 1fr;
-            }
+            gap: 0;
         }
 
         .arch-card {
+            flex: 1;
             background: var(--bg-secondary);
             border: 1px solid var(--border);
             border-radius: var(--radius-lg);
-            padding: 1.5rem;
+            padding: 2rem 1.5rem;
             text-align: center;
+            position: relative;
         }
 
         .arch-card h4 {
@@ -487,16 +485,32 @@
             color: var(--text-secondary);
         }
 
-        .arch-arrow {
+        .arch-connector {
             display: flex;
             align-items: center;
-            justify-content: center;
-            color: var(--text-muted);
-            font-size: 1.5rem;
+            padding: 0 0.75rem;
+            flex-shrink: 0;
+        }
+
+        .arch-connector svg {
+            width: 40px;
+            height: 20px;
         }
 
         @media (max-width: 768px) {
-            .arch-arrow {
+            .arch-pipeline {
+                flex-direction: column;
+                align-items: center;
+                gap: 0;
+            }
+
+            .arch-card {
+                width: 100%;
+                max-width: 400px;
+            }
+
+            .arch-connector {
+                padding: 0.75rem 0;
                 transform: rotate(90deg);
             }
         }
@@ -838,7 +852,7 @@
     <nav>
         <div class="nav-container">
             <a href="#" class="logo">
-                <div class="logo-icon">⚡</div>
+                <div class="logo-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><line x1="24" y1="18" x2="18" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/><line x1="40" y1="18" x2="46" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/><circle cx="18" cy="5" r="2.5" fill="#67e8f9"/><circle cx="46" cy="5" r="2.5" fill="#67e8f9"/><ellipse cx="32" cy="38" rx="24" ry="20" fill="#374151"/><ellipse cx="32" cy="32" rx="20" ry="14" fill="#4a5568"/><ellipse cx="32" cy="36" rx="22" ry="16" fill="#3d4b5e"/><ellipse cx="22" cy="36" rx="8" ry="8.5" fill="#1e293b"/><ellipse cx="42" cy="36" rx="8" ry="8.5" fill="#1e293b"/><circle cx="22" cy="36" r="6" fill="#3b82f6"/><circle cx="42" cy="36" r="6" fill="#3b82f6"/><circle cx="22" cy="36" r="3.5" fill="#1d4ed8"/><circle cx="42" cy="36" r="3.5" fill="#1d4ed8"/><circle cx="20" cy="34" r="1.8" fill="#fff" opacity="0.9"/><circle cx="40" cy="34" r="1.8" fill="#fff" opacity="0.9"/><ellipse cx="32" cy="48" rx="4" ry="2" fill="#f472b6"/></svg></div>
                 ZeptoClaw
             </a>
             <ul class="nav-links">
@@ -858,12 +872,12 @@
             <h1>AI Assistant That Fits<br>in <span class="highlight">5 Megabytes</span></h1>
             <p class="hero-subtitle">
                 Ultra-lightweight AI agent framework. Streaming, agent swarms, plugins,
-                batch mode, 4 channels, container isolation — all in a single Rust binary.
+                batch mode, 5 channels, container isolation — all in a single Rust binary.
             </p>
             <div class="hero-stats">
                 <div class="hero-stat">⚡ <span>~5MB</span> binary</div>
-                <div class="hero-stat">🛠️ <span>15+</span> tools + plugins</div>
-                <div class="hero-stat">📡 <span>4</span> channels</div>
+                <div class="hero-stat">🛠️ <span>17</span> tools + plugins</div>
+                <div class="hero-stat">📡 <span>5</span> channels</div>
                 <div class="hero-stat">🧪 <span>1000+</span> tests</div>
             </div>
             <div class="hero-cta">
@@ -878,34 +892,10 @@
                     <div class="terminal-dot green"></div>
                     <span class="terminal-title">zeptoclaw — agent mode</span>
                 </div>
-                <div class="terminal-body">
+                <div class="terminal-body" id="terminal-body">
                     <div class="terminal-line">
                         <span class="terminal-prompt">$</span>
-                        <span class="terminal-command">zeptoclaw agent --stream --template researcher -m "Analyze our API"</span>
-                    </div>
-                    <div class="terminal-output">
-                        <span class="terminal-ai">🤖 ZeptoClaw</span> — Streaming analysis with researcher template<br><br>
-                        <span class="terminal-tool">web_fetch</span> Fetching API docs...<br>
-                        <span class="terminal-tool">shell</span> Running integration tests...<br>
-                        <span class="terminal-tool">longterm_memory</span> Storing findings...<br>
-                    </div>
-                    <div class="terminal-line">
-                        <span class="terminal-ai">→</span>
-                        <span class="terminal-command">Found 12 endpoints, 3 missing auth headers</span>
-                    </div>
-                    <div class="terminal-output">
-                        <span style="color: var(--success)">✓</span> Analysis complete — saved to long-term memory
-                    </div>
-                    <div class="terminal-line">
-                        <span class="terminal-prompt">$</span>
-                        <span class="terminal-command">zeptoclaw batch --input prompts.txt --template coder --format jsonl</span>
-                    </div>
-                    <div class="terminal-output">
-                        <span style="color: var(--success)">✓</span> 50 prompts processed — 48 success, 2 errors
-                    </div>
-                    <div class="terminal-line">
-                        <span class="terminal-prompt">$</span>
-                        <span class="cursor"></span>
+                        <span class="terminal-command" id="typed-cmd"></span><span class="cursor" id="typing-cursor"></span>
                     </div>
                 </div>
             </div>
@@ -918,7 +908,7 @@
                 <div class="section-tag">Features</div>
                 <h2>Small Binary, Big Capabilities</h2>
                 <p class="section-subtitle">
-                    20+ modules, 15+ tools, plugins, streaming, agent swarms, and batch mode
+                    20+ modules, 17 tools, plugins, streaming, agent swarms, and batch mode
                     — in a single binary smaller than most app icons.
                 </p>
             </div>
@@ -962,8 +952,8 @@
 
                 <div class="feature-card">
                     <div class="feature-icon">💬</div>
-                    <h3>4-Channel Gateway</h3>
-                    <p>Telegram, Slack, Discord, and Webhook channels. Plus CLI mode. Channel factory with per-channel auth, allowlists, and unified message bus.</p>
+                    <h3>5-Channel Gateway</h3>
+                    <p>Telegram, Slack, Discord, Webhook, and CLI channels. Channel factory with per-channel auth, allowlists, and unified message bus.</p>
                 </div>
 
                 <div class="feature-card">
@@ -1064,8 +1054,8 @@
                     <p>The secure one. Streaming, swarms, plugins, batch mode, 1000+ tests.</p>
                     <ul class="family-traits">
                         <li>~5MB binary, 1000+ tests</li>
-                        <li>15+ tools + plugin system</li>
-                        <li>4 channels + agent swarms</li>
+                        <li>17 tools + plugin system</li>
+                        <li>5 channels + agent swarms</li>
                         <li>Container isolation</li>
                     </ul>
                 </div>
@@ -1098,17 +1088,21 @@
                 </p>
             </div>
 
-            <div class="arch-grid">
+            <div class="arch-pipeline">
                 <div class="arch-card">
                     <h4>Channels</h4>
                     <p>Telegram, Slack, Discord, Webhook, CLI — unified message interface</p>
                 </div>
-                <div class="arch-arrow">→</div>
+                <div class="arch-connector">
+                    <svg viewBox="0 0 40 20" fill="none"><path d="M0 10h30m0 0l-6-5m6 5l-6 5" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
                 <div class="arch-card">
                     <h4>Agent Loop</h4>
                     <p>Approval gate → Token budget → Tool execution → Streaming response</p>
                 </div>
-                <div class="arch-arrow">→</div>
+                <div class="arch-connector">
+                    <svg viewBox="0 0 40 20" fill="none"><path d="M0 10h30m0 0l-6-5m6 5l-6 5" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
                 <div class="arch-card">
                     <h4>Provider Stack</h4>
                     <p>Base provider → Fallback → Retry with cost tracking</p>
@@ -1157,7 +1151,7 @@
                 <div class="stat-label">Core Modules</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value">15+</div>
+                <div class="stat-value">17</div>
                 <div class="stat-label">Tools + Plugins</div>
             </div>
             <div class="stat-item">
@@ -1218,7 +1212,7 @@
         <div class="footer-content">
             <div class="footer-left">
                 <div class="footer-logo">
-                    <div class="logo-icon" style="width: 24px; height: 24px; font-size: 0.75rem;">⚡</div>
+                    <div class="logo-icon" style="width: 24px; height: 24px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><line x1="24" y1="18" x2="18" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/><line x1="40" y1="18" x2="46" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/><circle cx="18" cy="5" r="2.5" fill="#67e8f9"/><circle cx="46" cy="5" r="2.5" fill="#67e8f9"/><ellipse cx="32" cy="38" rx="24" ry="20" fill="#374151"/><ellipse cx="32" cy="32" rx="20" ry="14" fill="#4a5568"/><ellipse cx="32" cy="36" rx="22" ry="16" fill="#3d4b5e"/><ellipse cx="22" cy="36" rx="8" ry="8.5" fill="#1e293b"/><ellipse cx="42" cy="36" rx="8" ry="8.5" fill="#1e293b"/><circle cx="22" cy="36" r="6" fill="#3b82f6"/><circle cx="42" cy="36" r="6" fill="#3b82f6"/><circle cx="22" cy="36" r="3.5" fill="#1d4ed8"/><circle cx="42" cy="36" r="3.5" fill="#1d4ed8"/><circle cx="20" cy="34" r="1.8" fill="#fff" opacity="0.9"/><circle cx="40" cy="34" r="1.8" fill="#fff" opacity="0.9"/><ellipse cx="32" cy="48" rx="4" ry="2" fill="#f472b6"/></svg></div>
                     ZeptoClaw
                 </div>
                 <div class="footer-tagline">Ultra-lightweight AI assistant framework</div>
@@ -1245,6 +1239,109 @@
                 }
             });
         });
+
+        // Terminal typing animation
+        (function() {
+            const body = document.getElementById('terminal-body');
+            const cmdEl = document.getElementById('typed-cmd');
+            const cursorEl = document.getElementById('typing-cursor');
+
+            const scenes = [
+                {
+                    cmd: 'zeptoclaw agent --stream --template researcher -m "Analyze our API"',
+                    lines: [
+                        { html: '<span class="terminal-ai">🤖 ZeptoClaw</span> — Streaming analysis with researcher template', delay: 400 },
+                        { html: '<span class="terminal-tool">web_fetch</span> Fetching API docs...', delay: 600 },
+                        { html: '<span class="terminal-tool">shell</span> Running integration tests...', delay: 500 },
+                        { html: '<span class="terminal-tool">longterm_memory</span> Storing findings...', delay: 500 },
+                        { html: '<span class="terminal-ai">→</span> Found 12 endpoints, 3 missing auth headers', delay: 400, cls: 'terminal-line-inline' },
+                        { html: '<span style="color:var(--success)">✓</span> Analysis complete — saved to long-term memory', delay: 300 },
+                    ]
+                },
+                {
+                    cmd: 'zeptoclaw batch --input prompts.txt --template coder --format jsonl',
+                    lines: [
+                        { html: '<span style="color:var(--success)">✓</span> 50 prompts processed — 48 success, 2 errors', delay: 800 },
+                    ]
+                }
+            ];
+
+            let started = false;
+
+            function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+            function typeText(el, text, speed) {
+                return new Promise(resolve => {
+                    let i = 0;
+                    function tick() {
+                        if (i < text.length) {
+                            el.textContent += text[i++];
+                            setTimeout(tick, speed);
+                        } else {
+                            resolve();
+                        }
+                    }
+                    tick();
+                });
+            }
+
+            function addOutputLine(html) {
+                const div = document.createElement('div');
+                div.className = 'terminal-output';
+                div.style.opacity = '0';
+                div.innerHTML = html;
+                body.insertBefore(div, body.lastElementChild);
+                requestAnimationFrame(() => { div.style.opacity = '1'; });
+            }
+
+            function newPromptLine() {
+                // Remove cursor from previous line
+                if (cursorEl.parentNode) cursorEl.remove();
+                const line = document.createElement('div');
+                line.className = 'terminal-line';
+                const prompt = document.createElement('span');
+                prompt.className = 'terminal-prompt';
+                prompt.textContent = '$';
+                const cmd = document.createElement('span');
+                cmd.className = 'terminal-command';
+                line.appendChild(prompt);
+                line.appendChild(cmd);
+                line.appendChild(cursorEl);
+                body.appendChild(line);
+                return cmd;
+            }
+
+            async function runAnimation() {
+                for (let s = 0; s < scenes.length; s++) {
+                    const scene = scenes[s];
+                    const cmdTarget = s === 0 ? cmdEl : newPromptLine();
+
+                    // Type command
+                    await typeText(cmdTarget, scene.cmd, 25);
+                    await sleep(300);
+
+                    // Show output lines one by one
+                    for (const line of scene.lines) {
+                        addOutputLine(line.html);
+                        await sleep(line.delay);
+                    }
+                    await sleep(500);
+                }
+
+                // Final blinking cursor on new prompt
+                newPromptLine();
+            }
+
+            // Start when terminal scrolls into view
+            const observer = new IntersectionObserver(entries => {
+                if (entries[0].isIntersecting && !started) {
+                    started = true;
+                    observer.disconnect();
+                    runAnimation();
+                }
+            }, { threshold: 0.3 });
+            observer.observe(body);
+        })();
     </script>
 </body>
 </html>

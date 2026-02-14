@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Antennae -->
+  <line x1="24" y1="18" x2="18" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="40" y1="18" x2="46" y2="6" stroke="#67e8f9" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Antenna tips -->
+  <circle cx="18" cy="5" r="2.5" fill="#67e8f9"/>
+  <circle cx="46" cy="5" r="2.5" fill="#67e8f9"/>
+  <!-- Body / Head dome -->
+  <ellipse cx="32" cy="38" rx="24" ry="20" fill="#374151"/>
+  <!-- Top shell highlight -->
+  <ellipse cx="32" cy="32" rx="20" ry="14" fill="#4a5568"/>
+  <!-- Brow ridge -->
+  <ellipse cx="32" cy="36" rx="22" ry="16" fill="#3d4b5e"/>
+  <!-- Left eye socket -->
+  <ellipse cx="22" cy="36" rx="8" ry="8.5" fill="#1e293b"/>
+  <!-- Right eye socket -->
+  <ellipse cx="42" cy="36" rx="8" ry="8.5" fill="#1e293b"/>
+  <!-- Left eye -->
+  <circle cx="22" cy="36" r="6" fill="#3b82f6"/>
+  <!-- Right eye -->
+  <circle cx="42" cy="36" r="6" fill="#3b82f6"/>
+  <!-- Left pupil -->
+  <circle cx="22" cy="36" r="3.5" fill="#1d4ed8"/>
+  <!-- Right pupil -->
+  <circle cx="42" cy="36" r="3.5" fill="#1d4ed8"/>
+  <!-- Left eye reflection -->
+  <circle cx="20" cy="34" r="1.8" fill="#fff" opacity="0.9"/>
+  <!-- Right eye reflection -->
+  <circle cx="40" cy="34" r="1.8" fill="#fff" opacity="0.9"/>
+  <!-- Left eye small reflection -->
+  <circle cx="24" cy="38" r="0.8" fill="#fff" opacity="0.5"/>
+  <!-- Right eye small reflection -->
+  <circle cx="44" cy="38" r="0.8" fill="#fff" opacity="0.5"/>
+  <!-- Mouth -->
+  <ellipse cx="32" cy="48" rx="4" ry="2" fill="#f472b6"/>
+  <!-- Mouth inner -->
+  <ellipse cx="32" cy="48.5" rx="2.5" ry="1" fill="#ec4899"/>
+  <!-- Shell segmentation lines -->
+  <path d="M20 24 Q32 20 44 24" stroke="#5a6577" stroke-width="0.8" fill="none" opacity="0.5"/>
+  <path d="M16 30 Q32 26 48 30" stroke="#5a6577" stroke-width="0.8" fill="none" opacity="0.5"/>
+</svg>
