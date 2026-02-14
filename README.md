@@ -6,9 +6,10 @@
   <strong>AI assistant framework that fits in 5 megabytes.</strong>
 </p>
 <p align="center">
-  16+ tools &bull; runtime providers: Anthropic + OpenAI &bull; container isolation &bull; multi-tenant &bull; written in Rust
+  17 tools + plugins &bull; streaming &bull; agent swarms &bull; container isolation &bull; multi-tenant &bull; written in Rust
 </p>
 <p align="center">
+  <a href="https://zeptoclaw.pages.dev/docs/">Docs</a> &bull;
   <a href="#install">Install</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
@@ -96,21 +97,37 @@ zeptoclaw gateway --containerized
 
 ## Features
 
-**Multi-Provider LLM** — Runtime execution supports Anthropic and OpenAI today. Provider registry/config entries also include OpenRouter, Groq, Zhipu, VLLM, and Gemini for staged rollout.
+**Multi-Provider LLM** — Runtime execution supports Anthropic and OpenAI with SSE streaming. Retry with exponential backoff on 429/5xx and auto-failover between providers. Provider registry includes OpenRouter, Groq, Zhipu, VLLM, and Gemini for staged rollout.
 
-**16+ Built-in Tools** — Shell, filesystem, web search, web fetch, memory, cron scheduling, spawn, WhatsApp, Google Sheets, and more. Extend with the `Tool` trait in ~50 lines of Rust.
+**17 Built-in Tools + Plugins** — Shell, filesystem, web search, web fetch, memory, long-term memory, cron, spawn, delegate, WhatsApp, Google Sheets, and more. Extend with the `Tool` trait or JSON manifest plugins.
+
+**Streaming Responses** — Real-time SSE streaming from both Claude and OpenAI. Token-by-token output in CLI, gateway, and batch mode via `--stream`.
+
+**Agent Swarms** — Delegate subtasks to specialist sub-agents with role-specific system prompts and tool whitelists. Recursion blocking prevents infinite delegation loops.
+
+**Plugin System** — Extend with JSON manifest plugins. Define custom tools with command templates, parameter schemas, and validation. Auto-discovered from `~/.zeptoclaw/plugins/` at startup.
+
+**Agent Templates** — 4 built-in templates (coder, researcher, writer, analyst) plus custom JSON templates. Override system prompt, model, tokens, and temperature per template.
+
+**Batch Mode** — Process hundreds of prompts from text or JSONL files. Template support, text or JSONL output, stop-on-error control, streaming support.
 
 **Configurable Runtime Isolation** — Shell execution supports Native, Docker, or Apple Container runtimes. The containerized gateway isolates each request when `--containerized` is enabled.
 
-**Multi-Channel Gateway** — Implemented channels: Telegram, Slack, Discord, and Webhook (+ CLI mode). Channel factory with per-channel configuration and unified message bus.
+**Multi-Channel Gateway** — Telegram, Slack, Discord, and Webhook channels (+ CLI mode). Channel factory with per-channel configuration and unified message bus.
 
-**Hooks System** — Config-driven hooks with `before_tool`, `after_tool`, and `on_error` points. Supports Log, Block, and Notify actions with tool and channel pattern matching. Fully wired into the agent loop.
+**Tool Approval Gate** — Policy-based tool gating with configurable approval modes. Require confirmation before dangerous tools execute.
 
-**Memory & Sessions** — Long-running conversations with context. Persistent memory search and retrieval. Sessions survive restarts.
+**Hooks System** — Config-driven hooks with `before_tool`, `after_tool`, and `on_error` points. Supports Log, Block, and Notify actions with tool and channel pattern matching.
+
+**Memory & History** — Workspace memory with search and retrieval. Long-term key-value memory with categories and tags. Conversation history with session discovery, search, and cleanup.
+
+**Token Budget & Cost Tracking** — Per-session token budget enforcement with atomic lock-free counters. Per-model cost estimation for 8 models with provider-level accumulation.
+
+**Telemetry & Observability** — Prometheus text exposition and JSON metrics export. Health endpoints, usage metrics, structured JSON logging, per-request tracing with tenant isolation.
 
 **Cron & Scheduling** — Schedule recurring tasks with cron expressions. Heartbeat service for proactive check-ins. Background agent spawning for async work.
 
-**Health & Observability** — Built-in health endpoints, usage metrics with atomic counters, structured JSON logging, per-request tracing with tenant isolation.
+**Structured Output** — JSON and JSON Schema response formats. OpenAI `response_format` and Claude system prompt suffix for structured responses.
 
 **Security Hardened** — SSRF prevention, path traversal detection, shell command blocklist, mount validation, workspace-scoped filesystem tools.
 
@@ -142,36 +159,41 @@ One vision, four languages. Pick the right tool for the job.
 | `web_fetch` | Fetch and extract URL content | - |
 | `memory_get` | Retrieve workspace memory | - |
 | `memory_search` | Search workspace memory | - |
+| `longterm_memory` | Persistent key-value memory (set/get/search/delete/list) | - |
 | `cron` | Schedule recurring tasks | - |
 | `spawn` | Delegate background tasks | - |
+| `delegate` | Delegate tasks to specialist sub-agents | - |
 | `message` | Send messages to chat channels | - |
 | `whatsapp_send` | Send WhatsApp messages | Meta Cloud API |
 | `google_sheets` | Read/write Google Sheets | Google API |
 | `r8r` | Content rating and analysis | - |
-| `delegate` | Delegate tasks to specialist sub-agents | - |
 
 ## Architecture
 
 ```
 src/
-├── agent/       Agent loop, context builder
+├── agent/       Agent loop, context builder, token budget
+├── batch.rs     Batch mode (load prompts from file, format results)
 ├── bus/         Async message bus (pub/sub)
 ├── channels/    Telegram, Slack, Discord, Webhook (+ CLI mode)
-├── config/      Configuration types and loading
+├── cli/         CLI commands (agent, gateway, onboard, status, etc.)
+├── config/      Configuration types, loading, validation
 ├── cron/        Persistent cron scheduler
 ├── gateway/     Containerized agent proxy
 ├── health/      Health endpoints, usage metrics
 ├── heartbeat/   Periodic background tasks
-├── memory/      Workspace memory (markdown-based)
-├── providers/   Claude + OpenAI runtime, additional providers in registry
+├── hooks/       Config-driven before/after/error hooks
+├── memory/      Workspace memory + long-term memory
+├── plugins/     JSON manifest plugin system
+├── providers/   Claude + OpenAI + Retry + Fallback providers
 ├── runtime/     Native, Docker, Apple Container
 ├── security/    Shell blocklist, path validation, SSRF prevention
-├── session/     Session and message persistence
+├── session/     Session persistence, conversation history
 ├── skills/      Markdown-based skill system
-├── tools/       16+ agent tools
-├── utils/       Utility functions
+├── tools/       17 agent tools + plugin adapter
+├── utils/       Sanitize, metrics, telemetry, cost tracking
 ├── error.rs     Error types
-├── lib.rs       Library exports (17 modules)
+├── lib.rs       Library exports
 └── main.rs      CLI entry point
 ```
 
