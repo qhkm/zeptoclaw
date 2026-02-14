@@ -75,6 +75,20 @@ impl Tool for MessageTool {
             .or_else(|| ctx.chat_id.clone())
             .ok_or_else(|| ZeptoError::Tool("No target chat_id specified".to_string()))?;
 
+        // Validate channel name: only allow known channel types to prevent
+        // the LLM from targeting arbitrary/unexpected channels.
+        const ALLOWED_CHANNELS: &[&str] = &["telegram", "slack", "discord", "webhook"];
+        if !ALLOWED_CHANNELS
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&channel))
+        {
+            return Err(ZeptoError::Tool(format!(
+                "Unknown channel '{}'. Allowed: {}",
+                channel,
+                ALLOWED_CHANNELS.join(", ")
+            )));
+        }
+
         self.bus
             .publish_outbound(OutboundMessage::new(&channel, &chat_id, content))
             .await
@@ -137,5 +151,39 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_rejects_unknown_channel() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({"content": "Hello", "channel": "evil-channel", "chat_id": "123"}),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown channel"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_allows_known_channels() {
+        for channel in &["telegram", "slack", "discord", "webhook"] {
+            let bus = Arc::new(MessageBus::new());
+            let tool = MessageTool::new(bus.clone());
+
+            let result = tool
+                .execute(
+                    json!({"content": "Hi", "channel": channel, "chat_id": "123"}),
+                    &ToolContext::new(),
+                )
+                .await;
+
+            assert!(result.is_ok(), "Channel '{}' should be allowed", channel);
+        }
     }
 }

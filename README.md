@@ -9,11 +9,16 @@
   16+ tools &bull; runtime providers: Anthropic + OpenAI &bull; container isolation &bull; multi-tenant &bull; written in Rust
 </p>
 <p align="center">
+  <a href="#install">Install</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
-  <a href="#the-openclaw-family">Family</a> &bull;
   <a href="#tools">Tools</a> &bull;
   <a href="#architecture">Architecture</a>
+</p>
+<p align="center">
+  <a href="https://github.com/qhkm/zeptoclaw/actions/workflows/ci.yml"><img src="https://github.com/qhkm/zeptoclaw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/qhkm/zeptoclaw/releases/latest"><img src="https://img.shields.io/github/v/release/qhkm/zeptoclaw?color=blue" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
 ---
@@ -48,18 +53,39 @@ Then came **NanoClaw** — a forkable assistant in ~5,000 lines of TypeScript. T
 
 \* Measured on Apple Silicon release builds. Exact numbers vary by workload and hardware.
 
+## Install
+
+```bash
+# One-liner (macOS / Linux)
+curl -fsSL https://raw.githubusercontent.com/qhkm/zeptoclaw/main/install.sh | sh
+
+# Homebrew
+brew install qhkm/tap/zeptoclaw
+
+# Docker
+docker pull ghcr.io/qhkm/zeptoclaw:latest
+
+# Build from source
+cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw
+```
+
 ## Quick Start
 
 ```bash
-# Build from source
-git clone https://github.com/qhkm/zeptoclaw.git
-cd zeptoclaw && cargo build --release
-
 # Interactive setup (walks you through API keys, channels, workspace)
-./target/release/zeptoclaw onboard
+zeptoclaw onboard
 
 # Talk to your agent
 zeptoclaw agent -m "Hello, set up my workspace"
+
+# Stream responses token-by-token
+zeptoclaw agent -m "Explain async Rust" --stream
+
+# Use a template
+zeptoclaw agent --template researcher -m "Search for Rust agent frameworks"
+
+# Process prompts in batch
+zeptoclaw batch --input prompts.txt --output results.jsonl
 
 # Start as a Telegram/Slack/Discord/Webhook gateway
 zeptoclaw gateway

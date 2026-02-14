@@ -116,8 +116,14 @@ impl CronTool {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| {
-                if message.len() > 30 {
-                    format!("{}...", &message[..30])
+                // Use char_indices for UTF-8 safe truncation
+                if message.chars().count() > 30 {
+                    let end = message
+                        .char_indices()
+                        .nth(30)
+                        .map(|(i, _)| i)
+                        .unwrap_or(message.len());
+                    format!("{}...", &message[..end])
                 } else {
                     message.to_string()
                 }
@@ -333,10 +339,7 @@ mod tests {
         let ctx = ctx_with_channel();
 
         let result = tool
-            .execute(
-                json!({"action": "add", "every_seconds": 120}),
-                &ctx,
-            )
+            .execute(json!({"action": "add", "every_seconds": 120}), &ctx)
             .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -446,10 +449,7 @@ mod tests {
         let ctx = ctx_with_channel();
 
         let result = tool
-            .execute(
-                json!({"action": "remove", "job_id": "no_such_id"}),
-                &ctx,
-            )
+            .execute(json!({"action": "remove", "job_id": "no_such_id"}), &ctx)
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("not found"));

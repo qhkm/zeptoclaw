@@ -9,6 +9,11 @@ use crate::error::{Result, ZeptoError};
 
 /// Regex patterns that are blocked for security reasons.
 /// These are compiled once and matched against commands.
+///
+/// **Defense-in-depth only.** A blocklist can never be exhaustive — the
+/// primary security boundary should be container isolation (Docker /
+/// Apple Container) or the approval gate. These patterns catch the most
+/// common dangerous patterns and raise the bar for casual attacks.
 const REGEX_BLOCKED_PATTERNS: &[&str] = &[
     // Piped shell execution (curl/wget to sh/bash)
     r"curl\s+.*\|\s*(sh|bash|zsh)",
@@ -32,6 +37,18 @@ const REGEX_BLOCKED_PATTERNS: &[&str] = &[
     // Fork bombs
     r":\(\)\s*\{\s*:\|:&\s*\}\s*;:",
     r"fork\s*\(\s*\)",
+    // Encoded/indirect execution (common blocklist bypasses)
+    r"base64\s+(-d|--decode)",
+    r"python[23]?\s+-c\s+",
+    r"perl\s+-e\s+",
+    r"ruby\s+-e\s+",
+    r"node\s+-e\s+",
+    r"\beval\s+",
+    r"xargs\s+.*sh\b",
+    r"xargs\s+.*bash\b",
+    // Environment variable exfiltration
+    r"\benv\b.*>\s*/",
+    r"\bprintenv\b.*>\s*/",
 ];
 
 /// Literal substring patterns (credentials, sensitive paths)
@@ -331,5 +348,63 @@ mod tests {
         assert!(config.enabled);
         assert!(!config.compiled_patterns.is_empty());
         assert!(!config.literal_patterns.is_empty());
+    }
+
+    // ==================== ENCODED/INDIRECT EXECUTION TESTS ====================
+
+    #[test]
+    fn test_base64_decode_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("echo cm0gLXJmIC8= | base64 -d | sh")
+            .is_err());
+        assert!(config
+            .validate_command("base64 --decode payload.txt")
+            .is_err());
+    }
+
+    #[test]
+    fn test_scripting_language_exec_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("python -c 'import os; os.system(\"rm -rf /\")'")
+            .is_err());
+        assert!(config
+            .validate_command("python3 -c 'print(1)'")
+            .is_err());
+        assert!(config.validate_command("perl -e 'system(\"whoami\")'").is_err());
+        assert!(config
+            .validate_command("ruby -e 'exec \"cat /etc/shadow\"'")
+            .is_err());
+        assert!(config
+            .validate_command("node -e 'require(\"child_process\").exec(\"id\")'")
+            .is_err());
+    }
+
+    #[test]
+    fn test_eval_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("eval $(echo rm -rf /)").is_err());
+        assert!(config.validate_command("eval \"dangerous_cmd\"").is_err());
+    }
+
+    #[test]
+    fn test_xargs_to_shell_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("echo 'rm -rf /' | xargs sh")
+            .is_err());
+        assert!(config
+            .validate_command("find . -name '*.txt' | xargs bash")
+            .is_err());
+    }
+
+    #[test]
+    fn test_safe_scripting_allowed() {
+        let config = ShellSecurityConfig::new();
+        // Running python/node scripts by file (not -c) should be allowed
+        assert!(config.validate_command("python script.py").is_ok());
+        assert!(config.validate_command("node app.js").is_ok());
+        assert!(config.validate_command("ruby script.rb").is_ok());
     }
 }

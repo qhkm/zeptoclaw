@@ -4,12 +4,15 @@
 //! testing the full message flow, tool execution, session persistence, and
 //! configuration handling.
 
+use async_trait::async_trait;
 use std::sync::Arc;
 use tempfile::tempdir;
+use zeptoclaw::error::ZeptoError;
 use zeptoclaw::{
     bus::{InboundMessage, MessageBus, OutboundMessage},
     config::{Config, MemoryBackend, MemoryCitationsMode},
-    heartbeat::HeartbeatService,
+    heartbeat::{HeartbeatService, HEARTBEAT_PROMPT},
+    providers::{ChatOptions, FallbackProvider, LLMProvider, LLMResponse, ToolDefinition},
     security::ShellSecurityConfig,
     session::{Message, SessionManager},
     skills::SkillsLoader,
@@ -20,6 +23,59 @@ use zeptoclaw::{
         ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
     },
 };
+
+#[derive(Debug)]
+struct AlwaysFailProvider;
+
+#[derive(Debug)]
+struct StaticSuccessProvider {
+    provider_name: &'static str,
+    response: &'static str,
+}
+
+#[async_trait]
+impl LLMProvider for AlwaysFailProvider {
+    fn name(&self) -> &str {
+        "always-fail"
+    }
+
+    fn default_model(&self) -> &str {
+        "fail-model"
+    }
+
+    async fn chat(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+    ) -> zeptoclaw::error::Result<LLMResponse> {
+        Err(ZeptoError::Provider(
+            "simulated primary failure".to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for StaticSuccessProvider {
+    fn name(&self) -> &str {
+        self.provider_name
+    }
+
+    fn default_model(&self) -> &str {
+        "success-model"
+    }
+
+    async fn chat(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+    ) -> zeptoclaw::error::Result<LLMResponse> {
+        Ok(LLMResponse::text(self.response))
+    }
+}
 
 // ============================================================================
 // Message Bus Integration Tests
@@ -611,6 +667,77 @@ fn test_skills_loader_frontmatter_parsing() {
     assert_eq!(skill.description, "Demo skill");
 }
 
+#[test]
+fn test_skills_loader_workspace_override_and_filter_unavailable() {
+    let root = tempdir().unwrap();
+    let workspace = root.path().join("workspace_skills");
+    let builtin = root.path().join("builtin_skills");
+    std::fs::create_dir_all(workspace.join("demo")).unwrap();
+    std::fs::create_dir_all(builtin.join("demo")).unwrap();
+    std::fs::create_dir_all(builtin.join("needs_env")).unwrap();
+
+    std::fs::write(
+        workspace.join("demo/SKILL.md"),
+        "---\nname: demo\ndescription: Workspace demo\n---\n# Workspace Demo",
+    )
+    .unwrap();
+    std::fs::write(
+        builtin.join("demo/SKILL.md"),
+        "---\nname: demo\ndescription: Builtin demo\n---\n# Builtin Demo",
+    )
+    .unwrap();
+    std::fs::write(
+        builtin.join("needs_env/SKILL.md"),
+        "---\nname: needs_env\ndescription: Needs env var\nmetadata: {\"zeptoclaw\":{\"requires\":{\"env\":[\"ZEPTOCLAW_INTEGRATION_TEST_MISSING_ENV_2B9F2E16\"]}}}\n---\n# Needs Env",
+    )
+    .unwrap();
+
+    let loader = SkillsLoader::new(workspace, Some(builtin));
+
+    let demo = loader.load_skill("demo").unwrap();
+    assert_eq!(demo.source, "workspace");
+    assert_eq!(demo.description, "Workspace demo");
+
+    let all_names: Vec<String> = loader
+        .list_skills(false)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(all_names.iter().any(|name| name == "demo"));
+    assert!(all_names.iter().any(|name| name == "needs_env"));
+
+    let available_names: Vec<String> = loader
+        .list_skills(true)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(available_names.iter().any(|name| name == "demo"));
+    assert!(!available_names.iter().any(|name| name == "needs_env"));
+}
+
+#[tokio::test]
+async fn test_multi_provider_fallback_uses_secondary_provider() {
+    let provider = FallbackProvider::new(
+        Box::new(AlwaysFailProvider),
+        Box::new(StaticSuccessProvider {
+            provider_name: "secondary",
+            response: "fallback response",
+        }),
+    );
+
+    let response = provider
+        .chat(
+            vec![Message::user("hello")],
+            vec![],
+            None,
+            ChatOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.content, "fallback response");
+}
+
 // ============================================================================
 // End-to-End Integration Tests
 // ============================================================================
@@ -847,6 +974,90 @@ async fn test_runtime_factory_native() {
     let config = RuntimeConfig::default();
     let runtime = create_runtime(&config).await.unwrap();
     assert_eq!(runtime.name(), "native");
+}
+
+#[tokio::test]
+async fn test_cron_scheduling_dispatches_message() {
+    use chrono::Utc;
+    use tokio::time::{timeout, Duration};
+    use zeptoclaw::cron::{CronPayload, CronSchedule, CronService};
+
+    let root = tempdir().unwrap();
+    let bus = Arc::new(MessageBus::new());
+    let service = CronService::new(root.path().join("jobs.json"), Arc::clone(&bus));
+    service.start().await.unwrap();
+
+    let at_ms = (Utc::now() + chrono::Duration::seconds(1)).timestamp_millis();
+    service
+        .add_job(
+            "once".to_string(),
+            CronSchedule::At { at_ms },
+            CronPayload {
+                message: "scheduled message".to_string(),
+                channel: "telegram".to_string(),
+                chat_id: "cron-chat".to_string(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+    let inbound = timeout(Duration::from_secs(5), bus.consume_inbound())
+        .await
+        .expect("timed out waiting for cron message")
+        .expect("message bus closed");
+
+    assert_eq!(inbound.sender_id, "cron");
+    assert_eq!(inbound.channel, "telegram");
+    assert_eq!(inbound.chat_id, "cron-chat");
+    assert_eq!(inbound.content, "scheduled message");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(service.list_jobs(true).await.is_empty());
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn test_heartbeat_trigger_now_enqueues_message() {
+    use tokio::time::{timeout, Duration};
+
+    let root = tempdir().unwrap();
+    let heartbeat_path = root.path().join("HEARTBEAT.md");
+    std::fs::write(
+        &heartbeat_path,
+        "- [ ] investigate failed webhook deliveries",
+    )
+    .unwrap();
+
+    let bus = Arc::new(MessageBus::new());
+    let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
+    service.trigger_now().await.unwrap();
+
+    let inbound = timeout(Duration::from_secs(1), bus.consume_inbound())
+        .await
+        .expect("timed out waiting for heartbeat message")
+        .expect("message bus closed");
+
+    assert_eq!(inbound.channel, "heartbeat");
+    assert_eq!(inbound.sender_id, "system");
+    assert_eq!(inbound.chat_id, "ops-chat");
+    assert_eq!(inbound.content, HEARTBEAT_PROMPT);
+}
+
+#[tokio::test]
+async fn test_heartbeat_trigger_now_skips_non_actionable_content() {
+    use tokio::time::{timeout, Duration};
+
+    let root = tempdir().unwrap();
+    let heartbeat_path = root.path().join("HEARTBEAT.md");
+    std::fs::write(&heartbeat_path, "# Heartbeat\n<!-- no tasks -->\n- [ ]").unwrap();
+
+    let bus = Arc::new(MessageBus::new());
+    let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
+    service.trigger_now().await.unwrap();
+
+    let receive_result = timeout(Duration::from_millis(300), bus.consume_inbound()).await;
+    assert!(receive_result.is_err(), "expected no heartbeat message");
 }
 
 #[tokio::test]

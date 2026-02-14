@@ -189,9 +189,7 @@ mod tests {
         // Simulate being called from within a spawned sub-agent.
         let ctx = ToolContext::new().with_channel("subagent", "sub_1");
 
-        let result = tool
-            .execute(json!({"task": "do something"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": "do something"}), &ctx).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Cannot spawn from within a spawned task"));
@@ -218,9 +216,7 @@ mod tests {
         ctx.channel = Some("telegram".to_string());
         // chat_id stays None
 
-        let result = tool
-            .execute(json!({"task": "some work"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": "some work"}), &ctx).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("No chat_id available"));
@@ -231,9 +227,7 @@ mod tests {
         let tool = make_spawn_tool();
         let ctx = ctx_with_channel();
 
-        let result = tool
-            .execute(json!({"task": "analyze logs"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": "analyze logs"}), &ctx).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("Spawned background task"));
@@ -263,9 +257,7 @@ mod tests {
         let ctx = ctx_with_channel();
 
         let long_task = "a]".repeat(40); // 80 chars, exceeds 30-char threshold
-        let result = tool
-            .execute(json!({"task": long_task}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": long_task}), &ctx).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         // The auto-label should be truncated with "..."

@@ -8,9 +8,7 @@ use zeptoclaw::providers::{
 };
 use zeptoclaw::runtime::available_runtimes;
 
-use super::common::{
-    memory_backend_label, memory_citations_label, skills_loader_from_config,
-};
+use super::common::{memory_backend_label, memory_citations_label, skills_loader_from_config};
 use super::heartbeat::heartbeat_file_path;
 use super::AuthAction;
 
@@ -45,12 +43,30 @@ async fn cmd_auth_status() -> Result<()> {
     println!("=====================");
     println!();
 
-    println!("  Anthropic (Claude): {}", provider_status(&config.providers.anthropic));
-    println!("  OpenAI:             {}", provider_status(&config.providers.openai));
-    println!("  OpenRouter:         {}", provider_status(&config.providers.openrouter));
-    println!("  Groq:               {}", provider_status(&config.providers.groq));
-    println!("  Gemini:             {}", provider_status(&config.providers.gemini));
-    println!("  Zhipu:              {}", provider_status(&config.providers.zhipu));
+    println!(
+        "  Anthropic (Claude): {}",
+        provider_status(&config.providers.anthropic)
+    );
+    println!(
+        "  OpenAI:             {}",
+        provider_status(&config.providers.openai)
+    );
+    println!(
+        "  OpenRouter:         {}",
+        provider_status(&config.providers.openrouter)
+    );
+    println!(
+        "  Groq:               {}",
+        provider_status(&config.providers.groq)
+    );
+    println!(
+        "  Gemini:             {}",
+        provider_status(&config.providers.gemini)
+    );
+    println!(
+        "  Zhipu:              {}",
+        provider_status(&config.providers.zhipu)
+    );
 
     println!();
     println!("Runtime Provider Support");
@@ -127,7 +143,13 @@ fn provider_status(provider: &Option<ProviderConfig>) -> &'static str {
     provider
         .as_ref()
         .and_then(|p| p.api_key.as_ref())
-        .map(|k| if k.is_empty() { "not set" } else { "configured" })
+        .map(|k| {
+            if k.is_empty() {
+                "not set"
+            } else {
+                "configured"
+            }
+        })
         .unwrap_or("not set")
 }
 

@@ -60,6 +60,24 @@ use crate::error::{Result, ZeptoError};
 
 use super::{BaseChannelConfig, Channel};
 
+/// Constant-time string comparison to prevent timing side-channel attacks.
+///
+/// Always compares the full length of both strings regardless of where
+/// they first differ. Returns `false` immediately if lengths differ
+/// (length is not considered secret for Bearer tokens).
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
 /// Maximum allowed request body size (1 MB).
 const MAX_BODY_SIZE: usize = 1_048_576;
 
@@ -196,6 +214,9 @@ impl WebhookChannel {
     /// Returns `true` if:
     /// - No auth token is configured (open access), OR
     /// - The request carries a matching `Bearer <token>` header.
+    ///
+    /// Uses constant-time comparison to prevent timing side-channel attacks
+    /// that could leak the token value byte-by-byte.
     fn validate_auth(headers: &[(String, String)], required_token: &Option<String>) -> bool {
         let token = match required_token {
             Some(t) => t,
@@ -205,7 +226,7 @@ impl WebhookChannel {
         let expected = format!("Bearer {}", token);
 
         headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization") && value.trim() == expected
+            name.eq_ignore_ascii_case("authorization") && constant_time_eq(value.trim(), &expected)
         })
     }
 

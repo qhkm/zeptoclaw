@@ -87,13 +87,13 @@ After completing any feature, update these 3 files:
 - [x] **Filesystem security tests** — 5 new tests: path traversal, URL-encoded bypass, workspace boundary, absolute path rejection
 - [x] **Web tool SSRF tests** — 7 new tests: private IP ranges, IPv6, non-HTTP schemes, body size limits, no-host URLs
 - [x] **GSheets error path tests** — 7 new tests: unknown action, missing args, malformed values, base64 errors, path injection
-- [ ] **Integration test expansion** — multi-provider fallback, cron scheduling, heartbeat triggers, skills loader (`tests/integration.rs`) (~2 hrs)
+- [x] **Integration test expansion** — added 5 integration tests for fallback provider flow, cron dispatch, heartbeat trigger/skip behavior, and skills availability filtering (`tests/integration.rs`)
 
 ### P2 — Code Quality
 - [x] **R8rTool error handling** — already uses match + warn! + fallback (not .expect()), no change needed
 - [x] **README provider count** — updated to clarify "Anthropic and OpenAI today" + staged rollout for others
 - [x] **README hooks status** — updated from "wiring in progress" to "fully wired into agent loop"
-- [x] **Update stats** — 952 lib + 63 integration + 98 doc = 1,113 total tests; 17 tools; hooks system fully wired
+- [x] **Update stats** — 953 lib + 68 integration + 98 doc = 1,119 total tests; 17 tools; hooks system fully wired
 
 ### P3 — Documentation
 - [x] **Module-level docs** — all four files already have `//!` module docs (plugins, hooks, batch, telemetry)
@@ -116,7 +116,7 @@ After completing any feature, update these 3 files:
 ## Stats
 
 - Codebase: ~39,000 lines of Rust
-- Tests: 952 lib + 63 integration + 98 doc = **1,113 total**
+- Tests: 953 lib + 68 integration + 98 doc = **1,119 total**
 - Tools: 17 agent tools + dynamic plugin tools
 - Channels: 4 (Telegram, Slack, Discord, Webhook)
 - Providers: 2 (Claude, OpenAI) + RetryProvider + FallbackProvider

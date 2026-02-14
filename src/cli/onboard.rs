@@ -6,9 +6,7 @@ use anyhow::{Context, Result};
 
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode, RuntimeType};
 
-use super::common::{
-    memory_backend_label, memory_citations_label, read_line, read_secret,
-};
+use super::common::{memory_backend_label, memory_citations_label, read_line, read_secret};
 
 /// Initialize configuration directory and save default config.
 pub(crate) async fn cmd_onboard() -> Result<()> {

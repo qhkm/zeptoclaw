@@ -155,10 +155,7 @@ fn escape_xml(input: &str) -> String {
 }
 
 /// Create and configure an agent with all tools registered.
-pub(crate) async fn create_agent(
-    config: Config,
-    bus: Arc<MessageBus>,
-) -> Result<Arc<AgentLoop>> {
+pub(crate) async fn create_agent(config: Config, bus: Arc<MessageBus>) -> Result<Arc<AgentLoop>> {
     // Create session manager
     let session_manager = SessionManager::new().unwrap_or_else(|_| {
         warn!("Failed to create persistent session manager, using in-memory");

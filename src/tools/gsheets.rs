@@ -519,8 +519,7 @@ mod tests {
     #[test]
     fn test_from_service_account_empty_access_token() {
         // access_token present but empty string
-        let payload =
-            base64::engine::general_purpose::STANDARD.encode(r#"{"access_token": "  "}"#);
+        let payload = base64::engine::general_purpose::STANDARD.encode(r#"{"access_token": "  "}"#);
         let result = GoogleSheetsTool::from_service_account(&payload);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

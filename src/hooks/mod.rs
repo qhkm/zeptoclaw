@@ -115,11 +115,7 @@ impl HookRule {
     /// Check if this rule matches the given channel name.
     /// Empty channels list means match all.
     pub fn matches_channel(&self, channel_name: &str) -> bool {
-        self.channels.is_empty()
-            || self
-                .channels
-                .iter()
-                .any(|c| c == "*" || c == channel_name)
+        self.channels.is_empty() || self.channels.iter().any(|c| c == "*" || c == channel_name)
     }
 }
 
@@ -204,11 +200,36 @@ impl HookEngine {
                 HookAction::Log => {
                     let level = rule.level.as_deref().unwrap_or("info");
                     match level {
-                        "error" => tracing::error!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: tool call"),
-                        "warn" => tracing::warn!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: tool call"),
-                        "debug" => tracing::debug!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: tool call"),
-                        "trace" => tracing::trace!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: tool call"),
-                        _ => tracing::info!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: tool call"),
+                        "error" => tracing::error!(
+                            hook = "before_tool",
+                            tool = tool_name,
+                            channel = channel,
+                            "Hook: tool call"
+                        ),
+                        "warn" => tracing::warn!(
+                            hook = "before_tool",
+                            tool = tool_name,
+                            channel = channel,
+                            "Hook: tool call"
+                        ),
+                        "debug" => tracing::debug!(
+                            hook = "before_tool",
+                            tool = tool_name,
+                            channel = channel,
+                            "Hook: tool call"
+                        ),
+                        "trace" => tracing::trace!(
+                            hook = "before_tool",
+                            tool = tool_name,
+                            channel = channel,
+                            "Hook: tool call"
+                        ),
+                        _ => tracing::info!(
+                            hook = "before_tool",
+                            tool = tool_name,
+                            channel = channel,
+                            "Hook: tool call"
+                        ),
                     }
                 }
                 HookAction::Block => {
@@ -216,11 +237,21 @@ impl HookEngine {
                         .message
                         .clone()
                         .unwrap_or_else(|| format!("Tool '{}' blocked by hook", tool_name));
-                    tracing::info!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: blocking tool");
+                    tracing::info!(
+                        hook = "before_tool",
+                        tool = tool_name,
+                        channel = channel,
+                        "Hook: blocking tool"
+                    );
                     return HookResult::Block(msg);
                 }
                 HookAction::Notify => {
-                    tracing::info!(hook = "before_tool", tool = tool_name, channel = channel, "Hook: notify (logged)");
+                    tracing::info!(
+                        hook = "before_tool",
+                        tool = tool_name,
+                        channel = channel,
+                        "Hook: notify (logged)"
+                    );
                 }
             }
         }
@@ -250,15 +281,27 @@ impl HookEngine {
                     let ms = elapsed.as_millis();
                     let level = rule.level.as_deref().unwrap_or("info");
                     match level {
-                        "error" => tracing::error!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed"),
-                        "warn" => tracing::warn!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed"),
-                        "debug" => tracing::debug!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed"),
-                        _ => tracing::info!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed"),
+                        "error" => {
+                            tracing::error!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed")
+                        }
+                        "warn" => {
+                            tracing::warn!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed")
+                        }
+                        "debug" => {
+                            tracing::debug!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed")
+                        }
+                        _ => {
+                            tracing::info!(hook = "after_tool", tool = tool_name, latency_ms = %ms, "Hook: tool completed")
+                        }
                     }
                 }
                 HookAction::Block => {} // Block is a no-op in after_tool
                 HookAction::Notify => {
-                    tracing::info!(hook = "after_tool", tool = tool_name, "Hook: notify (logged)");
+                    tracing::info!(
+                        hook = "after_tool",
+                        tool = tool_name,
+                        "Hook: notify (logged)"
+                    );
                 }
             }
         }
@@ -279,14 +322,34 @@ impl HookEngine {
                 HookAction::Log => {
                     let level = rule.level.as_deref().unwrap_or("error");
                     match level {
-                        "warn" => tracing::warn!(hook = "on_error", tool = tool_name, error = error, "Hook: tool error"),
-                        "debug" => tracing::debug!(hook = "on_error", tool = tool_name, error = error, "Hook: tool error"),
-                        _ => tracing::error!(hook = "on_error", tool = tool_name, error = error, "Hook: tool error"),
+                        "warn" => tracing::warn!(
+                            hook = "on_error",
+                            tool = tool_name,
+                            error = error,
+                            "Hook: tool error"
+                        ),
+                        "debug" => tracing::debug!(
+                            hook = "on_error",
+                            tool = tool_name,
+                            error = error,
+                            "Hook: tool error"
+                        ),
+                        _ => tracing::error!(
+                            hook = "on_error",
+                            tool = tool_name,
+                            error = error,
+                            "Hook: tool error"
+                        ),
                     }
                 }
                 HookAction::Block => {} // Block is a no-op in on_error
                 HookAction::Notify => {
-                    tracing::info!(hook = "on_error", tool = tool_name, error = error, "Hook: error notify (logged)");
+                    tracing::info!(
+                        hook = "on_error",
+                        tool = tool_name,
+                        error = error,
+                        "Hook: error notify (logged)"
+                    );
                 }
             }
         }

@@ -296,7 +296,9 @@ impl Tool for WebFetchTool {
 
         // DNS-based SSRF check: resolve the hostname before making the
         // request and verify none of the resolved IPs are private/local.
-        resolve_and_check_host(&parsed).await?;
+        // The returned address is used to pin the connection, preventing
+        // DNS rebinding attacks between this check and the actual request.
+        let pinned = resolve_and_check_host(&parsed).await?;
 
         let max_chars = args
             .get("max_chars")
@@ -305,8 +307,21 @@ impl Tool for WebFetchTool {
             .unwrap_or(self.max_chars)
             .clamp(MIN_FETCH_CHARS, MAX_FETCH_CHARS);
 
-        let response = self
-            .client
+        // Build a client that pins the DNS resolution to the IP we already
+        // validated, so the HTTP library cannot re-resolve to a different
+        // (potentially private) address.
+        let client = if let Some((host, addr)) = pinned {
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .timeout(Duration::from_secs(30))
+                .resolve(&host, addr)
+                .build()
+                .unwrap_or_else(|_| self.client.clone())
+        } else {
+            self.client.clone()
+        };
+
+        let response = client
             .get(parsed.clone())
             .header("User-Agent", WEB_USER_AGENT)
             .send()
@@ -461,24 +476,29 @@ fn is_blocked_host(url: &Url) -> bool {
 /// point to a private or local address.  This catches DNS-based SSRF attacks
 /// where a public hostname (e.g. `metadata.attacker.com`) resolves to an
 /// internal IP such as `169.254.169.254`.
-async fn resolve_and_check_host(url: &Url) -> Result<()> {
+///
+/// Returns the first safe resolved IP address so the caller can pin the
+/// connection to it, preventing DNS rebinding attacks where a second DNS
+/// lookup (by the HTTP client) returns a different, private IP.
+async fn resolve_and_check_host(url: &Url) -> Result<Option<(String, std::net::SocketAddr)>> {
     let host = url
         .host_str()
         .ok_or_else(|| ZeptoError::SecurityViolation("URL has no host".to_string()))?;
 
     // IP literals are already checked by `is_blocked_host`, skip DNS lookup.
     if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+        return Ok(None);
     }
 
     let port = url.port_or_known_default().unwrap_or(443);
     let lookup_addr = format!("{}:{}", host, port);
 
-    let addrs = lookup_host(&lookup_addr)
+    let addrs: Vec<std::net::SocketAddr> = lookup_host(&lookup_addr)
         .await
-        .map_err(|e| ZeptoError::Tool(format!("DNS lookup failed for '{}': {}", host, e)))?;
+        .map_err(|e| ZeptoError::Tool(format!("DNS lookup failed for '{}': {}", host, e)))?
+        .collect();
 
-    for addr in addrs {
+    for addr in &addrs {
         if is_private_or_local_ip(addr.ip()) {
             return Err(ZeptoError::SecurityViolation(format!(
                 "DNS for '{}' resolved to private/local IP {}",
@@ -488,7 +508,12 @@ async fn resolve_and_check_host(url: &Url) -> Result<()> {
         }
     }
 
-    Ok(())
+    // Return the first safe address so the caller can pin the connection,
+    // preventing DNS rebinding between this check and the actual request.
+    Ok(addrs
+        .into_iter()
+        .next()
+        .map(|addr| (host.to_string(), addr)))
 }
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
@@ -602,9 +627,11 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_and_check_host_ip_literal_passes_through() {
         // IP literals are already covered by `is_blocked_host`, so
-        // `resolve_and_check_host` should succeed without DNS lookup.
+        // `resolve_and_check_host` should return None (no pinning needed).
         let url = Url::parse("https://93.184.216.34/").unwrap();
-        assert!(resolve_and_check_host(&url).await.is_ok());
+        let result = resolve_and_check_host(&url).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[tokio::test]

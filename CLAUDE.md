@@ -81,7 +81,7 @@ src/
 ├── session/        # Session, message persistence, conversation history
 ├── skills/         # Markdown-based skill system (loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry)
-├── tools/          # Agent tools (15 tools)
+├── tools/          # Agent tools (17 tools)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── filesystem.rs  # Read, write, list, edit files
 │   ├── web.rs         # Web search (Brave) and fetch with SSRF protection
@@ -233,13 +233,13 @@ ZeptoClaw uses **agentic search** instead of RAG + vector databases for memory a
 ## Testing
 
 ```bash
-# Unit tests (~876 tests)
+# Unit tests (953 tests)
 cargo test --lib
 
-# Integration tests (~63 tests)
+# Integration tests (68 tests)
 cargo test --test integration
 
-# All tests (~1036 total including doc tests)
+# All tests (1,119 total including doc tests)
 cargo test
 
 # Specific test

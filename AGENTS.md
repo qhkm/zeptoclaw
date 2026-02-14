@@ -24,7 +24,7 @@ If you skip this, the next agent starts with stale context and wastes time.
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
 - Codebase: ~38,000+ lines of Rust
-- Tests: ~876 lib + 63 integration + 97 doc = ~1036 total
+- Tests: 953 lib + 68 integration + 98 doc = 1,119 total
 
 ## Current State (2026-02-14)
 
@@ -49,6 +49,7 @@ If you skip this, the next agent starts with stale context and wastes time.
 - Tool approval (`src/tools/approval.rs`) — ApprovalGate with configurable policies (24 tests)
 - Agent templates (`src/config/templates.rs`) — 4 built-in + JSON file loading (21 tests)
 - Plugin system (`src/plugins/`) — JSON manifest plugins, discovery, validation, registry (70+ tests)
+- Integration expansion (`tests/integration.rs`) — fallback provider, cron scheduling dispatch, heartbeat trigger behavior, and skills availability filtering
 
 ### Deep Wiring (2026-02-14)
 - Tool approval wired — `ApprovalConfig` on `Config`, `ApprovalGate` checked before each tool execution in agent loop (both streaming and non-streaming paths)

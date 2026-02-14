@@ -200,10 +200,7 @@ pub(crate) async fn cmd_gateway(containerized_flag: Option<String>) -> Result<()
         match ensure_heartbeat_file(&hb_path).await {
             Ok(true) => info!("Created heartbeat file template at {:?}", hb_path),
             Ok(false) => {}
-            Err(e) => warn!(
-                "Failed to initialize heartbeat file {:?}: {}",
-                hb_path, e
-            ),
+            Err(e) => warn!("Failed to initialize heartbeat file {:?}: {}", hb_path, e),
         }
 
         let service = Arc::new(HeartbeatService::new(

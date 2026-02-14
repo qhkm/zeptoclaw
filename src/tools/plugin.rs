@@ -43,6 +43,25 @@ use crate::plugins::PluginToolDef;
 
 use super::types::{Tool, ToolContext};
 
+/// Shell-escape a string by wrapping it in single quotes.
+///
+/// Any embedded single quotes are escaped as `'\''` (end quote, escaped
+/// quote, restart quote). This prevents command injection via `$(...)`,
+/// backticks, `&&`, `;`, pipes, and all other shell metacharacters.
+fn shell_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\\''");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
 /// Adapter that wraps a `PluginToolDef` and implements the `Tool` trait.
 pub struct PluginTool {
     /// The plugin tool definition from the manifest.
@@ -61,15 +80,20 @@ impl PluginTool {
     }
 
     /// Interpolate `{{param_name}}` placeholders in a command template.
+    ///
+    /// All parameter values are shell-escaped to prevent command injection.
+    /// Values are wrapped in single quotes with any embedded single quotes
+    /// escaped as `'\''`.
     fn interpolate(command: &str, args: &Value) -> String {
         let mut result = command.to_string();
         if let Some(obj) = args.as_object() {
             for (key, value) in obj {
                 let placeholder = format!("{{{{{}}}}}", key);
-                let replacement = match value {
+                let raw = match value {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
+                let replacement = shell_escape(&raw);
                 result = result.replace(&placeholder, &replacement);
             }
         }
@@ -176,10 +200,30 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_escape_basic() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_escape_injection_attempt() {
+        // $(rm -rf /) should become a literal string, not executed
+        assert_eq!(shell_escape("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_escape("`whoami`"), "'`whoami`'");
+        assert_eq!(shell_escape("foo; rm -rf /"), "'foo; rm -rf /'");
+        assert_eq!(shell_escape("foo && evil"), "'foo && evil'");
+        assert_eq!(shell_escape("foo | evil"), "'foo | evil'");
+    }
+
+    #[test]
     fn test_interpolate_basic() {
         let cmd = "echo {{message}}";
         let args = json!({"message": "hello"});
-        assert_eq!(PluginTool::interpolate(cmd, &args), "echo hello");
+        assert_eq!(PluginTool::interpolate(cmd, &args), "echo 'hello'");
     }
 
     #[test]
@@ -188,7 +232,7 @@ mod tests {
         let args = json!({"path": "/tmp/repo", "count": 5});
         assert_eq!(
             PluginTool::interpolate(cmd, &args),
-            "git -C /tmp/repo log --oneline -5"
+            "git -C '/tmp/repo' log --oneline -'5'"
         );
     }
 
@@ -204,6 +248,16 @@ mod tests {
         let cmd = "echo {{missing}}";
         let args = json!({});
         assert_eq!(PluginTool::interpolate(cmd, &args), "echo {{missing}}");
+    }
+
+    #[test]
+    fn test_interpolate_prevents_command_injection() {
+        let cmd = "echo {{input}}";
+        let args = json!({"input": "$(cat /etc/passwd)"});
+        let result = PluginTool::interpolate(cmd, &args);
+        // The $() should be inside single quotes, making it a literal string
+        assert_eq!(result, "echo '$(cat /etc/passwd)'");
+        assert!(!result.contains("$(cat /etc/passwd)'") || result.starts_with("echo '"));
     }
 
     #[test]
@@ -230,12 +284,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_interpolation() {
-        let def = test_def("echo '{{msg}}'");
+        // Note: {{msg}} is replaced with shell-escaped value 'greetings'
+        // The command becomes: echo 'greetings'
+        let def = test_def("echo {{msg}}");
         let tool = PluginTool::new(def, "test-plugin");
         let ctx = ToolContext::new();
         let result = tool.execute(json!({"msg": "greetings"}), &ctx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().trim(), "greetings");
+    }
+
+    #[tokio::test]
+    async fn test_execute_blocks_command_injection() {
+        let def = test_def("echo {{input}}");
+        let tool = PluginTool::new(def, "test-plugin");
+        let ctx = ToolContext::new();
+        // This should NOT execute the subcommand — should print it literally
+        let result = tool
+            .execute(json!({"input": "$(echo INJECTED)"}), &ctx)
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("$(echo INJECTED)"),
+            "Should contain literal $() not executed result: {}",
+            output
+        );
+        assert!(
+            !output.contains("INJECTED\n"),
+            "Should not have executed the subcommand"
+        );
     }
 
     #[tokio::test]
