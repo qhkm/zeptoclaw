@@ -253,7 +253,9 @@ impl Config {
     /// Apply channel-specific environment variable overrides
     fn apply_channel_env_overrides(&mut self) {
         // Telegram
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_TELEGRAM_TOKEN") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_TELEGRAM_TOKEN")
+            .or_else(|_| std::env::var("ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN"))
+        {
             let channel = self
                 .channels
                 .telegram

@@ -25,7 +25,7 @@ See `src/security/` for implementation details.
 
 If you discover a security vulnerability, please report it responsibly:
 
-1. **Email:** security@kitakod.com
+1. **Email:** admin@aisar.ai
 2. **Do not** open a public GitHub issue for security vulnerabilities
 3. Include steps to reproduce, affected versions, and potential impact
 

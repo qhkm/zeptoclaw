@@ -25,7 +25,7 @@ pub(crate) async fn cmd_config(action: ConfigAction) -> Result<()> {
                 Ok(v) => v,
                 Err(e) => {
                     println!("[ERROR] Invalid JSON: {}", e);
-                    return Ok(());
+                    anyhow::bail!("Configuration file is not valid JSON");
                 }
             };
 
@@ -47,6 +47,10 @@ pub(crate) async fn cmd_config(action: ConfigAction) -> Result<()> {
                 println!("\nConfiguration looks good!");
             } else {
                 println!("\nFound {} error(s), {} warning(s)", errors, warnings);
+            }
+
+            if errors > 0 {
+                anyhow::bail!("Configuration validation failed with {} error(s)", errors);
             }
         }
     }

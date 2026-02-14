@@ -71,6 +71,13 @@ After completing any feature, update these 3 files:
 - [x] **Hooks system** (`src/hooks/mod.rs`) — config-driven before_tool/after_tool/on_error, 17 tests
 - [x] **Deploy templates** (`deploy/`) — Docker single/multi, Fly.io, Railway, Render
 
+### CLI Regression Recovery (2026-02-14)
+- [x] Restored missing CLI subcommands — `batch`, `history`, and `template` are wired in `src/cli/mod.rs` with handlers in `src/cli/batch.rs`, `src/cli/history.rs`, and `src/cli/template.rs`
+- [x] Restored template execution path — `agent --template <name>` now resolves templates and applies overrides via `create_agent_with_template()`
+- [x] Fixed config validation accuracy and exit behavior — `config check` recognizes `agents.defaults.streaming` and `token_budget`, and now exits non-zero on validation errors
+- [x] Improved CLI UX guardrails — root now supports `--version` and help-on-empty invocation; `heartbeat --show`/`--edit` conflict is enforced; `skills show` missing skill exits non-zero
+- [x] Hardened onboarding safety — existing invalid config now fails with context instead of silently resetting to defaults
+
 ---
 
 ## Backlog
@@ -88,12 +95,13 @@ After completing any feature, update these 3 files:
 - [x] **Web tool SSRF tests** — 7 new tests: private IP ranges, IPv6, non-HTTP schemes, body size limits, no-host URLs
 - [x] **GSheets error path tests** — 7 new tests: unknown action, missing args, malformed values, base64 errors, path injection
 - [x] **Integration test expansion** — added 5 integration tests for fallback provider flow, cron dispatch, heartbeat trigger/skip behavior, and skills availability filtering (`tests/integration.rs`)
+- [ ] **CLI surface smoke tests** — add integration checks for `--help`, `--version`, and critical subcommands (`agent`, `batch`, `history`, `template`, `config`) to prevent wiring regressions
 
 ### P2 — Code Quality
 - [x] **R8rTool error handling** — already uses match + warn! + fallback (not .expect()), no change needed
 - [x] **README provider count** — updated to clarify "Anthropic and OpenAI today" + staged rollout for others
 - [x] **README hooks status** — updated from "wiring in progress" to "fully wired into agent loop"
-- [x] **Update stats** — 953 lib + 68 integration + 98 doc = 1,119 total tests; 17 tools; hooks system fully wired
+- [x] **Update stats** — 974 lib + 68 integration + 98 doc = 1,140 total tests; 17 tools; hooks system fully wired
 
 ### P3 — Documentation
 - [x] **Module-level docs** — all four files already have `//!` module docs (plugins, hooks, batch, telemetry)
@@ -116,7 +124,7 @@ After completing any feature, update these 3 files:
 ## Stats
 
 - Codebase: ~39,000 lines of Rust
-- Tests: 968 lib + 68 integration + 98 doc = **1,134 total**
+- Tests: 974 lib + 68 integration + 98 doc = **1,140 total**
 - Tools: 17 agent tools + dynamic plugin tools
 - Channels: 4 (Telegram, Slack, Discord, Webhook)
 - Providers: 2 (Claude, OpenAI) + RetryProvider + FallbackProvider

@@ -33,6 +33,8 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "max_tool_iterations",
     "agent_timeout_secs",
     "message_queue_mode",
+    "streaming",
+    "token_budget",
 ];
 
 #[allow(dead_code)]

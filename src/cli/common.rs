@@ -1,5 +1,6 @@
 //! Shared CLI helpers used across multiple command handlers.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use tracing::{info, warn};
 
 use zeptoclaw::agent::{AgentLoop, ContextBuilder};
 use zeptoclaw::bus::MessageBus;
+use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
 use zeptoclaw::providers::{resolve_runtime_provider, ClaudeProvider, OpenAIProvider};
@@ -79,6 +81,35 @@ pub(crate) fn skills_loader_from_config(config: &Config) -> SkillsLoader {
         .map(expand_tilde)
         .unwrap_or_else(|| Config::dir().join("skills"));
     SkillsLoader::new(workspace_dir, None)
+}
+
+pub(crate) fn load_template_registry() -> Result<TemplateRegistry> {
+    let mut registry = TemplateRegistry::new();
+    let template_dir = Config::dir().join("templates");
+    registry
+        .merge_from_dir(&template_dir)
+        .with_context(|| format!("Failed to load templates from {}", template_dir.display()))?;
+    Ok(registry)
+}
+
+pub(crate) fn resolve_template(name: &str) -> Result<AgentTemplate> {
+    let registry = load_template_registry()?;
+    if let Some(template) = registry.get(name) {
+        return Ok(template.clone());
+    }
+
+    let mut available = registry
+        .names()
+        .into_iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>();
+    available.sort();
+
+    anyhow::bail!(
+        "Template '{}' not found. Available templates: {}",
+        name,
+        available.join(", ")
+    );
 }
 
 fn build_skills_prompt(config: &Config) -> String {
@@ -156,6 +187,59 @@ fn escape_xml(input: &str) -> String {
 
 /// Create and configure an agent with all tools registered.
 pub(crate) async fn create_agent(config: Config, bus: Arc<MessageBus>) -> Result<Arc<AgentLoop>> {
+    create_agent_with_template(config, bus, None).await
+}
+
+/// Create and configure an agent with optional template overrides.
+pub(crate) async fn create_agent_with_template(
+    mut config: Config,
+    bus: Arc<MessageBus>,
+    template: Option<AgentTemplate>,
+) -> Result<Arc<AgentLoop>> {
+    if let Some(tpl) = &template {
+        if let Some(model) = &tpl.model {
+            config.agents.defaults.model = model.clone();
+        }
+        if let Some(max_tokens) = tpl.max_tokens {
+            config.agents.defaults.max_tokens = max_tokens;
+        }
+        if let Some(temperature) = tpl.temperature {
+            config.agents.defaults.temperature = temperature;
+        }
+        if let Some(max_tool_iterations) = tpl.max_tool_iterations {
+            config.agents.defaults.max_tool_iterations = max_tool_iterations;
+        }
+    }
+
+    let allowed_tools = template
+        .as_ref()
+        .and_then(|tpl| tpl.allowed_tools.as_ref())
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect::<HashSet<_>>()
+        });
+    let blocked_tools = template
+        .as_ref()
+        .and_then(|tpl| tpl.blocked_tools.as_ref())
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let tool_enabled = |name: &str| {
+        let key = name.to_ascii_lowercase();
+        if let Some(allowed) = &allowed_tools {
+            if !allowed.contains(&key) {
+                return false;
+            }
+        }
+        !blocked_tools.contains(&key)
+    };
+
     // Create session manager
     let session_manager = SessionManager::new().unwrap_or_else(|_| {
         warn!("Failed to create persistent session manager, using in-memory");
@@ -163,11 +247,13 @@ pub(crate) async fn create_agent(config: Config, bus: Arc<MessageBus>) -> Result
     });
 
     let skills_prompt = build_skills_prompt(&config);
-    let context_builder = if skills_prompt.is_empty() {
-        ContextBuilder::new()
-    } else {
-        ContextBuilder::new().with_skills(&skills_prompt)
-    };
+    let mut context_builder = ContextBuilder::new();
+    if let Some(tpl) = &template {
+        context_builder = context_builder.with_system_prompt(&tpl.system_prompt);
+    }
+    if !skills_prompt.is_empty() {
+        context_builder = context_builder.with_skills(&skills_prompt);
+    }
 
     // Create agent loop
     let agent = Arc::new(AgentLoop::with_context_builder(
@@ -207,70 +293,92 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     };
 
     // Register all tools
-    agent.register_tool(Box::new(EchoTool)).await;
-    agent.register_tool(Box::new(ReadFileTool)).await;
-    agent.register_tool(Box::new(WriteFileTool)).await;
-    agent.register_tool(Box::new(ListDirTool)).await;
-    agent.register_tool(Box::new(EditFileTool)).await;
-    agent
-        .register_tool(Box::new(ShellTool::with_runtime(runtime)))
-        .await;
+    if tool_enabled("echo") {
+        agent.register_tool(Box::new(EchoTool)).await;
+    }
+    if tool_enabled("read_file") {
+        agent.register_tool(Box::new(ReadFileTool)).await;
+    }
+    if tool_enabled("write_file") {
+        agent.register_tool(Box::new(WriteFileTool)).await;
+    }
+    if tool_enabled("list_dir") {
+        agent.register_tool(Box::new(ListDirTool)).await;
+    }
+    if tool_enabled("edit_file") {
+        agent.register_tool(Box::new(EditFileTool)).await;
+    }
+    if tool_enabled("shell") {
+        agent
+            .register_tool(Box::new(ShellTool::with_runtime(runtime)))
+            .await;
+    }
 
     // Register web tools.
-    if let Some(web_search_key) = config.tools.web.search.api_key.as_deref() {
-        let web_search_key = web_search_key.trim();
-        if !web_search_key.is_empty() {
-            agent
-                .register_tool(Box::new(WebSearchTool::with_max_results(
-                    web_search_key,
-                    config.tools.web.search.max_results as usize,
-                )))
-                .await;
-            info!("Registered web_search tool");
+    if tool_enabled("web_search") {
+        if let Some(web_search_key) = config.tools.web.search.api_key.as_deref() {
+            let web_search_key = web_search_key.trim();
+            if !web_search_key.is_empty() {
+                agent
+                    .register_tool(Box::new(WebSearchTool::with_max_results(
+                        web_search_key,
+                        config.tools.web.search.max_results as usize,
+                    )))
+                    .await;
+                info!("Registered web_search tool");
+            }
         }
     }
-    agent.register_tool(Box::new(WebFetchTool::new())).await;
-    info!("Registered web_fetch tool");
+    if tool_enabled("web_fetch") {
+        agent.register_tool(Box::new(WebFetchTool::new())).await;
+        info!("Registered web_fetch tool");
+    }
 
     // Register proactive messaging tool.
-    agent
-        .register_tool(Box::new(MessageTool::new(agent.bus().clone())))
-        .await;
-    info!("Registered message tool");
+    if tool_enabled("message") {
+        agent
+            .register_tool(Box::new(MessageTool::new(agent.bus().clone())))
+            .await;
+        info!("Registered message tool");
+    }
 
     // Register WhatsApp tool.
-    if let (Some(phone_number_id), Some(access_token)) = (
-        config.tools.whatsapp.phone_number_id.as_deref(),
-        config.tools.whatsapp.access_token.as_deref(),
-    ) {
-        if !phone_number_id.trim().is_empty() && !access_token.trim().is_empty() {
-            agent
-                .register_tool(Box::new(WhatsAppTool::with_default_language(
-                    phone_number_id.trim(),
-                    access_token.trim(),
-                    config.tools.whatsapp.default_language.trim(),
-                )))
-                .await;
-            info!("Registered whatsapp_send tool");
+    if tool_enabled("whatsapp_send") {
+        if let (Some(phone_number_id), Some(access_token)) = (
+            config.tools.whatsapp.phone_number_id.as_deref(),
+            config.tools.whatsapp.access_token.as_deref(),
+        ) {
+            if !phone_number_id.trim().is_empty() && !access_token.trim().is_empty() {
+                agent
+                    .register_tool(Box::new(WhatsAppTool::with_default_language(
+                        phone_number_id.trim(),
+                        access_token.trim(),
+                        config.tools.whatsapp.default_language.trim(),
+                    )))
+                    .await;
+                info!("Registered whatsapp_send tool");
+            }
         }
     }
 
     // Register Google Sheets tool.
-    if let Some(access_token) = config.tools.google_sheets.access_token.as_deref() {
-        let token = access_token.trim();
-        if !token.is_empty() {
-            agent
-                .register_tool(Box::new(GoogleSheetsTool::new(token)))
-                .await;
-            info!("Registered google_sheets tool");
-        }
-    } else if let Some(encoded) = config.tools.google_sheets.service_account_base64.as_deref() {
-        match GoogleSheetsTool::from_service_account(encoded.trim()) {
-            Ok(tool) => {
-                agent.register_tool(Box::new(tool)).await;
-                info!("Registered google_sheets tool from base64 payload");
+    if tool_enabled("google_sheets") {
+        if let Some(access_token) = config.tools.google_sheets.access_token.as_deref() {
+            let token = access_token.trim();
+            if !token.is_empty() {
+                agent
+                    .register_tool(Box::new(GoogleSheetsTool::new(token)))
+                    .await;
+                info!("Registered google_sheets tool");
             }
-            Err(e) => warn!("Failed to initialize google_sheets tool: {}", e),
+        } else if let Some(encoded) = config.tools.google_sheets.service_account_base64.as_deref() {
+            match GoogleSheetsTool::from_service_account(encoded.trim()) {
+                Ok(tool) => {
+                    agent.register_tool(Box::new(tool)).await;
+                    info!("Registered google_sheets tool from base64 payload");
+                }
+                Err(e) => warn!("Failed to initialize google_sheets tool: {}", e),
+            }
         }
     }
 
@@ -279,36 +387,50 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
             info!("Memory tools are disabled");
         }
         MemoryBackend::Builtin => {
-            agent
-                .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
-                .await;
-            agent
-                .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
-                .await;
+            if tool_enabled("memory_search") {
+                agent
+                    .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
+                    .await;
+            }
+            if tool_enabled("memory_get") {
+                agent
+                    .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
+                    .await;
+            }
             info!("Registered memory_search and memory_get tools");
         }
         MemoryBackend::Qmd => {
             warn!("Memory backend 'qmd' is not implemented yet; using built-in memory tools");
-            agent
-                .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
-                .await;
-            agent
-                .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
-                .await;
+            if tool_enabled("memory_search") {
+                agent
+                    .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
+                    .await;
+            }
+            if tool_enabled("memory_get") {
+                agent
+                    .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
+                    .await;
+            }
             info!("Registered memory_search and memory_get tools");
         }
     }
 
-    agent
-        .register_tool(Box::new(CronTool::new(cron_service.clone())))
-        .await;
-    agent
-        .register_tool(Box::new(SpawnTool::new(
-            Arc::downgrade(&agent),
-            agent.bus().clone(),
-        )))
-        .await;
-    agent.register_tool(Box::new(R8rTool::default())).await;
+    if tool_enabled("cron") {
+        agent
+            .register_tool(Box::new(CronTool::new(cron_service.clone())))
+            .await;
+    }
+    if tool_enabled("spawn") {
+        agent
+            .register_tool(Box::new(SpawnTool::new(
+                Arc::downgrade(&agent),
+                agent.bus().clone(),
+            )))
+            .await;
+    }
+    if tool_enabled("r8r") {
+        agent.register_tool(Box::new(R8rTool::default())).await;
+    }
 
     info!("Registered {} tools", agent.tool_count().await);
 
@@ -341,7 +463,7 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     }
 
     // Register DelegateTool for agent swarm delegation (requires provider)
-    if config.swarm.enabled {
+    if tool_enabled("delegate") && config.swarm.enabled {
         if let Some(provider) = agent.provider().await {
             agent
                 .register_tool(Box::new(DelegateTool::new(

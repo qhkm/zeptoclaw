@@ -19,16 +19,20 @@ If you skip this, the next agent starts with stale context and wastes time.
 ## Project Snapshot
 
 - Language: Rust (edition 2021)
-- Core binary: `zeptoclaw` (`src/main.rs`, ~2200 lines)
+- Core binary: `zeptoclaw` (`src/main.rs` thin entrypoint; CLI handlers in `src/cli/`)
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
 - Codebase: ~38,000+ lines of Rust
-- Tests: 968 lib + 68 integration + 98 doc = 1,134 total
+- Tests: 974 lib + 68 integration + 98 doc = 1,140 total
 
 ## Current State (2026-02-14)
 
 ### Recently Completed
+- CLI regression recovery — restored `batch`, `history`, `template` commands and `agent --template` wiring in `src/cli/`
+- Config check hardening — recognizes `agents.defaults.streaming` + `token_budget`, now exits non-zero on validation errors
+- CLI UX polish — `--version` support, help on empty invocation, conflict handling for `heartbeat --show/--edit`, and non-zero exit for missing `skills show`
+- Onboarding safety — existing invalid config now fails with context instead of silently overwriting defaults
 - Streaming responses — SSE for both Claude and OpenAI providers, `--stream` CLI flag
 - Agent swarm — DelegateTool with recursion blocking, ProviderRef wrapper
 - RetryProvider — exponential backoff on 429/5xx, wired into provider stack
@@ -40,7 +44,7 @@ If you skip this, the next agent starts with stale context and wastes time.
 - TokenBudget (`src/agent/budget.rs`) — atomic per-session token budget with lock-free counters (18 tests)
 - OutputFormat (`src/providers/structured.rs`) — Text/Json/JsonSchema enum with OpenAI + Claude helpers (19 tests)
 - LongTermMemory (`src/memory/longterm.rs`) — persistent key-value store with categories, tags, access tracking (19 tests)
-- ConversationHistory CLI — `history list`, `history show`, `history cleanup` commands wired in main.rs
+- ConversationHistory CLI — `history list`, `history show`, `history cleanup` commands wired in `src/cli/mod.rs`
 - TokenBudget wired — `token_budget` config field, env override, budget check in agent loop before LLM calls
 - OutputFormat wired — `output_format` on `ChatOptions`, OpenAI `response_format`, Claude system suffix
 - LongTermMemoryTool (`src/tools/longterm_memory.rs`) — agent tool for set/get/search/delete/list/categories (22 tests)
@@ -132,13 +136,13 @@ cargo bench --bench message_bus --no-run
 1. Create `src/tools/<name>.rs`
 2. Implement `Tool` trait (`name()`, `description()`, `parameters()`, `execute()`)
 3. Add `pub mod <name>;` in `src/tools/mod.rs`
-4. Register in `create_agent()` in `src/main.rs`
+4. Register in `create_agent()` in `src/cli/common.rs`
 
 ### Adding a provider wrapper
 1. Create `src/providers/<name>.rs`
 2. Implement `LLMProvider` trait (must impl both `chat()` and `chat_stream()`)
 3. Add `pub mod <name>;` + re-export in `src/providers/mod.rs`
-4. Wire in `main.rs` provider resolution
+4. Wire in `src/cli/common.rs` provider resolution
 
 ### Key code patterns
 - `ProviderRef` wrapper in `delegate.rs` — converts `Arc<dyn LLMProvider>` to `Box<dyn LLMProvider>`

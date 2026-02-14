@@ -35,7 +35,8 @@ pub(crate) async fn cmd_onboard() -> Result<()> {
     let config_path = Config::path();
     let mut config = if config_path.exists() {
         println!("  Config already exists: {:?}", config_path);
-        Config::load().unwrap_or_default()
+        Config::load()
+            .with_context(|| format!("Failed to load existing config at {:?}", config_path))?
     } else {
         println!("  Creating new config: {:?}", config_path);
         Config::default()

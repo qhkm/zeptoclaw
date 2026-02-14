@@ -3,20 +3,24 @@
 //! All CLI logic lives here. `main.rs` calls `cli::run()`.
 
 pub mod agent;
+pub mod batch;
 pub mod common;
 pub mod config;
 pub mod gateway;
 pub mod heartbeat;
+pub mod history;
 pub mod onboard;
 pub mod skills;
 pub mod status;
+pub mod template;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "zeptoclaw")]
+#[command(version)]
 #[command(about = "Ultra-lightweight personal AI assistant", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -32,9 +36,33 @@ enum Commands {
         /// Direct message to process (non-interactive mode)
         #[arg(short, long)]
         message: Option<String>,
+        /// Apply an agent template (built-in or ~/.zeptoclaw/templates/*.json)
+        #[arg(long)]
+        template: Option<String>,
         /// Stream the response token-by-token
         #[arg(long)]
         stream: bool,
+    },
+    /// Process prompts from a file
+    Batch {
+        /// Input file (.txt, .json, or .jsonl)
+        #[arg(long)]
+        input: std::path::PathBuf,
+        /// Optional output file (prints to stdout if omitted)
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        /// Output format for results
+        #[arg(long, value_enum, default_value_t = BatchFormat::Text)]
+        format: BatchFormat,
+        /// Stop processing after the first failed prompt
+        #[arg(long)]
+        stop_on_error: bool,
+        /// Stream LLM output internally while collecting final result text
+        #[arg(long)]
+        stream: bool,
+        /// Apply an agent template to all prompts
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Start multi-channel gateway
     Gateway {
@@ -47,11 +75,21 @@ enum Commands {
     /// Trigger or inspect heartbeat tasks
     Heartbeat {
         /// Show heartbeat file contents
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "edit")]
         show: bool,
         /// Edit heartbeat file in $EDITOR
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "show")]
         edit: bool,
+    },
+    /// Manage conversation history
+    History {
+        #[command(subcommand)]
+        action: HistoryAction,
+    },
+    /// Manage agent templates
+    Template {
+        #[command(subcommand)]
+        action: TemplateAction,
     },
     /// Manage skills
     Skills {
@@ -110,10 +148,48 @@ pub enum ConfigAction {
     Check,
 }
 
+#[derive(Subcommand)]
+pub enum HistoryAction {
+    /// List recent CLI conversations
+    List {
+        /// Maximum number of conversations to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show a conversation by session key or title query
+    Show {
+        /// Session key (exact) or title substring (case-insensitive)
+        query: String,
+    },
+    /// Remove old CLI conversations
+    Cleanup {
+        /// Keep this many most-recent conversations
+        #[arg(long, default_value_t = 50)]
+        keep: usize,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TemplateAction {
+    /// List available templates (built-in + user-defined)
+    List,
+    /// Show full template details
+    Show {
+        /// Template name
+        name: String,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum BatchFormat {
+    Text,
+    Jsonl,
+}
+
 /// Entry point for the CLI — called from main().
 pub async fn run() -> Result<()> {
     // Initialize logging (JSON format when RUST_LOG_FORMAT=json)
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let use_json = std::env::var("RUST_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
@@ -131,14 +207,33 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Version) | None => {
+        None => {
+            let mut cmd = Cli::command();
+            cmd.print_help()?;
+            println!();
+        }
+        Some(Commands::Version) => {
             cmd_version();
         }
         Some(Commands::Onboard) => {
             onboard::cmd_onboard().await?;
         }
-        Some(Commands::Agent { message, stream }) => {
-            agent::cmd_agent(message, stream).await?;
+        Some(Commands::Agent {
+            message,
+            template,
+            stream,
+        }) => {
+            agent::cmd_agent(message, template, stream).await?;
+        }
+        Some(Commands::Batch {
+            input,
+            output,
+            format,
+            stop_on_error,
+            stream,
+            template,
+        }) => {
+            batch::cmd_batch(input, output, format, stop_on_error, stream, template).await?;
         }
         Some(Commands::Gateway { containerized }) => {
             gateway::cmd_gateway(containerized).await?;
@@ -148,6 +243,12 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Heartbeat { show, edit }) => {
             heartbeat::cmd_heartbeat(show, edit).await?;
+        }
+        Some(Commands::History { action }) => {
+            history::cmd_history(action).await?;
+        }
+        Some(Commands::Template { action }) => {
+            template::cmd_template(action).await?;
         }
         Some(Commands::Skills { action }) => {
             skills::cmd_skills(action).await?;

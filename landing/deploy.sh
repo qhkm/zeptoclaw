@@ -25,15 +25,29 @@ wrangler pages deploy . --project-name=r8r --branch=main
 cd ..
 echo ""
 
+# Build zeptoclaw docs and assemble deploy directory
+echo "📦 Building zeptoclaw docs..."
+cd zeptoclaw/docs
+npm install --silent
+npx astro build
+cd ../..
+
+echo "📦 Assembling zeptoclaw deploy..."
+rm -rf zeptoclaw/_deploy
+mkdir -p zeptoclaw/_deploy/docs
+cp zeptoclaw/index.html zeptoclaw/_deploy/
+cp -r zeptoclaw/docs/dist/* zeptoclaw/_deploy/docs/
+
 # Deploy zeptoclaw
 echo "📦 Deploying zeptoclaw..."
-cd zeptoclaw
+cd zeptoclaw/_deploy
 if ! wrangler pages project list 2>/dev/null | grep -q "zeptoclaw"; then
     echo "  Creating new project 'zeptoclaw'..."
     wrangler pages project create zeptoclaw --production-branch=main || true
 fi
 wrangler pages deploy . --project-name=zeptoclaw --branch=main
-cd ..
+cd ../..
+rm -rf zeptoclaw/_deploy
 echo ""
 
 echo "✅ Deployment complete!"

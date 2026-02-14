@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" fill="none">
+  <rect x="0" y="4" width="32" height="32" rx="8" fill="#f24e1e"/>
+  <text x="8" y="28" font-size="20" fill="white">&#9889;</text>
+  <text x="40" y="30" font-family="Inter, system-ui, sans-serif" font-size="24" font-weight="700" fill="currentColor">ZeptoClaw</text>
+</svg>

@@ -17,6 +17,9 @@ cargo clippy -- -D warnings
 # Format
 cargo fmt
 
+# Version
+./target/release/zeptoclaw --version
+
 # Run agent
 ./target/release/zeptoclaw agent -m "Hello"
 
@@ -70,6 +73,7 @@ src/
 │   ├── slack.rs    # Slack outbound channel
 │   ├── discord.rs  # Discord Gateway WebSocket + REST
 │   └── webhook.rs  # Generic HTTP webhook inbound
+├── cli/            # Clap command parsing + command handlers
 ├── config/         # Configuration types and loading
 ├── cron/           # Persistent cron scheduler service
 ├── gateway/        # Containerized agent proxy (Docker/Apple)
@@ -100,7 +104,7 @@ src/
 ├── batch.rs        # Batch mode (load prompts from file, format results)
 ├── error.rs        # Error types (ZeptoError)
 ├── lib.rs          # Library exports
-└── main.rs         # CLI entry point (~2200 lines)
+└── main.rs         # Thin entry point delegating to cli::run()
 ```
 
 ## Key Modules
@@ -233,13 +237,13 @@ ZeptoClaw uses **agentic search** instead of RAG + vector databases for memory a
 ## Testing
 
 ```bash
-# Unit tests (953 tests)
+# Unit tests (974 tests)
 cargo test --lib
 
 # Integration tests (68 tests)
 cargo test --test integration
 
-# All tests (1,119 total including doc tests)
+# All tests (1,140 total including doc tests)
 cargo test
 
 # Specific test
@@ -262,19 +266,19 @@ Verified on Apple Silicon (release build):
 1. Create `src/providers/newprovider.rs`
 2. Implement `LLMProvider` trait
 3. Export from `src/providers/mod.rs`
-4. Wire up in `main.rs` create_agent()
+4. Wire up provider resolution in `src/cli/common.rs` (`create_agent*`)
 
 ### Add a new tool
 1. Create tool in `src/tools/`
 2. Implement `Tool` trait with `async fn execute()`
 3. Register in `src/tools/mod.rs` and `src/lib.rs`
-4. Register in agent setup in `main.rs`
+4. Register in agent setup in `src/cli/common.rs`
 
 ### Add a new channel
 1. Create `src/channels/newchannel.rs`
 2. Implement `Channel` trait
 3. Export from `src/channels/mod.rs`
-4. Add to gateway mode in `main.rs`
+4. Add to channel factory wiring used by `src/cli/gateway.rs`
 
 ### Add a new skill
 1. Create `~/.zeptoclaw/skills/<name>/SKILL.md`

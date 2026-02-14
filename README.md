@@ -17,6 +17,9 @@
   <a href="#architecture">Architecture</a>
 </p>
 <p align="center">
+  <a href="https://zeptoclaw.pages.dev/docs/"><img src="https://img.shields.io/badge/docs-zeptoclaw.pages.dev-f24e1e?style=for-the-badge&logo=bookstack&logoColor=white" alt="Documentation"></a>
+</p>
+<p align="center">
   <a href="https://github.com/qhkm/zeptoclaw/actions/workflows/ci.yml"><img src="https://github.com/qhkm/zeptoclaw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/qhkm/zeptoclaw/releases/latest"><img src="https://img.shields.io/github/v/release/qhkm/zeptoclaw?color=blue" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
@@ -25,7 +28,7 @@
 ---
 
 ```
-$ zeptoclaw agent "Set up my project workspace"
+$ zeptoclaw agent -m "Set up my project workspace"
 
 🤖 ZeptoClaw — I'll set up your workspace.
 
@@ -222,7 +225,7 @@ Config: `~/.zeptoclaw/config.json`
 Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY`
 - `ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY`
-- `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
+- `ZEPTOCLAW_CHANNELS_TELEGRAM_TOKEN` (legacy alias: `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`)
 
 Compile-time model defaults:
 - `ZEPTOCLAW_DEFAULT_MODEL`

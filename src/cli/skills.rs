@@ -51,15 +51,14 @@ pub(crate) async fn cmd_skills(action: SkillsAction) -> Result<()> {
                 println!();
                 println!("{}", skill.content);
             } else {
-                eprintln!("Skill '{}' not found", name);
+                anyhow::bail!("Skill '{}' not found", name);
             }
         }
         SkillsAction::Create { name } => {
             let dir = loader.workspace_dir().join(&name);
             let skill_file = dir.join("SKILL.md");
             if skill_file.exists() {
-                eprintln!("Skill '{}' already exists at {:?}", name, skill_file);
-                return Ok(());
+                anyhow::bail!("Skill '{}' already exists at {:?}", name, skill_file);
             }
 
             std::fs::create_dir_all(&dir)?;

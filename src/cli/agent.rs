@@ -11,18 +11,32 @@ use zeptoclaw::providers::{
     configured_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
 };
 
-use super::common::create_agent;
+use super::common::{create_agent, create_agent_with_template, resolve_template};
 
 /// Interactive or single-message agent mode.
-pub(crate) async fn cmd_agent(message: Option<String>, stream: bool) -> Result<()> {
+pub(crate) async fn cmd_agent(
+    message: Option<String>,
+    template_name: Option<String>,
+    stream: bool,
+) -> Result<()> {
     // Load configuration
     let config = Config::load().with_context(|| "Failed to load configuration")?;
 
     // Create message bus
     let bus = Arc::new(MessageBus::new());
 
+    let template = if let Some(name) = template_name.as_deref() {
+        Some(resolve_template(name)?)
+    } else {
+        None
+    };
+
     // Create agent
-    let agent = create_agent(config.clone(), bus.clone()).await?;
+    let agent = if template.is_some() {
+        create_agent_with_template(config.clone(), bus.clone(), template).await?
+    } else {
+        create_agent(config.clone(), bus.clone()).await?
+    };
 
     // Check whether the runtime can use at least one configured provider.
     if resolve_runtime_provider(&config).is_none() {
