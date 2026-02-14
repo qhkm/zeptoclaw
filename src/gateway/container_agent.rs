@@ -30,6 +30,7 @@ const CONTAINER_SESSIONS_DIR: &str = "/data/.zeptoclaw/sessions";
 const CONTAINER_CONFIG_PATH: &str = "/data/.zeptoclaw/config.json";
 
 /// Path inside the container where the env file is mounted (Apple Container only).
+#[cfg(target_os = "macos")]
 const CONTAINER_ENV_DIR: &str = "/tmp/zeptoclaw-env";
 
 /// Resolved backend after auto-detection.
