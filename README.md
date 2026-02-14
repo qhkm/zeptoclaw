@@ -236,11 +236,18 @@ Defense-in-depth, not defense-in-hope:
 | `zeptoclaw onboard` | Interactive setup |
 | `zeptoclaw agent -m "..."` | Single message |
 | `zeptoclaw agent` | Interactive chat |
+| `zeptoclaw agent --stream` | Stream responses token-by-token |
+| `zeptoclaw agent --template researcher` | Use an agent template |
+| `zeptoclaw batch --input prompts.txt` | Process prompts from file |
 | `zeptoclaw gateway` | Start channel gateway |
 | `zeptoclaw gateway --containerized` | Gateway with container isolation |
+| `zeptoclaw history list` | List conversation history |
+| `zeptoclaw template list` | List agent templates |
 | `zeptoclaw heartbeat` | Trigger heartbeat check |
 | `zeptoclaw skills list` | List available skills |
+| `zeptoclaw config check` | Validate configuration |
 | `zeptoclaw status` | Show config status |
+| `zeptoclaw version` | Show version info |
 
 ## Development
 

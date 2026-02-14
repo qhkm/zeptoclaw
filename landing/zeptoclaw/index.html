@@ -867,7 +867,7 @@
             </div>
             <div class="hero-cta">
                 <a href="#install" class="btn btn-primary">Install ZeptoClaw</a>
-                <a href="#docs" class="btn btn-secondary">Read Docs</a>
+                <a href="https://github.com/qhkm/zeptoclaw#readme" class="btn btn-secondary">Read Docs</a>
             </div>
 
             <div class="terminal">
@@ -1179,17 +1179,23 @@
 
             <div class="install-steps">
                 <div class="install-step">
-                    <h4>1. Build from source</h4>
+                    <h4>1. Install</h4>
                     <div class="install-code">
-                        <span class="prompt">$</span> git clone https://github.com/qhkm/zeptoclaw.git<br>
-                        <span class="prompt">$</span> cd zeptoclaw && cargo build --release
+                        <span class="comment"># One-liner (macOS / Linux)</span><br>
+                        <span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/qhkm/zeptoclaw/main/install.sh | sh<br><br>
+                        <span class="comment"># Homebrew</span><br>
+                        <span class="prompt">$</span> brew install qhkm/tap/zeptoclaw<br><br>
+                        <span class="comment"># Docker</span><br>
+                        <span class="prompt">$</span> docker pull ghcr.io/qhkm/zeptoclaw:latest<br><br>
+                        <span class="comment"># Build from source</span><br>
+                        <span class="prompt">$</span> cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw
                     </div>
                 </div>
 
                 <div class="install-step">
                     <h4>2. Run interactive setup</h4>
                     <div class="install-code">
-                        <span class="prompt">$</span> ./target/release/zeptoclaw onboard<br>
+                        <span class="prompt">$</span> zeptoclaw onboard<br>
                         <span class="comment"># Walks you through provider keys, channels, and workspace config</span>
                     </div>
                 </div>
@@ -1221,9 +1227,9 @@
                 <div class="footer-tagline">Ultra-lightweight AI assistant framework</div>
             </div>
             <div class="footer-links">
-                <a href="#">Documentation</a>
-                <a href="#">GitHub</a>
-                <a href="#">Releases</a>
+                <a href="https://github.com/qhkm/zeptoclaw#readme">Documentation</a>
+                <a href="https://github.com/qhkm/zeptoclaw">GitHub</a>
+                <a href="https://github.com/qhkm/zeptoclaw/releases">Releases</a>
             </div>
         </div>
         <div class="footer-bottom">
