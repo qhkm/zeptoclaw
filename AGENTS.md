@@ -11,6 +11,7 @@ Project-level guidance for coding agents working in this repository.
 - Integration tests: `tests/integration.rs`
 - Codebase: ~43,000+ lines of Rust
 - Channels: 5 (Telegram, Slack, Discord, Webhook, WhatsApp)
+- Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
 - Tests: 1181 lib + 68 integration + ~98 doc = ~1,347 total
 
 ## Post-Implementation Checklist

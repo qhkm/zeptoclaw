@@ -96,7 +96,7 @@ src/
 ├── safety/         # Prompt injection detection, secret leak scanning, policy engine
 ├── security/       # Shell blocklist, path validation, mount policy
 ├── session/        # Session, message persistence, conversation history
-├── skills/         # Markdown-based skill system (loader, types)
+├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry)
 ├── tools/          # Agent tools (17 tools + MCP)
 │   ├── shell.rs       # Shell execution with runtime isolation
@@ -331,6 +331,8 @@ Verified on Apple Silicon (release build):
 2. Add YAML frontmatter (name, description, metadata)
 3. Add markdown instructions for the agent
 4. Or use: `zeptoclaw skills create <name>`
+
+Skills are OpenClaw-compatible — the loader reads `metadata.zeptoclaw`, `metadata.openclaw`, or raw metadata objects (in that priority order). Supported extensions: `os` platform filter, `requires.anyBins` (alias `any_bins`).
 
 ## Dependencies
 
