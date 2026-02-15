@@ -84,7 +84,9 @@ impl Tool for WebSearchTool {
         "Search the web and return result titles, URLs, and snippets."
     }
 
-    fn compact_description(&self) -> &str { "Web search" }
+    fn compact_description(&self) -> &str {
+        "Web search"
+    }
 
     fn parameters(&self) -> Value {
         json!({
@@ -251,7 +253,9 @@ impl Tool for WebFetchTool {
         "Fetch a URL and return extracted readable content."
     }
 
-    fn compact_description(&self) -> &str { "Fetch URL" }
+    fn compact_description(&self) -> &str {
+        "Fetch URL"
+    }
 
     fn parameters(&self) -> Value {
         json!({

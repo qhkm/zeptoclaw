@@ -35,7 +35,9 @@ impl Tool for SpawnTool {
         "Spawn a delegated background task and notify the user when it completes."
     }
 
-    fn compact_description(&self) -> &str { "Background task" }
+    fn compact_description(&self) -> &str {
+        "Background task"
+    }
 
     fn parameters(&self) -> Value {
         json!({

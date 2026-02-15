@@ -215,7 +215,6 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
     diagnostics
 }
 
-
 /// Validate custom tool definitions.
 pub fn validate_custom_tools(config: &crate::config::Config) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -223,10 +222,24 @@ pub fn validate_custom_tools(config: &crate::config::Config) -> Vec<String> {
 
     // Built-in tool names to check for conflicts
     let builtin_names: HashSet<&str> = [
-        "echo", "read_file", "write_file", "list_dir", "edit_file",
-        "shell", "web_search", "web_fetch", "message", "memory_search",
-        "memory_get", "longterm_memory", "whatsapp_send", "google_sheets",
-        "cron", "spawn", "delegate", "r8r",
+        "echo",
+        "read_file",
+        "write_file",
+        "list_dir",
+        "edit_file",
+        "shell",
+        "web_search",
+        "web_fetch",
+        "message",
+        "memory_search",
+        "memory_get",
+        "longterm_memory",
+        "whatsapp_send",
+        "google_sheets",
+        "cron",
+        "spawn",
+        "delegate",
+        "r8r",
     ]
     .iter()
     .copied()
@@ -246,10 +259,7 @@ pub fn validate_custom_tools(config: &crate::config::Config) -> Vec<String> {
             ));
         }
         if tool.command.trim().is_empty() {
-            warnings.push(format!(
-                "custom_tools[{}]: command must not be empty",
-                i
-            ));
+            warnings.push(format!("custom_tools[{}]: command must not be empty", i));
         }
         if tool.description.len() > 60 {
             warnings.push(format!(
@@ -264,8 +274,8 @@ pub fn validate_custom_tools(config: &crate::config::Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::config::{Config, CustomToolDef};
+    use serde_json::json;
 
     #[test]
     fn test_levenshtein_identical() {

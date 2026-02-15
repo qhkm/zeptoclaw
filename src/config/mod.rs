@@ -101,11 +101,7 @@ impl Config {
             self.agents.defaults.compact_tools = val == "true" || val == "1";
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_PROFILE") {
-            self.agents.defaults.tool_profile = if val.is_empty() {
-                None
-            } else {
-                Some(val)
-            };
+            self.agents.defaults.tool_profile = if val.is_empty() { None } else { Some(val) };
         }
 
         // Gateway

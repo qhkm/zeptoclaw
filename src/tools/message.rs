@@ -32,7 +32,9 @@ impl Tool for MessageTool {
         "Send a proactive message to a chat."
     }
 
-    fn compact_description(&self) -> &str { "Send message" }
+    fn compact_description(&self) -> &str {
+        "Send message"
+    }
 
     fn parameters(&self) -> Value {
         json!({

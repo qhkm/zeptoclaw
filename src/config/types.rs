@@ -978,7 +978,6 @@ impl Default for ContainerAgentConfig {
     }
 }
 
-
 /// A tool defined as a shell command in config.
 ///
 /// Custom tools let users expose any shell command as an agent tool

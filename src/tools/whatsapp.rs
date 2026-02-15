@@ -54,7 +54,9 @@ impl Tool for WhatsAppTool {
         "Send a WhatsApp message to a phone number using WhatsApp Cloud API."
     }
 
-    fn compact_description(&self) -> &str { "Send WhatsApp" }
+    fn compact_description(&self) -> &str {
+        "Send WhatsApp"
+    }
 
     fn parameters(&self) -> Value {
         json!({

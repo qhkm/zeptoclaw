@@ -63,7 +63,9 @@ impl Tool for CustomTool {
         &self.def.description
     }
 
-    fn compact_description(&self) -> &str { self.description() }
+    fn compact_description(&self) -> &str {
+        self.description()
+    }
 
     fn parameters(&self) -> Value {
         match &self.def.parameters {
@@ -286,7 +288,10 @@ mod tests {
         def.timeout_secs = Some(0);
         let tool = CustomTool::new(def);
         // timeout_secs of 0 should be clamped to MIN_TIMEOUT_SECS
-        assert_eq!(tool.def.timeout_secs.unwrap_or(30).max(MIN_TIMEOUT_SECS), MIN_TIMEOUT_SECS);
+        assert_eq!(
+            tool.def.timeout_secs.unwrap_or(30).max(MIN_TIMEOUT_SECS),
+            MIN_TIMEOUT_SECS
+        );
     }
 
     // === Async execution tests ===

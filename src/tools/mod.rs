@@ -123,7 +123,9 @@ impl Tool for EchoTool {
         "Echoes back the provided message"
     }
 
-    fn compact_description(&self) -> &str { "Echo message" }
+    fn compact_description(&self) -> &str {
+        "Echo message"
+    }
 
     fn parameters(&self) -> Value {
         serde_json::json!({

@@ -116,7 +116,9 @@ impl Tool for ShellTool {
         "Execute a shell command and return the output"
     }
 
-    fn compact_description(&self) -> &str { "Run shell command" }
+    fn compact_description(&self) -> &str {
+        "Run shell command"
+    }
 
     fn parameters(&self) -> Value {
         json!({

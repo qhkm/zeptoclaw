@@ -99,7 +99,9 @@ impl Tool for DelegateTool {
          Use this to decompose complex tasks into specialist subtasks."
     }
 
-    fn compact_description(&self) -> &str { "Delegate agent" }
+    fn compact_description(&self) -> &str {
+        "Delegate agent"
+    }
 
     fn parameters(&self) -> Value {
         json!({

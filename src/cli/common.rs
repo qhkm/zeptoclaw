@@ -232,24 +232,23 @@ pub(crate) async fn create_agent_with_template(
         .unwrap_or_default();
 
     // Resolve tool profile: config default > template override > all tools
-    let profile_tools: Option<HashSet<String>> = if let Some(ref profile_name) =
-        config.agents.defaults.tool_profile
-    {
-        match config.tool_profiles.get(profile_name) {
-            Some(tools) => tools
-                .as_ref()
-                .map(|names| names.iter().map(|n| n.to_ascii_lowercase()).collect()),
-            None => {
-                warn!(
-                    "Tool profile '{}' not found in tool_profiles config — all tools enabled",
-                    profile_name
-                );
-                None
+    let profile_tools: Option<HashSet<String>> =
+        if let Some(ref profile_name) = config.agents.defaults.tool_profile {
+            match config.tool_profiles.get(profile_name) {
+                Some(tools) => tools
+                    .as_ref()
+                    .map(|names| names.iter().map(|n| n.to_ascii_lowercase()).collect()),
+                None => {
+                    warn!(
+                        "Tool profile '{}' not found in tool_profiles config — all tools enabled",
+                        profile_name
+                    );
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let tool_enabled = |name: &str| {
         let key = name.to_ascii_lowercase();

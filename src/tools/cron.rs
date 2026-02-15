@@ -34,7 +34,9 @@ impl Tool for CronTool {
         "Schedule reminders and recurring tasks. Actions: add, list, remove."
     }
 
-    fn compact_description(&self) -> &str { "Schedule task" }
+    fn compact_description(&self) -> &str {
+        "Schedule task"
+    }
 
     fn parameters(&self) -> Value {
         json!({

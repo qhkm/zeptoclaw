@@ -60,7 +60,9 @@ impl Tool for ReadFileTool {
         "Read the contents of a file at the specified path"
     }
 
-    fn compact_description(&self) -> &str { "Read file" }
+    fn compact_description(&self) -> &str {
+        "Read file"
+    }
 
     fn parameters(&self) -> Value {
         json!({
@@ -122,7 +124,9 @@ impl Tool for WriteFileTool {
         "Write content to a file at the specified path, creating it if necessary"
     }
 
-    fn compact_description(&self) -> &str { "Write file" }
+    fn compact_description(&self) -> &str {
+        "Write file"
+    }
 
     fn parameters(&self) -> Value {
         json!({
@@ -206,7 +210,9 @@ impl Tool for ListDirTool {
         "List the contents of a directory at the specified path"
     }
 
-    fn compact_description(&self) -> &str { "List directory" }
+    fn compact_description(&self) -> &str {
+        "List directory"
+    }
 
     fn parameters(&self) -> Value {
         json!({
@@ -295,7 +301,9 @@ impl Tool for EditFileTool {
         "Edit a file by replacing specified text with new content"
     }
 
-    fn compact_description(&self) -> &str { "Edit file" }
+    fn compact_description(&self) -> &str {
+        "Edit file"
+    }
 
     fn parameters(&self) -> Value {
         json!({
