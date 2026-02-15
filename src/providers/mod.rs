@@ -41,6 +41,8 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "ollama",
 ];
 
+use crate::error::ProviderError;
+
 pub use claude::ClaudeProvider;
 pub use fallback::FallbackProvider;
 pub use openai::OpenAIProvider;
@@ -53,3 +55,92 @@ pub use structured::{validate_json_response, OutputFormat};
 pub use types::{
     ChatOptions, LLMProvider, LLMResponse, LLMToolCall, StreamEvent, ToolDefinition, Usage,
 };
+
+/// Parse an HTTP status code and response body into a structured [`ProviderError`].
+///
+/// This centralizes the mapping from HTTP status codes to error classifications
+/// so that both Claude and OpenAI providers produce consistent typed errors.
+pub fn parse_provider_error(status: u16, body: &str) -> ProviderError {
+    match status {
+        401 => ProviderError::Auth(body.to_string()),
+        402 => ProviderError::Billing(body.to_string()),
+        404 => ProviderError::ModelNotFound(body.to_string()),
+        429 => ProviderError::RateLimit(body.to_string()),
+        400 => ProviderError::InvalidRequest(body.to_string()),
+        500..=599 => ProviderError::ServerError(body.to_string()),
+        _ => ProviderError::Unknown(format!("HTTP {}: {}", status, body)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_provider_error_401() {
+        let err = parse_provider_error(401, "invalid api key");
+        assert!(matches!(err, ProviderError::Auth(_)));
+        assert_eq!(err.status_code(), Some(401));
+    }
+
+    #[test]
+    fn test_parse_provider_error_402() {
+        let err = parse_provider_error(402, "payment required");
+        assert!(matches!(err, ProviderError::Billing(_)));
+        assert_eq!(err.status_code(), Some(402));
+    }
+
+    #[test]
+    fn test_parse_provider_error_404() {
+        let err = parse_provider_error(404, "model not found");
+        assert!(matches!(err, ProviderError::ModelNotFound(_)));
+        assert_eq!(err.status_code(), Some(404));
+    }
+
+    #[test]
+    fn test_parse_provider_error_429() {
+        let err = parse_provider_error(429, "rate limited");
+        assert!(matches!(err, ProviderError::RateLimit(_)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_provider_error_400() {
+        let err = parse_provider_error(400, "bad json");
+        assert!(matches!(err, ProviderError::InvalidRequest(_)));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_provider_error_500() {
+        let err = parse_provider_error(500, "internal server error");
+        assert!(matches!(err, ProviderError::ServerError(_)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_provider_error_502() {
+        let err = parse_provider_error(502, "bad gateway");
+        assert!(matches!(err, ProviderError::ServerError(_)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_provider_error_503() {
+        let err = parse_provider_error(503, "service unavailable");
+        assert!(matches!(err, ProviderError::ServerError(_)));
+    }
+
+    #[test]
+    fn test_parse_provider_error_504() {
+        let err = parse_provider_error(504, "gateway timeout");
+        assert!(matches!(err, ProviderError::ServerError(_)));
+    }
+
+    #[test]
+    fn test_parse_provider_error_unknown() {
+        let err = parse_provider_error(418, "i'm a teapot");
+        assert!(matches!(err, ProviderError::Unknown(_)));
+        assert!(err.to_string().contains("HTTP 418"));
+    }
+}

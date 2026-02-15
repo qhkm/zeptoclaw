@@ -127,36 +127,33 @@ impl RetryProvider {
 
 /// Check whether a [`ZeptoError`] represents a transient failure that should be retried.
 ///
-/// Returns `true` for errors whose message (case-insensitive) contains patterns
-/// indicating rate limiting, server errors, or provider overload. Returns `false`
-/// for client errors (400, 401, 403, 404) and other non-transient failures.
+/// For structured [`ProviderError`](crate::error::ProviderError) errors, delegates
+/// to [`ProviderError::is_retryable`]. For legacy `Provider(String)` errors, falls
+/// back to substring matching against known retryable patterns.
 pub fn is_retryable(err: &ZeptoError) -> bool {
-    let msg = err.to_string().to_lowercase();
+    match err {
+        ZeptoError::ProviderTyped(pe) => pe.is_retryable(),
+        _ => {
+            // Fallback: keep old string matching for backward compatibility
+            let msg = err.to_string().to_lowercase();
 
-    // Explicitly exclude non-retryable client errors
-    let non_retryable = ["400", "401", "403", "404"];
-    for pattern in &non_retryable {
-        if msg.contains(pattern) {
-            // Check for false positives: "400" should not match "5400" etc.
-            // But "500" in "HTTP 500" is fine. For status codes embedded in
-            // error messages, a simple substring match is sufficient since
-            // providers format them as "HTTP 429" or "status: 500".
-            //
-            // However, a 5xx code like "500" could also appear alongside "400"
-            // in a message. We handle this by checking retryable patterns
-            // only after confirming no non-retryable pattern is the primary code.
-            // In practice, provider errors contain a single status code.
-            return false;
+            // Explicitly exclude non-retryable client errors
+            let non_retryable = ["400", "401", "403", "404"];
+            for pattern in &non_retryable {
+                if msg.contains(pattern) {
+                    return false;
+                }
+            }
+
+            for pattern in RETRYABLE_PATTERNS {
+                if msg.contains(pattern) {
+                    return true;
+                }
+            }
+
+            false
         }
     }
-
-    for pattern in RETRYABLE_PATTERNS {
-        if msg.contains(pattern) {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// Compute and sleep for the backoff delay for a given retry attempt.
@@ -655,5 +652,127 @@ mod tests {
         // Should fail after exhausting retries
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("429"));
+    }
+
+    // ====================================================================
+    // ProviderTyped error tests
+    // ====================================================================
+
+    #[test]
+    fn test_is_retryable_typed_rate_limit() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::RateLimit("quota exceeded".into()));
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_retryable_typed_server_error() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::ServerError("internal error".into()));
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_retryable_typed_timeout() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::Timeout("connection timed out".into()));
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_not_retryable_typed_auth() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::Auth("invalid api key".into()));
+        assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_not_retryable_typed_billing() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::Billing("payment required".into()));
+        assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_not_retryable_typed_invalid_request() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::InvalidRequest("bad json".into()));
+        assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_not_retryable_typed_model_not_found() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::ModelNotFound("gpt-99".into()));
+        assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_not_retryable_typed_unknown() {
+        use crate::error::ProviderError;
+        let err = ZeptoError::ProviderTyped(ProviderError::Unknown("something".into()));
+        assert!(!is_retryable(&err));
+    }
+
+    /// A mock provider that fails with ProviderTyped errors before succeeding.
+    struct TypedFailThenSucceedProvider {
+        fail_count: std::sync::atomic::AtomicU32,
+        target_failures: u32,
+    }
+
+    impl TypedFailThenSucceedProvider {
+        fn new(target_failures: u32) -> Self {
+            Self {
+                fail_count: std::sync::atomic::AtomicU32::new(0),
+                target_failures,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for TypedFailThenSucceedProvider {
+        fn name(&self) -> &str {
+            "typed-fail-then-succeed"
+        }
+
+        fn default_model(&self) -> &str {
+            "test-model"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            use crate::error::ProviderError;
+            let count = self
+                .fail_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < self.target_failures {
+                Err(ZeptoError::ProviderTyped(ProviderError::RateLimit(
+                    "quota exceeded".into(),
+                )))
+            } else {
+                Ok(LLMResponse::text("recovered"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_provider_retries_typed_rate_limit() {
+        let inner = TypedFailThenSucceedProvider::new(2);
+        let provider = RetryProvider::new(Box::new(inner))
+            .with_max_retries(3)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(10);
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "recovered");
     }
 }

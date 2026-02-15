@@ -34,7 +34,7 @@ pub use channels::{
 };
 pub use config::Config;
 pub use cron::{CronJob, CronPayload, CronSchedule, CronService};
-pub use error::{Result, ZeptoError};
+pub use error::{ProviderError, Result, ZeptoError};
 pub use heartbeat::{ensure_heartbeat_file, HeartbeatService, HEARTBEAT_PROMPT};
 pub use providers::{
     ChatOptions, ClaudeProvider, LLMProvider, LLMResponse, LLMToolCall, OpenAIProvider,

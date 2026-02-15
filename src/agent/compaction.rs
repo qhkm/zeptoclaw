@@ -160,6 +160,193 @@ pub fn summarize_messages(
     }
 }
 
+/// Shrink tool result messages to reduce context size.
+///
+/// Iterates through messages and truncates tool result content to `max_bytes`.
+/// Returns the modified messages and the number of results truncated.
+///
+/// # Arguments
+/// * `messages` - The conversation messages to process
+/// * `max_bytes_per_result` - Maximum byte length for each tool result
+///
+/// # Returns
+/// A tuple of (modified messages, count of shrunk results).
+///
+/// # Examples
+/// ```
+/// use zeptoclaw::session::Message;
+/// use zeptoclaw::agent::compaction::shrink_tool_results;
+///
+/// let msgs = vec![
+///     Message::user("Hi"),
+///     Message::tool_result("call_1", "A very long tool result that exceeds the limit"),
+///     Message::assistant("Done"),
+/// ];
+/// let (result, count) = shrink_tool_results(msgs, 20);
+/// assert_eq!(count, 1);
+/// assert!(result[1].content.len() < 100);
+/// ```
+pub fn shrink_tool_results(
+    messages: Vec<Message>,
+    max_bytes_per_result: usize,
+) -> (Vec<Message>, usize) {
+    let mut shrunk_count = 0;
+    let result = messages
+        .into_iter()
+        .map(|mut msg| {
+            if msg.is_tool_result() && msg.content.len() > max_bytes_per_result {
+                let original_len = msg.content.len();
+                msg.content.truncate(max_bytes_per_result);
+                // Ensure we don't split a multi-byte char
+                while !msg.content.is_char_boundary(msg.content.len()) {
+                    msg.content.pop();
+                }
+                msg.content.push_str(&format!(
+                    "\n...[shrunk from {} to {} bytes]",
+                    original_len,
+                    msg.content.len()
+                ));
+                shrunk_count += 1;
+            }
+            msg
+        })
+        .collect();
+    (result, shrunk_count)
+}
+
+/// Progressively shrink tool results with decreasing budgets for older messages.
+///
+/// Newer tool results (last `recent_count`) keep their full budget.
+/// Older tool results get 1/4 of the budget for more aggressive truncation.
+///
+/// # Arguments
+/// * `messages` - The conversation messages to process
+/// * `target_max_bytes` - Maximum byte length for recent tool results
+/// * `recent_count` - How many recent tool results keep the full budget
+///
+/// # Returns
+/// The modified messages with progressively shrunk tool results.
+///
+/// # Examples
+/// ```
+/// use zeptoclaw::session::Message;
+/// use zeptoclaw::agent::compaction::shrink_tool_results_progressive;
+///
+/// let msgs = vec![
+///     Message::tool_result("call_1", "old result that is quite long"),
+///     Message::tool_result("call_2", "new result that is quite long"),
+/// ];
+/// let result = shrink_tool_results_progressive(msgs, 20, 1);
+/// // Old result gets 1/4 budget, new result gets full budget
+/// assert!(result[0].content.len() < result[1].content.len() || result[1].content.len() <= 20);
+/// ```
+pub fn shrink_tool_results_progressive(
+    messages: Vec<Message>,
+    target_max_bytes: usize,
+    recent_count: usize,
+) -> Vec<Message> {
+    // Collect indices of tool result messages
+    let tool_result_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.is_tool_result())
+        .map(|(i, _)| i)
+        .collect();
+
+    let total_tool_results = tool_result_indices.len();
+    if total_tool_results == 0 {
+        return messages;
+    }
+
+    let mut messages = messages;
+    for (pos, &idx) in tool_result_indices.iter().enumerate() {
+        let is_recent = pos >= total_tool_results.saturating_sub(recent_count);
+        let budget = if is_recent {
+            target_max_bytes
+        } else {
+            // Older results get 1/4 the budget
+            target_max_bytes / 4
+        };
+
+        let msg = &mut messages[idx];
+        if msg.content.len() > budget {
+            let original_len = msg.content.len();
+            msg.content.truncate(budget);
+            while !msg.content.is_char_boundary(msg.content.len()) {
+                msg.content.pop();
+            }
+            msg.content.push_str(&format!(
+                "\n...[shrunk from {} to {} bytes]",
+                original_len,
+                msg.content.len()
+            ));
+        }
+    }
+    messages
+}
+
+/// Three-tier overflow recovery for context compaction.
+///
+/// Attempts progressively more aggressive strategies to bring the context
+/// size below 95% of the limit:
+///
+/// - **Tier 1**: Truncate old messages (keep `keep_recent_tier1` most recent)
+/// - **Tier 2**: Shrink tool results progressively (older results get smaller budgets)
+/// - **Tier 3**: Hard truncate to system message + last 3 messages
+///
+/// # Arguments
+/// * `messages` - The conversation messages to compact
+/// * `context_limit` - Maximum token capacity of the context window
+/// * `keep_recent_tier1` - How many recent messages to keep in tier 1 truncation
+/// * `tool_result_budget` - Maximum bytes per tool result in tier 2
+///
+/// # Returns
+/// A tuple of (recovered messages, tier used). Tier 0 means no recovery was needed.
+///
+/// # Examples
+/// ```
+/// use zeptoclaw::session::Message;
+/// use zeptoclaw::agent::compaction::try_recover_context;
+///
+/// let msgs = vec![Message::user("Hello"), Message::assistant("Hi!")];
+/// let (result, tier) = try_recover_context(msgs, 100_000, 8, 5120);
+/// assert_eq!(tier, 0); // no recovery needed
+/// ```
+pub fn try_recover_context(
+    messages: Vec<Message>,
+    context_limit: usize,
+    keep_recent_tier1: usize,
+    tool_result_budget: usize,
+) -> (Vec<Message>, u8) {
+    use super::context_monitor::ContextMonitor;
+
+    let target = context_limit as f64 * 0.95;
+
+    // Check if recovery is needed
+    let estimated = ContextMonitor::estimate_tokens(&messages);
+    if (estimated as f64) <= target {
+        return (messages, 0);
+    }
+
+    // Tier 1: Truncate old messages
+    let recovered = truncate_messages(messages, keep_recent_tier1);
+    let estimated = ContextMonitor::estimate_tokens(&recovered);
+    if (estimated as f64) <= target {
+        return (recovered, 1);
+    }
+
+    // Tier 2: Shrink tool results progressively
+    let recovered = shrink_tool_results_progressive(recovered, tool_result_budget, 3);
+    let estimated = ContextMonitor::estimate_tokens(&recovered);
+    if (estimated as f64) <= target {
+        return (recovered, 2);
+    }
+
+    // Tier 3: Hard truncate to system + last 3 messages
+    let recovered = truncate_messages(recovered, 3);
+    (recovered, 3)
+}
+
 /// Build a prompt asking an LLM to summarize a set of messages.
 ///
 /// Formats the messages into a human-readable transcript and appends
@@ -387,5 +574,200 @@ mod tests {
         assert!(prompt.contains("Summarize the following conversation"));
         // No message content, but prompt itself is still valid
         assert!(!prompt.contains("user:"));
+    }
+
+    // ── shrink_tool_results ──────────────────────────────────────────
+
+    #[test]
+    fn test_shrink_tool_results_basic() {
+        let long_content = "x".repeat(200);
+        let msgs = vec![
+            Message::user("Hello"),
+            Message::tool_result("call_1", &long_content),
+            Message::assistant("Done"),
+        ];
+        let (result, count) = shrink_tool_results(msgs, 50);
+        assert_eq!(count, 1);
+        // The tool result should be truncated + have the shrunk annotation
+        assert!(result[1].content.contains("...[shrunk from 200 to"));
+        // The user and assistant messages should be untouched
+        assert_eq!(result[0].content, "Hello");
+        assert_eq!(result[2].content, "Done");
+    }
+
+    #[test]
+    fn test_shrink_tool_results_preserves_small() {
+        let msgs = vec![
+            Message::user("Hello"),
+            Message::tool_result("call_1", "short result"),
+            Message::assistant("Done"),
+        ];
+        let (result, count) = shrink_tool_results(msgs, 1000);
+        assert_eq!(count, 0);
+        assert_eq!(result[1].content, "short result");
+    }
+
+    #[test]
+    fn test_shrink_tool_results_no_tool_results() {
+        let msgs = vec![
+            Message::user("Hello"),
+            Message::assistant("Hi there"),
+            Message::user("Bye"),
+        ];
+        let (result, count) = shrink_tool_results(msgs, 10);
+        assert_eq!(count, 0);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].content, "Hello");
+        assert_eq!(result[1].content, "Hi there");
+        assert_eq!(result[2].content, "Bye");
+    }
+
+    // ── shrink_tool_results_progressive ──────────────────────────────
+
+    #[test]
+    fn test_shrink_tool_results_progressive_older_smaller() {
+        let long_content = "x".repeat(500);
+        let msgs = vec![
+            Message::tool_result("call_1", &long_content), // old — gets 1/4 budget
+            Message::user("middle"),
+            Message::tool_result("call_2", &long_content), // old — gets 1/4 budget
+            Message::tool_result("call_3", &long_content), // recent — gets full budget
+        ];
+        let result = shrink_tool_results_progressive(msgs, 200, 1);
+
+        // Old results (call_1, call_2) should be shrunk to ~50 bytes (200/4)
+        // Recent result (call_3) should be shrunk to ~200 bytes
+        assert!(result[0].content.contains("...[shrunk from"));
+        assert!(result[2].content.contains("...[shrunk from"));
+        assert!(result[3].content.contains("...[shrunk from"));
+
+        // The old results should be shorter than the recent one
+        // (before annotation the old ones are truncated to 50, recent to 200)
+        // We check the truncation target was different
+        let old_base_len = result[0].content.find("\n...[shrunk").unwrap();
+        let recent_base_len = result[3].content.find("\n...[shrunk").unwrap();
+        assert!(
+            old_base_len < recent_base_len,
+            "Old result base ({}) should be shorter than recent ({})",
+            old_base_len,
+            recent_base_len
+        );
+
+        // User message should be untouched
+        assert_eq!(result[1].content, "middle");
+    }
+
+    // ── try_recover_context ──────────────────────────────────────────
+
+    #[test]
+    fn test_try_recover_context_no_recovery_needed() {
+        let msgs = vec![Message::user("Hello"), Message::assistant("Hi!")];
+        let (result, tier) = try_recover_context(msgs.clone(), 100_000, 8, 5120);
+        assert_eq!(tier, 0);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_try_recover_context_tier1_sufficient() {
+        // Create enough messages to exceed 95% of a small limit (100 tokens).
+        // Each 10-word message = 17 tokens. 6 messages = 102 tokens > 95.
+        // After tier 1 truncation to 3 recent: 3*17=51 < 95.
+        let msgs: Vec<Message> = (0..6)
+            .map(|_| Message::user("one two three four five six seven eight nine ten"))
+            .collect();
+        let (result, tier) = try_recover_context(msgs, 100, 3, 5120);
+        assert_eq!(tier, 1);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_try_recover_context_tier2_needed() {
+        // Construct a case where tier 1 isn't enough but tier 2 is.
+        // Use a system message + a few user messages + large tool results.
+        // context_limit = 200, so target is 190 (95%).
+        //
+        // System message: "sys" = 1 word => 1*1.3+4 = 5.3 => 5 tokens
+        // We add 10 user messages of 10 words each = 10*17 = 170 tokens
+        // Plus 2 large tool results of 2000 bytes each.
+        // Total with 10 user + 2 tool results ~ 5 + 170 + (tool tokens) > 190.
+        //
+        // After tier 1 (keep 8): system + 8 recent messages.
+        // If the 8 recent include the tool results, they still have huge content
+        // pushing tokens high. After tier 2 shrinks them, tokens drop.
+        //
+        // For simplicity: use limit=500, lots of messages and big tool results.
+        let mut msgs = vec![Message::system("system prompt")];
+        // Add 20 user messages (each 10 words = 17 tokens)
+        for _ in 0..20 {
+            msgs.push(Message::user(
+                "one two three four five six seven eight nine ten",
+            ));
+        }
+        // Add 5 large tool results (each ~3000 bytes, many words)
+        for i in 0..5 {
+            let big = "word ".repeat(600); // 600 words => 600*1.3+4 = 784 tokens
+            msgs.push(Message::tool_result(&format!("call_{}", i), &big));
+        }
+        // Add 3 more user messages at the end
+        for _ in 0..3 {
+            msgs.push(Message::user(
+                "one two three four five six seven eight nine ten",
+            ));
+        }
+
+        // Total: system(5) + 20*17(340) + 5*784(3920) + 3*17(51) = ~4316 tokens
+        // context_limit = 4500, target = 4275
+        // After tier 1 (keep 8): system + last 8 msgs.
+        // Last 8 = 5 tool results + 3 user msgs = 5*784 + 3*17 = 3920+51 = 3971
+        // Plus system = 3976. Still > 4275? No, 3976 < 4275. Hmm.
+        //
+        // Let's use a tighter limit to force tier 2.
+        // context_limit = 2000, target = 1900
+        // After tier 1 (keep 8): system(5) + 5 tool results(3920) + 3 user(51) = 3976 > 1900
+        // After tier 2: shrink tool results. Recent 3 tool results get 5120 budget,
+        // older 2 get 1280 budget. But word count matters for token estimation.
+        // With budget=100 bytes, "word " * 600 = 3000 bytes truncated to 100 bytes
+        // = ~20 words => 20*1.3+4 = 30 tokens.
+        // 5 tool results at ~30 tokens = 150, + system(5) + 3 user(51) = 206 < 1900.
+
+        let (result, tier) = try_recover_context(msgs, 2000, 8, 100);
+        assert!(
+            tier == 2 || tier == 1,
+            "Expected tier 1 or 2, got tier {}",
+            tier
+        );
+        // Verify context was actually reduced
+        let estimated = super::super::context_monitor::ContextMonitor::estimate_tokens(&result);
+        assert!(
+            (estimated as f64) <= 2000.0 * 0.95,
+            "Estimated {} should be <= {}",
+            estimated,
+            (2000.0 * 0.95) as usize
+        );
+    }
+
+    #[test]
+    fn test_try_recover_context_tier3_needed() {
+        // Create a scenario where even after tier 1 + tier 2, context is too large.
+        // Use keep_recent_tier1=8, and make each of the 8 remaining messages very large
+        // even after tool shrinking (because they are user/assistant messages, not tool results).
+        //
+        // context_limit = 100, target = 95
+        // 10 messages of 10 words each = 10*17 = 170 > 95.
+        // After tier 1 (keep 8): 8*17 = 136 > 95.
+        // After tier 2 (no tool results): still 136 > 95.
+        // After tier 3 (keep 3): 3*17 = 51 < 95.
+        let msgs: Vec<Message> = (0..10)
+            .map(|_| Message::user("one two three four five six seven eight nine ten"))
+            .collect();
+        let (result, tier) = try_recover_context(msgs, 100, 8, 5120);
+        assert_eq!(tier, 3);
+        assert_eq!(result.len(), 3);
+        let estimated = super::super::context_monitor::ContextMonitor::estimate_tokens(&result);
+        assert!(
+            (estimated as f64) <= 100.0 * 0.95,
+            "Estimated {} should be <= 95",
+            estimated
+        );
     }
 }

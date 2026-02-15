@@ -36,7 +36,7 @@ use tracing::{debug, info};
 use crate::error::{Result, ZeptoError};
 use crate::session::{Message, Role};
 
-use super::{ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage};
+use super::{parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage};
 
 /// The OpenAI API endpoint URL.
 const OPENAI_API_URL: &str = "https://api.openai.com/v1";
@@ -642,17 +642,21 @@ impl LLMProvider for OpenAIProvider {
                 continue;
             }
 
-            // Try to parse as OpenAI error response
-            if let Ok(error_response) = serde_json::from_str::<OpenAIErrorResponse>(&error_text) {
-                return Err(ZeptoError::Provider(format!(
-                    "OpenAI API error ({}): {} - {}",
-                    status, error_response.error.r#type, error_response.error.message
-                )));
-            }
+            // Build a human-readable body for the typed error
+            let body = if let Ok(error_response) =
+                serde_json::from_str::<OpenAIErrorResponse>(&error_text)
+            {
+                format!(
+                    "OpenAI API error: {} - {}",
+                    error_response.error.r#type, error_response.error.message
+                )
+            } else {
+                format!("OpenAI API error: {}", error_text)
+            };
 
-            return Err(ZeptoError::Provider(format!(
-                "OpenAI API error ({}): {}",
-                status, error_text
+            return Err(ZeptoError::from(parse_provider_error(
+                status.as_u16(),
+                &body,
             )));
         }
     }
@@ -801,16 +805,20 @@ impl LLMProvider for OpenAIProvider {
                 continue;
             }
 
-            if let Ok(error_response) = serde_json::from_str::<OpenAIErrorResponse>(&error_text) {
-                return Err(ZeptoError::Provider(format!(
-                    "OpenAI API error ({}): {} - {}",
-                    status, error_response.error.r#type, error_response.error.message
-                )));
-            }
+            let body = if let Ok(error_response) =
+                serde_json::from_str::<OpenAIErrorResponse>(&error_text)
+            {
+                format!(
+                    "OpenAI API error: {} - {}",
+                    error_response.error.r#type, error_response.error.message
+                )
+            } else {
+                format!("OpenAI API error: {}", error_text)
+            };
 
-            return Err(ZeptoError::Provider(format!(
-                "OpenAI API error ({}): {}",
-                status, error_text
+            return Err(ZeptoError::from(parse_provider_error(
+                status.as_u16(),
+                &body,
             )));
         }
     }

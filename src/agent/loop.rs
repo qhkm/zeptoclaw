@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, Instrument};
 
-use crate::agent::compaction::truncate_messages;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::config::Config;
@@ -320,25 +319,23 @@ impl AgentLoop {
         // Get or create session
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
 
-        // Apply context compaction if needed
+        // Apply three-tier context overflow recovery if needed
         if let Some(ref monitor) = self.context_monitor {
             if monitor.needs_compaction(&session.messages) {
-                let strategy = monitor.suggest_strategy(&session.messages);
-                match strategy {
-                    super::context_monitor::CompactionStrategy::Truncate { keep_recent } => {
-                        debug!(keep_recent, "Compacting context via truncation");
-                        session.messages = truncate_messages(session.messages, keep_recent);
-                    }
-                    super::context_monitor::CompactionStrategy::Summarize { keep_recent } => {
-                        // For now, fall back to truncation (summarize requires LLM call)
-                        debug!(
-                            keep_recent,
-                            "Compacting context via truncation (summarize fallback)"
-                        );
-                        session.messages = truncate_messages(session.messages, keep_recent);
-                    }
-                    super::context_monitor::CompactionStrategy::None => {}
+                let context_limit = self.config.compaction.context_limit;
+                let (recovered, tier) = crate::agent::compaction::try_recover_context(
+                    session.messages,
+                    context_limit,
+                    8,    // keep_recent for tier 1
+                    5120, // 5KB tool result budget for tier 2
+                );
+                if tier > 0 {
+                    debug!(
+                        tier = tier,
+                        "Context recovered via tier {} compaction", tier
+                    );
                 }
+                session.messages = recovered;
             }
         }
 
@@ -424,6 +421,16 @@ impl AgentLoop {
                 crate::hooks::HookEngine::new(self.config.hooks.clone())
                     .with_bus(Arc::clone(&self.bus)),
             );
+
+            // Compute dynamic tool result budget based on remaining context space
+            let current_tokens = ContextMonitor::estimate_tokens(&session.messages);
+            let context_limit = self.config.compaction.context_limit;
+            let result_budget = crate::utils::sanitize::compute_tool_result_budget(
+                context_limit,
+                current_tokens,
+                response.tool_calls.len(),
+            );
+
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -438,6 +445,7 @@ impl AgentLoop {
                     let gate = Arc::clone(&approval_gate);
                     let hooks = Arc::clone(&hook_engine);
                     let safety = safety_layer.clone();
+                    let budget = result_budget;
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -489,10 +497,10 @@ impl AgentLoop {
                         };
                         metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
 
-                        // Sanitize the result before feeding back to LLM
+                        // Sanitize the result with dynamic budget
                         let sanitized = crate::utils::sanitize::sanitize_tool_result(
                             &result,
-                            crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES,
+                            budget,
                         );
 
                         // Apply safety layer if enabled
@@ -604,24 +612,23 @@ impl AgentLoop {
 
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
 
-        // Apply context compaction if needed
+        // Apply three-tier context overflow recovery if needed (streaming)
         if let Some(ref monitor) = self.context_monitor {
             if monitor.needs_compaction(&session.messages) {
-                let strategy = monitor.suggest_strategy(&session.messages);
-                match strategy {
-                    super::context_monitor::CompactionStrategy::Truncate { keep_recent } => {
-                        debug!(keep_recent, "Compacting context via truncation (streaming)");
-                        session.messages = truncate_messages(session.messages, keep_recent);
-                    }
-                    super::context_monitor::CompactionStrategy::Summarize { keep_recent } => {
-                        debug!(
-                            keep_recent,
-                            "Compacting context via truncation (summarize fallback, streaming)"
-                        );
-                        session.messages = truncate_messages(session.messages, keep_recent);
-                    }
-                    super::context_monitor::CompactionStrategy::None => {}
+                let context_limit = self.config.compaction.context_limit;
+                let (recovered, tier) = crate::agent::compaction::try_recover_context(
+                    session.messages,
+                    context_limit,
+                    8,    // keep_recent for tier 1
+                    5120, // 5KB tool result budget for tier 2
+                );
+                if tier > 0 {
+                    debug!(
+                        tier = tier,
+                        "Context recovered via tier {} compaction (streaming)", tier
+                    );
                 }
+                session.messages = recovered;
             }
         }
 
@@ -687,6 +694,16 @@ impl AgentLoop {
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer_stream = self.safety_layer.clone();
+
+            // Compute dynamic tool result budget based on remaining context space
+            let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
+            let context_limit_stream = self.config.compaction.context_limit;
+            let result_budget_stream = crate::utils::sanitize::compute_tool_result_budget(
+                context_limit_stream,
+                current_tokens_stream,
+                response.tool_calls.len(),
+            );
+
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -699,6 +716,7 @@ impl AgentLoop {
                     let metrics_collector = Arc::clone(&metrics_collector);
                     let gate = Arc::clone(&approval_gate);
                     let safety = safety_layer_stream.clone();
+                    let budget = result_budget_stream;
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
@@ -726,10 +744,8 @@ impl AgentLoop {
                             }
                         };
                         metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
-                        let sanitized = crate::utils::sanitize::sanitize_tool_result(
-                            &result,
-                            crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES,
-                        );
+                        let sanitized =
+                            crate::utils::sanitize::sanitize_tool_result(&result, budget);
 
                         // Apply safety layer if enabled
                         let sanitized = if let Some(ref safety) = safety {

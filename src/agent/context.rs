@@ -1,7 +1,8 @@
 //! Context builder for agent conversations
 //!
 //! This module provides the `ContextBuilder` for constructing the system prompt
-//! and message history for LLM conversations.
+//! and message history for LLM conversations. It also provides `RuntimeContext`
+//! for injecting environment-awareness into the agent's system prompt.
 
 use crate::session::Message;
 
@@ -11,6 +12,160 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are ZeptoClaw, an ultra-lightweight p
 You have access to tools to help accomplish tasks. Use them when needed.
 
 Be concise but helpful. Focus on completing the user's request efficiently."#;
+
+/// Runtime context injected into the system prompt to make agents environment-aware.
+///
+/// This struct captures information about the agent's runtime environment such as
+/// the channel it is running on, available tools, current time, workspace path,
+/// and OS/platform details. When rendered, it produces a `## Runtime Context`
+/// section appended to the system prompt.
+///
+/// # Example
+///
+/// ```rust
+/// use zeptoclaw::agent::RuntimeContext;
+///
+/// let ctx = RuntimeContext::new()
+///     .with_channel("telegram")
+///     .with_tools(vec!["shell".to_string(), "web_search".to_string()])
+///     .with_workspace("/home/user/project")
+///     .with_os_info();
+///
+/// let rendered = ctx.render().unwrap();
+/// assert!(rendered.contains("Channel: telegram"));
+/// assert!(rendered.contains("shell, web_search"));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeContext {
+    /// The channel the agent is running on (e.g., "telegram", "cli", "whatsapp", "discord")
+    pub channel: Option<String>,
+    /// Names of available tools
+    pub available_tools: Vec<String>,
+    /// Current timestamp (ISO 8601)
+    pub current_time: Option<String>,
+    /// Workspace path
+    pub workspace: Option<String>,
+    /// OS/platform info (e.g., "linux aarch64", "macos aarch64")
+    pub os_info: Option<String>,
+}
+
+impl RuntimeContext {
+    /// Create a new empty runtime context.
+    ///
+    /// # Example
+    /// ```rust
+    /// use zeptoclaw::agent::RuntimeContext;
+    ///
+    /// let ctx = RuntimeContext::new();
+    /// assert!(ctx.is_empty());
+    /// ```
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the channel name.
+    ///
+    /// # Arguments
+    /// * `channel` - The channel identifier (e.g., "telegram", "cli", "discord")
+    pub fn with_channel(mut self, channel: &str) -> Self {
+        self.channel = Some(channel.to_string());
+        self
+    }
+
+    /// Set the list of available tool names.
+    ///
+    /// # Arguments
+    /// * `tools` - Vector of tool name strings
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools;
+        self
+    }
+
+    /// Set the current time to now (UTC, ISO 8601 / RFC 3339).
+    pub fn with_current_time(mut self) -> Self {
+        self.current_time = Some(chrono::Utc::now().to_rfc3339());
+        self
+    }
+
+    /// Set the workspace path.
+    ///
+    /// # Arguments
+    /// * `workspace` - The workspace directory path
+    pub fn with_workspace(mut self, workspace: &str) -> Self {
+        self.workspace = Some(workspace.to_string());
+        self
+    }
+
+    /// Set the OS/platform info from the current environment.
+    pub fn with_os_info(mut self) -> Self {
+        self.os_info = Some(format!(
+            "{} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+        self
+    }
+
+    /// Check if any context field is set.
+    ///
+    /// Returns `true` if no fields have been populated.
+    ///
+    /// # Example
+    /// ```rust
+    /// use zeptoclaw::agent::RuntimeContext;
+    ///
+    /// assert!(RuntimeContext::new().is_empty());
+    /// assert!(!RuntimeContext::new().with_channel("cli").is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.channel.is_none()
+            && self.available_tools.is_empty()
+            && self.current_time.is_none()
+            && self.workspace.is_none()
+            && self.os_info.is_none()
+    }
+
+    /// Render the context as a markdown section for the system prompt.
+    ///
+    /// Returns `None` if no context fields are set.
+    ///
+    /// # Example
+    /// ```rust
+    /// use zeptoclaw::agent::RuntimeContext;
+    ///
+    /// let ctx = RuntimeContext::new().with_channel("cli");
+    /// let rendered = ctx.render().unwrap();
+    /// assert!(rendered.starts_with("## Runtime Context"));
+    /// assert!(rendered.contains("Channel: cli"));
+    /// ```
+    pub fn render(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        if let Some(ref channel) = self.channel {
+            parts.push(format!("- Channel: {}", channel));
+        }
+        if !self.available_tools.is_empty() {
+            parts.push(format!(
+                "- Available tools: {}",
+                self.available_tools.join(", ")
+            ));
+        }
+        if let Some(ref time) = self.current_time {
+            parts.push(format!("- Current time: {}", time));
+        }
+        if let Some(ref workspace) = self.workspace {
+            parts.push(format!("- Workspace: {}", workspace));
+        }
+        if let Some(ref os) = self.os_info {
+            parts.push(format!("- Platform: {}", os));
+        }
+
+        Some(format!("## Runtime Context\n\n{}", parts.join("\n")))
+    }
+}
 
 /// Builder for constructing conversation context for LLM calls.
 ///
@@ -34,6 +189,8 @@ pub struct ContextBuilder {
     system_prompt: String,
     /// Optional skills content to append to system prompt
     skills_prompt: Option<String>,
+    /// Optional runtime context to append to system prompt
+    runtime_context: Option<RuntimeContext>,
 }
 
 impl ContextBuilder {
@@ -51,6 +208,7 @@ impl ContextBuilder {
         Self {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             skills_prompt: None,
+            runtime_context: None,
         }
     }
 
@@ -96,6 +254,36 @@ impl ContextBuilder {
         self
     }
 
+    /// Add runtime context to the system prompt.
+    ///
+    /// Runtime context provides the agent with awareness of its environment
+    /// including the channel, available tools, current time, workspace, and
+    /// platform information.
+    ///
+    /// If the provided context is empty (no fields set), it is ignored.
+    ///
+    /// # Arguments
+    /// * `ctx` - The runtime context to inject
+    ///
+    /// # Example
+    /// ```rust
+    /// use zeptoclaw::agent::{ContextBuilder, RuntimeContext};
+    ///
+    /// let ctx = RuntimeContext::new()
+    ///     .with_channel("discord")
+    ///     .with_os_info();
+    /// let builder = ContextBuilder::new().with_runtime_context(ctx);
+    /// let system = builder.build_system_message();
+    /// assert!(system.content.contains("Runtime Context"));
+    /// assert!(system.content.contains("discord"));
+    /// ```
+    pub fn with_runtime_context(mut self, ctx: RuntimeContext) -> Self {
+        if !ctx.is_empty() {
+            self.runtime_context = Some(ctx);
+        }
+        self
+    }
+
     /// Build the system message with all configured content.
     ///
     /// # Returns
@@ -115,6 +303,12 @@ impl ContextBuilder {
         if let Some(ref skills) = self.skills_prompt {
             content.push_str("\n\n## Available Skills\n\n");
             content.push_str(skills);
+        }
+        if let Some(ref ctx) = self.runtime_context {
+            if let Some(rendered) = ctx.render() {
+                content.push_str("\n\n");
+                content.push_str(&rendered);
+            }
         }
         Message::system(&content)
     }
@@ -304,5 +498,174 @@ mod tests {
         assert_eq!(messages.len(), 6);
         assert!(messages[2].has_tool_calls());
         assert!(messages[3].is_tool_result());
+    }
+
+    // ---- RuntimeContext tests ----
+
+    #[test]
+    fn test_runtime_context_empty() {
+        let ctx = RuntimeContext::new();
+        assert!(ctx.is_empty());
+        assert!(ctx.render().is_none());
+    }
+
+    #[test]
+    fn test_runtime_context_default() {
+        let ctx = RuntimeContext::default();
+        assert!(ctx.is_empty());
+        assert!(ctx.channel.is_none());
+        assert!(ctx.available_tools.is_empty());
+        assert!(ctx.current_time.is_none());
+        assert!(ctx.workspace.is_none());
+        assert!(ctx.os_info.is_none());
+    }
+
+    #[test]
+    fn test_runtime_context_with_channel() {
+        let ctx = RuntimeContext::new().with_channel("telegram");
+        assert!(!ctx.is_empty());
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Channel: telegram"));
+    }
+
+    #[test]
+    fn test_runtime_context_with_tools() {
+        let ctx =
+            RuntimeContext::new().with_tools(vec!["shell".to_string(), "web_search".to_string()]);
+        assert!(!ctx.is_empty());
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("shell, web_search"));
+    }
+
+    #[test]
+    fn test_runtime_context_with_empty_tools() {
+        let ctx = RuntimeContext::new().with_tools(vec![]);
+        assert!(ctx.is_empty());
+        assert!(ctx.render().is_none());
+    }
+
+    #[test]
+    fn test_runtime_context_with_current_time() {
+        let ctx = RuntimeContext::new().with_current_time();
+        assert!(!ctx.is_empty());
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Current time:"));
+        // Should contain a valid RFC 3339 timestamp-like string
+        assert!(rendered.contains("20"));
+    }
+
+    #[test]
+    fn test_runtime_context_with_os_info() {
+        let ctx = RuntimeContext::new().with_os_info();
+        assert!(!ctx.is_empty());
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Platform:"));
+        // Should contain the current OS
+        assert!(rendered.contains(std::env::consts::OS));
+    }
+
+    #[test]
+    fn test_runtime_context_with_workspace() {
+        let ctx = RuntimeContext::new().with_workspace("/home/user/project");
+        assert!(!ctx.is_empty());
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Workspace: /home/user/project"));
+    }
+
+    #[test]
+    fn test_runtime_context_full() {
+        let ctx = RuntimeContext::new()
+            .with_channel("whatsapp")
+            .with_tools(vec!["shell".to_string()])
+            .with_workspace("/tmp/test")
+            .with_os_info();
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("## Runtime Context"));
+        assert!(rendered.contains("Channel: whatsapp"));
+        assert!(rendered.contains("Available tools: shell"));
+        assert!(rendered.contains("Workspace: /tmp/test"));
+        assert!(rendered.contains("Platform:"));
+    }
+
+    #[test]
+    fn test_runtime_context_render_ordering() {
+        let ctx = RuntimeContext::new()
+            .with_channel("cli")
+            .with_tools(vec!["echo".to_string()])
+            .with_workspace("/work");
+        let rendered = ctx.render().unwrap();
+        let channel_pos = rendered.find("Channel:").unwrap();
+        let tools_pos = rendered.find("Available tools:").unwrap();
+        let workspace_pos = rendered.find("Workspace:").unwrap();
+        // Channel comes before tools, tools before workspace
+        assert!(channel_pos < tools_pos);
+        assert!(tools_pos < workspace_pos);
+    }
+
+    #[test]
+    fn test_runtime_context_clone() {
+        let ctx = RuntimeContext::new()
+            .with_channel("discord")
+            .with_workspace("/tmp");
+        let cloned = ctx.clone();
+        assert_eq!(ctx.channel, cloned.channel);
+        assert_eq!(ctx.workspace, cloned.workspace);
+    }
+
+    // ---- ContextBuilder + RuntimeContext integration tests ----
+
+    #[test]
+    fn test_context_builder_with_runtime_context() {
+        let ctx = RuntimeContext::new().with_channel("discord");
+        let builder = ContextBuilder::new().with_runtime_context(ctx);
+        let system = builder.build_system_message();
+        assert!(system.content.contains("Runtime Context"));
+        assert!(system.content.contains("discord"));
+    }
+
+    #[test]
+    fn test_context_builder_empty_runtime_context_adds_nothing() {
+        let ctx = RuntimeContext::new();
+        let builder = ContextBuilder::new().with_runtime_context(ctx);
+        let system = builder.build_system_message();
+        assert!(!system.content.contains("Runtime Context"));
+    }
+
+    #[test]
+    fn test_context_builder_all_sections() {
+        let ctx = RuntimeContext::new().with_channel("cli");
+        let builder = ContextBuilder::new()
+            .with_skills("- /help: Show help")
+            .with_runtime_context(ctx);
+        let system = builder.build_system_message();
+        assert!(system.content.contains("ZeptoClaw"));
+        assert!(system.content.contains("Available Skills"));
+        assert!(system.content.contains("## Runtime Context"));
+        assert!(system.content.contains("cli"));
+    }
+
+    #[test]
+    fn test_context_builder_section_ordering() {
+        let ctx = RuntimeContext::new().with_channel("slack");
+        let builder = ContextBuilder::new()
+            .with_skills("- /deploy: Deploy app")
+            .with_runtime_context(ctx);
+        let system = builder.build_system_message();
+        let skills_pos = system.content.find("Available Skills").unwrap();
+        let runtime_pos = system.content.find("Runtime Context").unwrap();
+        // Skills section should come before runtime context
+        assert!(skills_pos < runtime_pos);
+    }
+
+    #[test]
+    fn test_context_builder_runtime_context_in_messages() {
+        let ctx = RuntimeContext::new()
+            .with_channel("telegram")
+            .with_os_info();
+        let builder = ContextBuilder::new().with_runtime_context(ctx);
+        let messages = builder.build_messages(vec![], "Hello");
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("Runtime Context"));
+        assert!(messages[0].content.contains("telegram"));
     }
 }

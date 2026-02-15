@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, ZeptoError};
 use crate::session::{Message, Role, ToolCall};
 
-use super::{ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage};
+use super::{parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage};
 
 /// The Claude API endpoint URL.
 const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -148,21 +148,22 @@ impl LLMProvider for ClaudeProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
 
-            // Try to parse as Claude error response
-            if let Ok(error_response) = serde_json::from_str::<ClaudeErrorResponse>(&error_text) {
-                return Err(ZeptoError::Provider(format!(
-                    "Claude API error ({}): {} - {}",
-                    status, error_response.error.r#type, error_response.error.message
-                )));
-            }
+            // Build a human-readable body for the typed error
+            let body = if let Ok(error_response) =
+                serde_json::from_str::<ClaudeErrorResponse>(&error_text)
+            {
+                format!(
+                    "Claude API error: {} - {}",
+                    error_response.error.r#type, error_response.error.message
+                )
+            } else {
+                format!("Claude API error: {}", error_text)
+            };
 
-            return Err(ZeptoError::Provider(format!(
-                "Claude API error ({}): {}",
-                status, error_text
-            )));
+            return Err(ZeptoError::from(parse_provider_error(status, &body)));
         }
 
         let claude_response: ClaudeResponse = response.json().await?;
@@ -215,18 +216,19 @@ impl LLMProvider for ClaudeProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
-            if let Ok(error_response) = serde_json::from_str::<ClaudeErrorResponse>(&error_text) {
-                return Err(ZeptoError::Provider(format!(
-                    "Claude API error ({}): {} - {}",
-                    status, error_response.error.r#type, error_response.error.message
-                )));
-            }
-            return Err(ZeptoError::Provider(format!(
-                "Claude API error ({}): {}",
-                status, error_text
-            )));
+            let body = if let Ok(error_response) =
+                serde_json::from_str::<ClaudeErrorResponse>(&error_text)
+            {
+                format!(
+                    "Claude API error: {} - {}",
+                    error_response.error.r#type, error_response.error.message
+                )
+            } else {
+                format!("Claude API error: {}", error_text)
+            };
+            return Err(ZeptoError::from(parse_provider_error(status, &body)));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);

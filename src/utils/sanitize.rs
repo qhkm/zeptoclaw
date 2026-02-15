@@ -10,6 +10,12 @@ use regex::Regex;
 /// Default maximum result size in bytes (50 KB).
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 51_200;
 
+/// Minimum tool result budget in bytes (1 KB).
+pub const MIN_RESULT_BUDGET: usize = 1024;
+
+/// Approximate bytes per token for budget estimation.
+const BYTES_PER_TOKEN: usize = 4;
+
 /// Minimum length of a contiguous hex string to be stripped.
 const MIN_HEX_BLOB_LEN: usize = 200;
 
@@ -50,6 +56,33 @@ pub fn sanitize_tool_result(result: &str, max_bytes: usize) -> String {
     }
 
     out
+}
+
+/// Compute a dynamic tool result byte budget based on remaining context capacity.
+///
+/// The budget scales with available context space:
+/// - Takes the remaining token capacity (context_limit - current_usage)
+/// - Converts tokens to approximate bytes (multiply by 4)
+/// - Divides by the number of pending results to share budget fairly
+/// - Clamps to [`MIN_RESULT_BUDGET`, `DEFAULT_MAX_RESULT_BYTES`]
+///
+/// # Arguments
+/// * `context_limit` - Maximum token capacity of the context window
+/// * `current_usage_tokens` - Current estimated token usage
+/// * `pending_result_count` - Number of tool results about to be inserted
+///
+/// # Returns
+/// The byte budget for each tool result.
+pub fn compute_tool_result_budget(
+    context_limit: usize,
+    current_usage_tokens: usize,
+    pending_result_count: usize,
+) -> usize {
+    let remaining_tokens = context_limit.saturating_sub(current_usage_tokens);
+    let remaining_bytes = remaining_tokens * BYTES_PER_TOKEN;
+    let count = pending_result_count.max(1);
+    let per_result = remaining_bytes / count;
+    per_result.clamp(MIN_RESULT_BUDGET, DEFAULT_MAX_RESULT_BYTES)
 }
 
 #[cfg(test)]
@@ -116,5 +149,73 @@ mod tests {
         assert!(!result.contains(&b64));
         // Should have two replacement markers
         assert_eq!(result.matches("[base64 data removed,").count(), 2);
+    }
+
+    // --- compute_tool_result_budget tests ---
+
+    #[test]
+    fn test_compute_budget_plenty_of_space() {
+        // 100k limit, 10k used => 90k remaining => 90k * 4 = 360k bytes
+        // Single result => 360k, clamped to DEFAULT_MAX_RESULT_BYTES (50KB)
+        let budget = compute_tool_result_budget(100_000, 10_000, 1);
+        assert_eq!(budget, DEFAULT_MAX_RESULT_BYTES);
+    }
+
+    #[test]
+    fn test_compute_budget_tight_space() {
+        // 100k limit, 99_000 used => 1000 remaining => 1000 * 4 = 4000 bytes
+        // Single result => 4000 bytes
+        let budget = compute_tool_result_budget(100_000, 99_000, 1);
+        assert_eq!(budget, 4000);
+        assert!(budget > MIN_RESULT_BUDGET);
+        assert!(budget < DEFAULT_MAX_RESULT_BYTES);
+    }
+
+    #[test]
+    fn test_compute_budget_no_space() {
+        // Usage >= limit => 0 remaining => clamped to MIN_RESULT_BUDGET
+        let budget = compute_tool_result_budget(100_000, 100_000, 1);
+        assert_eq!(budget, MIN_RESULT_BUDGET);
+
+        // Usage exceeds limit
+        let budget = compute_tool_result_budget(100_000, 120_000, 1);
+        assert_eq!(budget, MIN_RESULT_BUDGET);
+    }
+
+    #[test]
+    fn test_compute_budget_multiple_results() {
+        // 100k limit, 90k used => 10k remaining => 10k * 4 = 40k bytes
+        // 4 results => 40k / 4 = 10k each
+        let budget = compute_tool_result_budget(100_000, 90_000, 4);
+        assert_eq!(budget, 10_000);
+    }
+
+    #[test]
+    fn test_compute_budget_single_result() {
+        // 100k limit, 95_000 used => 5k remaining => 5k * 4 = 20k bytes
+        // 1 result => 20k
+        let budget = compute_tool_result_budget(100_000, 95_000, 1);
+        assert_eq!(budget, 20_000);
+    }
+
+    #[test]
+    fn test_compute_budget_zero_results() {
+        // pending_result_count=0 should not panic; treated as 1
+        let budget = compute_tool_result_budget(100_000, 50_000, 0);
+        // 50k remaining => 50k * 4 = 200k bytes / 1 => clamped to 51_200
+        assert_eq!(budget, DEFAULT_MAX_RESULT_BYTES);
+    }
+
+    #[test]
+    fn test_compute_budget_never_below_minimum() {
+        // Even with very little space and many results, never below MIN
+        // 1000 limit, 999 used => 1 remaining => 1 * 4 = 4 bytes / 10 results = 0
+        // Clamped to MIN_RESULT_BUDGET
+        let budget = compute_tool_result_budget(1000, 999, 10);
+        assert_eq!(budget, MIN_RESULT_BUDGET);
+
+        // Zero remaining, many results
+        let budget = compute_tool_result_budget(1000, 1000, 100);
+        assert_eq!(budget, MIN_RESULT_BUDGET);
     }
 }

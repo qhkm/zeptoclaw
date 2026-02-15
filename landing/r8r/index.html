@@ -59,9 +59,6 @@
             font-weight: 700;
             color: var(--text-primary);
             text-decoration: none;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
         }
 
         .logo span {
@@ -120,7 +117,7 @@
             transform: translate(-50%, -50%);
             width: 800px;
             height: 800px;
-            background: radial-gradient(circle, rgba(242, 78, 30, 0.15) 0%, transparent 70%);
+            background: radial-gradient(circle, rgba(46, 196, 182, 0.15) 0%, transparent 70%);
             pointer-events: none;
         }
 
@@ -586,13 +583,13 @@
 <body>
     <nav>
         <div class="nav-container">
-            <a href="#" class="logo">r<span>8</span>r</a>
+            <a href="/" class="logo">r<span>8</span>r</a>
             <ul class="nav-links">
                 <li><a href="#features">Features</a></li>
-                <li><a href="#docs">Docs</a></li>
-                <li><a href="https://github.com/r8r/r8r">GitHub</a></li>
+                <li><a href="https://r8r-docs.pages.dev">Docs</a></li>
+                <li><a href="https://github.com/qhkm/r8r">GitHub</a></li>
             </ul>
-            <a href="#get-started" class="nav-cta">Get Started</a>
+            <a href="#install" class="nav-cta">Get Started</a>
             <button class="mobile-menu-btn">☰</button>
         </div>
     </nav>
@@ -607,10 +604,10 @@
             </p>
             <div class="hero-cta">
                 <a href="#install" class="btn btn-primary">Install r8r</a>
-                <a href="#docs" class="btn btn-secondary">View Documentation</a>
+                <a href="https://r8r-docs.pages.dev" class="btn btn-secondary">View Documentation</a>
             </div>
 
-            <div class="terminal">
+            <div class="terminal" id="install">
                 <div class="terminal-header">
                     <div class="terminal-dot red"></div>
                     <div class="terminal-dot yellow"></div>
@@ -758,7 +755,7 @@
                         are first-class citizens with 20+ built-in node types including 
                         Email, Slack, Database, and S3.
                     </p>
-                    <a href="#" class="btn btn-primary">Explore the DSL</a>
+                    <a href="https://github.com/qhkm/r8r#usage" class="btn btn-primary">Explore the DSL</a>
                 </div>
 
                 <div class="code-block">
@@ -799,10 +796,10 @@
                 <div class="footer-tagline">Workflow automation, oxidized.</div>
             </div>
             <div class="footer-links">
-                <a href="#">Documentation</a>
-                <a href="#">GitHub</a>
-                <a href="#">Discord</a>
-                <a href="#">Twitter</a>
+                <a href="https://r8r-docs.pages.dev">Documentation</a>
+                <a href="https://github.com/qhkm/r8r">GitHub</a>
+                <a href="https://discord.gg/kitakod">Discord</a>
+                <a href="https://x.com/kitakod">Twitter</a>
             </div>
         </div>
         <div class="footer-bottom">
