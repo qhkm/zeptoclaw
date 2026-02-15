@@ -547,6 +547,16 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    // Register custom CLI-defined tools
+    for tool_def in &config.custom_tools {
+        if !tool_enabled(&tool_def.name) {
+            continue;
+        }
+        let tool = zeptoclaw::tools::custom::CustomTool::new(tool_def.clone());
+        agent.register_tool(Box::new(tool)).await;
+        info!(tool = %tool_def.name, "Registered custom CLI tool");
+    }
+
     info!("Registered {} tools", agent.tool_count().await);
 
     // Set up provider
