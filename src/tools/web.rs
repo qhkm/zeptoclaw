@@ -448,7 +448,9 @@ async fn read_body_limited(response: reqwest::Response, max_bytes: usize) -> Res
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn is_blocked_host(url: &Url) -> bool {
+/// Check whether a URL's host is a blocked (local/private) address.
+/// Used by both `WebFetchTool` and the watch command to prevent SSRF.
+pub fn is_blocked_host(url: &Url) -> bool {
     let Some(host_str) = url.host_str() else {
         return true;
     };
@@ -480,7 +482,7 @@ fn is_blocked_host(url: &Url) -> bool {
 /// Returns the first safe resolved IP address so the caller can pin the
 /// connection to it, preventing DNS rebinding attacks where a second DNS
 /// lookup (by the HTTP client) returns a different, private IP.
-async fn resolve_and_check_host(url: &Url) -> Result<Option<(String, std::net::SocketAddr)>> {
+pub async fn resolve_and_check_host(url: &Url) -> Result<Option<(String, std::net::SocketAddr)>> {
     let host = url
         .host_str()
         .ok_or_else(|| ZeptoError::SecurityViolation("URL has no host".to_string()))?;

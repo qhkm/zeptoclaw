@@ -62,8 +62,23 @@ cargo fmt
 ./target/release/zeptoclaw channel setup whatsapp
 ./target/release/zeptoclaw channel test whatsapp
 
-# Onboard (interactive setup)
+# Onboard (express setup by default)
 ./target/release/zeptoclaw onboard
+./target/release/zeptoclaw onboard --full    # full 10-step wizard
+
+# Memory management
+./target/release/zeptoclaw memory list [--category user]
+./target/release/zeptoclaw memory search "project name"
+./target/release/zeptoclaw memory set user:name "Your Name" --category user --tags "profile,name"
+./target/release/zeptoclaw memory delete user:name
+./target/release/zeptoclaw memory stats
+
+# Tool discovery
+./target/release/zeptoclaw tools list
+./target/release/zeptoclaw tools info web_search
+
+# Watch URLs for changes
+./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
 ```
 
 ## Architecture
@@ -81,6 +96,9 @@ src/
 │   ├── webhook.rs  # Generic HTTP webhook inbound
 │   └── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
 ├── cli/            # Clap command parsing + command handlers
+│   ├── memory.rs   # Memory list/search/set/delete/stats commands
+│   ├── tools.rs    # Tool discovery list/info + dynamic status summary
+│   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types and loading
 ├── cron/           # Persistent cron scheduler service
 ├── deps/           # Dependency manager (install, start, stop, health check)
@@ -256,6 +274,7 @@ Environment variables override config:
 - `ZEPTOCLAW_ROUTINES_ENABLED` — enable routines engine (default: false)
 - `ZEPTOCLAW_ROUTINES_CRON_INTERVAL_SECS` — cron tick interval (default: 60)
 - `ZEPTOCLAW_ROUTINES_MAX_CONCURRENT` — max concurrent routine executions (default: 3)
+- `ZEPTOCLAW_HEARTBEAT_DELIVER_TO` — channel for heartbeat result delivery (default: none)
 
 ### Compile-time Configuration
 

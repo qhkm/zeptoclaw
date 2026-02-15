@@ -10,10 +10,13 @@ pub mod config;
 pub mod gateway;
 pub mod heartbeat;
 pub mod history;
+pub mod memory;
 pub mod onboard;
 pub mod skills;
 pub mod status;
 pub mod template;
+pub mod tools;
+pub mod watch;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -31,7 +34,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize configuration and workspace
-    Onboard,
+    Onboard {
+        /// Run full 10-step wizard (express mode by default)
+        #[arg(long)]
+        full: bool,
+    },
     /// Start interactive agent mode
     Agent {
         /// Direct message to process (non-interactive mode)
@@ -87,6 +94,11 @@ enum Commands {
         #[command(subcommand)]
         action: HistoryAction,
     },
+    /// Manage long-term memory
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Manage agent templates
     Template {
         #[command(subcommand)]
@@ -96,6 +108,11 @@ enum Commands {
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
+    },
+    /// Manage and discover tools
+    Tools {
+        #[command(subcommand)]
+        action: ToolsAction,
     },
     /// Manage authentication
     Auth {
@@ -116,6 +133,52 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Watch a URL for changes and notify
+    Watch {
+        /// URL to monitor
+        url: String,
+        /// Check interval (e.g., "1h", "30m", "15m")
+        #[arg(long, default_value = "1h")]
+        interval: String,
+        /// Channel to notify on changes (telegram, slack, discord). Omit for stdout only.
+        #[arg(long)]
+        notify: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MemoryAction {
+    /// List all stored memories
+    List {
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+    },
+    /// Search memories by query
+    Search {
+        /// Search query (matches key, value, category, tags)
+        query: String,
+    },
+    /// Set a memory value
+    Set {
+        /// Memory key (e.g. "user:name", "preference:language")
+        key: String,
+        /// Memory value
+        value: String,
+        /// Category for grouping
+        #[arg(long, default_value = "general")]
+        category: String,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
+    /// Delete a memory by key
+    Delete {
+        /// Memory key to delete
+        key: String,
+    },
+    /// Show memory statistics
+    Stats,
 }
 
 #[derive(Subcommand)]
@@ -134,6 +197,17 @@ pub enum SkillsAction {
     /// Create a new workspace skill template
     Create {
         /// Skill name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ToolsAction {
+    /// List all available tools with status
+    List,
+    /// Show details for a specific tool
+    Info {
+        /// Tool name
         name: String,
     },
 }
@@ -237,8 +311,8 @@ pub async fn run() -> Result<()> {
         Some(Commands::Version) => {
             cmd_version();
         }
-        Some(Commands::Onboard) => {
-            onboard::cmd_onboard().await?;
+        Some(Commands::Onboard { full }) => {
+            onboard::cmd_onboard(full).await?;
         }
         Some(Commands::Agent {
             message,
@@ -269,11 +343,17 @@ pub async fn run() -> Result<()> {
         Some(Commands::History { action }) => {
             history::cmd_history(action).await?;
         }
+        Some(Commands::Memory { action }) => {
+            memory::cmd_memory(action).await?;
+        }
         Some(Commands::Template { action }) => {
             template::cmd_template(action).await?;
         }
         Some(Commands::Skills { action }) => {
             skills::cmd_skills(action).await?;
+        }
+        Some(Commands::Tools { action }) => {
+            tools::cmd_tools(action).await?;
         }
         Some(Commands::Auth { action }) => {
             status::cmd_auth(action).await?;
@@ -286,6 +366,13 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Config { action }) => {
             config::cmd_config(action).await?;
+        }
+        Some(Commands::Watch {
+            url,
+            interval,
+            notify,
+        }) => {
+            watch::cmd_watch(url, interval, notify).await?;
         }
     }
 

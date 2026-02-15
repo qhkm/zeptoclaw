@@ -64,3 +64,4 @@ pub use budget::TokenBudget;
 pub use context::{ContextBuilder, RuntimeContext};
 pub use context_monitor::{CompactionStrategy, ContextMonitor};
 pub use r#loop::AgentLoop;
+pub use r#loop::{ToolFeedback, ToolFeedbackPhase};

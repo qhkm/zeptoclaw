@@ -38,6 +38,28 @@ pub(crate) async fn cmd_agent(
         create_agent(config.clone(), bus.clone()).await?
     };
 
+    // Set up tool execution feedback (shows progress on stderr)
+    let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.set_tool_feedback(feedback_tx).await;
+
+    // Spawn feedback printer to stderr
+    tokio::spawn(async move {
+        use zeptoclaw::agent::ToolFeedbackPhase;
+        while let Some(fb) = feedback_rx.recv().await {
+            match fb.phase {
+                ToolFeedbackPhase::Starting => {
+                    eprint!("  [{}] Running...", fb.tool_name);
+                }
+                ToolFeedbackPhase::Done { elapsed_ms } => {
+                    eprintln!(" done ({:.1}s)", elapsed_ms as f64 / 1000.0);
+                }
+                ToolFeedbackPhase::Failed { elapsed_ms, error } => {
+                    eprintln!(" failed ({:.1}s): {}", elapsed_ms as f64 / 1000.0, error);
+                }
+            }
+        }
+    });
+
     // Check whether the runtime can use at least one configured provider.
     if resolve_runtime_provider(&config).is_none() {
         let configured = configured_provider_names(&config);
@@ -76,7 +98,7 @@ pub(crate) async fn cmd_agent(
                             }
                             StreamEvent::Done { .. } => break,
                             StreamEvent::Error(e) => {
-                                eprintln!("\nStream error: {}", e);
+                                eprintln!("{}", format_cli_error(&e));
                                 std::process::exit(1);
                             }
                             StreamEvent::ToolCalls(_) => {}
@@ -85,7 +107,7 @@ pub(crate) async fn cmd_agent(
                     println!(); // newline after streaming
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{}", format_cli_error(&e));
                     std::process::exit(1);
                 }
             }
@@ -95,7 +117,7 @@ pub(crate) async fn cmd_agent(
                     println!("{}", response);
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{}", format_cli_error(&e));
                     std::process::exit(1);
                 }
             }
@@ -147,7 +169,7 @@ pub(crate) async fn cmd_agent(
                                         }
                                         StreamEvent::Done { .. } => break,
                                         StreamEvent::Error(e) => {
-                                            eprintln!("\nStream error: {}", e);
+                                            eprintln!("{}", format_cli_error(&e));
                                         }
                                         StreamEvent::ToolCalls(_) => {}
                                     }
@@ -156,7 +178,7 @@ pub(crate) async fn cmd_agent(
                                 println!();
                             }
                             Err(e) => {
-                                eprintln!("Error: {}", e);
+                                eprintln!("{}", format_cli_error(&e));
                                 eprintln!();
                             }
                         }
@@ -168,7 +190,7 @@ pub(crate) async fn cmd_agent(
                                 println!();
                             }
                             Err(e) => {
-                                eprintln!("Error: {}", e);
+                                eprintln!("{}", format_cli_error(&e));
                                 eprintln!();
                             }
                         }
@@ -246,4 +268,80 @@ pub(crate) async fn cmd_agent_stdin() -> Result<()> {
     io::stdout().flush()?;
 
     Ok(())
+}
+
+/// Format agent errors with actionable guidance for CLI users.
+fn format_cli_error(e: &dyn std::fmt::Display) -> String {
+    let msg = e.to_string();
+
+    if msg.contains("Authentication error") {
+        format!(
+            "{}\n\n  Fix: Check your API key. Run 'zeptoclaw auth status' to verify.\n  Or:  Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...",
+            msg
+        )
+    } else if msg.contains("Billing error") {
+        format!(
+            "{}\n\n  Fix: Add a payment method to your AI provider account.",
+            msg
+        )
+    } else if msg.contains("Rate limit") {
+        format!(
+            "{}\n\n  Fix: Wait a moment and try again. Or set up a fallback provider.",
+            msg
+        )
+    } else if msg.contains("Model not found") {
+        format!(
+            "{}\n\n  Fix: Check model name in config. Run 'zeptoclaw config check'.",
+            msg
+        )
+    } else if msg.contains("Timeout") {
+        format!(
+            "{}\n\n  Fix: Try again. If persistent, check your network connection.",
+            msg
+        )
+    } else if msg.contains("No AI provider configured") || msg.contains("provider") {
+        format!(
+            "{}\n\n  Fix: Run 'zeptoclaw onboard' to set up an AI provider.",
+            msg
+        )
+    } else {
+        msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_cli_error_auth() {
+        let e = anyhow::anyhow!("Authentication error: invalid key");
+        let msg = format_cli_error(&e);
+        assert!(msg.contains("Fix:"));
+        assert!(msg.contains("auth status"));
+    }
+
+    #[test]
+    fn test_format_cli_error_billing() {
+        let e = anyhow::anyhow!("Billing error: payment required");
+        let msg = format_cli_error(&e);
+        assert!(msg.contains("Fix:"));
+        assert!(msg.contains("payment method"));
+    }
+
+    #[test]
+    fn test_format_cli_error_rate_limit() {
+        let e = anyhow::anyhow!("Rate limit exceeded");
+        let msg = format_cli_error(&e);
+        assert!(msg.contains("Fix:"));
+        assert!(msg.contains("Wait"));
+    }
+
+    #[test]
+    fn test_format_cli_error_generic() {
+        let e = anyhow::anyhow!("Something went wrong");
+        let msg = format_cli_error(&e);
+        assert_eq!(msg, "Something went wrong");
+        assert!(!msg.contains("Fix:"));
+    }
 }

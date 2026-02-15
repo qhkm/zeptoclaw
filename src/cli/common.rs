@@ -580,3 +580,142 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
 
     Ok(agent)
 }
+
+/// Validate an API key by making a minimal API call.
+/// Returns Ok(()) if key works, Err with user-friendly message if not.
+pub(crate) async fn validate_api_key(
+    provider: &str,
+    api_key: &str,
+    api_base: Option<&str>,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    match provider {
+        "anthropic" => {
+            // Use read-only /v1/models endpoint to validate key without consuming tokens.
+            let base = api_base.unwrap_or("https://api.anthropic.com");
+            let resp = client
+                .get(format!("{}/v1/models", base))
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                Ok(())
+            } else {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!(friendly_api_error(
+                    "anthropic",
+                    status,
+                    &body
+                )))
+            }
+        }
+        "openai" => {
+            let base = api_base.unwrap_or("https://api.openai.com/v1");
+            let resp = client
+                .get(format!("{}/models", base))
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                Ok(())
+            } else {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!(friendly_api_error("openai", status, &body)))
+            }
+        }
+        _ => {
+            warn!(
+                "API key validation not supported for provider '{}', skipping",
+                provider
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Map HTTP status to user-friendly error message with actionable guidance.
+pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> String {
+    // Try to extract a message from the provider's JSON error response.
+    let api_msg = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message").or_else(|| e.as_str().map(|_| e)))
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let base = match status {
+        401 => format!(
+            "Invalid API key. Check your {} key and try again.\n  {}",
+            provider,
+            if provider == "anthropic" {
+                "Get key: https://console.anthropic.com/"
+            } else {
+                "Get key: https://platform.openai.com/api-keys"
+            }
+        ),
+        402 => format!(
+            "Billing issue on your {} account. Add a payment method.\n  {}",
+            provider,
+            if provider == "anthropic" {
+                "Billing: https://console.anthropic.com/settings/billing"
+            } else {
+                "Billing: https://platform.openai.com/settings/organization/billing"
+            }
+        ),
+        429 => "Rate limited. Wait a moment and try again.".to_string(),
+        404 => {
+            "Model not found. Your API key may not have access to the default model.".to_string()
+        }
+        _ => format!(
+            "API returned HTTP {}. Check your API key and account status.",
+            status
+        ),
+    };
+
+    if let Some(msg) = api_msg {
+        format!("{}\n  Detail: {}", base, msg)
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_friendly_api_error_401_anthropic() {
+        let msg = friendly_api_error("anthropic", 401, "");
+        assert!(msg.contains("Invalid API key"));
+        assert!(msg.contains("anthropic"));
+        assert!(msg.contains("console.anthropic.com"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_401_openai() {
+        let msg = friendly_api_error("openai", 401, "");
+        assert!(msg.contains("Invalid API key"));
+        assert!(msg.contains("openai"));
+        assert!(msg.contains("platform.openai.com"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_402() {
+        let msg = friendly_api_error("anthropic", 402, "");
+        assert!(msg.contains("Billing issue"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_unknown_status() {
+        let msg = friendly_api_error("openai", 500, "");
+        assert!(msg.contains("HTTP 500"));
+    }
+}

@@ -25,6 +25,34 @@ use crate::utils::metrics::MetricsCollector;
 use super::budget::TokenBudget;
 use super::context::ContextBuilder;
 
+/// Tool execution feedback event for CLI display.
+#[derive(Debug, Clone)]
+pub struct ToolFeedback {
+    /// Name of the tool being executed.
+    pub tool_name: String,
+    /// Current phase of execution.
+    pub phase: ToolFeedbackPhase,
+}
+
+/// Phase of tool execution feedback.
+#[derive(Debug, Clone)]
+pub enum ToolFeedbackPhase {
+    /// Tool execution is starting.
+    Starting,
+    /// Tool execution completed successfully.
+    Done {
+        /// Elapsed time in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// Tool execution failed.
+    Failed {
+        /// Elapsed time in milliseconds.
+        elapsed_ms: u64,
+        /// Error description.
+        error: String,
+    },
+}
+
 /// The main agent loop that processes messages and coordinates with LLM providers.
 ///
 /// The `AgentLoop` is responsible for:
@@ -90,6 +118,8 @@ pub struct AgentLoop {
     safety_layer: Option<Arc<SafetyLayer>>,
     /// Optional context monitor for compaction.
     context_monitor: Option<ContextMonitor>,
+    /// Optional channel for tool execution feedback (tool name + duration).
+    tool_feedback_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ToolFeedback>>>>,
 }
 
 impl AgentLoop {
@@ -149,6 +179,7 @@ impl AgentLoop {
             approval_gate,
             safety_layer,
             context_monitor,
+            tool_feedback_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -199,6 +230,7 @@ impl AgentLoop {
             approval_gate,
             safety_layer,
             context_monitor,
+            tool_feedback_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -431,6 +463,7 @@ impl AgentLoop {
                 response.tool_calls.len(),
             );
 
+            let tool_feedback_tx = self.tool_feedback_tx.clone();
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -446,6 +479,7 @@ impl AgentLoop {
                     let hooks = Arc::clone(&hook_engine);
                     let safety = safety_layer.clone();
                     let budget = result_budget;
+                    let tool_feedback_tx = tool_feedback_tx.clone();
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -472,6 +506,13 @@ impl AgentLoop {
                             return (id, format!("Tool '{}' requires user approval and was not executed. {}", name, prompt));
                         }
 
+                        // Send tool starting feedback
+                        if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                            let _ = tx.send(ToolFeedback {
+                                tool_name: name.clone(),
+                                phase: ToolFeedbackPhase::Starting,
+                            });
+                        }
                         let tool_start = std::time::Instant::now();
                         let (result, success) = {
                             let tools_guard = tools.read().await;
@@ -481,6 +522,12 @@ impl AgentLoop {
                                     let latency_ms = elapsed.as_millis() as u64;
                                     debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
                                     hooks.after_tool(&name, &r, elapsed, channel_name, chat_id);
+                                    if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                                        let _ = tx.send(ToolFeedback {
+                                            tool_name: name.clone(),
+                                            phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
+                                        });
+                                    }
                                     (r, true)
                                 }
                                 Err(e) => {
@@ -490,6 +537,15 @@ impl AgentLoop {
                                     hooks.on_error(&name, &e.to_string(), channel_name, chat_id);
                                     if let Some(metrics) = usage_metrics.as_ref() {
                                         metrics.record_error();
+                                    }
+                                    if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                                        let _ = tx.send(ToolFeedback {
+                                            tool_name: name.clone(),
+                                            phase: ToolFeedbackPhase::Failed {
+                                                elapsed_ms: latency_ms,
+                                                error: e.to_string(),
+                                            },
+                                        });
                                     }
                                     (format!("Error: {}", e), false)
                                 }
@@ -704,6 +760,7 @@ impl AgentLoop {
                 response.tool_calls.len(),
             );
 
+            let tool_feedback_tx = self.tool_feedback_tx.clone();
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -717,6 +774,7 @@ impl AgentLoop {
                     let gate = Arc::clone(&approval_gate);
                     let safety = safety_layer_stream.clone();
                     let budget = result_budget_stream;
+                    let tool_feedback_tx = tool_feedback_tx.clone();
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
@@ -735,6 +793,13 @@ impl AgentLoop {
                             );
                         }
 
+                        // Send tool starting feedback
+                        if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                            let _ = tx.send(ToolFeedback {
+                                tool_name: name.clone(),
+                                phase: ToolFeedbackPhase::Starting,
+                            });
+                        }
                         let tool_start = std::time::Instant::now();
                         let (result, success) = {
                             let tools_guard = tools.read().await;
@@ -744,6 +809,26 @@ impl AgentLoop {
                             }
                         };
                         metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
+                        // Send tool done/failed feedback
+                        if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                            let latency_ms = tool_start.elapsed().as_millis() as u64;
+                            if success {
+                                let _ = tx.send(ToolFeedback {
+                                    tool_name: name.clone(),
+                                    phase: ToolFeedbackPhase::Done {
+                                        elapsed_ms: latency_ms,
+                                    },
+                                });
+                            } else {
+                                let _ = tx.send(ToolFeedback {
+                                    tool_name: name.clone(),
+                                    phase: ToolFeedbackPhase::Failed {
+                                        elapsed_ms: latency_ms,
+                                        error: result.clone(),
+                                    },
+                                });
+                            }
+                        }
                         let sanitized =
                             crate::utils::sanitize::sanitize_tool_result(&result, budget);
 
@@ -1152,6 +1237,11 @@ impl AgentLoop {
         self.streaming.load(Ordering::SeqCst)
     }
 
+    /// Set tool feedback sender for CLI tool execution display.
+    pub async fn set_tool_feedback(&self, tx: tokio::sync::mpsc::UnboundedSender<ToolFeedback>) {
+        *self.tool_feedback_tx.write().await = Some(tx);
+    }
+
     /// Get a reference to the token budget tracker.
     pub fn token_budget(&self) -> &TokenBudget {
         &self.token_budget
@@ -1380,5 +1470,40 @@ mod tests {
         let agent = AgentLoop::new(config, session_manager, bus);
         agent.set_streaming(true);
         assert!(agent.is_streaming());
+    }
+
+    #[test]
+    fn test_tool_feedback_debug() {
+        let fb = ToolFeedback {
+            tool_name: "shell".to_string(),
+            phase: ToolFeedbackPhase::Starting,
+        };
+        let debug_str = format!("{:?}", fb);
+        assert!(debug_str.contains("shell"));
+        assert!(debug_str.contains("Starting"));
+    }
+
+    #[test]
+    fn test_tool_feedback_phases() {
+        let starting = ToolFeedbackPhase::Starting;
+        let done = ToolFeedbackPhase::Done { elapsed_ms: 1200 };
+        let failed = ToolFeedbackPhase::Failed {
+            elapsed_ms: 500,
+            error: "timeout".to_string(),
+        };
+        // Verify all three phases can be constructed and debug-printed
+        assert!(format!("{:?}", starting).contains("Starting"));
+        assert!(format!("{:?}", done).contains("1200"));
+        assert!(format!("{:?}", failed).contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_feedback_channel_none_by_default() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        let guard = agent.tool_feedback_tx.read().await;
+        assert!(guard.is_none());
     }
 }

@@ -723,6 +723,10 @@ pub struct HeartbeatConfig {
     /// Optional heartbeat file path override.
     #[serde(default)]
     pub file_path: Option<String>,
+    /// Channel to deliver heartbeat results to (e.g., "telegram", "slack").
+    /// If empty/none, heartbeat runs but results are not pushed.
+    #[serde(default)]
+    pub deliver_to: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -731,6 +735,7 @@ impl Default for HeartbeatConfig {
             enabled: false,
             interval_secs: 30 * 60,
             file_path: None,
+            deliver_to: None,
         }
     }
 }
@@ -1019,5 +1024,25 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(!config.swarm.enabled);
         assert_eq!(config.swarm.max_depth, 2);
+    }
+
+    #[test]
+    fn test_heartbeat_config_default_deliver_to() {
+        let config = HeartbeatConfig::default();
+        assert!(config.deliver_to.is_none());
+    }
+
+    #[test]
+    fn test_heartbeat_config_deserialize_deliver_to() {
+        let json = r#"{"enabled": true, "interval_secs": 600, "deliver_to": "telegram"}"#;
+        let config: HeartbeatConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.deliver_to, Some("telegram".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_config_deserialize_no_deliver_to() {
+        let json = r#"{"enabled": true, "interval_secs": 600}"#;
+        let config: HeartbeatConfig = serde_json::from_str(json).unwrap();
+        assert!(config.deliver_to.is_none());
     }
 }

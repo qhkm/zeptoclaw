@@ -497,6 +497,10 @@ impl Config {
                 self.heartbeat.file_path = Some(val);
             }
         }
+
+        if let Ok(v) = std::env::var("ZEPTOCLAW_HEARTBEAT_DELIVER_TO") {
+            self.heartbeat.deliver_to = if v.is_empty() { None } else { Some(v) };
+        }
     }
 
     /// Apply skills-specific environment variable overrides.

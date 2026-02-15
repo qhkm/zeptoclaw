@@ -83,7 +83,7 @@ pub use r8r::R8rTool;
 pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;
 pub use types::{Tool, ToolContext};
-pub use web::{WebFetchTool, WebSearchTool};
+pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;
 
 use async_trait::async_trait;
