@@ -5,6 +5,37 @@ All notable changes to ZeptoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Memory decay scoring** — `importance` field on memories with 30-day half-life decay (`importance * 0.5^(age_days / 30)`); pinned entries exempt
+- **Auto memory injection** — Pinned memories automatically injected into system prompt at agent startup via `ContextBuilder::with_memory_context()`
+- **Pre-compaction memory flush** — Silent LLM turn saves important facts and consolidates duplicates before context window shrinks (10s timeout)
+- **Pin action** — New `pin` action on `longterm_memory` tool (shorthand for `set` with `category="pinned"`)
+- **Importance weighting** — Configurable `importance` parameter (0.0–2.0) on memory `set` action; higher = decays slower
+
+## [0.3.1] - 2026-02-15
+
+### Added
+- **Secret encryption** — `secrets encrypt/decrypt/rotate` CLI commands with XChaCha20-Poly1305 + Argon2id
+- **Transparent config decryption** — `ENC[...]` values in config.json auto-decrypted at load time
+- **Tunnel support** — `--tunnel` flag on gateway for Cloudflare, ngrok, and Tailscale tunnels
+- **Sender allowlists** — `deny_by_default` mode for channel sender filtering
+
+## [0.3.0] - 2026-02-14
+
+### Added
+- **OpenAI-compatible providers** — Groq, Ollama, Gemini, and any OpenAI-compatible API via `api_base` config
+- **WhatsApp channel** — WhatsApp via whatsmeow-rs bridge with CLI channel setup/test
+- **Binary plugin system** — Standalone executables communicating via JSON-RPC 2.0 over stdin/stdout
+- **Reminder tool** — Persistent reminders with add/complete/snooze/overdue actions and cron delivery
+- **OpenClaw skills compatibility** — Reads `metadata.openclaw` and `metadata.zeptoclaw` in skill manifests
+- **SOUL.md identity** — Auto-detected agent personality file prepended to system prompt
+- **Token efficiency** — Compact tool descriptions, custom CLI-defined tools, tool profiles
+- **UX overhaul** — Express onboard, memory CLI, tools CLI, watch command, actionable error messages
+- **Agent engine resilience** — Structured provider errors, context overflow recovery, circuit breaker, runtime context injection
+- **Dependency manager** — `HasDependencies` trait, GitHub Release/Docker/NPM/Pip fetcher, JSON registry
+
 ## [0.2.0] - 2026-02-14
 
 First public release.
@@ -39,4 +70,7 @@ First public release.
 - Mount allowlist validation
 - Cron job caps and spawn recursion prevention
 
+[Unreleased]: https://github.com/qhkm/zeptoclaw/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/qhkm/zeptoclaw/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/qhkm/zeptoclaw/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.2.0
