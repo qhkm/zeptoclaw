@@ -5,6 +5,7 @@
 
 use regex::Regex;
 
+use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use crate::error::{Result, ZeptoError};
 
 /// Regex patterns that are blocked for security reasons.
@@ -146,6 +147,16 @@ impl ShellSecurityConfig {
         // Check regex patterns
         for pattern in &self.compiled_patterns {
             if pattern.is_match(command) {
+                log_audit_event(
+                    AuditCategory::ShellSecurity,
+                    AuditSeverity::Critical,
+                    "command_blocked_regex",
+                    &format!(
+                        "Command blocked: matches prohibited pattern '{}'",
+                        pattern.as_str()
+                    ),
+                    true,
+                );
                 return Err(ZeptoError::SecurityViolation(format!(
                     "Command blocked: matches prohibited pattern '{}'",
                     pattern.as_str()
@@ -156,6 +167,13 @@ impl ShellSecurityConfig {
         // Check literal patterns
         for literal in &self.literal_patterns {
             if command_lower.contains(literal) {
+                log_audit_event(
+                    AuditCategory::ShellSecurity,
+                    AuditSeverity::Critical,
+                    "command_blocked_literal",
+                    &format!("Command blocked: contains prohibited path '{}'", literal),
+                    true,
+                );
                 return Err(ZeptoError::SecurityViolation(format!(
                     "Command blocked: contains prohibited path '{}'",
                     literal

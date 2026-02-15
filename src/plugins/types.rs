@@ -94,6 +94,11 @@ pub struct BinaryPluginConfig {
     /// Optional timeout override in seconds (default: 30).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+
+    /// Optional SHA-256 hex digest for binary integrity verification.
+    /// When set, the binary's hash is checked before execution.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// A tool definition within a plugin manifest.
@@ -613,6 +618,7 @@ mod tests {
                 path: "plugin".to_string(),
                 protocol: "jsonrpc".to_string(),
                 timeout_secs: None,
+                sha256: None,
             }),
         };
         assert!(binary_manifest.is_binary());

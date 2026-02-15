@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use crate::error::{Result, ZeptoError};
 
 pub const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[
@@ -163,6 +164,17 @@ pub fn validate_extra_mounts(mounts: &[String], allowlist_path: &str) -> Result<
         let host_path = canonicalize_existing(&expand_path(&host))?;
 
         if let Some(pattern) = path_contains_blocked_pattern(&host_path, &blocked_patterns) {
+            log_audit_event(
+                AuditCategory::MountSecurity,
+                AuditSeverity::Critical,
+                "mount_blocked_pattern",
+                &format!(
+                    "Mount '{}' blocked by pattern '{}'",
+                    host_path.display(),
+                    pattern
+                ),
+                true,
+            );
             return Err(ZeptoError::SecurityViolation(format!(
                 "Mount '{}' blocked by pattern '{}'",
                 host_path.display(),
@@ -183,6 +195,17 @@ pub fn validate_extra_mounts(mounts: &[String], allowlist_path: &str) -> Result<
             })
             .next()
             .ok_or_else(|| {
+                log_audit_event(
+                    AuditCategory::MountSecurity,
+                    AuditSeverity::Critical,
+                    "mount_outside_roots",
+                    &format!(
+                        "Mount '{}' is outside allowedRoots in '{}'",
+                        host_path.display(),
+                        allowlist_path.display()
+                    ),
+                    true,
+                );
                 ZeptoError::SecurityViolation(format!(
                     "Mount '{}' is outside allowedRoots in '{}'",
                     host_path.display(),

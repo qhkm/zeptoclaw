@@ -330,6 +330,7 @@ mod tests {
         config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
             enabled: false,
             bridge_url: "ws://localhost:3001".to_string(),
+            bridge_token: None,
             allow_from: vec![],
             bridge_managed: true,
             deny_by_default: true,
@@ -346,6 +347,7 @@ mod tests {
         config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
             enabled: true,
             bridge_url: String::new(),
+            bridge_token: None,
             allow_from: vec![],
             bridge_managed: true,
             deny_by_default: true,

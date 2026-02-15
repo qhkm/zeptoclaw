@@ -8,8 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use crate::error::{Result, ZeptoError};
 
 use super::types::{BinaryPluginConfig, Plugin, PluginManifest};
@@ -317,6 +319,38 @@ pub fn validate_binary_path(
             return Err(ZeptoError::Config(format!(
                 "Binary is not executable: {}",
                 binary_path.display()
+            )));
+        }
+    }
+
+    // SHA-256 integrity verification (when configured).
+    if let Some(ref expected_hash) = binary_config.sha256 {
+        let file_bytes = fs::read(&canonical_bin).map_err(|e| {
+            ZeptoError::Config(format!(
+                "Failed to read binary for SHA-256 check {}: {}",
+                canonical_bin.display(),
+                e
+            ))
+        })?;
+        let actual_hash = hex::encode(Sha256::digest(&file_bytes));
+        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+            log_audit_event(
+                AuditCategory::PluginIntegrity,
+                AuditSeverity::Critical,
+                "sha256_mismatch",
+                &format!(
+                    "Binary {} expected SHA-256 {} but got {}",
+                    canonical_bin.display(),
+                    expected_hash,
+                    actual_hash
+                ),
+                true,
+            );
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Binary SHA-256 mismatch for {}: expected {} but got {}",
+                canonical_bin.display(),
+                expected_hash,
+                actual_hash
             )));
         }
     }
@@ -819,6 +853,7 @@ mod tests {
                 path: "bin/plugin".to_string(),
                 protocol: "jsonrpc".to_string(),
                 timeout_secs: None,
+                sha256: None,
             }),
         }
     }
@@ -923,6 +958,7 @@ mod tests {
             path: "bin/plugin".to_string(),
             protocol: "jsonrpc".to_string(),
             timeout_secs: None,
+            sha256: None,
         };
 
         let result = validate_binary_path(tmp.path(), &config);
@@ -938,6 +974,7 @@ mod tests {
             path: "bin/missing".to_string(),
             protocol: "jsonrpc".to_string(),
             timeout_secs: None,
+            sha256: None,
         };
         let result = validate_binary_path(tmp.path(), &config);
         assert!(result.is_err());
@@ -958,9 +995,116 @@ mod tests {
             path: "plugin".to_string(),
             protocol: "jsonrpc".to_string(),
             timeout_secs: None,
+            sha256: None,
         };
         let result = validate_binary_path(tmp.path(), &config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not executable"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-256 verification tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sha256_match_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let bin_path = tmp.path().join("plugin");
+        let content = b"#!/bin/sh\necho ok";
+        fs::write(&bin_path, content).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let expected = hex::encode(Sha256::digest(content));
+        let config = BinaryPluginConfig {
+            path: "plugin".to_string(),
+            protocol: "jsonrpc".to_string(),
+            timeout_secs: None,
+            sha256: Some(expected),
+        };
+        let result = validate_binary_path(tmp.path(), &config);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sha256_mismatch_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let bin_path = tmp.path().join("plugin");
+        fs::write(&bin_path, b"#!/bin/sh\necho ok").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = BinaryPluginConfig {
+            path: "plugin".to_string(),
+            protocol: "jsonrpc".to_string(),
+            timeout_secs: None,
+            sha256: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+        };
+        let result = validate_binary_path(tmp.path(), &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("SHA-256 mismatch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sha256_none_skips_check() {
+        let tmp = TempDir::new().unwrap();
+        let bin_path = tmp.path().join("plugin");
+        fs::write(&bin_path, b"#!/bin/sh\necho ok").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = BinaryPluginConfig {
+            path: "plugin".to_string(),
+            protocol: "jsonrpc".to_string(),
+            timeout_secs: None,
+            sha256: None,
+        };
+        let result = validate_binary_path(tmp.path(), &config);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sha256_case_insensitive() {
+        let tmp = TempDir::new().unwrap();
+        let bin_path = tmp.path().join("plugin");
+        let content = b"#!/bin/sh\necho ok";
+        fs::write(&bin_path, content).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let expected = hex::encode(Sha256::digest(content)).to_uppercase();
+        let config = BinaryPluginConfig {
+            path: "plugin".to_string(),
+            protocol: "jsonrpc".to_string(),
+            timeout_secs: None,
+            sha256: Some(expected),
+        };
+        let result = validate_binary_path(tmp.path(), &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_binary_plugin_config_sha256_default_none() {
+        let json = r#"{"path": "bin/plugin"}"#;
+        let config: BinaryPluginConfig = serde_json::from_str(json).expect("should parse");
+        assert!(config.sha256.is_none());
+    }
+
+    #[test]
+    fn test_binary_plugin_config_sha256_deserialize() {
+        let json = r#"{"path": "bin/plugin", "sha256": "abc123"}"#;
+        let config: BinaryPluginConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.sha256.as_deref(), Some("abc123"));
     }
 }

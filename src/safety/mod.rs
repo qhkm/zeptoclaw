@@ -11,6 +11,7 @@ pub mod validator;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use leak_detector::{LeakAction, LeakDetector};
 use policy::{PolicyAction, PolicyEngine};
 use sanitizer::SanitizedOutput;
@@ -132,6 +133,13 @@ impl SafetyLayer {
             // Check for blocking detections first
             for d in &detections {
                 if d.action == LeakAction::Block {
+                    log_audit_event(
+                        AuditCategory::LeakDetection,
+                        AuditSeverity::Critical,
+                        "leak_block",
+                        &format!("{} detected ({})", d.pattern_name, d.matched_text),
+                        true,
+                    );
                     return SafetyResult {
                         content: String::new(),
                         warnings: vec![format!(
@@ -151,6 +159,13 @@ impl SafetyLayer {
                     match d.action {
                         LeakAction::Redact => {
                             was_modified = true;
+                            log_audit_event(
+                                AuditCategory::LeakDetection,
+                                AuditSeverity::Warning,
+                                "leak_redact",
+                                &format!("Redacted: {}", d.pattern_name),
+                                false,
+                            );
                             warnings.push(format!("Redacted: {}", d.pattern_name));
                         }
                         LeakAction::Warn => {
@@ -178,6 +193,13 @@ impl SafetyLayer {
         for v in &violations {
             match v.action {
                 PolicyAction::Block => {
+                    log_audit_event(
+                        AuditCategory::PolicyViolation,
+                        AuditSeverity::Critical,
+                        "policy_block",
+                        &format!("Policy '{}': {}", v.rule_name, v.description),
+                        true,
+                    );
                     return SafetyResult {
                         content: String::new(),
                         warnings: vec![format!(
@@ -210,6 +232,13 @@ impl SafetyLayer {
             let sanitized: SanitizedOutput = sanitizer::check_injection(&content);
             if sanitized.was_modified {
                 was_modified = true;
+                log_audit_event(
+                    AuditCategory::InjectionAttempt,
+                    AuditSeverity::Warning,
+                    "injection_sanitized",
+                    &sanitized.warnings.join("; "),
+                    false,
+                );
             }
             warnings.extend(sanitized.warnings);
             sanitized.content

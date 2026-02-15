@@ -376,6 +376,13 @@ impl Config {
                 .get_or_insert_with(WhatsAppConfig::default);
             channel.bridge_url = val;
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_TOKEN") {
+            let channel = self
+                .channels
+                .whatsapp
+                .get_or_insert_with(WhatsAppConfig::default);
+            channel.bridge_token = Some(val);
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED") {
             if let Ok(enabled) = val.parse() {
                 let channel = self
@@ -383,6 +390,13 @@ impl Config {
                     .whatsapp
                     .get_or_insert_with(WhatsAppConfig::default);
                 channel.enabled = enabled;
+            }
+        }
+
+        // Runtime: Apple Container
+        if let Ok(val) = std::env::var("ZEPTOCLAW_RUNTIME_APPLE_ALLOW_EXPERIMENTAL") {
+            if let Ok(v) = val.parse() {
+                self.runtime.apple.allow_experimental = v;
             }
         }
     }

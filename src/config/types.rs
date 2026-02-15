@@ -413,6 +413,9 @@ pub struct WhatsAppConfig {
     /// WebSocket bridge URL
     #[serde(default = "default_whatsapp_bridge_url")]
     pub bridge_url: String,
+    /// Optional Bearer token for authenticating to the bridge WebSocket.
+    #[serde(default)]
+    pub bridge_token: Option<String>,
     /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set)
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -439,6 +442,7 @@ impl Default for WhatsAppConfig {
         Self {
             enabled: false,
             bridge_url: default_whatsapp_bridge_url(),
+            bridge_token: None,
             allow_from: Vec::new(),
             deny_by_default: false,
             bridge_managed: default_bridge_managed(),
@@ -1001,6 +1005,9 @@ pub struct AppleContainerConfig {
     pub image: String,
     /// Additional directory mounts
     pub extra_mounts: Vec<String>,
+    /// Allow use of Apple Container runtime (experimental).
+    /// When false (default), requesting the Apple Container runtime returns an error.
+    pub allow_experimental: bool,
 }
 
 // ============================================================================

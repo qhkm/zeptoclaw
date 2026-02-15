@@ -5,6 +5,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use crate::error::{Result, ZeptoError};
 
 /// A validated path that is guaranteed to be within the workspace.
@@ -69,6 +70,13 @@ impl AsRef<Path> for SafePath {
 pub fn validate_path_in_workspace(path: &str, workspace: &str) -> Result<SafePath> {
     // Check for obvious traversal patterns in the raw input
     if contains_traversal_pattern(path) {
+        log_audit_event(
+            AuditCategory::PathSecurity,
+            AuditSeverity::Critical,
+            "path_traversal",
+            &format!("Path contains suspicious traversal pattern: {}", path),
+            true,
+        );
         return Err(ZeptoError::SecurityViolation(format!(
             "Path contains suspicious traversal pattern: {}",
             path
@@ -100,6 +108,16 @@ pub fn validate_path_in_workspace(path: &str, workspace: &str) -> Result<SafePat
 
     // Check if the normalized path starts with the workspace
     if !normalized_path.starts_with(&canonical_workspace) {
+        log_audit_event(
+            AuditCategory::PathSecurity,
+            AuditSeverity::Critical,
+            "path_escape",
+            &format!(
+                "Path escapes workspace: {} is not within {}",
+                path, workspace
+            ),
+            true,
+        );
         return Err(ZeptoError::SecurityViolation(format!(
             "Path escapes workspace: {} is not within {}",
             path, workspace
@@ -146,6 +164,17 @@ fn check_symlink_escape(path: &Path, canonical_workspace: &Path) -> Result<()> {
             if let Ok(canonical) = current.canonicalize() {
                 // Check if the canonical path is still within workspace
                 if !canonical.starts_with(canonical_workspace) {
+                    log_audit_event(
+                        AuditCategory::PathSecurity,
+                        AuditSeverity::Critical,
+                        "symlink_escape",
+                        &format!(
+                            "Symlink escape: '{}' resolves to '{}' outside workspace",
+                            current.display(),
+                            canonical.display()
+                        ),
+                        true,
+                    );
                     return Err(ZeptoError::SecurityViolation(format!(
                         "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
                         current.display(),

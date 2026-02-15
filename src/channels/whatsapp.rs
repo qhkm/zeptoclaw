@@ -215,6 +215,7 @@ impl WhatsAppChannel {
     /// and sends outbound messages. Reconnects with exponential backoff.
     async fn run_bridge_loop(
         bridge_url: String,
+        bridge_token: Option<String>,
         bus: Arc<MessageBus>,
         allowlist: Vec<String>,
         deny_by_default: bool,
@@ -236,7 +237,26 @@ impl WhatsAppChannel {
                     info!("WhatsApp bridge loop shutdown requested");
                     return;
                 }
-                result = connect_async(&bridge_url) => {
+                result = async {
+                    if let Some(ref token) = bridge_token {
+                        // Build request with Authorization header.
+                        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+                            .uri(&bridge_url)
+                            .header("Authorization", format!("Bearer {}", token))
+                            .header("Host", tokio_tungstenite::tungstenite::http::Uri::try_from(bridge_url.as_str())
+                                .map(|u| u.host().unwrap_or("localhost").to_string())
+                                .unwrap_or_else(|_| "localhost".to_string()))
+                            .header("Connection", "Upgrade")
+                            .header("Upgrade", "websocket")
+                            .header("Sec-WebSocket-Version", "13")
+                            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+                            .body(())
+                            .expect("valid WebSocket request");
+                        connect_async(request).await
+                    } else {
+                        connect_async(&bridge_url).await
+                    }
+                } => {
                     match result {
                         Ok((stream, _)) => stream,
                         Err(e) => {
@@ -420,6 +440,7 @@ impl Channel for WhatsAppChannel {
         info!("Starting WhatsApp channel with bridge at {}", bridge_url);
         tokio::spawn(Self::run_bridge_loop(
             bridge_url,
+            self.config.bridge_token.clone(),
             Arc::clone(&self.bus),
             self.config.allow_from.clone(),
             self.config.deny_by_default,
@@ -1036,5 +1057,40 @@ mod tests {
         let channel = WhatsAppChannel::new(config, test_bus());
         let deps = channel.dependencies();
         assert!(deps.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Bridge token auth
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_bridge_token_default_none() {
+        let config = WhatsAppConfig::default();
+        assert!(config.bridge_token.is_none());
+    }
+
+    #[test]
+    fn test_bridge_token_deserialize_with_token() {
+        let json = r#"{"bridge_token": "secret-tok-123"}"#;
+        let config: WhatsAppConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.bridge_token.as_deref(), Some("secret-tok-123"));
+    }
+
+    #[test]
+    fn test_bridge_token_serde_roundtrip() {
+        let config = WhatsAppConfig {
+            bridge_token: Some("my-token".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).expect("should serialize");
+        let parsed: WhatsAppConfig = serde_json::from_str(&json).expect("should parse");
+        assert_eq!(parsed.bridge_token.as_deref(), Some("my-token"));
+    }
+
+    #[test]
+    fn test_bridge_token_env_override() {
+        // Env override is tested in config module; here just verify the field is accessible.
+        let mut config = WhatsAppConfig::default();
+        config.bridge_token = Some("env-token".to_string());
+        assert_eq!(config.bridge_token.as_deref(), Some("env-token"));
     }
 }

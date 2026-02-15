@@ -46,6 +46,11 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
             Ok(Arc::new(runtime))
         }
         RuntimeType::AppleContainer => {
+            if !config.apple.allow_experimental {
+                return Err(RuntimeError::NotAvailable(
+                    "Apple Container runtime is experimental. Set `allow_experimental: true` in runtime.apple config or ZEPTOCLAW_RUNTIME_APPLE_ALLOW_EXPERIMENTAL=true to enable.".to_string(),
+                ));
+            }
             #[cfg(target_os = "macos")]
             {
                 let extra_mounts =
@@ -115,6 +120,34 @@ mod tests {
     async fn test_available_runtimes_includes_native() {
         let available = available_runtimes().await;
         assert!(available.contains(&"native"));
+    }
+
+    #[tokio::test]
+    async fn test_create_apple_container_blocked_by_default() {
+        let mut config = RuntimeConfig::default();
+        config.runtime_type = RuntimeType::AppleContainer;
+        // allow_experimental defaults to false
+        assert!(!config.apple.allow_experimental);
+
+        let result = create_runtime(&config).await;
+        assert!(result.is_err());
+        let err_text = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err_text.contains("experimental"));
+    }
+
+    #[test]
+    fn test_apple_container_config_default_not_experimental() {
+        use crate::config::AppleContainerConfig;
+        let config = AppleContainerConfig::default();
+        assert!(!config.allow_experimental);
+    }
+
+    #[test]
+    fn test_apple_container_config_deserialize_experimental() {
+        use crate::config::AppleContainerConfig;
+        let json = r#"{"allow_experimental": true}"#;
+        let config: AppleContainerConfig = serde_json::from_str(json).expect("should parse");
+        assert!(config.allow_experimental);
     }
 
     #[tokio::test]

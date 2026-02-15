@@ -1,6 +1,7 @@
 //! ZeptoClaw - Ultra-lightweight personal AI assistant
 
 pub mod agent;
+pub mod audit;
 pub mod batch;
 pub mod bus;
 pub mod channels;
