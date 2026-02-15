@@ -193,6 +193,8 @@ pub struct ContextBuilder {
     skills_prompt: Option<String>,
     /// Optional runtime context to append to system prompt
     runtime_context: Option<RuntimeContext>,
+    /// Optional memory context to append to system prompt
+    memory_context: Option<String>,
 }
 
 impl ContextBuilder {
@@ -212,6 +214,7 @@ impl ContextBuilder {
             soul_prompt: None,
             skills_prompt: None,
             runtime_context: None,
+            memory_context: None,
         }
     }
 
@@ -310,6 +313,30 @@ impl ContextBuilder {
         self
     }
 
+    /// Add memory context to the system prompt.
+    ///
+    /// Injects long-term memory content (pinned + relevant entries) as a
+    /// `## Memory` section. If the provided string is empty, it is ignored.
+    ///
+    /// # Arguments
+    /// * `memory_context` - Pre-built memory injection string
+    ///
+    /// # Example
+    /// ```rust
+    /// use zeptoclaw::agent::ContextBuilder;
+    ///
+    /// let builder = ContextBuilder::new()
+    ///     .with_memory_context("## Memory\n\n### Pinned\n- user:name: Alice".to_string());
+    /// let system = builder.build_system_message();
+    /// assert!(system.content.contains("## Memory"));
+    /// ```
+    pub fn with_memory_context(mut self, memory_context: String) -> Self {
+        if !memory_context.is_empty() {
+            self.memory_context = Some(memory_context);
+        }
+        self
+    }
+
     /// Build the system message with all configured content.
     ///
     /// # Returns
@@ -340,6 +367,10 @@ impl ContextBuilder {
                 content.push_str("\n\n");
                 content.push_str(&rendered);
             }
+        }
+        if let Some(ref mem) = self.memory_context {
+            content.push_str("\n\n");
+            content.push_str(mem);
         }
         Message::system(&content)
     }
@@ -747,5 +778,35 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("Runtime Context"));
         assert!(messages[0].content.contains("telegram"));
+    }
+
+    // ---- Memory context tests ----
+
+    #[test]
+    fn test_context_builder_with_memory_context() {
+        let builder = ContextBuilder::new()
+            .with_memory_context("## Memory\n\n### Pinned\n- user:name: Alice".to_string());
+        let system = builder.build_system_message();
+        assert!(system.content.contains("## Memory"));
+        assert!(system.content.contains("user:name: Alice"));
+    }
+
+    #[test]
+    fn test_context_builder_empty_memory_context_skipped() {
+        let builder = ContextBuilder::new().with_memory_context(String::new());
+        let system = builder.build_system_message();
+        assert!(!system.content.contains("## Memory"));
+    }
+
+    #[test]
+    fn test_context_builder_memory_after_runtime() {
+        let ctx = RuntimeContext::new().with_channel("cli");
+        let builder = ContextBuilder::new()
+            .with_runtime_context(ctx)
+            .with_memory_context("## Memory\n\n### Pinned\n- k: v".to_string());
+        let system = builder.build_system_message();
+        let runtime_pos = system.content.find("Runtime Context").unwrap();
+        let memory_pos = system.content.find("## Memory").unwrap();
+        assert!(runtime_pos < memory_pos);
     }
 }
