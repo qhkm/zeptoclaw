@@ -50,6 +50,7 @@ cargo fmt
 ./target/release/zeptoclaw template list
 ./target/release/zeptoclaw template show coder
 ./target/release/zeptoclaw agent --template researcher -m "Search for..."
+./target/release/zeptoclaw agent --template task-manager -m "Add task: finish proposal by Friday"
 
 # Batch mode (process multiple prompts from file)
 ./target/release/zeptoclaw batch --input prompts.txt
@@ -98,7 +99,7 @@ src/
 ├── session/        # Session, message persistence, conversation history
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (17 tools + MCP + binary plugins)
+├── tools/          # Agent tools (18 tools + MCP + binary plugins)
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── filesystem.rs  # Read, write, list, edit files
@@ -114,6 +115,7 @@ src/
 │   ├── plugin.rs      # Plugin tool adapter (PluginTool)
 │   ├── approval.rs    # Tool approval gate (ApprovalGate)
 │   ├── r8r.rs         # R8r workflow integration
+│   ├── reminder.rs    # Persistent reminders (add/complete/snooze/overdue) with cron delivery
 │   └── mcp/           # MCP (Model Context Protocol) client tools
 │       ├── protocol.rs   # JSON-RPC 2.0 types, content blocks
 │       ├── client.rs     # HTTP transport, tools cache
@@ -172,7 +174,7 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-15 built-in tools + dynamic MCP tools via `Tool` async trait. All filesystem tools require workspace.
+16 built-in tools + dynamic MCP tools via `Tool` async trait. All filesystem tools require workspace.
 
 ### Utils (`src/utils/`)
 - `sanitize.rs` - Tool result sanitization (strip base64, hex, truncate)
