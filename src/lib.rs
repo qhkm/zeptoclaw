@@ -62,7 +62,8 @@ pub use security::{
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 pub use tools::{
-    cron::CronTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool, EchoTool,
-    GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool, ReminderTool, Tool,
-    ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool,
+    BinaryPluginTool, EchoTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool,
+    R8rTool, ReminderTool, Tool, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool,
+    WhatsAppTool,
 };
