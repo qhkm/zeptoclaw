@@ -176,6 +176,9 @@ Containerized agent proxy for full request isolation:
 - Stdin/stdout IPC with containerized agent
 - Semaphore-based concurrency limiting (`max_concurrent` config)
 - Mount allowlist validation, docker binary verification
+- **Auto-installs channel dependencies** (e.g., whatsmeow-bridge for WhatsApp)
+- Dependencies installed at gateway startup via DepManager
+- Warn-and-continue on dependency failures (non-blocking)
 
 ### Providers (`src/providers/`)
 LLM provider abstraction via `LLMProvider` trait:
