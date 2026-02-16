@@ -1,5 +1,6 @@
 //! Workspace memory utilities (OpenClaw-style markdown memory).
 
+pub mod builtin_searcher;
 pub mod longterm;
 pub mod traits;
 
