@@ -1250,8 +1250,7 @@ impl AgentLoop {
         };
 
         // Emit session SLO metrics (covers success, error, and timeout paths)
-        let slo =
-            crate::utils::slo::SessionSLO::evaluate(&self.metrics_collector, agent_completed);
+        let slo = crate::utils::slo::SessionSLO::evaluate(&self.metrics_collector, agent_completed);
         slo.emit();
         debug!(slo_summary = %slo.summary(), "Session SLO summary");
 
