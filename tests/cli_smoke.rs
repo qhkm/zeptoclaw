@@ -95,9 +95,16 @@ fn cli_auth_status() {
 
 #[test]
 fn cli_auth_login() {
-    let (code, _stdout, _stderr) = run_cli(&["auth", "login"]);
-    // Should exit 0 (just prints instructions)
-    assert_eq!(code, 0);
+    // Test with unsupported provider to get the error path (no browser/timeout)
+    let (code, _stdout, stderr) = run_cli(&["auth", "login", "openai"]);
+    // Should exit non-zero since OpenAI doesn't support OAuth
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("does not support OAuth")
+            || stderr.contains("not support OAuth")
+            || _stdout.contains("does not support OAuth"),
+        "Expected OAuth unsupported error"
+    );
 }
 
 #[test]
