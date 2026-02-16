@@ -52,6 +52,9 @@ enum Commands {
         /// Stream the response token-by-token
         #[arg(long)]
         stream: bool,
+        /// Show what tools would be called without executing them
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Process prompts from a file
     Batch {
@@ -201,6 +204,12 @@ pub enum MemoryAction {
     },
     /// Show memory statistics
     Stats,
+    /// Remove expired memories below decay threshold
+    Cleanup {
+        /// Decay score threshold (0.0-1.0). Entries below this are removed.
+        #[arg(long, default_value_t = 0.1)]
+        threshold: f32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -350,8 +359,9 @@ pub async fn run() -> Result<()> {
             message,
             template,
             stream,
+            dry_run,
         }) => {
-            agent::cmd_agent(message, template, stream).await?;
+            agent::cmd_agent(message, template, stream, dry_run).await?;
         }
         Some(Commands::Batch {
             input,

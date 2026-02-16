@@ -121,6 +121,8 @@ pub struct AgentLoop {
     pending_messages: Arc<Mutex<HashMap<String, Vec<InboundMessage>>>>,
     /// Whether to stream the final LLM response in CLI mode.
     streaming: AtomicBool,
+    /// When true, tool calls are intercepted and described instead of executed.
+    dry_run: AtomicBool,
     /// Per-session token budget tracker.
     token_budget: Arc<TokenBudget>,
     /// Tool approval gate for policy-based tool gating.
@@ -186,6 +188,7 @@ impl AgentLoop {
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
             streaming: AtomicBool::new(false),
+            dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
             safety_layer,
@@ -237,6 +240,7 @@ impl AgentLoop {
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
             streaming: AtomicBool::new(false),
+            dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
             safety_layer,
@@ -478,6 +482,7 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            let is_dry_run = self.dry_run.load(Ordering::SeqCst);
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -494,6 +499,7 @@ impl AgentLoop {
                     let safety = safety_layer.clone();
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    let dry_run = is_dry_run;
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -518,6 +524,20 @@ impl AgentLoop {
                             let prompt = gate.format_approval_request(&name, &args);
                             info!(tool = %name, "Tool requires approval, blocking execution");
                             return (id, format!("Tool '{}' requires user approval and was not executed. {}", name, prompt));
+                        }
+
+                        // Dry-run mode: describe what would happen without executing
+                        if dry_run {
+                            let args_display = serde_json::to_string_pretty(&args)
+                                .unwrap_or_else(|_| raw_args.clone());
+                            let sanitized = crate::utils::sanitize::sanitize_tool_result(
+                                &args_display, budget,
+                            );
+                            let description = format!(
+                                "[DRY RUN] Would execute tool '{}' with arguments: {}",
+                                name, sanitized
+                            );
+                            return (id, description);
                         }
 
                         // Send tool starting feedback
@@ -644,6 +664,11 @@ impl AgentLoop {
         // Add final assistant response
         session.add_message(Message::assistant(&response.content));
         self.session_manager.save(&session).await?;
+
+        // Emit session SLO metrics
+        let slo = crate::utils::slo::SessionSLO::evaluate(&self.metrics_collector, true);
+        slo.emit();
+        debug!(slo_summary = %slo.summary(), "Session SLO summary");
 
         Ok(response.content)
     }
@@ -778,6 +803,7 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -792,6 +818,7 @@ impl AgentLoop {
                     let safety = safety_layer_stream.clone();
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    let dry_run = is_dry_run_stream;
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
@@ -808,6 +835,19 @@ impl AgentLoop {
                                     name, prompt
                                 ),
                             );
+                        }
+
+                        // Dry-run mode: describe what would happen without executing
+                        if dry_run {
+                            let args_display = serde_json::to_string_pretty(&args)
+                                .unwrap_or_else(|_| raw_args.clone());
+                            let sanitized =
+                                crate::utils::sanitize::sanitize_tool_result(&args_display, budget);
+                            let description = format!(
+                                "[DRY RUN] Would execute tool '{}' with arguments: {}",
+                                name, sanitized
+                            );
+                            return (id, description);
                         }
 
                         // Send tool starting feedback
@@ -1363,6 +1403,20 @@ impl AgentLoop {
         self.streaming.load(Ordering::SeqCst)
     }
 
+    /// Enable or disable dry-run mode.
+    ///
+    /// When enabled, tool calls are intercepted and a description of
+    /// what *would* happen is returned instead of actually executing
+    /// the tool.
+    pub fn set_dry_run(&self, enabled: bool) {
+        self.dry_run.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Check if dry-run mode is enabled.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run.load(Ordering::SeqCst)
+    }
+
     /// Set tool feedback sender for CLI tool execution display.
     pub async fn set_tool_feedback(&self, tx: tokio::sync::mpsc::UnboundedSender<ToolFeedback>) {
         *self.tool_feedback_tx.write().await = Some(tx);
@@ -1657,5 +1711,28 @@ mod tests {
         let messages = vec![Message::user("hello"), Message::assistant("hi")];
         // Should return silently without error
         agent.memory_flush(&messages).await;
+    }
+
+    #[test]
+    fn test_dry_run_default_false() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        assert!(!agent.is_dry_run());
+    }
+
+    #[test]
+    fn test_set_dry_run() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        assert!(!agent.is_dry_run());
+        agent.set_dry_run(true);
+        assert!(agent.is_dry_run());
+        agent.set_dry_run(false);
+        assert!(!agent.is_dry_run());
     }
 }

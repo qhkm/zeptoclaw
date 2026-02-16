@@ -17,6 +17,7 @@ pub(crate) async fn cmd_memory(action: MemoryAction) -> Result<()> {
         } => cmd_memory_set(key, value, category, tags).await,
         MemoryAction::Delete { key } => cmd_memory_delete(key).await,
         MemoryAction::Stats => cmd_memory_stats().await,
+        MemoryAction::Cleanup { threshold } => cmd_memory_cleanup(threshold).await,
     }
 }
 
@@ -142,6 +143,23 @@ async fn cmd_memory_stats() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_memory_cleanup(threshold: f32) -> Result<()> {
+    if !(0.0..=1.0).contains(&threshold) || !threshold.is_finite() {
+        anyhow::bail!("Threshold must be between 0.0 and 1.0");
+    }
+    let mut mem = LongTermMemory::new().with_context(|| "Failed to open long-term memory")?;
+    let before = mem.count();
+    let removed = mem.cleanup_expired(threshold)?;
+    println!(
+        "Memory cleanup: removed {} of {} entries (threshold: {:.2})",
+        removed, before, threshold
+    );
+    if removed > 0 {
+        println!("Remaining: {} entries", mem.count());
+    }
     Ok(())
 }
 

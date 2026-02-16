@@ -127,6 +127,48 @@ impl MetricsCollector {
         self.session_start.elapsed()
     }
 
+    /// Compute an approximate p95 tool duration across all tools.
+    ///
+    /// Uses `avg + 2 * (max - avg)` clamped to max as a rough estimate.
+    /// Returns `None` if no tool calls have been recorded.
+    pub fn approx_p95_duration(&self) -> Option<Duration> {
+        let tools = self.tools.lock().unwrap();
+        let mut max_p95 = Duration::ZERO;
+        let mut found_any = false;
+
+        for metrics in tools.values() {
+            if let (Some(avg), Some(max)) = (metrics.average_duration(), metrics.max_duration) {
+                found_any = true;
+                let spread = max.saturating_sub(avg);
+                // p95 ≈ avg + 2*(max-avg), clamped to max
+                let p95 = (avg + spread.mul_f32(2.0)).min(max);
+                if p95 > max_p95 {
+                    max_p95 = p95;
+                }
+            }
+        }
+
+        if found_any {
+            Some(max_p95)
+        } else {
+            None
+        }
+    }
+
+    /// Compute the aggregate success rate across all tools.
+    ///
+    /// Returns 1.0 if no calls have been recorded.
+    pub fn aggregate_success_rate(&self) -> f64 {
+        let tools = self.tools.lock().unwrap();
+        let total_calls: u64 = tools.values().map(|m| m.call_count).sum();
+        let total_errors: u64 = tools.values().map(|m| m.error_count).sum();
+
+        if total_calls == 0 {
+            return 1.0;
+        }
+        (total_calls - total_errors) as f64 / total_calls as f64
+    }
+
     /// Produces a human-readable summary of the session metrics.
     ///
     /// Example output:
@@ -354,5 +396,40 @@ mod tests {
 
         let duration = collector.session_duration();
         assert!(duration >= Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_approx_p95_duration_no_calls() {
+        let collector = MetricsCollector::new();
+        assert!(collector.approx_p95_duration().is_none());
+    }
+
+    #[test]
+    fn test_approx_p95_duration_single_tool() {
+        let collector = MetricsCollector::new();
+        collector.record_tool_call("shell", Duration::from_millis(100), true);
+        collector.record_tool_call("shell", Duration::from_millis(500), true);
+
+        let p95 = collector.approx_p95_duration().unwrap();
+        assert!(p95 >= Duration::from_millis(100));
+        assert!(p95 <= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_aggregate_success_rate_no_calls() {
+        let collector = MetricsCollector::new();
+        assert!((collector.aggregate_success_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_aggregate_success_rate_mixed() {
+        let collector = MetricsCollector::new();
+        collector.record_tool_call("a", Duration::from_millis(10), true);
+        collector.record_tool_call("a", Duration::from_millis(10), true);
+        collector.record_tool_call("b", Duration::from_millis(10), true);
+        collector.record_tool_call("b", Duration::from_millis(10), false);
+
+        let rate = collector.aggregate_success_rate();
+        assert!((rate - 0.75).abs() < f64::EPSILON);
     }
 }

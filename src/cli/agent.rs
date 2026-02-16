@@ -18,6 +18,7 @@ pub(crate) async fn cmd_agent(
     message: Option<String>,
     template_name: Option<String>,
     stream: bool,
+    dry_run: bool,
 ) -> Result<()> {
     // Load configuration
     let config = Config::load().with_context(|| "Failed to load configuration")?;
@@ -37,6 +38,12 @@ pub(crate) async fn cmd_agent(
     } else {
         create_agent(config.clone(), bus.clone()).await?
     };
+
+    // Enable dry-run mode if requested
+    if dry_run {
+        agent.set_dry_run(true);
+        eprintln!("[DRY RUN] Tool execution disabled — showing what would happen");
+    }
 
     // Set up tool execution feedback (shows progress on stderr)
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();

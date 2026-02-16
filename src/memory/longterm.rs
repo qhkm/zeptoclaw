@@ -256,6 +256,22 @@ impl LongTermMemory {
         Ok(to_remove)
     }
 
+    /// Remove entries whose `decay_score()` has fallen below `threshold`.
+    /// Pinned entries are never removed (their decay_score is always 1.0).
+    /// Returns the number of entries removed.
+    pub fn cleanup_expired(&mut self, threshold: f32) -> Result<usize> {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, entry| entry.decay_score() >= threshold);
+        let count = before - self.entries.len();
+
+        if count > 0 {
+            self.save()?;
+        }
+
+        Ok(count)
+    }
+
     /// Return a human-readable summary of the memory store.
     pub fn summary(&self) -> String {
         let count = self.count();
@@ -806,5 +822,57 @@ mod tests {
             let low = mem.get_readonly("low").unwrap();
             assert_eq!(low.importance, 0.3, "Low importance should persist");
         }
+    }
+
+    #[test]
+    fn test_cleanup_expired_removes_low_score() {
+        let (mut mem, _dir) = temp_memory();
+        mem.set("high", "value", "test", vec![], 2.0).unwrap();
+        mem.set("low", "value", "test", vec![], 0.01).unwrap();
+
+        // Age the low-importance entry so its decay_score drops below threshold
+        if let Some(entry) = mem.entries.get_mut("low") {
+            entry.last_accessed = now_timestamp() - (90 * 86400); // 90 days old
+            entry.importance = 0.01;
+        }
+
+        let removed = mem.cleanup_expired(0.1).unwrap();
+        assert_eq!(removed, 1);
+        assert!(mem.get_readonly("high").is_some());
+        assert!(mem.get_readonly("low").is_none());
+    }
+
+    #[test]
+    fn test_cleanup_expired_keeps_pinned() {
+        let (mut mem, _dir) = temp_memory();
+        mem.set("pinned_key", "value", "pinned", vec![], 0.01)
+            .unwrap();
+
+        // Age the entry far into the past
+        if let Some(entry) = mem.entries.get_mut("pinned_key") {
+            entry.last_accessed = now_timestamp() - (365 * 86400);
+        }
+
+        let removed = mem.cleanup_expired(0.5).unwrap();
+        assert_eq!(removed, 0, "Pinned entries should never be cleaned up");
+        assert!(mem.get_readonly("pinned_key").is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_no_op_when_all_fresh() {
+        let (mut mem, _dir) = temp_memory();
+        mem.set("k1", "v1", "test", vec![], 1.0).unwrap();
+        mem.set("k2", "v2", "test", vec![], 1.0).unwrap();
+
+        let removed = mem.cleanup_expired(0.1).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(mem.count(), 2);
+    }
+
+    #[test]
+    fn test_cleanup_expired_empty_memory() {
+        let (mut mem, _dir) = temp_memory();
+        let removed = mem.cleanup_expired(0.5).unwrap();
+        assert_eq!(removed, 0);
     }
 }
