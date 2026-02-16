@@ -574,6 +574,8 @@ pub struct ProvidersConfig {
     pub gemini: Option<ProviderConfig>,
     /// Ollama (local models) configuration
     pub ollama: Option<ProviderConfig>,
+    /// Nvidia NIM configuration
+    pub nvidia: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers

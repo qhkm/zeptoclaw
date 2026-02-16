@@ -93,6 +93,13 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_base_url: Some("http://localhost:11434/v1"),
         backend: "openai",
     },
+    ProviderSpec {
+        name: "nvidia",
+        model_keywords: &["nvidia", "nim"],
+        runtime_supported: true,
+        default_base_url: Some("https://integrate.api.nvidia.com/v1"),
+        backend: "openai",
+    },
 ];
 
 fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -105,6 +112,7 @@ fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a Pro
         "vllm" => config.providers.vllm.as_ref(),
         "gemini" => config.providers.gemini.as_ref(),
         "ollama" => config.providers.ollama.as_ref(),
+        "nvidia" => config.providers.nvidia.as_ref(),
         _ => None,
     }
 }
@@ -363,6 +371,23 @@ mod tests {
         assert_eq!(selected.name, "anthropic");
         assert_eq!(selected.backend, "anthropic");
         assert_eq!(selected.api_base, None);
+    }
+
+    #[test]
+    fn test_nvidia_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.nvidia = Some(ProviderConfig {
+            api_key: Some("nvapi-test".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "nvidia");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://integrate.api.nvidia.com/v1")
+        );
     }
 
     #[test]

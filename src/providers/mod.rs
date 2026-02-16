@@ -39,6 +39,7 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "vllm",
     "gemini",
     "ollama",
+    "nvidia",
 ];
 
 use crate::error::ProviderError;

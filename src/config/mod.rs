@@ -262,6 +262,22 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // vLLM
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VLLM_API_KEY") {
+            let provider = self
+                .providers
+                .vllm
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VLLM_API_BASE") {
+            let provider = self
+                .providers
+                .vllm
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
         // Ollama (local models)
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OLLAMA_API_KEY") {
             let provider = self
@@ -274,6 +290,22 @@ impl Config {
             let provider = self
                 .providers
                 .ollama
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
+        // Nvidia NIM
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NVIDIA_API_KEY") {
+            let provider = self
+                .providers
+                .nvidia
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NVIDIA_API_BASE") {
+            let provider = self
+                .providers
+                .nvidia
                 .get_or_insert_with(ProviderConfig::default);
             provider.api_base = Some(val);
         }
