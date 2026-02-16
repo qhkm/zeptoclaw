@@ -55,8 +55,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Implements the `LLMProvider` trait for Anthropic's Claude API.
 /// Handles message format conversion, tool calling, and response parsing.
 pub struct ClaudeProvider {
-    /// API key for authentication
-    api_key: String,
+    /// Resolved credential (API key or OAuth Bearer token).
+    credential: crate::auth::ResolvedCredential,
     /// HTTP client for making requests
     client: Client,
 }
@@ -77,7 +77,20 @@ impl ClaudeProvider {
     /// ```
     pub fn new(api_key: &str) -> Self {
         Self {
-            api_key: api_key.to_string(),
+            credential: crate::auth::ResolvedCredential::ApiKey(api_key.to_string()),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+        }
+    }
+
+    /// Create a new Claude provider with a resolved credential.
+    ///
+    /// This supports both API key and OAuth Bearer token authentication.
+    pub fn with_credential(credential: crate::auth::ResolvedCredential) -> Self {
+        Self {
+            credential,
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -95,9 +108,35 @@ impl ClaudeProvider {
     /// * `client` - Custom reqwest client
     pub fn with_client(api_key: &str, client: Client) -> Self {
         Self {
-            api_key: api_key.to_string(),
+            credential: crate::auth::ResolvedCredential::ApiKey(api_key.to_string()),
             client,
         }
+    }
+
+    /// Build auth headers based on the resolved credential type.
+    ///
+    /// - API key: sends `x-api-key` header
+    /// - Bearer token: sends `Authorization: Bearer` header
+    fn auth_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        match &self.credential {
+            crate::auth::ResolvedCredential::ApiKey(key) => {
+                headers.insert(
+                    "x-api-key",
+                    reqwest::header::HeaderValue::from_str(key)
+                        .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
+                );
+            }
+            crate::auth::ResolvedCredential::BearerToken { access_token, .. } => {
+                let value = format!("Bearer {}", access_token);
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    reqwest::header::HeaderValue::from_str(&value)
+                        .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
+                );
+            }
+        }
+        headers
     }
 }
 
@@ -142,7 +181,7 @@ impl LLMProvider for ClaudeProvider {
         let response = self
             .client
             .post(CLAUDE_API_URL)
-            .header("x-api-key", &self.api_key)
+            .headers(self.auth_headers())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&request)
@@ -210,7 +249,7 @@ impl LLMProvider for ClaudeProvider {
         let response = self
             .client
             .post(CLAUDE_API_URL)
-            .header("x-api-key", &self.api_key)
+            .headers(self.auth_headers())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&request)

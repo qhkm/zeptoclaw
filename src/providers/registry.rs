@@ -3,6 +3,7 @@
 //! This module centralizes provider metadata and the mapping from configuration
 //! to runtime provider selection.
 
+use crate::auth::{AuthMethod, ResolvedCredential};
 use crate::config::{Config, ProviderConfig};
 
 /// Metadata describing an LLM provider.
@@ -21,16 +22,18 @@ pub struct ProviderSpec {
 }
 
 /// Runtime-ready provider selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeProviderSelection {
     /// Selected provider id.
     pub name: &'static str,
-    /// API key used for provider auth.
+    /// API key used for provider auth (kept for backward compat).
     pub api_key: String,
     /// Optional provider base URL.
     pub api_base: Option<String>,
     /// The underlying backend type ("anthropic" or "openai").
     pub backend: &'static str,
+    /// Resolved credential (OAuth token or API key).
+    pub credential: ResolvedCredential,
 }
 
 /// Provider registry in priority order.
@@ -155,17 +158,35 @@ pub fn resolve_runtime_provider(config: &Config) -> Option<RuntimeProviderSelect
 }
 
 /// Resolve all runtime-supported configured providers in registry order.
+///
+/// For each provider, resolves the credential based on the configured `auth_method`:
+/// - `api_key` (default): uses the configured API key
+/// - `oauth`: checks the token store for a valid OAuth token
+/// - `auto`: tries OAuth first, falls back to API key
 pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelection> {
     let mut resolved = Vec::new();
+
+    // Try to load the token store for OAuth resolution.
+    // Use a fixed key for now; in production this would use resolve_master_key().
+    let token_store = crate::security::encryption::resolve_master_key(false)
+        .ok()
+        .map(crate::auth::store::TokenStore::new);
 
     for spec in PROVIDER_REGISTRY
         .iter()
         .filter(|spec| spec.runtime_supported)
     {
         let provider = provider_config_by_name(config, spec.name);
-        let Some(api_key) = configured_api_key(provider) else {
-            continue;
-        };
+        let auth_method = provider
+            .map(|p| p.resolved_auth_method())
+            .unwrap_or_default();
+
+        // Resolve credential based on auth method
+        let (credential, api_key_str) =
+            match resolve_credential(spec.name, &auth_method, provider, token_store.as_ref()) {
+                Some(pair) => pair,
+                None => continue, // No credential available for this provider
+            };
 
         let user_base = provider.and_then(|p| p.api_base.clone()).and_then(|base| {
             if base.is_empty() {
@@ -178,18 +199,77 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
 
         resolved.push(RuntimeProviderSelection {
             name: spec.name,
-            api_key: api_key.to_string(),
+            api_key: api_key_str,
             api_base,
             backend: spec.backend,
+            credential,
         });
     }
 
     resolved
 }
 
+/// Resolve a credential for a single provider.
+///
+/// Returns `Some((credential, api_key_string))` or `None` if no credential is available.
+fn resolve_credential(
+    provider_name: &str,
+    auth_method: &AuthMethod,
+    provider_config: Option<&ProviderConfig>,
+    token_store: Option<&crate::auth::store::TokenStore>,
+) -> Option<(ResolvedCredential, String)> {
+    let api_key = configured_api_key(provider_config);
+
+    match auth_method {
+        AuthMethod::ApiKey => {
+            // Only use API key
+            let key = api_key?;
+            Some((ResolvedCredential::ApiKey(key.to_string()), key.to_string()))
+        }
+        AuthMethod::OAuth => {
+            // Only use OAuth token
+            if let Some(token) = try_load_oauth_token(provider_name, token_store) {
+                let key_str = token.value().to_string();
+                Some((token, key_str))
+            } else {
+                None
+            }
+        }
+        AuthMethod::Auto => {
+            // Try OAuth first, fall back to API key
+            if let Some(token) = try_load_oauth_token(provider_name, token_store) {
+                let key_str = token.value().to_string();
+                Some((token, key_str))
+            } else {
+                api_key.map(|key| (ResolvedCredential::ApiKey(key.to_string()), key.to_string()))
+            }
+        }
+    }
+}
+
+/// Try to load a valid OAuth token from the store.
+fn try_load_oauth_token(
+    provider_name: &str,
+    token_store: Option<&crate::auth::store::TokenStore>,
+) -> Option<ResolvedCredential> {
+    let store = token_store?;
+    let token_set = store.load(provider_name).ok()??;
+
+    // Expired tokens are ignored here; refresh is handled before provider setup.
+    if token_set.is_expired() {
+        return None;
+    }
+
+    Some(ResolvedCredential::BearerToken {
+        access_token: token_set.access_token,
+        expires_at: token_set.expires_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_configured_provider_names_registry_order() {
@@ -402,5 +482,68 @@ mod tests {
         assert_eq!(selected.name, "openai");
         assert_eq!(selected.backend, "openai");
         assert_eq!(selected.api_base, None);
+    }
+
+    fn test_token_store_with_token(
+        token: crate::auth::OAuthTokenSet,
+    ) -> (TempDir, crate::auth::store::TokenStore) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tokens.json.enc");
+        let store = crate::auth::store::TokenStore::with_path(
+            path,
+            crate::security::encryption::SecretEncryption::from_raw_key(&[0x42u8; 32]),
+        );
+        store.save(&token).unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn test_try_load_oauth_token_skips_expired_token_even_with_refresh_token() {
+        let token = crate::auth::OAuthTokenSet {
+            provider: "anthropic".to_string(),
+            access_token: "expired-access".to_string(),
+            refresh_token: Some("refresh-token".to_string()),
+            expires_at: Some(chrono::Utc::now().timestamp() - 60),
+            token_type: "Bearer".to_string(),
+            scope: None,
+            obtained_at: chrono::Utc::now().timestamp() - 3600,
+            client_id: Some("zeptoclaw".to_string()),
+        };
+
+        let (_tmp, store) = test_token_store_with_token(token);
+        let resolved = try_load_oauth_token("anthropic", Some(&store));
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_resolve_credential_auto_falls_back_to_api_key_when_oauth_token_expired() {
+        let token = crate::auth::OAuthTokenSet {
+            provider: "anthropic".to_string(),
+            access_token: "expired-access".to_string(),
+            refresh_token: Some("refresh-token".to_string()),
+            expires_at: Some(chrono::Utc::now().timestamp() - 60),
+            token_type: "Bearer".to_string(),
+            scope: None,
+            obtained_at: chrono::Utc::now().timestamp() - 3600,
+            client_id: Some("zeptoclaw".to_string()),
+        };
+
+        let (_tmp, store) = test_token_store_with_token(token);
+        let provider = ProviderConfig {
+            api_key: Some("sk-ant-fallback".to_string()),
+            auth_method: Some("auto".to_string()),
+            ..Default::default()
+        };
+
+        let (credential, api_key) = resolve_credential(
+            "anthropic",
+            &AuthMethod::Auto,
+            Some(&provider),
+            Some(&store),
+        )
+        .expect("credential should resolve");
+
+        assert_eq!(api_key, "sk-ant-fallback");
+        assert!(matches!(credential, ResolvedCredential::ApiKey(_)));
     }
 }
