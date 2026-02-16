@@ -618,9 +618,16 @@ pub struct ProviderConfig {
     /// Custom API base URL
     #[serde(default)]
     pub api_base: Option<String>,
-    /// Authentication method (e.g., "oauth", "api_key")
+    /// Authentication method: "api_key" (default), "oauth", or "auto"
     #[serde(default)]
     pub auth_method: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Resolve the authentication method for this provider.
+    pub fn resolved_auth_method(&self) -> crate::auth::AuthMethod {
+        crate::auth::AuthMethod::from_option(self.auth_method.as_deref())
+    }
 }
 
 /// Retry behavior for runtime provider calls.
