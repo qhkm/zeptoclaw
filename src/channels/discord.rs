@@ -47,8 +47,8 @@ const BASE_RECONNECT_DELAY_SECS: u64 = 2;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
 /// Discord Gateway intents bitmask.
-/// GUILDS (1 << 0) | GUILD_MESSAGES (1 << 9) | MESSAGE_CONTENT (1 << 15)
-const GATEWAY_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 15);
+/// GUILDS (1 << 0) | GUILD_MESSAGES (1 << 9) | DIRECT_MESSAGES (1 << 12) | MESSAGE_CONTENT (1 << 15)
+const GATEWAY_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
 
 /// Discord message content length limit.
 const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
@@ -1339,10 +1339,11 @@ mod tests {
     fn test_gateway_intents_bitmask() {
         // GUILDS (1 << 0) = 1
         // GUILD_MESSAGES (1 << 9) = 512
+        // DIRECT_MESSAGES (1 << 12) = 4096
         // MESSAGE_CONTENT (1 << 15) = 32768
-        // Total = 33281
-        assert_eq!(GATEWAY_INTENTS, 1 + 512 + 32768);
-        assert_eq!(GATEWAY_INTENTS, 33281);
+        // Total = 37377
+        assert_eq!(GATEWAY_INTENTS, 1 + 512 + 4096 + 32768);
+        assert_eq!(GATEWAY_INTENTS, 37377);
     }
 
     // -----------------------------------------------------------------------
