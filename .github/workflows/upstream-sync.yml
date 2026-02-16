@@ -1,0 +1,194 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream/main into fork main
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure upstream remote
+        run: |
+          set -euo pipefail
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/qhkm/zeptoclaw.git
+          else
+            git remote add upstream https://github.com/qhkm/zeptoclaw.git
+          fi
+
+      - name: Fetch and prune remotes
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git fetch --prune upstream
+          git checkout main
+          git pull --ff-only origin main
+
+      - name: Compute drift
+        id: drift
+        run: |
+          set -euo pipefail
+          counts=$(git rev-list --left-right --count origin/main...upstream/main)
+          ahead=$(echo "$counts" | awk '{print $1}')
+          behind=$(echo "$counts" | awk '{print $2}')
+
+          echo "ahead=${ahead}" >> "$GITHUB_OUTPUT"
+          echo "behind=${behind}" >> "$GITHUB_OUTPUT"
+          echo "origin_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Upstream drift (before sync)"
+            echo "- origin/main: $(git rev-parse --short origin/main)"
+            echo "- upstream/main: $(git rev-parse --short upstream/main)"
+            echo "- ahead: ${ahead}"
+            echo "- behind: ${behind}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exit when already synced
+        if: steps.drift.outputs.behind == '0'
+        run: echo "No upstream commits to merge."
+
+      - name: Merge upstream/main (no-ff)
+        id: merge
+        if: steps.drift.outputs.behind != '0'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git merge --no-ff upstream/main -m "chore(sync): merge upstream/main into main"
+
+      - name: Setup droid CLI
+        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://app.factory.ai/cli | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve merge conflicts with Factory Droid
+        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure'
+        env:
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${FACTORY_API_KEY:-}" ]; then
+            echo "FACTORY_API_KEY secret is required for Factory Droid conflict resolution." >&2
+            exit 1
+          fi
+
+          droid exec --auto high "
+          Act as a senior Git maintainer and perform the full upstream sync now.
+
+          Repository: ${GITHUB_WORKSPACE}
+          Goal: merge https://github.com/qhkm/zeptoclaw \`upstream/main\` into my fork \`origin/main\` via local \`main\`, preserve all fork-specific behavior, and push.
+
+          Requirements:
+          1. Fetch and prune both remotes.
+          2. Merge with \`git merge --no-ff upstream/main\` (no rebase, no reset, no stash).
+          3. If conflicts occur, resolve compositionally (never ours/theirs blindly). For each conflict, report:
+             - upstream intent
+             - fork intent
+             - merged result and why both behaviors are preserved
+             - refactor/abstraction suggestion if needed
+             - risk level
+          4. Run relevant tests for touched areas.
+          5. Create the merge commit.
+          6. Push \`main\` to \`origin\`.
+          7. Verify final state with:
+             - \`main...upstream/main\`
+             - \`origin/main...upstream/main\`
+             and confirm behind count is 0.
+
+          Output format:
+          - “What changed”
+          - “Conflict resolutions” (per file)
+          - “Risks”
+          - “Validation run”
+          - “Final SHAs and ahead/behind counts”
+          " > sync-report.md
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Unresolved conflicts remain after Factory Droid execution." >&2
+            exit 1
+          fi
+
+      - name: Run validators for merge result
+        if: steps.drift.outputs.behind != '0'
+        run: |
+          set -euo pipefail
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+          cargo test
+
+      - name: Push main if local diverges from origin/main
+        if: steps.drift.outputs.behind != '0'
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          local_sha=$(git rev-parse HEAD)
+          origin_sha=$(git rev-parse origin/main)
+
+          if [ "$local_sha" != "$origin_sha" ]; then
+            git push origin main
+          else
+            echo "origin/main already matches local main."
+          fi
+
+      - name: Verify sync state
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git fetch --prune upstream
+
+          local_counts=$(git rev-list --left-right --count main...upstream/main)
+          origin_counts=$(git rev-list --left-right --count origin/main...upstream/main)
+
+          local_ahead=$(echo "$local_counts" | awk '{print $1}')
+          local_behind=$(echo "$local_counts" | awk '{print $2}')
+          origin_ahead=$(echo "$origin_counts" | awk '{print $1}')
+          origin_behind=$(echo "$origin_counts" | awk '{print $2}')
+
+          {
+            echo "### Sync verification"
+            echo "- main...upstream/main => ahead=${local_ahead}, behind=${local_behind}"
+            echo "- origin/main...upstream/main => ahead=${origin_ahead}, behind=${origin_behind}"
+            echo "- final local main: $(git rev-parse --short main)"
+            echo "- final origin/main: $(git rev-parse --short origin/main)"
+            echo "- final upstream/main: $(git rev-parse --short upstream/main)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$local_behind" != "0" ] || [ "$origin_behind" != "0" ]; then
+            echo "Behind count is not zero after sync." >&2
+            exit 1
+          fi
+
+      - name: Upload conflict resolution report
+        if: hashFiles('sync-report.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-report
+          path: sync-report.md
+          retention-days: 14
