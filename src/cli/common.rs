@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use zeptoclaw::agent::{AgentLoop, ContextBuilder};
+use zeptoclaw::agent::{AgentLoop, ContextBuilder, RuntimeContext};
 use zeptoclaw::bus::MessageBus;
 use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
@@ -315,6 +315,12 @@ pub(crate) async fn create_agent_with_template(
             Err(e) => warn!("Failed to load long-term memory for injection: {}", e),
         }
     }
+
+    // Build runtime context for environment awareness (time, platform, etc.)
+    let runtime_ctx = RuntimeContext::new()
+        .with_timezone(&config.agents.defaults.timezone)
+        .with_os_info();
+    context_builder = context_builder.with_runtime_context(runtime_ctx);
 
     // Create agent loop
     let agent = Arc::new(AgentLoop::with_context_builder(

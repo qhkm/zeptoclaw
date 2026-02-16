@@ -236,6 +236,32 @@ pub struct AgentDefaults {
     /// Default tool profile name (from `tool_profiles`). Omit for all tools.
     #[serde(default)]
     pub tool_profile: Option<String>,
+    /// IANA timezone for the agent (e.g., "Asia/Kuala_Lumpur", "US/Pacific").
+    /// Used for time-aware system prompts and message timestamps.
+    /// Defaults to system local timezone, falls back to "UTC".
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+}
+
+/// Detect the system's IANA timezone.
+///
+/// Priority: `TZ` env → `/etc/localtime` symlink → `"UTC"`.
+fn default_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.is_empty() {
+            return tz;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(target) = std::fs::read_link("/etc/localtime") {
+            let path = target.to_string_lossy();
+            if let Some(pos) = path.find("zoneinfo/") {
+                return path[pos + 9..].to_string();
+            }
+        }
+    }
+    "UTC".to_string()
 }
 
 /// Default model compile-time configuration.
@@ -259,6 +285,7 @@ impl Default for AgentDefaults {
             token_budget: 0,
             compact_tools: false,
             tool_profile: None,
+            timezone: default_timezone(),
         }
     }
 }

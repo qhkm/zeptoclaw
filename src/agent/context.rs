@@ -4,7 +4,41 @@
 //! and message history for LLM conversations. It also provides `RuntimeContext`
 //! for injecting environment-awareness into the agent's system prompt.
 
+use chrono::Utc;
+use chrono_tz::Tz;
+
 use crate::session::Message;
+
+/// Format the current time in the given IANA timezone.
+///
+/// Returns a human-readable string like "Mon 2026-02-16 12:51 +08:00".
+/// Falls back to UTC if the timezone name is invalid.
+fn format_current_time(tz_name: &str) -> String {
+    let utc_now = Utc::now();
+    match tz_name.parse::<Tz>() {
+        Ok(tz) => {
+            let local = utc_now.with_timezone(&tz);
+            local.format("%a %Y-%m-%d %H:%M %:z").to_string()
+        }
+        Err(_) => utc_now.format("%a %Y-%m-%d %H:%M UTC").to_string(),
+    }
+}
+
+/// Format a timestamp envelope for a user message.
+///
+/// Returns a string like "[Mon 2026-02-16 12:51 +08:00]" to prepend to user messages.
+pub fn format_message_envelope(tz_name: &str) -> String {
+    let utc_now = Utc::now();
+    match tz_name.parse::<Tz>() {
+        Ok(tz) => {
+            let local = utc_now.with_timezone(&tz);
+            format!("[{}]", local.format("%a %Y-%m-%d %H:%M %:z"))
+        }
+        Err(_) => {
+            format!("[{}]", utc_now.format("%a %Y-%m-%d %H:%M UTC"))
+        }
+    }
+}
 
 /// Default system prompt for ZeptoClaw agent
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are ZeptoClaw, an ultra-lightweight personal AI assistant.
@@ -41,8 +75,9 @@ pub struct RuntimeContext {
     pub channel: Option<String>,
     /// Names of available tools
     pub available_tools: Vec<String>,
-    /// Current timestamp (ISO 8601)
-    pub current_time: Option<String>,
+    /// IANA timezone (e.g., "Asia/Kuala_Lumpur"). When set, current time is
+    /// computed **live** in `render()` so it is never stale.
+    pub timezone: Option<String>,
     /// Workspace path
     pub workspace: Option<String>,
     /// OS/platform info (e.g., "linux aarch64", "macos aarch64")
@@ -81,9 +116,22 @@ impl RuntimeContext {
         self
     }
 
-    /// Set the current time to now (UTC, ISO 8601 / RFC 3339).
+    /// Set the current time to now (UTC).
+    #[deprecated(note = "Use with_timezone() instead for live time computation")]
     pub fn with_current_time(mut self) -> Self {
-        self.current_time = Some(chrono::Utc::now().to_rfc3339());
+        self.timezone = Some("UTC".to_string());
+        self
+    }
+
+    /// Set the timezone for live time computation.
+    ///
+    /// When a timezone is set, `render()` computes the current time dynamically
+    /// so it is always fresh — never stale across conversation turns.
+    ///
+    /// # Arguments
+    /// * `tz` - IANA timezone string (e.g., "Asia/Kuala_Lumpur", "US/Pacific", "UTC")
+    pub fn with_timezone(mut self, tz: &str) -> Self {
+        self.timezone = Some(tz.to_string());
         self
     }
 
@@ -120,7 +168,7 @@ impl RuntimeContext {
     pub fn is_empty(&self) -> bool {
         self.channel.is_none()
             && self.available_tools.is_empty()
-            && self.current_time.is_none()
+            && self.timezone.is_none()
             && self.workspace.is_none()
             && self.os_info.is_none()
     }
@@ -153,8 +201,11 @@ impl RuntimeContext {
                 self.available_tools.join(", ")
             ));
         }
-        if let Some(ref time) = self.current_time {
-            parts.push(format!("- Current time: {}", time));
+        // Compute current time LIVE (never stale)
+        if let Some(ref tz_name) = self.timezone {
+            let now = format_current_time(tz_name);
+            parts.push(format!("- Current time: {}", now));
+            parts.push(format!("- Timezone: {}", tz_name));
         }
         if let Some(ref workspace) = self.workspace {
             parts.push(format!("- Workspace: {}", workspace));
@@ -380,7 +431,7 @@ impl ContextBuilder {
     /// This constructs a message list with:
     /// 1. System message (with skills if configured)
     /// 2. Conversation history
-    /// 3. New user input (if non-empty)
+    /// 3. New user input (if non-empty), with timestamp envelope when timezone is set
     ///
     /// # Arguments
     /// * `history` - The conversation history to include
@@ -406,7 +457,19 @@ impl ContextBuilder {
         let mut messages = vec![self.build_system_message()];
         messages.extend(history.iter().cloned());
         if !user_input.is_empty() {
-            messages.push(Message::user(user_input));
+            // Prepend timestamp envelope to user message so the LLM knows
+            // exactly when this message arrived (prevents stale-time bugs).
+            let content = if let Some(ref ctx) = self.runtime_context {
+                if let Some(ref tz) = ctx.timezone {
+                    let envelope = format_message_envelope(tz);
+                    format!("{} {}", envelope, user_input)
+                } else {
+                    user_input.to_string()
+                }
+            } else {
+                user_input.to_string()
+            };
+            messages.push(Message::user(&content));
         }
         messages
     }
@@ -626,7 +689,7 @@ mod tests {
         assert!(ctx.is_empty());
         assert!(ctx.channel.is_none());
         assert!(ctx.available_tools.is_empty());
-        assert!(ctx.current_time.is_none());
+        assert!(ctx.timezone.is_none());
         assert!(ctx.workspace.is_none());
         assert!(ctx.os_info.is_none());
     }
@@ -656,13 +719,37 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_context_with_current_time() {
-        let ctx = RuntimeContext::new().with_current_time();
+    fn test_runtime_context_with_timezone() {
+        let ctx = RuntimeContext::new().with_timezone("Asia/Kuala_Lumpur");
         assert!(!ctx.is_empty());
         let rendered = ctx.render().unwrap();
         assert!(rendered.contains("Current time:"));
-        // Should contain a valid RFC 3339 timestamp-like string
-        assert!(rendered.contains("20"));
+        assert!(rendered.contains("Timezone: Asia/Kuala_Lumpur"));
+        assert!(rendered.contains("+08:00"));
+    }
+
+    #[test]
+    fn test_runtime_context_with_utc_timezone() {
+        let ctx = RuntimeContext::new().with_timezone("UTC");
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Current time:"));
+        assert!(rendered.contains("+00:00"));
+    }
+
+    #[test]
+    fn test_runtime_context_invalid_timezone_fallback() {
+        let ctx = RuntimeContext::new().with_timezone("Invalid/Timezone");
+        let rendered = ctx.render().unwrap();
+        assert!(rendered.contains("Current time:"));
+        assert!(rendered.contains("UTC"));
+    }
+
+    #[test]
+    fn test_runtime_context_time_is_live() {
+        // Verify render works — time is computed dynamically each call
+        let ctx = RuntimeContext::new().with_timezone("UTC");
+        let r1 = ctx.render().unwrap();
+        assert!(r1.contains("Current time:"));
     }
 
     #[test]
@@ -721,6 +808,47 @@ mod tests {
         let cloned = ctx.clone();
         assert_eq!(ctx.channel, cloned.channel);
         assert_eq!(ctx.workspace, cloned.workspace);
+    }
+
+    // ---- Message envelope tests ----
+
+    #[test]
+    fn test_message_envelope_valid_timezone() {
+        let envelope = format_message_envelope("Asia/Kuala_Lumpur");
+        assert!(envelope.starts_with('['));
+        assert!(envelope.ends_with(']'));
+        assert!(envelope.contains("+08:00"));
+    }
+
+    #[test]
+    fn test_message_envelope_utc() {
+        let envelope = format_message_envelope("UTC");
+        assert!(envelope.contains("+00:00"));
+    }
+
+    #[test]
+    fn test_message_envelope_invalid_timezone() {
+        let envelope = format_message_envelope("Invalid/Timezone");
+        assert!(envelope.contains("UTC"));
+    }
+
+    #[test]
+    fn test_build_messages_with_timezone_envelope() {
+        let ctx = RuntimeContext::new().with_timezone("UTC");
+        let builder = ContextBuilder::new().with_runtime_context(ctx);
+        let messages = builder.build_messages(&[], "Hello");
+        assert_eq!(messages.len(), 2);
+        // User message should start with timestamp envelope
+        assert!(messages[1].content.starts_with('['));
+        assert!(messages[1].content.contains("] Hello"));
+    }
+
+    #[test]
+    fn test_build_messages_without_timezone_no_envelope() {
+        let ctx = RuntimeContext::new().with_channel("cli");
+        let builder = ContextBuilder::new().with_runtime_context(ctx);
+        let messages = builder.build_messages(&[], "Hello");
+        assert_eq!(messages[1].content, "Hello");
     }
 
     // ---- ContextBuilder + RuntimeContext integration tests ----

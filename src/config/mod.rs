@@ -118,6 +118,9 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_PROFILE") {
             self.agents.defaults.tool_profile = if val.is_empty() { None } else { Some(val) };
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE") {
+            self.agents.defaults.timezone = val;
+        }
 
         // Gateway
         if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_HOST") {
