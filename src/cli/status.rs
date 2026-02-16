@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 
+use zeptoclaw::auth;
 use zeptoclaw::config::{Config, ContainerAgentBackend, ProviderConfig};
 use zeptoclaw::providers::{
     configured_unsupported_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
@@ -15,23 +16,156 @@ use super::AuthAction;
 /// Manage authentication.
 pub(crate) async fn cmd_auth(action: AuthAction) -> Result<()> {
     match action {
-        AuthAction::Login => {
-            println!("Authentication login is not yet implemented.");
-            println!();
-            println!("To configure API keys, either:");
-            println!("  1. Set environment variables:");
-            println!("     export ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
-            println!();
-            println!("  2. Edit your config file:");
-            println!("     {:?}", Config::path());
+        AuthAction::Login { provider } => {
+            cmd_auth_login(provider).await?;
         }
-        AuthAction::Logout => {
-            println!("Authentication logout is not yet implemented.");
+        AuthAction::Logout { provider } => {
+            cmd_auth_logout(provider)?;
         }
         AuthAction::Status => {
             cmd_auth_status().await?;
         }
+        AuthAction::Refresh { provider } => {
+            cmd_auth_refresh(&provider).await?;
+        }
     }
+    Ok(())
+}
+
+/// OAuth login flow.
+async fn cmd_auth_login(provider: Option<String>) -> Result<()> {
+    let provider = provider.unwrap_or_else(|| {
+        println!(
+            "OAuth-supported providers: {}",
+            auth::oauth_supported_providers().join(", ")
+        );
+        println!();
+        "anthropic".to_string()
+    });
+
+    let oauth_config = auth::provider_oauth_config(&provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider '{}' does not support OAuth authentication.\n\
+             Supported providers: {}\n\n\
+             To configure API keys instead:\n  \
+             export ZEPTOCLAW_PROVIDERS_{}_API_KEY=your-key-here",
+            provider,
+            auth::oauth_supported_providers().join(", "),
+            provider.to_uppercase()
+        )
+    })?;
+
+    println!("WARNING: Using OAuth subscription tokens for API access may violate");
+    println!("the provider's Terms of Service. The provider may block these tokens");
+    println!("at any time. If blocked, ZeptoClaw will fall back to your API key.");
+    println!();
+
+    // Use a simple client ID (dynamic registration would be better but more complex)
+    let client_id = "zeptoclaw";
+
+    let tokens = auth::oauth::run_oauth_flow(&oauth_config, client_id).await?;
+
+    // Store the tokens
+    let encryption = zeptoclaw::security::encryption::resolve_master_key(true)
+        .map_err(|e| anyhow::anyhow!("Cannot store tokens without encryption key: {}", e))?;
+
+    let store = auth::store::TokenStore::new(encryption);
+    store
+        .save(&tokens)
+        .map_err(|e| anyhow::anyhow!("Failed to save tokens: {}", e))?;
+
+    println!();
+    println!("Authenticated with {} successfully!", provider);
+    if tokens.expires_at.is_some() {
+        println!("Token expires in: {}", tokens.expires_in_human());
+    }
+    if tokens.refresh_token.is_some() {
+        println!("Refresh token: stored (will auto-refresh before expiry)");
+    }
+
+    // Suggest config update
+    println!();
+    println!("To use OAuth tokens automatically, update your config:");
+    println!(
+        r#"  "providers": {{ "{}": {{ "auth_method": "auto" }} }}"#,
+        provider
+    );
+
+    Ok(())
+}
+
+/// OAuth logout.
+fn cmd_auth_logout(provider: Option<String>) -> Result<()> {
+    let encryption = match zeptoclaw::security::encryption::resolve_master_key(true) {
+        Ok(enc) => enc,
+        Err(_) => {
+            println!("No encryption key available. If you have stored tokens,");
+            println!("delete them manually: rm ~/.zeptoclaw/auth/tokens.json.enc");
+            return Ok(());
+        }
+    };
+
+    let store = auth::store::TokenStore::new(encryption);
+
+    if let Some(provider) = provider {
+        match store.delete(&provider) {
+            Ok(true) => println!("Logged out from {} (OAuth tokens removed).", provider),
+            Ok(false) => println!("No OAuth tokens stored for '{}'.", provider),
+            Err(e) => println!("Failed to remove tokens: {}", e),
+        }
+    } else {
+        // Show what's stored and ask which to remove
+        match store.list() {
+            Ok(entries) if entries.is_empty() => {
+                println!("No OAuth tokens stored.");
+            }
+            Ok(entries) => {
+                println!("Stored OAuth tokens:");
+                for (name, summary) in &entries {
+                    println!(
+                        "  {}: {} (refresh: {})",
+                        name,
+                        if summary.is_expired {
+                            "expired"
+                        } else {
+                            &summary.expires_in
+                        },
+                        if summary.has_refresh_token {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                    );
+                }
+                println!();
+                println!("Specify a provider to log out: zeptoclaw auth logout <provider>");
+            }
+            Err(e) => println!("Failed to read token store: {}", e),
+        }
+    }
+
+    Ok(())
+}
+
+/// Force refresh OAuth tokens.
+async fn cmd_auth_refresh(provider: &str) -> Result<()> {
+    let encryption = zeptoclaw::security::encryption::resolve_master_key(true)
+        .map_err(|e| anyhow::anyhow!("Cannot access tokens without encryption key: {}", e))?;
+
+    let store = auth::store::TokenStore::new(encryption);
+
+    match auth::refresh::ensure_fresh_token(&store, provider).await {
+        Ok(_) => {
+            println!("Token refreshed for {}.", provider);
+            println!("New token stored securely.");
+        }
+        Err(e) => {
+            println!("Failed to refresh token for {}: {}", provider, e);
+            println!();
+            println!("Try logging in again: zeptoclaw auth login {}", provider);
+        }
+    }
+
     Ok(())
 }
 
@@ -43,29 +177,64 @@ async fn cmd_auth_status() -> Result<()> {
     println!("=====================");
     println!();
 
-    println!(
-        "  Anthropic (Claude): {}",
-        provider_status(&config.providers.anthropic)
+    // Load OAuth token store (best-effort)
+    let token_store = zeptoclaw::security::encryption::resolve_master_key(false)
+        .ok()
+        .map(auth::store::TokenStore::new);
+
+    let oauth_status = |name: &str| -> String {
+        if let Some(ref store) = token_store {
+            if let Ok(Some(token)) = store.load(name) {
+                if token.is_expired() {
+                    return format!(
+                        "OAuth (expired{})",
+                        if token.refresh_token.is_some() {
+                            ", has refresh token"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                return format!("OAuth (expires in {})", token.expires_in_human());
+            }
+        }
+        String::new()
+    };
+
+    let provider_display = |name: &str, label: &str, provider: &Option<ProviderConfig>| {
+        let api = provider_status(provider);
+        let oauth = oauth_status(name);
+        let auth_method = provider
+            .as_ref()
+            .and_then(|p| p.auth_method.as_deref())
+            .unwrap_or("api_key");
+
+        if !oauth.is_empty() {
+            println!("  {}: {} | {} [method: {}]", label, api, oauth, auth_method);
+        } else {
+            println!("  {}: {} [method: {}]", label, api, auth_method);
+        }
+    };
+
+    provider_display(
+        "anthropic",
+        "Anthropic (Claude)",
+        &config.providers.anthropic,
     );
-    println!(
-        "  OpenAI:             {}",
-        provider_status(&config.providers.openai)
+    provider_display("openai", "OpenAI            ", &config.providers.openai);
+    provider_display(
+        "openrouter",
+        "OpenRouter        ",
+        &config.providers.openrouter,
     );
+    provider_display("groq", "Groq              ", &config.providers.groq);
+    provider_display("gemini", "Gemini            ", &config.providers.gemini);
+    provider_display("zhipu", "Zhipu             ", &config.providers.zhipu);
+
+    println!();
     println!(
-        "  OpenRouter:         {}",
-        provider_status(&config.providers.openrouter)
-    );
-    println!(
-        "  Groq:               {}",
-        provider_status(&config.providers.groq)
-    );
-    println!(
-        "  Gemini:             {}",
-        provider_status(&config.providers.gemini)
-    );
-    println!(
-        "  Zhipu:              {}",
-        provider_status(&config.providers.zhipu)
+        "OAuth-supported providers: {}",
+        auth::oauth_supported_providers().join(", ")
     );
 
     println!();

@@ -245,12 +245,23 @@ pub enum ToolsAction {
 
 #[derive(Subcommand)]
 pub enum AuthAction {
-    /// Log in to AI provider
-    Login,
-    /// Log out from AI provider
-    Logout,
-    /// Show authentication status
+    /// Log in to AI provider via OAuth browser sign-in
+    Login {
+        /// Provider to authenticate with (e.g., "anthropic")
+        provider: Option<String>,
+    },
+    /// Log out from AI provider (delete stored OAuth tokens)
+    Logout {
+        /// Provider to log out from (e.g., "anthropic")
+        provider: Option<String>,
+    },
+    /// Show authentication status for all providers
     Status,
+    /// Force refresh OAuth tokens
+    Refresh {
+        /// Provider to refresh tokens for
+        provider: String,
+    },
 }
 
 #[derive(Subcommand)]
