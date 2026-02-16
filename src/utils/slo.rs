@@ -38,7 +38,7 @@ impl SessionSLO {
     /// Evaluate SLOs from a completed session's metrics.
     pub fn evaluate(metrics: &MetricsCollector, agent_completed: bool) -> Self {
         let tool_success_rate = metrics.aggregate_success_rate();
-        let p95_latency = metrics.approx_p95_duration();
+        let p95_latency = metrics.worst_case_tool_latency();
         let p95_latency_met = match p95_latency {
             Some(d) => d.as_secs_f64() < SLO_P95_LATENCY_SECS,
             None => true,

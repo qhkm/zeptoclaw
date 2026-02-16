@@ -8,18 +8,6 @@ use chrono::Local;
 
 use crate::session::Message;
 
-/// Format the current local time.
-///
-/// Uses `chrono::Local` which respects the system timezone (TZ env var,
-/// /etc/localtime on Unix). Returns a human-readable string like
-/// "Mon 2026-02-16 12:51 +08:00".
-///
-/// This avoids embedding the full IANA timezone database (chrono-tz ~1.2MB)
-/// while still producing correct local times on any system.
-fn format_current_time() -> String {
-    Local::now().format("%a %Y-%m-%d %H:%M %:z").to_string()
-}
-
 /// Format a timestamp envelope for a user message.
 ///
 /// Returns a string like "[Mon 2026-02-16 12:51 +08:00]" to prepend to user messages.
@@ -191,11 +179,16 @@ impl RuntimeContext {
                 self.available_tools.join(", ")
             ));
         }
-        // Compute current time LIVE via chrono::Local (never stale)
-        if let Some(ref tz_name) = self.timezone {
-            let now = format_current_time();
-            parts.push(format!("- Current time: {}", now));
-            parts.push(format!("- Timezone: {}", tz_name));
+        // Compute current time LIVE via chrono::Local (never stale).
+        // The timezone label comes from config (auto-detected IANA name),
+        // but we always show the actual system offset to avoid contradictions.
+        if self.timezone.is_some() {
+            let now = Local::now();
+            parts.push(format!(
+                "- Current time: {}",
+                now.format("%a %Y-%m-%d %H:%M %:z")
+            ));
+            parts.push(format!("- Timezone: {}", now.format("%:z")));
         }
         if let Some(ref workspace) = self.workspace {
             parts.push(format!("- Workspace: {}", workspace));
@@ -714,11 +707,12 @@ mod tests {
         assert!(!ctx.is_empty());
         let rendered = ctx.render().unwrap();
         assert!(rendered.contains("Current time:"));
-        assert!(rendered.contains("Timezone: Asia/Kuala_Lumpur"));
-        // Time uses chrono::Local — format includes UTC offset like +HH:00
+        // Timezone label now shows the actual system UTC offset (e.g. "+08:00")
+        // instead of the config IANA name, to avoid contradictions.
         assert!(
-            rendered.contains('+') || rendered.contains('-'),
-            "should contain UTC offset sign"
+            rendered.contains("Timezone: +") || rendered.contains("Timezone: -"),
+            "should show UTC offset: {}",
+            rendered
         );
     }
 
@@ -727,7 +721,13 @@ mod tests {
         let ctx = RuntimeContext::new().with_timezone("UTC");
         let rendered = ctx.render().unwrap();
         assert!(rendered.contains("Current time:"));
-        assert!(rendered.contains("Timezone: UTC"));
+        // Even when config says "UTC", the displayed timezone is the actual
+        // system offset from chrono::Local (e.g. "+08:00" or "+00:00").
+        assert!(
+            rendered.contains("Timezone: +") || rendered.contains("Timezone: -"),
+            "should show UTC offset: {}",
+            rendered
+        );
     }
 
     #[test]

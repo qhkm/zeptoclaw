@@ -127,11 +127,11 @@ impl MetricsCollector {
         self.session_start.elapsed()
     }
 
-    /// Compute an approximate p95 tool duration across all tools.
+    /// Compute the worst-case tool latency across all tools.
     ///
-    /// Uses `avg + 2 * (max - avg)` clamped to max as a rough estimate.
+    /// Uses `avg + 2 * (max - avg)` clamped to max as a rough upper-bound estimate.
     /// Returns `None` if no tool calls have been recorded.
-    pub fn approx_p95_duration(&self) -> Option<Duration> {
+    pub fn worst_case_tool_latency(&self) -> Option<Duration> {
         let tools = self.tools.lock().unwrap();
         let mut max_p95 = Duration::ZERO;
         let mut found_any = false;
@@ -399,18 +399,18 @@ mod tests {
     }
 
     #[test]
-    fn test_approx_p95_duration_no_calls() {
+    fn test_worst_case_tool_latency_no_calls() {
         let collector = MetricsCollector::new();
-        assert!(collector.approx_p95_duration().is_none());
+        assert!(collector.worst_case_tool_latency().is_none());
     }
 
     #[test]
-    fn test_approx_p95_duration_single_tool() {
+    fn test_worst_case_tool_latency_single_tool() {
         let collector = MetricsCollector::new();
         collector.record_tool_call("shell", Duration::from_millis(100), true);
         collector.record_tool_call("shell", Duration::from_millis(500), true);
 
-        let p95 = collector.approx_p95_duration().unwrap();
+        let p95 = collector.worst_case_tool_latency().unwrap();
         assert!(p95 >= Duration::from_millis(100));
         assert!(p95 <= Duration::from_millis(500));
     }

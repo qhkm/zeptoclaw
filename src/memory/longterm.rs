@@ -259,7 +259,15 @@ impl LongTermMemory {
     /// Remove entries whose `decay_score()` has fallen below `threshold`.
     /// Pinned entries are never removed (their decay_score is always 1.0).
     /// Returns the number of entries removed.
+    ///
+    /// `threshold` must be a finite value in the range `0.0..=1.0`.
     pub fn cleanup_expired(&mut self, threshold: f32) -> Result<usize> {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(ZeptoError::Config(format!(
+                "cleanup_expired threshold must be 0.0..=1.0, got {}",
+                threshold
+            )));
+        }
         let before = self.entries.len();
         self.entries
             .retain(|_, entry| entry.decay_score() >= threshold);
@@ -874,5 +882,23 @@ mod tests {
         let (mut mem, _dir) = temp_memory();
         let removed = mem.cleanup_expired(0.5).unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_cleanup_expired_rejects_invalid_threshold() {
+        let (mut mem, _dir) = temp_memory();
+
+        // Out of range
+        assert!(mem.cleanup_expired(-0.1).is_err());
+        assert!(mem.cleanup_expired(1.1).is_err());
+
+        // Non-finite
+        assert!(mem.cleanup_expired(f32::NAN).is_err());
+        assert!(mem.cleanup_expired(f32::INFINITY).is_err());
+        assert!(mem.cleanup_expired(f32::NEG_INFINITY).is_err());
+
+        // Boundaries should be accepted
+        assert!(mem.cleanup_expired(0.0).is_ok());
+        assert!(mem.cleanup_expired(1.0).is_ok());
     }
 }

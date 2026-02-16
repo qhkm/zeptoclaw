@@ -522,16 +522,7 @@ impl AgentLoop {
 
                         // Dry-run mode: describe what would happen without executing
                         if dry_run {
-                            let args_display = serde_json::to_string_pretty(&args)
-                                .unwrap_or_else(|_| raw_args.clone());
-                            let sanitized = crate::utils::sanitize::sanitize_tool_result(
-                                &args_display, budget,
-                            );
-                            let description = format!(
-                                "[DRY RUN] Would execute tool '{}' with arguments: {}",
-                                name, sanitized
-                            );
-                            return (id, description);
+                            return (id, Self::dry_run_result(&name, &args, &raw_args, budget));
                         }
 
                         // Send tool starting feedback
@@ -658,11 +649,6 @@ impl AgentLoop {
         // Add final assistant response
         session.add_message(Message::assistant(&response.content));
         self.session_manager.save(&session).await?;
-
-        // Emit session SLO metrics
-        let slo = crate::utils::slo::SessionSLO::evaluate(&self.metrics_collector, true);
-        slo.emit();
-        debug!(slo_summary = %slo.summary(), "Session SLO summary");
 
         Ok(response.content)
     }
@@ -827,15 +813,7 @@ impl AgentLoop {
 
                         // Dry-run mode: describe what would happen without executing
                         if dry_run {
-                            let args_display = serde_json::to_string_pretty(&args)
-                                .unwrap_or_else(|_| raw_args.clone());
-                            let sanitized =
-                                crate::utils::sanitize::sanitize_tool_result(&args_display, budget);
-                            let description = format!(
-                                "[DRY RUN] Would execute tool '{}' with arguments: {}",
-                                name, sanitized
-                            );
-                            return (id, description);
+                            return (id, Self::dry_run_result(&name, &args, &raw_args, budget));
                         }
 
                         // Send tool starting feedback
@@ -1216,7 +1194,7 @@ impl AgentLoop {
         let process_result =
             tokio::time::timeout(timeout_duration, self.process_message(msg)).await;
 
-        match process_result {
+        let agent_completed = match process_result {
             Ok(Ok(response)) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 let (input_tokens, output_tokens) =
@@ -1237,6 +1215,7 @@ impl AgentLoop {
                         metrics.record_error();
                     }
                 }
+                true
             }
             Ok(Err(e)) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
@@ -1248,6 +1227,7 @@ impl AgentLoop {
                 let error_msg =
                     OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("Error: {}", e));
                 self.bus.publish_outbound(error_msg).await.ok();
+                false
             }
             Err(_elapsed) => {
                 let timeout_secs = self.config.agents.defaults.agent_timeout_secs;
@@ -1265,8 +1245,15 @@ impl AgentLoop {
                     ),
                 );
                 self.bus.publish_outbound(timeout_msg).await.ok();
+                false
             }
-        }
+        };
+
+        // Emit session SLO metrics (covers success, error, and timeout paths)
+        let slo =
+            crate::utils::slo::SessionSLO::evaluate(&self.metrics_collector, agent_completed);
+        slo.emit();
+        debug!(slo_summary = %slo.summary(), "Session SLO summary");
 
         self.drain_pending_messages(msg).await;
     }
@@ -1446,6 +1433,22 @@ impl AgentLoop {
     /// Check if dry-run mode is enabled.
     pub fn is_dry_run(&self) -> bool {
         self.dry_run.load(Ordering::SeqCst)
+    }
+
+    /// Format a dry-run result describing what a tool call would do.
+    fn dry_run_result(
+        name: &str,
+        args: &serde_json::Value,
+        raw_args: &str,
+        budget: usize,
+    ) -> String {
+        let args_display =
+            serde_json::to_string_pretty(args).unwrap_or_else(|_| raw_args.to_string());
+        let sanitized = crate::utils::sanitize::sanitize_tool_result(&args_display, budget);
+        format!(
+            "[DRY RUN] Would execute tool '{}' with arguments: {}",
+            name, sanitized
+        )
     }
 
     /// Set tool feedback sender for CLI tool execution display.

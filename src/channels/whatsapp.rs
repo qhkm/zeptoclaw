@@ -208,6 +208,33 @@ impl WhatsAppChannel {
     }
 
     // -----------------------------------------------------------------------
+    // Error redaction
+    // -----------------------------------------------------------------------
+
+    /// Produce a safe log message for a WebSocket connection error.
+    /// The tungstenite `Error` Debug representation may contain the full HTTP
+    /// request including the `Authorization: Bearer <token>` header, so we
+    /// must not log it verbatim.
+    fn redact_ws_error(e: &tokio_tungstenite::tungstenite::Error) -> String {
+        use tokio_tungstenite::tungstenite::Error as WsError;
+        match e {
+            WsError::ConnectionClosed => "connection closed".to_string(),
+            WsError::AlreadyClosed => "already closed".to_string(),
+            WsError::Io(io_err) => format!("IO error: {}", io_err.kind()),
+            WsError::Tls(_) => "TLS error".to_string(),
+            WsError::Capacity(msg) => format!("capacity: {}", msg),
+            WsError::Protocol(p) => format!("protocol: {}", p),
+            WsError::WriteBufferFull(_) => "write buffer full".to_string(),
+            WsError::Utf8 => "UTF-8 error".to_string(),
+            WsError::AttackAttempt => "attack attempt detected".to_string(),
+            WsError::Url(u) => format!("URL error: {}", u),
+            // Http variant may contain the full request with Authorization header.
+            WsError::Http(resp) => format!("HTTP status {}", resp.status()),
+            WsError::HttpFormat(_) => "HTTP format error".to_string(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Bridge WebSocket loop
     // -----------------------------------------------------------------------
 
@@ -260,7 +287,10 @@ impl WhatsAppChannel {
                     match result {
                         Ok((stream, _)) => stream,
                         Err(e) => {
-                            warn!("WhatsApp: bridge connect failed: {}", e);
+                            // Redact the error to avoid leaking the bridge token.
+                            // tungstenite may include the full HTTP request
+                            // (with Authorization header) in error Debug output.
+                            warn!("WhatsApp: bridge connect failed: {}", Self::redact_ws_error(&e));
                             let delay = Self::backoff_delay(reconnect_attempt);
                             reconnect_attempt =
                                 (reconnect_attempt + 1).min(MAX_RECONNECT_ATTEMPTS);
