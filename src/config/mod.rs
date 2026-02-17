@@ -661,6 +661,13 @@ impl Config {
                 self.routines.jitter_ms = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_ROUTINES_ON_MISS") {
+            match val.to_lowercase().as_str() {
+                "skip" => self.routines.on_miss = crate::cron::OnMiss::Skip,
+                "run_once" => self.routines.on_miss = crate::cron::OnMiss::RunOnce,
+                _ => {}
+            }
+        }
     }
 
     /// Save configuration to the default path
