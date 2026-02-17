@@ -980,12 +980,12 @@ async fn test_runtime_factory_native() {
 async fn test_cron_scheduling_dispatches_message() {
     use chrono::Utc;
     use tokio::time::{timeout, Duration};
-    use zeptoclaw::cron::{CronPayload, CronSchedule, CronService};
+    use zeptoclaw::cron::{CronPayload, CronSchedule, CronService, OnMiss};
 
     let root = tempdir().unwrap();
     let bus = Arc::new(MessageBus::new());
     let service = CronService::new(root.path().join("jobs.json"), Arc::clone(&bus));
-    service.start().await.unwrap();
+    service.start(&OnMiss::Skip).await.unwrap();
 
     let at_ms = (Utc::now() + chrono::Duration::seconds(1)).timestamp_millis();
     service

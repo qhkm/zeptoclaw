@@ -132,6 +132,12 @@ pub struct RoutinesConfig {
     pub cron_interval_secs: u64,
     /// Maximum concurrent routine executions.
     pub max_concurrent: usize,
+    /// Random jitter in milliseconds added to cron tick intervals.
+    #[serde(default)]
+    pub jitter_ms: u64,
+    /// Policy for missed schedules when process restarts.
+    #[serde(default)]
+    pub on_miss: crate::cron::OnMiss,
 }
 
 impl Default for RoutinesConfig {
@@ -140,6 +146,8 @@ impl Default for RoutinesConfig {
             enabled: false,
             cron_interval_secs: 60,
             max_concurrent: 3,
+            jitter_ms: 0,
+            on_miss: crate::cron::OnMiss::Skip,
         }
     }
 }
@@ -1403,6 +1411,19 @@ mod tests {
             config.agents.defaults.tool_profile.as_ref().unwrap(),
             "minimal"
         );
+    }
+
+    #[test]
+    fn test_routines_config_jitter_default() {
+        let config = RoutinesConfig::default();
+        assert_eq!(config.jitter_ms, 0);
+    }
+
+    #[test]
+    fn test_routines_config_jitter_deserialize() {
+        let json = r#"{"enabled": true, "cron_interval_secs": 60, "max_concurrent": 3, "jitter_ms": 5000}"#;
+        let config: RoutinesConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.jitter_ms, 5000);
     }
 
     #[test]

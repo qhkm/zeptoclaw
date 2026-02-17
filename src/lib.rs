@@ -37,7 +37,7 @@ pub use channels::{
     WhatsAppCloudChannel,
 };
 pub use config::Config;
-pub use cron::{CronJob, CronPayload, CronSchedule, CronService};
+pub use cron::{CronJob, CronPayload, CronSchedule, CronService, OnMiss};
 pub use error::{ProviderError, Result, ZeptoError};
 pub use heartbeat::{ensure_heartbeat_file, HeartbeatService, HEARTBEAT_PROMPT};
 pub use providers::{

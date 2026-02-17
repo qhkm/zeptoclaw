@@ -159,6 +159,30 @@ fn next_run_at(schedule: &CronSchedule, now: i64) -> Option<i64> {
     }
 }
 
+/// Compute a random-ish delay in [0, max_ms) using system clock nanoseconds.
+/// Avoids adding `rand` crate — sufficient decorrelation for scheduling jitter.
+fn jitter_delay(max_ms: u64) -> std::time::Duration {
+    if max_ms == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 % max_ms)
+        .unwrap_or(0);
+    std::time::Duration::from_millis(jitter)
+}
+
+/// Policy for handling missed schedules (jobs due while process was down).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnMiss {
+    /// Skip missed runs, reschedule to next future time (default).
+    #[default]
+    Skip,
+    /// Execute one missed run immediately, then reschedule.
+    RunOnce,
+}
+
 /// Persistent cron scheduler.
 pub struct CronService {
     store_path: PathBuf,
@@ -166,48 +190,87 @@ pub struct CronService {
     bus: Arc<MessageBus>,
     running: Arc<AtomicBool>,
     handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    jitter_ms: u64,
 }
 
 impl CronService {
     /// Create a new cron service.
     pub fn new(store_path: PathBuf, bus: Arc<MessageBus>) -> Self {
+        Self::with_jitter(store_path, bus, 0)
+    }
+
+    /// Create a new cron service with configurable jitter (milliseconds).
+    pub fn with_jitter(store_path: PathBuf, bus: Arc<MessageBus>, jitter_ms: u64) -> Self {
         Self {
             store_path,
             store: Arc::new(RwLock::new(CronStore::default())),
             bus,
             running: Arc::new(AtomicBool::new(false)),
             handle: Arc::new(RwLock::new(None)),
+            jitter_ms,
         }
     }
 
     /// Start scheduler loop (idempotent).
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, on_miss: &OnMiss) -> Result<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
         let loaded = self.load_store().await?;
+        let missed_payloads: Vec<CronPayload>;
         {
             let mut store = self.store.write().await;
             *store = loaded;
             let now = now_ms();
+            let mut missed: Vec<CronPayload> = Vec::new();
             for job in &mut store.jobs {
                 if job.enabled {
-                    job.state.next_run_at_ms = next_run_at(&job.schedule, now);
+                    if let Some(next) = job.state.next_run_at_ms {
+                        if next <= now {
+                            // This job was missed while we were down
+                            match on_miss {
+                                OnMiss::Skip => {
+                                    info!(job_id = %job.id, job_name = %job.name, "Skipping missed schedule");
+                                }
+                                OnMiss::RunOnce => {
+                                    info!(job_id = %job.id, job_name = %job.name, "Queueing missed schedule for immediate run");
+                                    missed.push(job.payload.clone());
+                                }
+                            }
+                            // Either way, reschedule to next future time
+                            job.state.next_run_at_ms = next_run_at(&job.schedule, now);
+                        }
+                        // If next > now, job is correctly scheduled for the future — leave it
+                    } else {
+                        job.state.next_run_at_ms = next_run_at(&job.schedule, now);
+                    }
                 }
             }
+            missed_payloads = missed;
         }
+
+        // Dispatch missed jobs outside the lock
+        for payload in &missed_payloads {
+            let inbound =
+                InboundMessage::new(&payload.channel, "cron", &payload.chat_id, &payload.message);
+            if let Err(e) = self.bus.publish_inbound(inbound).await {
+                error!("Failed to dispatch missed job: {}", e);
+            }
+        }
+
         self.save_store().await?;
 
         let store = Arc::clone(&self.store);
         let store_path = self.store_path.clone();
         let bus = Arc::clone(&self.bus);
         let running = Arc::clone(&self.running);
+        let jitter_ms = self.jitter_ms;
 
         let handle = tokio::spawn(async move {
             info!("Cron service started");
             while running.load(Ordering::SeqCst) {
-                if let Err(err) = tick(&store, &store_path, &bus).await {
+                if let Err(err) = tick(&store, &store_path, &bus, jitter_ms).await {
                     error!("Cron tick failed: {}", err);
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -320,6 +383,7 @@ async fn tick(
     store: &Arc<RwLock<CronStore>>,
     store_path: &PathBuf,
     bus: &Arc<MessageBus>,
+    jitter_ms: u64,
 ) -> Result<()> {
     let now = now_ms();
     let due_jobs: Vec<CronJob> = {
@@ -346,6 +410,9 @@ async fn tick(
             &job.payload.chat_id,
             &job.payload.message,
         );
+        if jitter_ms > 0 {
+            tokio::time::sleep(jitter_delay(jitter_ms)).await;
+        }
         match bus.publish_inbound(inbound).await {
             Ok(_) => results.push((job.id.clone(), true, None)),
             Err(e) => results.push((job.id.clone(), false, Some(e.to_string()))),
@@ -455,5 +522,132 @@ mod tests {
         let removed = service.remove_job(&job.id).await.unwrap();
         assert!(removed);
         assert!(service.list_jobs(true).await.is_empty());
+    }
+
+    #[test]
+    fn test_jitter_delay_zero() {
+        let d = jitter_delay(0);
+        assert_eq!(d, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn test_jitter_delay_bounded() {
+        let max_ms = 500;
+        let d = jitter_delay(max_ms);
+        assert!(d < std::time::Duration::from_millis(max_ms));
+    }
+
+    #[test]
+    fn test_cron_service_with_jitter() {
+        let temp = tempdir().unwrap();
+        let service = CronService::with_jitter(
+            temp.path().join("jobs.json"),
+            Arc::new(MessageBus::new()),
+            250,
+        );
+        assert_eq!(service.jitter_ms, 250);
+    }
+
+    #[test]
+    fn test_on_miss_default_is_skip() {
+        let policy = OnMiss::default();
+        assert_eq!(policy, OnMiss::Skip);
+    }
+
+    #[test]
+    fn test_on_miss_serde_roundtrip() {
+        let skip_json = serde_json::to_string(&OnMiss::Skip).unwrap();
+        assert_eq!(skip_json, r#""skip""#);
+
+        let run_once_json = serde_json::to_string(&OnMiss::RunOnce).unwrap();
+        assert_eq!(run_once_json, r#""run_once""#);
+
+        let parsed: OnMiss = serde_json::from_str(r#""run_once""#).unwrap();
+        assert_eq!(parsed, OnMiss::RunOnce);
+    }
+
+    #[tokio::test]
+    async fn test_start_skip_missed_jobs() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store_path = temp.path().join("jobs.json");
+
+        // Pre-seed store with a job whose next_run is in the past
+        let json = serde_json::json!({
+            "version": 1,
+            "jobs": [{
+                "id": "missed1",
+                "name": "missed job",
+                "enabled": true,
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "message": "check", "channel": "cli", "chat_id": "cli" },
+                "state": { "next_run_at_ms": 1 },
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "delete_after_run": false
+            }]
+        });
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&json).unwrap())
+            .await
+            .unwrap();
+
+        let service = CronService::new(store_path, bus);
+        service.start(&OnMiss::Skip).await.unwrap();
+        service.stop().await;
+
+        // After skip, job should have a future next_run_at_ms
+        let jobs = service.list_jobs(true).await;
+        assert_eq!(jobs.len(), 1);
+        let next = jobs[0].state.next_run_at_ms.unwrap();
+        assert!(
+            next > now_ms() - 5000,
+            "next_run should be in the future after skip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_run_once_missed_jobs() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store_path = temp.path().join("jobs.json");
+
+        // Pre-seed store with a missed job
+        let json = serde_json::json!({
+            "version": 1,
+            "jobs": [{
+                "id": "missed2",
+                "name": "missed run_once job",
+                "enabled": true,
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "message": "run_once_check", "channel": "cli", "chat_id": "cli" },
+                "state": { "next_run_at_ms": 1 },
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "delete_after_run": false
+            }]
+        });
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&json).unwrap())
+            .await
+            .unwrap();
+
+        let service = CronService::new(store_path, bus.clone());
+        service.start(&OnMiss::RunOnce).await.unwrap();
+        service.stop().await;
+
+        // Verify the missed job was dispatched via the bus
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), bus.consume_inbound())
+            .await
+            .expect("should receive dispatched missed job within timeout")
+            .expect("bus should have a message");
+        assert_eq!(msg.content, "run_once_check");
+
+        // Job should still be rescheduled to the future
+        let jobs = service.list_jobs(true).await;
+        assert_eq!(jobs.len(), 1);
+        let next = jobs[0].state.next_run_at_ms.unwrap();
+        assert!(
+            next > now_ms() - 5000,
+            "next_run should be in the future after run_once"
+        );
     }
 }

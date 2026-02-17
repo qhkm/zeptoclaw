@@ -316,6 +316,8 @@ Environment variables override config:
 - `ZEPTOCLAW_ROUTINES_ENABLED` — enable routines engine (default: false)
 - `ZEPTOCLAW_ROUTINES_CRON_INTERVAL_SECS` — cron tick interval (default: 60)
 - `ZEPTOCLAW_ROUTINES_MAX_CONCURRENT` — max concurrent routine executions (default: 3)
+- `ZEPTOCLAW_ROUTINES_JITTER_MS` — jitter window in ms for scheduled dispatches (default: 0)
+- `ZEPTOCLAW_ROUTINES_ON_MISS` — missed schedule policy: "skip" (default) or "run_once"
 - `ZEPTOCLAW_HEARTBEAT_DELIVER_TO` — channel for heartbeat result delivery (default: none)
 - `ZEPTOCLAW_MASTER_KEY` — hex-encoded 32-byte master encryption key for secret encryption
 - `ZEPTOCLAW_TUNNEL_PROVIDER` — tunnel provider (cloudflare, ngrok, tailscale, auto)
@@ -368,7 +370,7 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (1612 tests)
+# Unit tests (1616 tests)
 cargo test --lib
 
 # Main binary tests (54 tests)
