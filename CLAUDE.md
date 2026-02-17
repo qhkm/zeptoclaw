@@ -40,6 +40,12 @@ cargo fmt
 # Heartbeat and skills
 ./target/release/zeptoclaw heartbeat --show
 ./target/release/zeptoclaw skills list
+./target/release/zeptoclaw skills hub search "calendar"
+./target/release/zeptoclaw skills hub inspect <slug>
+./target/release/zeptoclaw skills hub install <slug> --yes
+./target/release/zeptoclaw skills hub update --all
+./target/release/zeptoclaw skills hub sync --execute --yes
+./target/release/zeptoclaw skills hub list
 
 # Conversation history
 ./target/release/zeptoclaw history list [--limit 20]
@@ -108,6 +114,7 @@ src/
 │   └── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
+│   ├── skills_hub.rs # ClawHub registry commands (login/whoami/search/explore/inspect/install/uninstall/list)
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types and loading
@@ -115,7 +122,7 @@ src/
 ├── deps/           # Dependency manager (install, start, stop, health check)
 │   ├── types.rs    # Dependency, DepKind, HealthCheck, HasDependencies
 │   ├── registry.rs # JSON registry (installed state tracking)
-│   ├── fetcher.rs  # DepFetcher trait + real/mock implementations
+│   ├── fetcher.rs  # DepFetcher trait + real/mock implementations (GitHub binary download/extract)
 │   └── manager.rs  # DepManager lifecycle orchestrator
 ├── gateway/        # Containerized agent proxy (Docker/Apple)
 ├── heartbeat/      # Periodic background task service
@@ -205,9 +212,14 @@ Message input channels via `Channel` trait:
 - `DepManager` — install, start, stop, health check lifecycle orchestrator
 - `Registry` — JSON file at `~/.zeptoclaw/deps/registry.json` tracks installed state
 - `DepFetcher` trait — abstracts network calls for testability
+- `RealFetcher` binary path resolves release assets from GitHub API, downloads binaries, extracts `.zip`/`.tar`/`.tar.gz`/`.tgz` bundles, and installs executable artifacts into `~/.zeptoclaw/deps/bin`
 
 ### Tools (`src/tools/`)
 18 built-in tools + dynamic MCP tools via `Tool` async trait. All filesystem tools require workspace.
+
+### CLI (`src/cli/`)
+- `skills hub` provides ClawHub token login plus read-only discovery (`whoami`, `search`, `explore`, `inspect`) and local install lifecycle (`install`, `update`, `uninstall`, `list`) with fingerprint-based dirty-state protection, plus `sync` dry-run/execute publishing for local changes; when `ZEPTOCLAW_MASTER_KEY` is set, stored ClawHub tokens are encrypted at rest.
+- Installed ClawHub skills are extracted to the workspace skills directory and tracked in `~/.zeptoclaw/clawhub/lock.json`, with per-skill origin metadata at `.clawhub/origin.json`.
 
 ### Utils (`src/utils/`)
 - `sanitize.rs` - Tool result sanitization (strip base64, hex, truncate)
@@ -304,6 +316,9 @@ Environment variables override config:
 - `ZEPTOCLAW_HEARTBEAT_DELIVER_TO` — channel for heartbeat result delivery (default: none)
 - `ZEPTOCLAW_MASTER_KEY` — hex-encoded 32-byte master encryption key for secret encryption
 - `ZEPTOCLAW_TUNNEL_PROVIDER` — tunnel provider (cloudflare, ngrok, tailscale, auto)
+- `ZEPTOCLAW_CLAWHUB_REGISTRY` — override ClawHub API base URL (default: https://clawhub.ai)
+- `ZEPTOCLAW_CLAWHUB_SITE` — override ClawHub site URL for auth/display (default: https://clawhub.ai)
+- `ZEPTOCLAW_CLAWHUB_TOKEN` — ClawHub API token override for `skills hub` commands
 
 ### Compile-time Configuration
 
@@ -335,13 +350,13 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (1612 tests)
+# Unit tests (1617 tests)
 cargo test --lib
 
-# Main binary tests (54 tests)
+# Main binary tests (65 tests)
 cargo test --bin zeptoclaw
 
-# CLI smoke tests (23 tests)
+# CLI smoke tests (28 tests)
 cargo test --test cli_smoke
 
 # Integration tests (68 tests)

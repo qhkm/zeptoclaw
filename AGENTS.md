@@ -11,11 +11,12 @@ Project-level guidance for coding agents working in this repository.
 - Integration tests: `tests/integration.rs`
 - Codebase: ~43,000+ lines of Rust
 - Channels: 5 (Telegram, Slack, Discord, Webhook, WhatsApp)
-- Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
+- Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw) + ClawHub CLI integration (`skills hub` with login/search/explore/inspect/install/update/sync/uninstall/list)
 - Plugins: Command-mode (shell template) + Binary-mode (JSON-RPC 2.0 stdin/stdout)
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
+- Dependency auto-install: `DepKind::Binary` now downloads from GitHub Releases and supports direct binaries plus `.zip`/`.tar`/`.tar.gz`/`.tgz` extraction
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
-- Tests: 1612 lib + 54 main + 23 cli_smoke + 68 integration + 140 doc (116 passed, 24 ignored)
+- Tests: 1617 lib + 65 main + 28 cli_smoke + 68 integration + 140 doc (116 passed, 24 ignored)
 
 ## Post-Implementation Checklist
 
