@@ -245,9 +245,13 @@ fn configure_memory(config: &mut Config) -> Result<()> {
     println!("Memory Setup");
     println!("------------");
     println!("Choose memory backend:");
-    println!("  1. Built-in workspace markdown memory (recommended)");
-    println!("  2. QMD (planned; currently falls back to built-in)");
-    println!("  3. Disabled");
+    println!("  1. Built-in substring search (recommended)");
+    println!("  2. BM25 keyword scoring (requires --features memory-bm25)");
+    println!("  3. Embedding + cosine similarity (not yet implemented)");
+    println!("  4. HNSW approximate nearest neighbor (not yet implemented)");
+    println!("  5. Tantivy full-text search (not yet implemented)");
+    println!("  6. QMD (planned; currently falls back to built-in)");
+    println!("  7. Disabled");
     println!();
     print!(
         "Memory backend [current={}]: ",
@@ -259,8 +263,12 @@ fn configure_memory(config: &mut Config) -> Result<()> {
     if !backend_choice.is_empty() {
         config.memory.backend = match backend_choice.trim() {
             "1" | "builtin" => MemoryBackend::Builtin,
-            "2" | "qmd" => MemoryBackend::Qmd,
-            "3" | "none" | "disabled" => MemoryBackend::Disabled,
+            "2" | "bm25" => MemoryBackend::Bm25,
+            "3" | "embedding" => MemoryBackend::Embedding,
+            "4" | "hnsw" => MemoryBackend::Hnsw,
+            "5" | "tantivy" => MemoryBackend::Tantivy,
+            "6" | "qmd" => MemoryBackend::Qmd,
+            "7" | "none" | "disabled" => MemoryBackend::Disabled,
             _ => config.memory.backend.clone(),
         };
     }
