@@ -585,8 +585,12 @@ pub(crate) async fn create_agent_with_template(
 
     // Create and start cron service for scheduled tasks.
     let cron_store_path = Config::dir().join("cron").join("jobs.json");
-    let cron_service = Arc::new(CronService::new(cron_store_path, agent.bus().clone()));
-    cron_service.start().await?;
+    let cron_service = Arc::new(CronService::with_jitter(
+        cron_store_path,
+        agent.bus().clone(),
+        config.routines.jitter_ms,
+    ));
+    cron_service.start(&config.routines.on_miss).await?;
 
     // Create runtime from config
     let runtime = match create_runtime(&config.runtime).await {

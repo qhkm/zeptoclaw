@@ -15,7 +15,7 @@ Project-level guidance for coding agents working in this repository.
 - Plugins: Command-mode (shell template) + Binary-mode (JSON-RPC 2.0 stdin/stdout)
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
-- Tests: 1612 lib + 54 main + 23 cli_smoke + 68 integration + 140 doc (116 passed, 24 ignored)
+- Tests: 1616 lib + 54 main + 23 cli_smoke + 68 integration + 140 doc (116 passed, 24 ignored)
 
 ## Post-Implementation Checklist
 
