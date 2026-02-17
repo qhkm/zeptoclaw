@@ -2,8 +2,13 @@ name: Upstream Sync
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0 */4 * * *"
   workflow_dispatch:
+    inputs:
+      upstream_repository:
+        description: "Upstream repository in owner/name format"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -16,7 +21,7 @@ jobs:
   sync:
     name: Sync upstream/main into fork main
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,13 +35,35 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Resolve upstream repository
+        id: upstream
+        env:
+          UPSTREAM_REPOSITORY_INPUT: ${{ github.event.inputs.upstream_repository }}
+          UPSTREAM_REPOSITORY_VAR: ${{ vars.UPSTREAM_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          upstream_repository="${UPSTREAM_REPOSITORY_INPUT:-${UPSTREAM_REPOSITORY_VAR:-}}"
+
+          if [ -z "${upstream_repository}" ]; then
+            echo "Set repository variable UPSTREAM_REPOSITORY (owner/name) or provide workflow_dispatch input upstream_repository." >&2
+            exit 1
+          fi
+
+          if [ "${upstream_repository}" = "${GITHUB_REPOSITORY}" ]; then
+            echo "UPSTREAM_REPOSITORY (${upstream_repository}) must not match GITHUB_REPOSITORY (${GITHUB_REPOSITORY})." >&2
+            exit 1
+          fi
+
+          echo "repository=${upstream_repository}" >> "$GITHUB_OUTPUT"
+
       - name: Configure upstream remote
         run: |
           set -euo pipefail
+          upstream_url="https://github.com/${{ steps.upstream.outputs.repository }}.git"
           if git remote get-url upstream >/dev/null 2>&1; then
-            git remote set-url upstream https://github.com/qhkm/zeptoclaw.git
+            git remote set-url upstream "${upstream_url}"
           else
-            git remote add upstream https://github.com/qhkm/zeptoclaw.git
+            git remote add upstream "${upstream_url}"
           fi
 
       - name: Fetch and prune remotes
@@ -80,30 +107,70 @@ jobs:
           set -euo pipefail
           git merge --no-ff upstream/main -m "chore(sync): merge upstream/main into main"
 
-      - name: Setup droid CLI
+      - name: Check Factory Droid secret availability
+        id: factory
         if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure'
+        env:
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          FACTORY_CLI_SHA256: ${{ secrets.FACTORY_CLI_SHA256 }}
         run: |
           set -euo pipefail
-          curl -fsSL https://app.factory.ai/cli | sh
+          if [ -n "${FACTORY_API_KEY:-}" ] && [ -n "${FACTORY_CLI_SHA256:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip auto-conflict resolution when Factory secrets are missing
+        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure' && steps.factory.outputs.ready != 'true'
+        run: |
+          set -euo pipefail
+          git merge --abort || true
+
+          {
+            echo "### Manual conflict resolution required"
+            echo "- Merge conflicts were detected."
+            echo "- Automatic resolution is disabled because FACTORY_API_KEY and FACTORY_CLI_SHA256 are not both configured."
+            echo "- Configure these repository secrets to enable Factory Droid auto-resolution."
+            echo "- Factory secret docs: https://app.factory.ai"
+            echo "- No changes were pushed in this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Factory Droid CLI
+        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure' && steps.factory.outputs.ready == 'true'
+        env:
+          FACTORY_CLI_SHA256: ${{ secrets.FACTORY_CLI_SHA256 }}
+        run: |
+          set -euo pipefail
+
+          FACTORY_CLI_URL="https://app.factory.ai/cli"
+          FACTORY_CLI_INSTALL_SCRIPT="/tmp/factory-cli.sh"
+
+          curl -fsSL "${FACTORY_CLI_URL}" -o "${FACTORY_CLI_INSTALL_SCRIPT}"
+          echo "${FACTORY_CLI_SHA256}  ${FACTORY_CLI_INSTALL_SCRIPT}" | sha256sum -c -
+          sh "${FACTORY_CLI_INSTALL_SCRIPT}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Resolve merge conflicts with Factory Droid
-        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure'
+        id: droid
+        if: steps.drift.outputs.behind != '0' && steps.merge.outcome == 'failure' && steps.factory.outputs.ready == 'true'
+        timeout-minutes: 10
         env:
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
         run: |
           set -euo pipefail
 
+          # FACTORY_API_KEY is generated in Factory and stored as a repository secret.
           if [ -z "${FACTORY_API_KEY:-}" ]; then
             echo "FACTORY_API_KEY secret is required for Factory Droid conflict resolution." >&2
             exit 1
           fi
 
-          droid exec --auto high "
+          if ! droid exec --auto high "
           Act as a senior Git maintainer and perform the full upstream sync now.
 
           Repository: ${GITHUB_WORKSPACE}
-          Goal: merge https://github.com/qhkm/zeptoclaw \`upstream/main\` into my fork \`origin/main\` via local \`main\`, preserve all fork-specific behavior, and push.
+          Goal: merge https://github.com/${{ steps.upstream.outputs.repository }} \`upstream/main\` into \`origin/main\` via local \`main\`, preserving fork-specific behavior.
 
           Requirements:
           1. Fetch and prune both remotes.
@@ -114,10 +181,8 @@ jobs:
              - merged result and why both behaviors are preserved
              - refactor/abstraction suggestion if needed
              - risk level
-          4. Run relevant tests for touched areas.
-          5. Create the merge commit.
-          6. Push \`main\` to \`origin\`.
-          7. Verify final state with:
+          4. Create the merge commit.
+          5. Verify final state with:
              - \`main...upstream/main\`
              - \`origin/main...upstream/main\`
              and confirm behind count is 0.
@@ -128,23 +193,38 @@ jobs:
           - “Risks”
           - “Validation run”
           - “Final SHAs and ahead/behind counts”
-          " > sync-report.md
+          " > sync-report.md; then
+            echo "Factory Droid execution failed before conflicts were resolved." >&2
+            exit 1
+          fi
 
           if git diff --name-only --diff-filter=U | grep -q .; then
             echo "Unresolved conflicts remain after Factory Droid execution." >&2
             exit 1
           fi
 
+      - name: Install Rust toolchain
+        if: steps.drift.outputs.behind != '0' && (steps.merge.outcome == 'success' || steps.droid.outcome == 'success')
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        if: steps.drift.outputs.behind != '0' && (steps.merge.outcome == 'success' || steps.droid.outcome == 'success')
+        uses: Swatinem/rust-cache@v2
+
       - name: Run validators for merge result
-        if: steps.drift.outputs.behind != '0'
+        if: steps.drift.outputs.behind != '0' && (steps.merge.outcome == 'success' || steps.droid.outcome == 'success')
         run: |
           set -euo pipefail
           cargo fmt -- --check
           cargo clippy -- -D warnings
-          cargo test
+          cargo test --lib
+          cargo test --test integration
+          cargo test --doc
 
       - name: Push main if local diverges from origin/main
-        if: steps.drift.outputs.behind != '0'
+        if: steps.drift.outputs.behind != '0' && (steps.merge.outcome == 'success' || steps.droid.outcome == 'success')
         run: |
           set -euo pipefail
           git fetch origin main
@@ -158,6 +238,7 @@ jobs:
           fi
 
       - name: Verify sync state
+        if: steps.drift.outputs.behind == '0' || steps.merge.outcome == 'success' || steps.droid.outcome == 'success'
         run: |
           set -euo pipefail
           git fetch --prune origin

@@ -90,6 +90,9 @@ cargo fmt
 
 # Watch URLs for changes
 ./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
+
+# Trigger upstream sync workflow manually (GitHub CLI)
+gh workflow run upstream-sync.yml -f upstream_repository=OWNER/REPO
 ```
 
 ## Architecture
@@ -161,6 +164,12 @@ landing/
 └── zeptoclaw/
     ├── index.html        # Static landing page (hero, sections, interactive animations)
     └── mascot-no-bg.png  # README mascot asset used in landing hero
+
+.github/
+└── workflows/
+    ├── ci.yml            # PR/push validation (test, clippy, fmt)
+    ├── release.yml       # Release pipeline
+    └── upstream-sync.yml # Scheduled fork sync with optional Factory Droid conflict handling
 ```
 
 ## Key Modules
@@ -205,6 +214,12 @@ Message input channels via `Channel` trait:
 - `DepManager` — install, start, stop, health check lifecycle orchestrator
 - `Registry` — JSON file at `~/.zeptoclaw/deps/registry.json` tracks installed state
 - `DepFetcher` trait — abstracts network calls for testability
+
+### CI Workflows (`.github/workflows/`)
+- `upstream-sync.yml` runs every 4 hours and can be dispatched manually with `upstream_repository` input
+- Requires non-self `UPSTREAM_REPOSITORY` (repo variable or manual input) before sync
+- Conflict auto-resolution is optional and only enabled when `FACTORY_API_KEY` and `FACTORY_CLI_SHA256` are configured
+- Merge-result validation uses Rust toolchain setup + rust cache + `cargo fmt`, `cargo clippy`, and CI-aligned test commands
 
 ### Tools (`src/tools/`)
 18 built-in tools + dynamic MCP tools via `Tool` async trait. All filesystem tools require workspace.
@@ -335,7 +350,7 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (1612 tests)
+# Unit tests (1613 tests)
 cargo test --lib
 
 # Main binary tests (54 tests)
