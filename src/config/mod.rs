@@ -496,6 +496,10 @@ impl Config {
                 "none" | "disabled" => Some(MemoryBackend::Disabled),
                 "builtin" => Some(MemoryBackend::Builtin),
                 "qmd" => Some(MemoryBackend::Qmd),
+                "bm25" => Some(MemoryBackend::Bm25),
+                "embedding" => Some(MemoryBackend::Embedding),
+                "hnsw" => Some(MemoryBackend::Hnsw),
+                "tantivy" => Some(MemoryBackend::Tantivy),
                 _ => None,
             } {
                 self.memory.backend = parsed;
@@ -545,6 +549,12 @@ impl Config {
                 .filter(|item| !item.is_empty())
                 .map(str::to_string)
                 .collect();
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_EMBEDDING_PROVIDER") {
+            self.memory.embedding_provider = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_EMBEDDING_MODEL") {
+            self.memory.embedding_model = Some(val);
         }
     }
 
@@ -654,6 +664,18 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_ROUTINES_MAX_CONCURRENT") {
             if let Ok(v) = val.parse::<usize>() {
                 self.routines.max_concurrent = v.clamp(1, 100);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_ROUTINES_JITTER_MS") {
+            if let Ok(v) = val.parse::<u64>() {
+                self.routines.jitter_ms = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_ROUTINES_ON_MISS") {
+            match val.to_lowercase().as_str() {
+                "skip" => self.routines.on_miss = crate::cron::OnMiss::Skip,
+                "run_once" => self.routines.on_miss = crate::cron::OnMiss::RunOnce,
+                _ => {}
             }
         }
     }

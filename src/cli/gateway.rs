@@ -1,13 +1,15 @@
 //! Gateway command handler (multi-channel bot server).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 
 use zeptoclaw::bus::MessageBus;
-use zeptoclaw::channels::{register_configured_channels, ChannelManager};
+use zeptoclaw::channels::{register_configured_channels, ChannelManager, WhatsAppChannel};
 use zeptoclaw::config::{Config, ContainerAgentBackend};
+use zeptoclaw::deps::{fetcher::RealFetcher, DepManager, HasDependencies};
 use zeptoclaw::health::{
     health_port, start_health_server, start_periodic_usage_flush, UsageMetrics,
 };
@@ -199,6 +201,18 @@ pub(crate) async fn cmd_gateway(
     // Create channel manager
     let channel_manager = ChannelManager::new(bus.clone(), config.clone());
 
+    // Install and start channel dependencies (if any)
+    let deps_dir = DepManager::default_dir();
+    let dep_mgr = DepManager::new(deps_dir, Arc::new(RealFetcher));
+    let deps = collect_enabled_channel_deps(&config);
+
+    if !deps.is_empty() {
+        info!("Installing {} channel dependencies...", deps.len());
+        for dep in &deps {
+            install_and_start_dep(&dep_mgr, dep).await;
+        }
+    }
+
     // Register channels via factory.
     let channel_count = register_configured_channels(&channel_manager, bus.clone(), &config).await;
     if channel_count == 0 {
@@ -342,4 +356,112 @@ async fn validate_apple_available() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Collect dependencies from all enabled channels with bridge_managed=true.
+fn collect_enabled_channel_deps(config: &Config) -> Vec<zeptoclaw::deps::Dependency> {
+    let mut deps = Vec::new();
+
+    // WhatsApp
+    if let Some(ref wa_cfg) = config.channels.whatsapp {
+        if wa_cfg.enabled && wa_cfg.bridge_managed {
+            // Create temporary channel just to query dependencies
+            let temp_bus = Arc::new(MessageBus::new());
+            let channel = WhatsAppChannel::new(wa_cfg.clone(), temp_bus);
+            deps.extend(channel.dependencies());
+        }
+    }
+
+    // Future: Add Telegram, Discord, Slack if they declare dependencies
+
+    deps
+}
+
+/// Install and start a dependency with warn-on-fail (non-blocking).
+///
+/// Performs three phases in order:
+/// 1. Install - early return on failure
+/// 2. Start - early return on failure
+/// 3. Health check (10s timeout) - logs warning but does not block
+///
+/// All failures are logged as warnings, allowing the gateway to continue.
+async fn install_and_start_dep(mgr: &DepManager, dep: &zeptoclaw::deps::Dependency) {
+    // Install
+    match mgr.ensure_installed(dep).await {
+        Ok(_) => info!("✓ Installed {}", dep.name),
+        Err(e) => {
+            warn!("✗ Failed to install {}: {}", dep.name, e);
+            return;
+        }
+    }
+
+    // Start
+    match mgr.start(dep).await {
+        Ok(_) => info!("✓ Started {}", dep.name),
+        Err(e) => {
+            warn!("✗ Failed to start {}: {}", dep.name, e);
+            return;
+        }
+    }
+
+    // Health check (10s timeout)
+    let health_timeout = Duration::from_secs(10);
+    match mgr.wait_healthy(dep, health_timeout).await {
+        Ok(_) => info!("✓ {} is healthy", dep.name),
+        Err(e) => warn!("✗ {} health check failed: {}", dep.name, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collect_enabled_channel_deps_whatsapp_managed() {
+        let mut config = Config::default();
+        config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
+            enabled: true,
+            bridge_managed: true,
+            bridge_url: "ws://localhost:3001".to_string(),
+            bridge_token: None,
+            allow_from: vec![],
+            deny_by_default: false,
+        });
+
+        let deps = collect_enabled_channel_deps(&config);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "whatsmeow-bridge");
+    }
+
+    #[test]
+    fn test_collect_enabled_channel_deps_whatsapp_not_managed() {
+        let mut config = Config::default();
+        config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
+            enabled: true,
+            bridge_managed: false, // User manages externally
+            bridge_url: "ws://localhost:3001".to_string(),
+            bridge_token: None,
+            allow_from: vec![],
+            deny_by_default: false,
+        });
+
+        let deps = collect_enabled_channel_deps(&config);
+        assert_eq!(deps.len(), 0); // No deps when not managed
+    }
+
+    #[test]
+    fn test_collect_enabled_channel_deps_whatsapp_disabled() {
+        let mut config = Config::default();
+        config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
+            enabled: false,
+            bridge_managed: true,
+            bridge_url: "ws://localhost:3001".to_string(),
+            bridge_token: None,
+            allow_from: vec![],
+            deny_by_default: false,
+        });
+
+        let deps = collect_enabled_channel_deps(&config);
+        assert_eq!(deps.len(), 0); // No deps when disabled
+    }
 }

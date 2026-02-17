@@ -115,6 +115,11 @@ tempfile = "3.10"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
 
+[features]
+default = []
+# BM25 keyword scoring memory backend (adds ~0 extra deps for now)
+memory-bm25 = []
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"

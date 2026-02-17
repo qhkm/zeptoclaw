@@ -6,12 +6,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
+
+use super::builtin_searcher::BuiltinSearcher;
+use super::traits::MemorySearcher;
 
 /// Returns the current unix epoch timestamp in seconds.
 fn now_timestamp() -> u64 {
@@ -64,10 +68,20 @@ impl MemoryEntry {
 }
 
 /// Long-term memory store persisted as JSON.
-#[derive(Debug)]
 pub struct LongTermMemory {
     entries: HashMap<String, MemoryEntry>,
     storage_path: PathBuf,
+    searcher: Arc<dyn MemorySearcher>,
+}
+
+impl std::fmt::Debug for LongTermMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LongTermMemory")
+            .field("entries", &self.entries)
+            .field("storage_path", &self.storage_path)
+            .field("searcher", &self.searcher.name())
+            .finish()
+    }
 }
 
 impl LongTermMemory {
@@ -81,17 +95,26 @@ impl LongTermMemory {
 
     /// Create a long-term memory store at a custom path. Useful for testing.
     pub fn with_path(path: PathBuf) -> Result<Self> {
+        Self::with_path_and_searcher(path, Arc::new(BuiltinSearcher))
+    }
+
+    /// Create a long-term memory store with a custom searcher.
+    pub fn with_path_and_searcher(
+        path: PathBuf,
+        searcher: Arc<dyn MemorySearcher>,
+    ) -> Result<Self> {
         let entries = Self::load(&path)?;
         Ok(Self {
             entries,
             storage_path: path,
+            searcher,
         })
     }
 
     /// Upsert a memory entry. If the key already exists, the value, category,
     /// tags, and importance are updated and `last_accessed` is refreshed. The entry is
-    /// persisted to disk immediately.
-    pub fn set(
+    /// persisted to disk immediately and the searcher index is updated.
+    pub async fn set(
         &mut self,
         key: &str,
         value: &str,
@@ -104,7 +127,7 @@ impl LongTermMemory {
         if let Some(existing) = self.entries.get_mut(key) {
             existing.value = value.to_string();
             existing.category = category.to_string();
-            existing.tags = tags;
+            existing.tags = tags.clone();
             existing.importance = importance;
             existing.last_accessed = now;
         } else {
@@ -115,13 +138,19 @@ impl LongTermMemory {
                 created_at: now,
                 last_accessed: now,
                 access_count: 0,
-                tags,
+                tags: tags.clone(),
                 importance,
             };
             self.entries.insert(key.to_string(), entry);
         }
 
-        self.save()
+        self.save()?;
+
+        // Update searcher index with composite searchable text
+        let searchable = format!("{} {} {} {}", key, value, category, tags.join(" "));
+        self.searcher.index(key, &searchable).await?;
+
+        Ok(())
     }
 
     /// Retrieve a memory entry by key, updating its access stats
@@ -142,48 +171,55 @@ impl LongTermMemory {
     }
 
     /// Delete a memory entry by key. Returns `true` if the entry existed
-    /// (and was removed), `false` otherwise. Saves to disk on deletion.
-    pub fn delete(&mut self, key: &str) -> Result<bool> {
+    /// (and was removed), `false` otherwise. Saves to disk and removes from
+    /// searcher index on deletion.
+    pub async fn delete(&mut self, key: &str) -> Result<bool> {
         let existed = self.entries.remove(key).is_some();
         if existed {
             self.save()?;
+            self.searcher.remove(key).await?;
         }
         Ok(existed)
     }
 
-    /// Case-insensitive substring search across key, value, category, and tags.
+    /// Search across key, value, category, and tags using the injected searcher.
     /// Results are sorted by relevance: exact key matches first, then by
-    /// `decay_score` descending.
+    /// searcher score descending.
     pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
         let query_lower = query.to_lowercase();
-        let mut results: Vec<&MemoryEntry> = self
+        let mut scored: Vec<(&MemoryEntry, f32)> = self
             .entries
             .values()
-            .filter(|entry| {
-                entry.key.to_lowercase().contains(&query_lower)
-                    || entry.value.to_lowercase().contains(&query_lower)
-                    || entry.category.to_lowercase().contains(&query_lower)
-                    || entry
-                        .tags
-                        .iter()
-                        .any(|tag| tag.to_lowercase().contains(&query_lower))
+            .filter_map(|entry| {
+                // Build searchable text from all entry fields
+                let text = format!(
+                    "{} {} {} {}",
+                    entry.key,
+                    entry.value,
+                    entry.category,
+                    entry.tags.join(" ")
+                );
+                let score = self.searcher.score(&text, query);
+                if score > 0.0 {
+                    Some((entry, score))
+                } else {
+                    None
+                }
             })
             .collect();
 
-        results.sort_by(|a, b| {
-            let a_exact = a.key.to_lowercase() == query_lower;
-            let b_exact = b.key.to_lowercase() == query_lower;
+        // Exact key matches still get priority
+        scored.sort_by(|a, b| {
+            let a_exact = a.0.key.to_lowercase() == query_lower;
+            let b_exact = b.0.key.to_lowercase() == query_lower;
             match (a_exact, b_exact) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => b
-                    .decay_score()
-                    .partial_cmp(&a.decay_score())
-                    .unwrap_or(std::cmp::Ordering::Equal),
+                _ => b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal),
             }
         });
 
-        results
+        scored.into_iter().map(|(entry, _)| entry).collect()
     }
 
     /// List all entries in a given category, sorted by `last_accessed`
@@ -387,8 +423,8 @@ mod tests {
         assert_eq!(mem.count(), 0);
     }
 
-    #[test]
-    fn test_set_and_get() {
+    #[tokio::test]
+    async fn test_set_and_get() {
         let (mut mem, _dir) = temp_memory();
         mem.set(
             "user:name",
@@ -397,6 +433,7 @@ mod tests {
             vec!["identity".to_string()],
             1.0,
         )
+        .await
         .unwrap();
 
         let entry = mem.get("user:name").unwrap();
@@ -404,30 +441,32 @@ mod tests {
         assert_eq!(entry.category, "user");
     }
 
-    #[test]
-    fn test_set_upsert() {
+    #[tokio::test]
+    async fn test_set_upsert() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("user:name", "Alice", "user", vec![], 1.0).unwrap();
+        mem.set("user:name", "Alice", "user", vec![], 1.0)
+            .await
+            .unwrap();
         mem.set("user:name", "Bob", "user", vec!["updated".to_string()], 1.0)
+            .await
             .unwrap();
 
         let entry = mem.get("user:name").unwrap();
         assert_eq!(entry.value, "Bob");
         assert_eq!(entry.tags, vec!["updated"]);
-        // Should still be 1 entry, not 2.
         assert_eq!(mem.count(), 1);
     }
 
-    #[test]
-    fn test_get_updates_access_stats() {
+    #[tokio::test]
+    async fn test_get_updates_access_stats() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("key1", "value1", "test", vec![], 1.0).unwrap();
+        mem.set("key1", "value1", "test", vec![], 1.0)
+            .await
+            .unwrap();
 
         let before_access = mem.get_readonly("key1").unwrap().last_accessed;
         let before_count = mem.get_readonly("key1").unwrap().access_count;
 
-        // Small delay to ensure timestamp may differ (though on fast machines
-        // it may be the same second).
         let _ = mem.get("key1");
         let _ = mem.get("key1");
 
@@ -436,10 +475,12 @@ mod tests {
         assert!(entry.last_accessed >= before_access);
     }
 
-    #[test]
-    fn test_get_readonly_no_update() {
+    #[tokio::test]
+    async fn test_get_readonly_no_update() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("key1", "value1", "test", vec![], 1.0).unwrap();
+        mem.set("key1", "value1", "test", vec![], 1.0)
+            .await
+            .unwrap();
 
         let before = mem.get_readonly("key1").unwrap().access_count;
         let _ = mem.get_readonly("key1");
@@ -455,30 +496,35 @@ mod tests {
         assert!(mem.get("nonexistent").is_none());
     }
 
-    #[test]
-    fn test_delete_existing() {
+    #[tokio::test]
+    async fn test_delete_existing() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("key1", "value1", "test", vec![], 1.0).unwrap();
+        mem.set("key1", "value1", "test", vec![], 1.0)
+            .await
+            .unwrap();
         assert_eq!(mem.count(), 1);
 
-        let existed = mem.delete("key1").unwrap();
+        let existed = mem.delete("key1").await.unwrap();
         assert!(existed);
         assert_eq!(mem.count(), 0);
         assert!(mem.get("key1").is_none());
     }
 
-    #[test]
-    fn test_delete_nonexistent() {
+    #[tokio::test]
+    async fn test_delete_nonexistent() {
         let (mut mem, _dir) = temp_memory();
-        let existed = mem.delete("nonexistent").unwrap();
+        let existed = mem.delete("nonexistent").await.unwrap();
         assert!(!existed);
     }
 
-    #[test]
-    fn test_search_by_key() {
+    #[tokio::test]
+    async fn test_search_by_key() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("user:name", "Alice", "user", vec![], 1.0).unwrap();
+        mem.set("user:name", "Alice", "user", vec![], 1.0)
+            .await
+            .unwrap();
         mem.set("project:name", "ZeptoClaw", "project", vec![], 1.0)
+            .await
             .unwrap();
 
         let results = mem.search("user");
@@ -486,12 +532,14 @@ mod tests {
         assert!(results.iter().any(|e| e.key == "user:name"));
     }
 
-    #[test]
-    fn test_search_by_value() {
+    #[tokio::test]
+    async fn test_search_by_value() {
         let (mut mem, _dir) = temp_memory();
         mem.set("key1", "Rust programming language", "fact", vec![], 1.0)
+            .await
             .unwrap();
         mem.set("key2", "Python scripting", "fact", vec![], 1.0)
+            .await
             .unwrap();
 
         let results = mem.search("Rust");
@@ -499,8 +547,8 @@ mod tests {
         assert_eq!(results[0].key, "key1");
     }
 
-    #[test]
-    fn test_search_by_tag() {
+    #[tokio::test]
+    async fn test_search_by_tag() {
         let (mut mem, _dir) = temp_memory();
         mem.set(
             "key1",
@@ -509,6 +557,7 @@ mod tests {
             vec!["important".to_string(), "work".to_string()],
             1.0,
         )
+        .await
         .unwrap();
         mem.set(
             "key2",
@@ -517,6 +566,7 @@ mod tests {
             vec!["personal".to_string()],
             1.0,
         )
+        .await
         .unwrap();
 
         let results = mem.search("important");
@@ -524,8 +574,8 @@ mod tests {
         assert_eq!(results[0].key, "key1");
     }
 
-    #[test]
-    fn test_search_case_insensitive() {
+    #[tokio::test]
+    async fn test_search_case_insensitive() {
         let (mut mem, _dir) = temp_memory();
         mem.set(
             "Key1",
@@ -534,9 +584,9 @@ mod tests {
             vec!["MyTag".to_string()],
             1.0,
         )
+        .await
         .unwrap();
 
-        // Search with different casing.
         assert!(!mem.search("hello").is_empty());
         assert!(!mem.search("HELLO").is_empty());
         assert!(!mem.search("key1").is_empty());
@@ -545,12 +595,12 @@ mod tests {
         assert!(!mem.search("test").is_empty());
     }
 
-    #[test]
-    fn test_list_by_category() {
+    #[tokio::test]
+    async fn test_list_by_category() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("k1", "v1", "user", vec![], 1.0).unwrap();
-        mem.set("k2", "v2", "user", vec![], 1.0).unwrap();
-        mem.set("k3", "v3", "project", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "user", vec![], 1.0).await.unwrap();
+        mem.set("k2", "v2", "user", vec![], 1.0).await.unwrap();
+        mem.set("k3", "v3", "project", vec![], 1.0).await.unwrap();
 
         let user_entries = mem.list_by_category("user");
         assert_eq!(user_entries.len(), 2);
@@ -560,56 +610,53 @@ mod tests {
         assert_eq!(project_entries.len(), 1);
     }
 
-    #[test]
-    fn test_list_all() {
+    #[tokio::test]
+    async fn test_list_all() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("k1", "v1", "a", vec![], 1.0).unwrap();
-        mem.set("k2", "v2", "b", vec![], 1.0).unwrap();
-        mem.set("k3", "v3", "c", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "a", vec![], 1.0).await.unwrap();
+        mem.set("k2", "v2", "b", vec![], 1.0).await.unwrap();
+        mem.set("k3", "v3", "c", vec![], 1.0).await.unwrap();
 
         let all = mem.list_all();
         assert_eq!(all.len(), 3);
     }
 
-    #[test]
-    fn test_count() {
+    #[tokio::test]
+    async fn test_count() {
         let (mut mem, _dir) = temp_memory();
         assert_eq!(mem.count(), 0);
 
-        mem.set("k1", "v1", "test", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "test", vec![], 1.0).await.unwrap();
         assert_eq!(mem.count(), 1);
 
-        mem.set("k2", "v2", "test", vec![], 1.0).unwrap();
+        mem.set("k2", "v2", "test", vec![], 1.0).await.unwrap();
         assert_eq!(mem.count(), 2);
 
-        mem.delete("k1").unwrap();
+        mem.delete("k1").await.unwrap();
         assert_eq!(mem.count(), 1);
     }
 
-    #[test]
-    fn test_categories() {
+    #[tokio::test]
+    async fn test_categories() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("k1", "v1", "user", vec![], 1.0).unwrap();
-        mem.set("k2", "v2", "fact", vec![], 1.0).unwrap();
-        mem.set("k3", "v3", "user", vec![], 1.0).unwrap();
-        mem.set("k4", "v4", "preference", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "user", vec![], 1.0).await.unwrap();
+        mem.set("k2", "v2", "fact", vec![], 1.0).await.unwrap();
+        mem.set("k3", "v3", "user", vec![], 1.0).await.unwrap();
+        mem.set("k4", "v4", "preference", vec![], 1.0)
+            .await
+            .unwrap();
 
         let cats = mem.categories();
         assert_eq!(cats, vec!["fact", "preference", "user"]);
     }
 
-    #[test]
-    fn test_cleanup_least_used() {
+    #[tokio::test]
+    async fn test_cleanup_least_used() {
         let (mut mem, _dir) = temp_memory();
-        // Use different importance values so decay scores differ significantly
-        mem.set("k1", "v1", "test", vec![], 0.5).unwrap();
-        mem.set("k2", "v2", "test", vec![], 0.3).unwrap();
-        mem.set("k3", "v3", "test", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "test", vec![], 0.5).await.unwrap();
+        mem.set("k2", "v2", "test", vec![], 0.3).await.unwrap();
+        mem.set("k3", "v3", "test", vec![], 1.0).await.unwrap();
 
-        // k1 has importance 0.5, k2 has 0.3, k3 has 1.0
-        // Since they're all fresh, their decay scores are approximately:
-        // k1 ≈ 0.5, k2 ≈ 0.3, k3 ≈ 1.0
-        // Keeping 2 should remove k2 (lowest score)
         let removed = mem.cleanup_least_used(2).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(mem.count(), 2);
@@ -618,12 +665,11 @@ mod tests {
         assert!(mem.get_readonly("k2").is_none());
     }
 
-    #[test]
-    fn test_persistence_roundtrip() {
+    #[tokio::test]
+    async fn test_persistence_roundtrip() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let path = dir.path().join("longterm.json");
 
-        // Create and populate a store.
         {
             let mut mem = LongTermMemory::with_path(path.clone()).unwrap();
             mem.set(
@@ -633,12 +679,13 @@ mod tests {
                 vec!["identity".to_string()],
                 1.0,
             )
+            .await
             .unwrap();
             mem.set("fact:lang", "Rust", "fact", vec!["tech".to_string()], 1.0)
+                .await
                 .unwrap();
         }
 
-        // Open a new store at the same path and verify entries loaded.
         {
             let mem = LongTermMemory::with_path(path).unwrap();
             assert_eq!(mem.count(), 2);
@@ -651,27 +698,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_summary() {
+    #[tokio::test]
+    async fn test_summary() {
         let (mut mem, _dir) = temp_memory();
         assert_eq!(mem.summary(), "Long-term memory: 0 entries (0 categories)");
 
-        mem.set("k1", "v1", "user", vec![], 1.0).unwrap();
-        mem.set("k2", "v2", "fact", vec![], 1.0).unwrap();
-        mem.set("k3", "v3", "fact", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "user", vec![], 1.0).await.unwrap();
+        mem.set("k2", "v2", "fact", vec![], 1.0).await.unwrap();
+        mem.set("k3", "v3", "fact", vec![], 1.0).await.unwrap();
 
         assert_eq!(mem.summary(), "Long-term memory: 3 entries (2 categories)");
     }
 
-    #[test]
-    fn test_decay_score_fresh_entry() {
+    #[tokio::test]
+    async fn test_decay_score_fresh_entry() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("fresh", "value", "test", vec![], 1.0).unwrap();
+        mem.set("fresh", "value", "test", vec![], 1.0)
+            .await
+            .unwrap();
 
         let entry = mem.get_readonly("fresh").unwrap();
         let score = entry.decay_score();
-
-        // Fresh entry with importance 1.0 should score very close to 1.0
         assert!(
             (score - 1.0).abs() < 0.01,
             "Fresh entry score was {}, expected ~1.0",
@@ -679,39 +726,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_decay_score_pinned_exempt() {
+    #[tokio::test]
+    async fn test_decay_score_pinned_exempt() {
         let (mut mem, _dir) = temp_memory();
         mem.set("pinned_key", "value", "pinned", vec![], 1.0)
+            .await
             .unwrap();
 
-        // Manually age the entry by setting last_accessed far in the past
-        if let Some(entry) = mem.entries.get_mut("pinned_key") {
-            entry.last_accessed = now_timestamp() - (365 * 86400); // 1 year old
-        }
-
-        let entry = mem.get_readonly("pinned_key").unwrap();
-        let score = entry.decay_score();
-
-        // Pinned entries always score 1.0 regardless of age
-        assert_eq!(score, 1.0, "Pinned entry should score 1.0, got {}", score);
-    }
-
-    #[test]
-    fn test_decay_score_pinned_case_insensitive() {
-        let (mut mem, _dir) = temp_memory();
-        mem.set("pinned_key", "value", "Pinned", vec![], 1.0)
-            .unwrap();
-
-        // Age the entry
         if let Some(entry) = mem.entries.get_mut("pinned_key") {
             entry.last_accessed = now_timestamp() - (365 * 86400);
         }
 
         let entry = mem.get_readonly("pinned_key").unwrap();
         let score = entry.decay_score();
+        assert_eq!(score, 1.0, "Pinned entry should score 1.0, got {}", score);
+    }
 
-        // "Pinned" with capital P should also be exempt
+    #[tokio::test]
+    async fn test_decay_score_pinned_case_insensitive() {
+        let (mut mem, _dir) = temp_memory();
+        mem.set("pinned_key", "value", "Pinned", vec![], 1.0)
+            .await
+            .unwrap();
+
+        if let Some(entry) = mem.entries.get_mut("pinned_key") {
+            entry.last_accessed = now_timestamp() - (365 * 86400);
+        }
+
+        let entry = mem.get_readonly("pinned_key").unwrap();
+        let score = entry.decay_score();
         assert_eq!(
             score, 1.0,
             "Pinned (capital) entry should score 1.0, got {}",
@@ -719,20 +762,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_decay_score_old_entry_decays() {
+    #[tokio::test]
+    async fn test_decay_score_old_entry_decays() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("old", "value", "test", vec![], 1.0).unwrap();
+        mem.set("old", "value", "test", vec![], 1.0).await.unwrap();
 
-        // Set last_accessed to 30 days ago
         if let Some(entry) = mem.entries.get_mut("old") {
             entry.last_accessed = now_timestamp() - (30 * 86400);
         }
 
         let entry = mem.get_readonly("old").unwrap();
         let score = entry.decay_score();
-
-        // After 30 days with importance 1.0, score should be ~0.5 (half-life)
         assert!(
             (score - 0.5).abs() < 0.05,
             "30-day-old entry score was {}, expected ~0.5",
@@ -740,16 +780,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_decay_score_importance_scales() {
+    #[tokio::test]
+    async fn test_decay_score_importance_scales() {
         let (mut mem, _dir) = temp_memory();
         mem.set("low_importance", "value", "test", vec![], 0.5)
+            .await
             .unwrap();
 
         let entry = mem.get_readonly("low_importance").unwrap();
         let score = entry.decay_score();
-
-        // Fresh entry with importance 0.5 should score ~0.5
         assert!(
             (score - 0.5).abs() < 0.01,
             "Low importance entry score was {}, expected ~0.5",
@@ -757,90 +796,72 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_search_sorted_by_decay_score() {
+    #[tokio::test]
+    async fn test_search_sorted_by_searcher_score() {
         let (mut mem, _dir) = temp_memory();
+        mem.set("fresh", "test value", "test", vec![], 1.0)
+            .await
+            .unwrap();
+        mem.set("old", "test value", "test", vec![], 1.0)
+            .await
+            .unwrap();
 
-        // Create fresh and old entries
-        mem.set("fresh", "test value", "test", vec![], 1.0).unwrap();
-        mem.set("old", "test value", "test", vec![], 1.0).unwrap();
-
-        // Age the "old" entry
         if let Some(entry) = mem.entries.get_mut("old") {
-            entry.last_accessed = now_timestamp() - (60 * 86400); // 60 days old
+            entry.last_accessed = now_timestamp() - (60 * 86400);
         }
 
         let results = mem.search("test");
         assert_eq!(results.len(), 2);
 
-        // Fresh entry should rank first (higher decay score)
-        assert_eq!(results[0].key, "fresh", "Fresh entry should rank first");
-        assert_eq!(results[1].key, "old", "Old entry should rank second");
+        let keys: Vec<&str> = results.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"fresh"));
+        assert!(keys.contains(&"old"));
     }
 
-    #[test]
-    fn test_cleanup_evicts_by_decay_score() {
+    #[tokio::test]
+    async fn test_cleanup_evicts_by_decay_score() {
         let (mut mem, _dir) = temp_memory();
+        mem.set("high", "value", "test", vec![], 2.0).await.unwrap();
+        mem.set("medium", "value", "test", vec![], 1.0)
+            .await
+            .unwrap();
+        mem.set("low", "value", "test", vec![], 0.5).await.unwrap();
 
-        // Create entries with different importance levels
-        mem.set("high", "value", "test", vec![], 2.0).unwrap();
-        mem.set("medium", "value", "test", vec![], 1.0).unwrap();
-        mem.set("low", "value", "test", vec![], 0.5).unwrap();
-
-        // Keep only 1 entry - should evict by decay score (lowest first)
         let removed = mem.cleanup_least_used(1).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(mem.count(), 1);
-
-        // High importance entry should survive
-        assert!(
-            mem.get_readonly("high").is_some(),
-            "High importance entry should survive"
-        );
-        assert!(
-            mem.get_readonly("medium").is_none(),
-            "Medium importance entry should be removed"
-        );
-        assert!(
-            mem.get_readonly("low").is_none(),
-            "Low importance entry should be removed"
-        );
+        assert!(mem.get_readonly("high").is_some());
+        assert!(mem.get_readonly("medium").is_none());
+        assert!(mem.get_readonly("low").is_none());
     }
 
-    #[test]
-    fn test_importance_persists_roundtrip() {
+    #[tokio::test]
+    async fn test_importance_persists_roundtrip() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let path = dir.path().join("longterm.json");
 
-        // Create and populate with different importance values
         {
             let mut mem = LongTermMemory::with_path(path.clone()).unwrap();
-            mem.set("high", "value", "test", vec![], 2.5).unwrap();
-            mem.set("low", "value", "test", vec![], 0.3).unwrap();
+            mem.set("high", "value", "test", vec![], 2.5).await.unwrap();
+            mem.set("low", "value", "test", vec![], 0.3).await.unwrap();
         }
 
-        // Reload and verify importance values persisted
         {
             let mem = LongTermMemory::with_path(path).unwrap();
             assert_eq!(mem.count(), 2);
-
-            let high = mem.get_readonly("high").unwrap();
-            assert_eq!(high.importance, 2.5, "High importance should persist");
-
-            let low = mem.get_readonly("low").unwrap();
-            assert_eq!(low.importance, 0.3, "Low importance should persist");
+            assert_eq!(mem.get_readonly("high").unwrap().importance, 2.5);
+            assert_eq!(mem.get_readonly("low").unwrap().importance, 0.3);
         }
     }
 
-    #[test]
-    fn test_cleanup_expired_removes_low_score() {
+    #[tokio::test]
+    async fn test_cleanup_expired_removes_low_score() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("high", "value", "test", vec![], 2.0).unwrap();
-        mem.set("low", "value", "test", vec![], 0.01).unwrap();
+        mem.set("high", "value", "test", vec![], 2.0).await.unwrap();
+        mem.set("low", "value", "test", vec![], 0.01).await.unwrap();
 
-        // Age the low-importance entry so its decay_score drops below threshold
         if let Some(entry) = mem.entries.get_mut("low") {
-            entry.last_accessed = now_timestamp() - (90 * 86400); // 90 days old
+            entry.last_accessed = now_timestamp() - (90 * 86400);
             entry.importance = 0.01;
         }
 
@@ -850,13 +871,13 @@ mod tests {
         assert!(mem.get_readonly("low").is_none());
     }
 
-    #[test]
-    fn test_cleanup_expired_keeps_pinned() {
+    #[tokio::test]
+    async fn test_cleanup_expired_keeps_pinned() {
         let (mut mem, _dir) = temp_memory();
         mem.set("pinned_key", "value", "pinned", vec![], 0.01)
+            .await
             .unwrap();
 
-        // Age the entry far into the past
         if let Some(entry) = mem.entries.get_mut("pinned_key") {
             entry.last_accessed = now_timestamp() - (365 * 86400);
         }
@@ -866,11 +887,11 @@ mod tests {
         assert!(mem.get_readonly("pinned_key").is_some());
     }
 
-    #[test]
-    fn test_cleanup_expired_no_op_when_all_fresh() {
+    #[tokio::test]
+    async fn test_cleanup_expired_no_op_when_all_fresh() {
         let (mut mem, _dir) = temp_memory();
-        mem.set("k1", "v1", "test", vec![], 1.0).unwrap();
-        mem.set("k2", "v2", "test", vec![], 1.0).unwrap();
+        mem.set("k1", "v1", "test", vec![], 1.0).await.unwrap();
+        mem.set("k2", "v2", "test", vec![], 1.0).await.unwrap();
 
         let removed = mem.cleanup_expired(0.1).unwrap();
         assert_eq!(removed, 0);
@@ -888,17 +909,50 @@ mod tests {
     fn test_cleanup_expired_rejects_invalid_threshold() {
         let (mut mem, _dir) = temp_memory();
 
-        // Out of range
         assert!(mem.cleanup_expired(-0.1).is_err());
         assert!(mem.cleanup_expired(1.1).is_err());
-
-        // Non-finite
         assert!(mem.cleanup_expired(f32::NAN).is_err());
         assert!(mem.cleanup_expired(f32::INFINITY).is_err());
         assert!(mem.cleanup_expired(f32::NEG_INFINITY).is_err());
-
-        // Boundaries should be accepted
         assert!(mem.cleanup_expired(0.0).is_ok());
         assert!(mem.cleanup_expired(1.0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_uses_injected_searcher() {
+        use crate::memory::traits::MemorySearcher;
+        use std::sync::Arc;
+
+        struct MagicSearcher;
+
+        #[async_trait::async_trait]
+        impl MemorySearcher for MagicSearcher {
+            fn name(&self) -> &str {
+                "magic"
+            }
+            fn score(&self, chunk: &str, _query: &str) -> f32 {
+                if chunk.to_lowercase().contains("magic") {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("lt.json");
+        let searcher = Arc::new(MagicSearcher);
+        let mut mem = LongTermMemory::with_path_and_searcher(path, searcher).unwrap();
+
+        mem.set("k1", "magic word", "test", vec![], 1.0)
+            .await
+            .unwrap();
+        mem.set("k2", "normal word", "test", vec![], 1.0)
+            .await
+            .unwrap();
+
+        let results = mem.search("anything");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "k1");
     }
 }

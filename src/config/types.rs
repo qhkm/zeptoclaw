@@ -132,6 +132,12 @@ pub struct RoutinesConfig {
     pub cron_interval_secs: u64,
     /// Maximum concurrent routine executions.
     pub max_concurrent: usize,
+    /// Random jitter in milliseconds added to cron tick intervals.
+    #[serde(default)]
+    pub jitter_ms: u64,
+    /// Policy for missed schedules when process restarts.
+    #[serde(default)]
+    pub on_miss: crate::cron::OnMiss,
 }
 
 impl Default for RoutinesConfig {
@@ -140,6 +146,8 @@ impl Default for RoutinesConfig {
             enabled: false,
             cron_interval_secs: 60,
             max_concurrent: 3,
+            jitter_ms: 0,
+            on_miss: crate::cron::OnMiss::Skip,
         }
     }
 }
@@ -317,6 +325,8 @@ pub struct ChannelsConfig {
     pub slack: Option<SlackConfig>,
     /// WhatsApp bridge configuration
     pub whatsapp: Option<WhatsAppConfig>,
+    /// WhatsApp Cloud API configuration (official API, no bridge)
+    pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
     pub feishu: Option<FeishuConfig>,
     /// MaixCam configuration
@@ -473,6 +483,69 @@ impl Default for WhatsAppConfig {
             allow_from: Vec::new(),
             deny_by_default: false,
             bridge_managed: default_bridge_managed(),
+        }
+    }
+}
+
+/// WhatsApp Cloud API channel configuration (official Meta API).
+///
+/// Uses Meta's webhook system for inbound messages and the Cloud API
+/// for outbound replies. Does not require the whatsmeow-rs bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppCloudConfig {
+    /// Whether the channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Phone number ID from Meta Business dashboard.
+    #[serde(default)]
+    pub phone_number_id: String,
+    /// Permanent access token for Cloud API.
+    #[serde(default)]
+    pub access_token: String,
+    /// Webhook verify token (you choose this secret, must match Meta dashboard).
+    #[serde(default)]
+    pub webhook_verify_token: String,
+    /// Address to bind the webhook HTTP server to.
+    #[serde(default = "default_whatsapp_cloud_bind")]
+    pub bind_address: String,
+    /// Port for the webhook HTTP server.
+    #[serde(default = "default_whatsapp_cloud_port")]
+    pub port: u16,
+    /// URL path for the webhook endpoint.
+    #[serde(default = "default_whatsapp_cloud_path")]
+    pub path: String,
+    /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set).
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_whatsapp_cloud_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_whatsapp_cloud_port() -> u16 {
+    9877
+}
+
+fn default_whatsapp_cloud_path() -> String {
+    "/whatsapp".to_string()
+}
+
+impl Default for WhatsAppCloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            phone_number_id: String::new(),
+            access_token: String::new(),
+            webhook_verify_token: String::new(),
+            bind_address: default_whatsapp_cloud_bind(),
+            port: default_whatsapp_cloud_port(),
+            path: default_whatsapp_cloud_path(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
         }
     }
 }
@@ -780,9 +853,17 @@ pub enum MemoryBackend {
     /// Disable memory tools.
     #[serde(rename = "none")]
     Disabled,
-    /// Built-in workspace markdown memory.
+    /// Built-in substring search (default, zero cost).
     #[default]
     Builtin,
+    /// BM25 keyword scoring (feature: memory-bm25).
+    Bm25,
+    /// LLM embedding + cosine similarity (feature: memory-embedding).
+    Embedding,
+    /// HNSW approximate nearest neighbor (feature: memory-hnsw).
+    Hnsw,
+    /// Tantivy full-text search engine (feature: memory-tantivy).
+    Tantivy,
     /// QMD backend (falls back safely when unavailable).
     Qmd,
 }
@@ -819,6 +900,18 @@ pub struct MemoryConfig {
     /// Extra workspace-relative file/dir paths to include.
     #[serde(default)]
     pub extra_paths: Vec<String>,
+    /// Embedding provider name. Only used when backend is "embedding".
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    /// Embedding model name. Only used when backend is "embedding".
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// HNSW index file path override. Only used when backend is "hnsw".
+    #[serde(default)]
+    pub hnsw_index_path: Option<String>,
+    /// Tantivy index directory path override. Only used when backend is "tantivy".
+    #[serde(default)]
+    pub tantivy_index_path: Option<String>,
 }
 
 impl Default for MemoryConfig {
@@ -831,6 +924,10 @@ impl Default for MemoryConfig {
             min_score: 0.2,
             max_snippet_chars: 700,
             extra_paths: Vec::new(),
+            embedding_provider: None,
+            embedding_model: None,
+            hnsw_index_path: None,
+            tantivy_index_path: None,
         }
     }
 }
@@ -1317,6 +1414,19 @@ mod tests {
     }
 
     #[test]
+    fn test_routines_config_jitter_default() {
+        let config = RoutinesConfig::default();
+        assert_eq!(config.jitter_ms, 0);
+    }
+
+    #[test]
+    fn test_routines_config_jitter_deserialize() {
+        let json = r#"{"enabled": true, "cron_interval_secs": 60, "max_concurrent": 3, "jitter_ms": 5000}"#;
+        let config: RoutinesConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.jitter_ms, 5000);
+    }
+
+    #[test]
     fn test_tunnel_config_defaults() {
         let config = TunnelConfig::default();
         assert!(config.provider.is_none());
@@ -1350,5 +1460,98 @@ mod tests {
         let ngrok = config.tunnel.ngrok.as_ref().unwrap();
         assert_eq!(ngrok.authtoken.as_deref(), Some("tok_123"));
         assert_eq!(ngrok.domain.as_deref(), Some("my.ngrok.io"));
+    }
+
+    #[test]
+    fn test_whatsapp_cloud_config_defaults() {
+        let config = WhatsAppCloudConfig::default();
+        assert!(!config.enabled);
+        assert!(config.phone_number_id.is_empty());
+        assert!(config.access_token.is_empty());
+        assert!(config.webhook_verify_token.is_empty());
+        assert_eq!(config.bind_address, "127.0.0.1");
+        assert_eq!(config.port, 9877);
+        assert_eq!(config.path, "/whatsapp");
+        assert!(config.allow_from.is_empty());
+        assert!(!config.deny_by_default);
+    }
+
+    #[test]
+    fn test_whatsapp_cloud_config_deserialize() {
+        let json = r#"{
+            "enabled": true,
+            "phone_number_id": "123456",
+            "access_token": "EAAx...",
+            "webhook_verify_token": "my-verify-secret",
+            "port": 8443,
+            "allow_from": ["60123456789"]
+        }"#;
+        let config: WhatsAppCloudConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.phone_number_id, "123456");
+        assert_eq!(config.access_token, "EAAx...");
+        assert_eq!(config.webhook_verify_token, "my-verify-secret");
+        assert_eq!(config.port, 8443);
+        assert_eq!(config.allow_from, vec!["60123456789"]);
+    }
+
+    #[test]
+    fn test_channels_config_with_whatsapp_cloud() {
+        let json = r#"{
+            "channels": {
+                "whatsapp_cloud": {
+                    "enabled": true,
+                    "phone_number_id": "999",
+                    "access_token": "tok",
+                    "webhook_verify_token": "verify"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let wac = config.channels.whatsapp_cloud.unwrap();
+        assert!(wac.enabled);
+        assert_eq!(wac.phone_number_id, "999");
+    }
+
+    #[test]
+    fn test_memory_backend_bm25_deserialize() {
+        let json = r#"{"memory": {"backend": "bm25"}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory.backend, MemoryBackend::Bm25);
+    }
+
+    #[test]
+    fn test_memory_backend_embedding_deserialize() {
+        let json = r#"{"memory": {"backend": "embedding", "embedding_provider": "openai", "embedding_model": "text-embedding-3-small"}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory.backend, MemoryBackend::Embedding);
+        assert_eq!(config.memory.embedding_provider.as_deref(), Some("openai"));
+        assert_eq!(
+            config.memory.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn test_memory_backend_hnsw_deserialize() {
+        let json = r#"{"memory": {"backend": "hnsw"}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory.backend, MemoryBackend::Hnsw);
+    }
+
+    #[test]
+    fn test_memory_backend_tantivy_deserialize() {
+        let json = r#"{"memory": {"backend": "tantivy"}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory.backend, MemoryBackend::Tantivy);
+    }
+
+    #[test]
+    fn test_memory_config_new_fields_default_none() {
+        let config = MemoryConfig::default();
+        assert!(config.embedding_provider.is_none());
+        assert!(config.embedding_model.is_none());
+        assert!(config.hnsw_index_path.is_none());
+        assert!(config.tantivy_index_path.is_none());
     }
 }

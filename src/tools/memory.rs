@@ -5,12 +5,15 @@
 //! - `memory_get`: read a memory file with optional line window.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::config::{MemoryCitationsMode, MemoryConfig};
 use crate::error::{Result, ZeptoError};
+use crate::memory::builtin_searcher::BuiltinSearcher;
+use crate::memory::traits::MemorySearcher;
 use crate::memory::{read_workspace_memory, search_workspace_memory};
 
 use super::{Tool, ToolContext};
@@ -18,12 +21,21 @@ use super::{Tool, ToolContext};
 /// Tool for searching workspace memory files.
 pub struct MemorySearchTool {
     config: MemoryConfig,
+    searcher: Arc<dyn MemorySearcher>,
 }
 
 impl MemorySearchTool {
     /// Create a new memory search tool.
     pub fn new(config: MemoryConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            searcher: Arc::new(BuiltinSearcher),
+        }
+    }
+
+    /// Create a new memory search tool with a custom searcher.
+    pub fn with_searcher(config: MemoryConfig, searcher: Arc<dyn MemorySearcher>) -> Self {
+        Self { config, searcher }
     }
 }
 
@@ -105,6 +117,7 @@ impl Tool for MemorySearchTool {
             Path::new(workspace),
             query,
             &self.config,
+            self.searcher.clone(),
             max_results,
             min_score,
             include_citations,

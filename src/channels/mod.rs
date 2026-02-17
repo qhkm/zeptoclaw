@@ -116,6 +116,7 @@ pub mod telegram;
 mod types;
 pub mod webhook;
 pub mod whatsapp;
+pub mod whatsapp_cloud;
 
 pub use discord::DiscordChannel;
 pub use factory::register_configured_channels;
@@ -125,3 +126,4 @@ pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};
 pub use webhook::{WebhookChannel, WebhookChannelConfig};
 pub use whatsapp::WhatsAppChannel;
+pub use whatsapp_cloud::WhatsAppCloudChannel;

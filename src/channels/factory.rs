@@ -9,6 +9,7 @@ use crate::config::Config;
 
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
+use super::WhatsAppCloudChannel;
 use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel};
 
 /// Register all configured channels that currently have implementations.
@@ -113,6 +114,28 @@ pub async fn register_configured_channels(
             }
         }
     }
+
+    // WhatsApp Cloud API (official)
+    if let Some(ref wac_config) = config.channels.whatsapp_cloud {
+        if wac_config.enabled {
+            if wac_config.phone_number_id.is_empty() || wac_config.access_token.is_empty() {
+                warn!(
+                    "WhatsApp Cloud channel enabled but phone_number_id or access_token is empty"
+                );
+            } else {
+                manager
+                    .register(Box::new(WhatsAppCloudChannel::new(
+                        wac_config.clone(),
+                        bus.clone(),
+                    )))
+                    .await;
+                info!(
+                    "Registered WhatsApp Cloud API channel on {}:{}",
+                    wac_config.bind_address, wac_config.port
+                );
+            }
+        }
+    }
     if config
         .channels
         .feishu
@@ -157,7 +180,7 @@ pub async fn register_configured_channels(
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
-    use crate::config::{Config, SlackConfig, TelegramConfig, WhatsAppConfig};
+    use crate::config::{Config, SlackConfig, TelegramConfig, WhatsAppCloudConfig, WhatsAppConfig};
 
     #[tokio::test]
     async fn test_register_configured_channels_registers_telegram() {
@@ -213,5 +236,25 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(manager.has_channel("slack").await);
+    }
+
+    #[tokio::test]
+    async fn test_register_configured_channels_registers_whatsapp_cloud() {
+        let bus = Arc::new(MessageBus::new());
+        let mut config = Config::default();
+        config.channels.whatsapp_cloud = Some(WhatsAppCloudConfig {
+            enabled: true,
+            phone_number_id: "123456".to_string(),
+            access_token: "test-token".to_string(),
+            webhook_verify_token: "verify".to_string(),
+            port: 0,
+            ..Default::default()
+        });
+
+        let manager = ChannelManager::new(bus.clone(), config.clone());
+        let count = register_configured_channels(&manager, bus, &config).await;
+
+        assert_eq!(count, 1);
+        assert!(manager.has_channel("whatsapp_cloud").await);
     }
 }

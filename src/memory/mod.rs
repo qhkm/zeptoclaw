@@ -1,12 +1,20 @@
 //! Workspace memory utilities (OpenClaw-style markdown memory).
 
+#[cfg(feature = "memory-bm25")]
+pub mod bm25_searcher;
+pub mod builtin_searcher;
+pub mod factory;
 pub mod longterm;
+pub mod traits;
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
+
+pub use traits::MemorySearcher;
 
 use crate::config::MemoryConfig;
 use crate::error::{Result, ZeptoError};
@@ -62,6 +70,7 @@ pub async fn search_workspace_memory(
     workspace: &Path,
     query: &str,
     config: &MemoryConfig,
+    searcher: Arc<dyn MemorySearcher>,
     max_results: Option<usize>,
     min_score: Option<f32>,
     include_citations: bool,
@@ -75,6 +84,7 @@ pub async fn search_workspace_memory(
             &workspace,
             &query,
             &config,
+            &*searcher,
             max_results,
             min_score,
             include_citations,
@@ -89,6 +99,7 @@ fn search_workspace_memory_sync(
     workspace: &Path,
     query: &str,
     config: &MemoryConfig,
+    searcher: &dyn MemorySearcher,
     max_results: Option<usize>,
     min_score: Option<f32>,
     include_citations: bool,
@@ -108,9 +119,6 @@ fn search_workspace_memory_sync(
         .clamp(1, 50);
     let min_score = min_score.unwrap_or(config.min_score).clamp(0.0, 1.0);
     let snippet_chars = (config.max_snippet_chars as usize).max(64);
-
-    let query_terms = tokenize(query);
-    let query_lower = query.to_lowercase();
 
     let mut results = Vec::new();
 
@@ -138,7 +146,7 @@ fn search_workspace_memory_sync(
                 continue;
             }
 
-            let score = score_chunk(&chunk, &query_lower, &query_terms);
+            let score = searcher.score(&chunk, query);
             if score < min_score {
                 if end == lines.len() {
                     break;
@@ -443,49 +451,6 @@ fn relative_path(workspace: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn tokenize(query: &str) -> Vec<String> {
-    let terms: Vec<String> = query
-        .to_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|term| term.len() >= 2)
-        .map(|term| term.to_string())
-        .collect();
-
-    if terms.is_empty() {
-        vec![query.to_lowercase()]
-    } else {
-        terms
-    }
-}
-
-fn score_chunk(chunk: &str, query_lower: &str, query_terms: &[String]) -> f32 {
-    let chunk_lower = chunk.to_lowercase();
-    let mut matched_terms = 0usize;
-    let mut term_hits = 0usize;
-
-    for term in query_terms {
-        let hits = chunk_lower.match_indices(term).count();
-        if hits > 0 {
-            matched_terms += 1;
-            term_hits += hits;
-        }
-    }
-
-    if matched_terms == 0 {
-        return 0.0;
-    }
-
-    let coverage = matched_terms as f32 / query_terms.len() as f32;
-    let density = (term_hits as f32 / (query_terms.len().max(1) as f32 * 2.0)).min(1.0);
-    let phrase_bonus = if chunk_lower.contains(query_lower) {
-        0.25
-    } else {
-        0.0
-    };
-
-    (coverage * 0.7 + density * 0.3 + phrase_bonus).min(1.0)
-}
-
 fn format_citation(path: &str, start_line: usize, end_line: usize) -> String {
     if start_line == end_line {
         format!("{}#L{}", path, start_line)
@@ -500,8 +465,10 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::builtin_searcher::BuiltinSearcher;
     use super::*;
     use crate::config::{MemoryBackend, MemoryCitationsMode};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -519,6 +486,7 @@ mod tests {
             workspace,
             "concise preference",
             &config,
+            Arc::new(BuiltinSearcher),
             Some(5),
             Some(0.1),
             true,
@@ -569,14 +537,17 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_pinned_only() {
+    #[tokio::test]
+    async fn test_build_memory_injection_pinned_only() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
-        ltm.set("pref:lang", "Rust", "pinned", vec![], 1.0).unwrap();
+        ltm.set("pref:lang", "Rust", "pinned", vec![], 1.0)
+            .await
+            .unwrap();
 
         let result = build_memory_injection(&ltm, "", 2000);
         assert!(result.contains("## Memory"));
@@ -586,14 +557,16 @@ mod tests {
         assert!(!result.contains("### Relevant"));
     }
 
-    #[test]
-    fn test_build_memory_injection_query_match() {
+    #[tokio::test]
+    async fn test_build_memory_injection_query_match() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("fact:project", "ZeptoClaw is 4MB", "fact", vec![], 1.0)
+            .await
             .unwrap();
         ltm.set("fact:other", "unrelated thing", "fact", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "ZeptoClaw", 2000);
@@ -601,12 +574,13 @@ mod tests {
         assert!(result.contains("ZeptoClaw is 4MB"));
     }
 
-    #[test]
-    fn test_build_memory_injection_pinned_not_duplicated() {
+    #[tokio::test]
+    async fn test_build_memory_injection_pinned_not_duplicated() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "Alice", 2000);
@@ -614,8 +588,8 @@ mod tests {
         assert_eq!(result.matches("user:name: Alice").count(), 1);
     }
 
-    #[test]
-    fn test_build_memory_injection_budget_enforcement() {
+    #[tokio::test]
+    async fn test_build_memory_injection_budget_enforcement() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
@@ -628,6 +602,7 @@ mod tests {
                 vec![],
                 1.0,
             )
+            .await
             .unwrap();
         }
 
@@ -650,26 +625,30 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_empty_message_no_relevant() {
+    #[tokio::test]
+    async fn test_build_memory_injection_empty_message_no_relevant() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
-        ltm.set("fact:x", "value", "fact", vec![], 1.0).unwrap();
+        ltm.set("fact:x", "value", "fact", vec![], 1.0)
+            .await
+            .unwrap();
 
         let result = build_memory_injection(&ltm, "", 2000);
         // With empty message, no query-match, and no pinned entries => empty
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_mixed_pinned_and_relevant() {
+    #[tokio::test]
+    async fn test_build_memory_injection_mixed_pinned_and_relevant() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
         ltm.set("fact:rust", "Rust is fast", "fact", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "Rust", 2000);

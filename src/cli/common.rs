@@ -13,6 +13,7 @@ use zeptoclaw::bus::MessageBus;
 use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
+use zeptoclaw::memory::factory::create_searcher;
 use zeptoclaw::providers::{
     resolve_runtime_providers, ClaudeProvider, FallbackProvider, LLMProvider, OpenAIProvider,
     RetryProvider, RuntimeProviderSelection,
@@ -64,6 +65,10 @@ pub(crate) fn memory_backend_label(backend: &MemoryBackend) -> &'static str {
     match backend {
         MemoryBackend::Disabled => "none",
         MemoryBackend::Builtin => "builtin",
+        MemoryBackend::Bm25 => "bm25",
+        MemoryBackend::Embedding => "embedding",
+        MemoryBackend::Hnsw => "hnsw",
+        MemoryBackend::Tantivy => "tantivy",
         MemoryBackend::Qmd => "qmd",
     }
 }
@@ -434,9 +439,18 @@ pub(crate) async fn create_agent_with_template(
         context_builder = context_builder.with_skills(&skills_prompt);
     }
 
+    // Create memory searcher from config (reused for injection + tool registration)
+    let memory_searcher = create_searcher(&config.memory);
+
     // Inject pinned memories into system prompt
     if !matches!(config.memory.backend, MemoryBackend::Disabled) {
-        match zeptoclaw::memory::longterm::LongTermMemory::new() {
+        let ltm_path = zeptoclaw::config::Config::dir()
+            .join("memory")
+            .join("longterm.json");
+        match zeptoclaw::memory::longterm::LongTermMemory::with_path_and_searcher(
+            ltm_path,
+            memory_searcher.clone(),
+        ) {
             Ok(ltm) => {
                 let memory_ctx = zeptoclaw::memory::build_memory_injection(
                     &ltm,
@@ -468,8 +482,12 @@ pub(crate) async fn create_agent_with_template(
 
     // Create and start cron service for scheduled tasks.
     let cron_store_path = Config::dir().join("cron").join("jobs.json");
-    let cron_service = Arc::new(CronService::new(cron_store_path, agent.bus().clone()));
-    cron_service.start().await?;
+    let cron_service = Arc::new(CronService::with_jitter(
+        cron_store_path,
+        agent.bus().clone(),
+        config.routines.jitter_ms,
+    ));
+    cron_service.start(&config.routines.on_miss).await?;
 
     // Create runtime from config
     let runtime = match create_runtime(&config.runtime).await {
@@ -585,55 +603,48 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
-    match &config.memory.backend {
-        MemoryBackend::Disabled => {
-            info!("Memory tools are disabled");
+    // Register memory tools via factory-created searcher
+    if !matches!(config.memory.backend, MemoryBackend::Disabled) {
+        if tool_enabled("memory_search") {
+            agent
+                .register_tool(Box::new(MemorySearchTool::with_searcher(
+                    config.memory.clone(),
+                    memory_searcher.clone(),
+                )))
+                .await;
         }
-        MemoryBackend::Builtin => {
-            if tool_enabled("memory_search") {
-                agent
-                    .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
-                    .await;
-            }
-            if tool_enabled("memory_get") {
-                agent
-                    .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
-                    .await;
-            }
-            if tool_enabled("longterm_memory") {
-                match zeptoclaw::tools::longterm_memory::LongTermMemoryTool::new() {
-                    Ok(tool) => {
-                        agent.register_tool(Box::new(tool)).await;
-                        info!("Registered longterm_memory tool");
-                    }
-                    Err(e) => warn!("Failed to initialize longterm_memory tool: {}", e),
+        if tool_enabled("memory_get") {
+            agent
+                .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
+                .await;
+        }
+        if tool_enabled("longterm_memory") {
+            let ltm_path = zeptoclaw::config::Config::dir()
+                .join("memory")
+                .join("longterm.json");
+            match zeptoclaw::memory::longterm::LongTermMemory::with_path_and_searcher(
+                ltm_path,
+                memory_searcher.clone(),
+            ) {
+                Ok(ltm) => {
+                    let tool = zeptoclaw::tools::longterm_memory::LongTermMemoryTool::with_memory(
+                        std::sync::Arc::new(tokio::sync::Mutex::new(ltm)),
+                    );
+                    agent.register_tool(Box::new(tool)).await;
+                    info!(
+                        "Registered longterm_memory tool (searcher: {})",
+                        memory_searcher.name()
+                    );
                 }
+                Err(e) => warn!("Failed to initialize longterm_memory tool: {}", e),
             }
-            info!("Registered memory_search and memory_get tools");
         }
-        MemoryBackend::Qmd => {
-            warn!("Memory backend 'qmd' is not implemented yet; using built-in memory tools");
-            if tool_enabled("memory_search") {
-                agent
-                    .register_tool(Box::new(MemorySearchTool::new(config.memory.clone())))
-                    .await;
-            }
-            if tool_enabled("memory_get") {
-                agent
-                    .register_tool(Box::new(MemoryGetTool::new(config.memory.clone())))
-                    .await;
-            }
-            if tool_enabled("longterm_memory") {
-                match zeptoclaw::tools::longterm_memory::LongTermMemoryTool::new() {
-                    Ok(tool) => {
-                        agent.register_tool(Box::new(tool)).await;
-                        info!("Registered longterm_memory tool");
-                    }
-                    Err(e) => warn!("Failed to initialize longterm_memory tool: {}", e),
-                }
-            }
-            info!("Registered memory_search and memory_get tools");
-        }
+        info!(
+            "Registered memory tools (backend: {})",
+            memory_searcher.name()
+        );
+    } else {
+        info!("Memory tools are disabled");
     }
 
     if tool_enabled("cron") {

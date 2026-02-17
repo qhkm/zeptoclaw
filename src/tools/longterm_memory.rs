@@ -3,7 +3,9 @@
 //! Exposes the `LongTermMemory` store to the AI agent, allowing it to remember
 //! facts, preferences, and learnings that persist across sessions.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -97,13 +99,13 @@ impl Tool for LongTermMemoryTool {
             .ok_or_else(|| ZeptoError::Tool("Missing 'action' parameter".to_string()))?;
 
         match action {
-            "set" => self.execute_set(&args),
-            "get" => self.execute_get(&args),
-            "search" => self.execute_search(&args),
-            "delete" => self.execute_delete(&args),
-            "list" => self.execute_list(&args),
-            "categories" => self.execute_categories(),
-            "pin" => self.execute_pin(&args),
+            "set" => self.execute_set(&args).await,
+            "get" => self.execute_get(&args).await,
+            "search" => self.execute_search(&args).await,
+            "delete" => self.execute_delete(&args).await,
+            "list" => self.execute_list(&args).await,
+            "categories" => self.execute_categories().await,
+            "pin" => self.execute_pin(&args).await,
             other => Err(ZeptoError::Tool(format!(
                 "Unknown longterm_memory action '{}'. Valid actions: set, get, search, delete, list, categories, pin",
                 other
@@ -113,7 +115,7 @@ impl Tool for LongTermMemoryTool {
 }
 
 impl LongTermMemoryTool {
-    fn execute_set(&self, args: &Value) -> Result<String> {
+    async fn execute_set(&self, args: &Value) -> Result<String> {
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
@@ -160,14 +162,11 @@ impl LongTermMemoryTool {
             .map(|f| f as f32)
             .unwrap_or(1.0);
 
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let mut memory = self.memory.lock().await;
 
         // Check if this is an update or a new entry.
         let is_update = memory.get_readonly(key).is_some();
-        memory.set(key, value, category, tags, importance)?;
+        memory.set(key, value, category, tags, importance).await?;
 
         if is_update {
             Ok(format!("Updated memory '{}'", key))
@@ -179,7 +178,7 @@ impl LongTermMemoryTool {
         }
     }
 
-    fn execute_get(&self, args: &Value) -> Result<String> {
+    async fn execute_get(&self, args: &Value) -> Result<String> {
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
@@ -189,10 +188,7 @@ impl LongTermMemoryTool {
                 ZeptoError::Tool("Missing 'key' parameter for get action".to_string())
             })?;
 
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let mut memory = self.memory.lock().await;
 
         match memory.get(key) {
             Some(entry) => {
@@ -205,7 +201,7 @@ impl LongTermMemoryTool {
         }
     }
 
-    fn execute_search(&self, args: &Value) -> Result<String> {
+    async fn execute_search(&self, args: &Value) -> Result<String> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -215,10 +211,7 @@ impl LongTermMemoryTool {
                 ZeptoError::Tool("Missing 'query' parameter for search action".to_string())
             })?;
 
-        let memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let memory = self.memory.lock().await;
 
         let results = memory.search(query);
 
@@ -238,7 +231,7 @@ impl LongTermMemoryTool {
         ))
     }
 
-    fn execute_delete(&self, args: &Value) -> Result<String> {
+    async fn execute_delete(&self, args: &Value) -> Result<String> {
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
@@ -248,29 +241,23 @@ impl LongTermMemoryTool {
                 ZeptoError::Tool("Missing 'key' parameter for delete action".to_string())
             })?;
 
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let mut memory = self.memory.lock().await;
 
-        if memory.delete(key)? {
+        if memory.delete(key).await? {
             Ok(format!("Deleted memory '{}'", key))
         } else {
             Ok(format!("No memory found for key '{}'", key))
         }
     }
 
-    fn execute_list(&self, args: &Value) -> Result<String> {
+    async fn execute_list(&self, args: &Value) -> Result<String> {
         let category = args
             .get("category")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let memory = self.memory.lock().await;
 
         let results: Vec<&crate::memory::longterm::MemoryEntry> = if let Some(cat) = category {
             memory.list_by_category(cat)
@@ -307,11 +294,8 @@ impl LongTermMemoryTool {
         Ok(format!("{}:\n{}", label, json))
     }
 
-    fn execute_categories(&self) -> Result<String> {
-        let memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+    async fn execute_categories(&self) -> Result<String> {
+        let memory = self.memory.lock().await;
 
         let categories = memory.categories();
 
@@ -326,7 +310,7 @@ impl LongTermMemoryTool {
         Ok(format!("{}\nCategories:\n{}", summary, json))
     }
 
-    fn execute_pin(&self, args: &Value) -> Result<String> {
+    async fn execute_pin(&self, args: &Value) -> Result<String> {
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
@@ -357,12 +341,9 @@ impl LongTermMemoryTool {
             })
             .unwrap_or_default();
 
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to acquire memory lock: {}", e)))?;
+        let mut memory = self.memory.lock().await;
 
-        memory.set(key, value, "pinned", tags, 1.0)?;
+        memory.set(key, value, "pinned", tags, 1.0).await?;
         Ok(format!("Pinned memory '{}'", key))
     }
 }
