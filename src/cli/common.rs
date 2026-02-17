@@ -925,6 +925,26 @@ pub(crate) async fn validate_api_key(
                 Err(anyhow::anyhow!(friendly_api_error("openai", status, &body)))
             }
         }
+        "openrouter" => {
+            // OpenRouter has a dedicated key info endpoint.
+            let base = api_base.unwrap_or("https://openrouter.ai/api/v1");
+            let resp = client
+                .get(format!("{}/key", base))
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                Ok(())
+            } else {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!(friendly_api_error(
+                    "openrouter",
+                    status,
+                    &body
+                )))
+            }
+        }
         _ => {
             warn!(
                 "API key validation not supported for provider '{}', skipping",
@@ -951,21 +971,26 @@ pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> Str
         401 => format!(
             "Invalid API key. Check your {} key and try again.\n  {}",
             provider,
-            if provider == "anthropic" {
-                "Get key: https://console.anthropic.com/"
-            } else {
-                "Get key: https://platform.openai.com/api-keys"
+            match provider {
+                "anthropic" => "Get key: https://console.anthropic.com/",
+                "openrouter" => "Get key: https://openrouter.ai/settings/keys",
+                _ => "Get key: https://platform.openai.com/api-keys",
             }
         ),
-        402 => format!(
-            "Billing issue on your {} account. Add a payment method.\n  {}",
-            provider,
-            if provider == "anthropic" {
-                "Billing: https://console.anthropic.com/settings/billing"
-            } else {
-                "Billing: https://platform.openai.com/settings/organization/billing"
+        402 => match provider {
+            "openrouter" => {
+                "Insufficient OpenRouter credits. Add credits and try again.\n  Credits: https://openrouter.ai/settings/credits"
+                    .to_string()
             }
-        ),
+            _ => format!(
+                "Billing issue on your {} account. Add a payment method.\n  {}",
+                provider,
+                match provider {
+                    "anthropic" => "Billing: https://console.anthropic.com/settings/billing",
+                    _ => "Billing: https://platform.openai.com/settings/organization/billing",
+                }
+            ),
+        },
         429 => "Rate limited. Wait a moment and try again.".to_string(),
         404 => {
             "Model not found. Your API key may not have access to the default model.".to_string()
@@ -1045,9 +1070,24 @@ mod tests {
     }
 
     #[test]
+    fn test_friendly_api_error_401_openrouter() {
+        let msg = friendly_api_error("openrouter", 401, "");
+        assert!(msg.contains("Invalid API key"));
+        assert!(msg.contains("openrouter"));
+        assert!(msg.contains("openrouter.ai/settings/keys"));
+    }
+
+    #[test]
     fn test_friendly_api_error_402() {
         let msg = friendly_api_error("anthropic", 402, "");
         assert!(msg.contains("Billing issue"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_402_openrouter() {
+        let msg = friendly_api_error("openrouter", 402, "");
+        assert!(msg.contains("Insufficient OpenRouter credits"));
+        assert!(msg.contains("openrouter.ai/settings/credits"));
     }
 
     #[test]

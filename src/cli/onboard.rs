@@ -5,8 +5,121 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode, RuntimeType};
+use zeptoclaw::providers::configured_provider_names;
 
 use super::common::{memory_backend_label, memory_citations_label, read_line, read_secret};
+
+/// Run the provider selection menu and configure chosen providers.
+///
+/// Shows a multi-select prompt where users can pick one or more providers.
+/// Returns Ok(()) after configuring all selected providers.
+async fn configure_providers(config: &mut Config) -> Result<()> {
+    let config_path = Config::path();
+
+    println!("API Key Setup");
+    println!("=============");
+    println!();
+    println!("Which AI providers would you like to configure?");
+    println!("  1. Anthropic (Claude) - Recommended");
+    println!("  2. OpenAI (GPT-4, etc.)");
+    println!("  3. OpenRouter (400+ models via single API key)");
+    println!("  4. All of the above");
+    println!("  5. Skip (configure later)");
+    println!();
+    let (want_anthropic, want_openai, want_openrouter) = loop {
+        print!("Enter choices (comma-separated, e.g. 1,3 or 4) or 5 to skip: ");
+        io::stdout().flush()?;
+
+        let input = read_line()?;
+        if input.trim().is_empty() {
+            println!("Skipping API key setup. You can configure later by:");
+            println!("  - Editing {:?}", config_path);
+            println!("  - Setting environment variables:");
+            println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
+            println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
+            println!("    ZEPTOCLAW_PROVIDERS_OPENROUTER_API_KEY=sk-or-...");
+            return Ok(());
+        }
+
+        let mut want_anthropic = false;
+        let mut want_openai = false;
+        let mut want_openrouter = false;
+        let mut want_all = false;
+        let mut want_skip = false;
+        let mut invalid_choices = Vec::new();
+
+        for raw_choice in input.split(',') {
+            let choice = raw_choice.trim().trim_end_matches('.');
+            if choice.is_empty() {
+                continue;
+            }
+            match choice {
+                "1" => want_anthropic = true,
+                "2" => want_openai = true,
+                "3" => want_openrouter = true,
+                "4" => want_all = true,
+                "5" => want_skip = true,
+                _ => invalid_choices.push(choice.to_string()),
+            }
+        }
+
+        if want_skip && (want_all || want_anthropic || want_openai || want_openrouter) {
+            println!("Invalid choice(s): 5 cannot be combined with other selections.");
+            continue;
+        }
+
+        if want_skip {
+            println!("Skipping API key setup. You can configure later by:");
+            println!("  - Editing {:?}", config_path);
+            println!("  - Setting environment variables:");
+            println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
+            println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
+            println!("    ZEPTOCLAW_PROVIDERS_OPENROUTER_API_KEY=sk-or-...");
+            return Ok(());
+        }
+
+        if !invalid_choices.is_empty() {
+            println!(
+                "Invalid choice(s): {}. Please use numbers 1, 2, 3, 4, and/or 5.",
+                invalid_choices.join(", ")
+            );
+            continue;
+        }
+
+        if want_all {
+            want_anthropic = true;
+            want_openai = true;
+            want_openrouter = true;
+        }
+
+        if !want_anthropic && !want_openai && !want_openrouter {
+            println!(
+                "No valid choices entered. Please try again, or press Enter / choose 5 to skip."
+            );
+            continue;
+        }
+
+        break (want_anthropic, want_openai, want_openrouter);
+    };
+
+    if want_anthropic {
+        configure_anthropic(config).await?;
+    }
+    if want_openai {
+        if want_anthropic {
+            println!();
+        }
+        configure_openai(config).await?;
+    }
+    if want_openrouter {
+        if want_anthropic || want_openai {
+            println!();
+        }
+        configure_openrouter(config).await?;
+    }
+
+    Ok(())
+}
 
 /// Format the express-mode next-steps message.
 fn express_next_steps() -> String {
@@ -72,43 +185,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         }
 
         println!();
-        println!("API Key Setup");
-        println!("=============");
-        println!();
-        println!("Which AI provider would you like to configure?");
-        println!("  1. Anthropic (Claude) - Recommended");
-        println!("  2. OpenAI (GPT-4, etc.)");
-        println!("  3. Both");
-        println!("  4. Skip (configure later)");
-        println!();
-        print!("Enter choice [1-4]: ");
-        io::stdout().flush()?;
-
-        let choice = read_line()?;
-
-        match choice.as_str() {
-            "1" | "1." => {
-                configure_anthropic(&mut config).await?;
-            }
-            "2" | "2." => {
-                configure_openai(&mut config).await?;
-            }
-            "3" | "3." => {
-                configure_anthropic(&mut config).await?;
-                println!();
-                configure_openai(&mut config).await?;
-            }
-            "4" | "4." | "" => {
-                println!("Skipping API key setup. You can configure later by:");
-                println!("  - Editing {:?}", config_path);
-                println!("  - Setting environment variables:");
-                println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
-                println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
-            }
-            _ => {
-                println!("Invalid choice. Skipping API key setup.");
-            }
-        }
+        configure_providers(&mut config).await?;
 
         // Configure web search integration
         configure_web_search(&mut config)?;
@@ -149,43 +226,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         println!("Initializing ZeptoClaw...");
         println!();
 
-        println!("API Key Setup");
-        println!("=============");
-        println!();
-        println!("Which AI provider would you like to configure?");
-        println!("  1. Anthropic (Claude) - Recommended");
-        println!("  2. OpenAI (GPT-4, etc.)");
-        println!("  3. Both");
-        println!("  4. Skip (configure later)");
-        println!();
-        print!("Enter choice [1-4]: ");
-        io::stdout().flush()?;
-
-        let choice = read_line()?;
-
-        match choice.as_str() {
-            "1" | "1." => {
-                configure_anthropic(&mut config).await?;
-            }
-            "2" | "2." => {
-                configure_openai(&mut config).await?;
-            }
-            "3" | "3." => {
-                configure_anthropic(&mut config).await?;
-                println!();
-                configure_openai(&mut config).await?;
-            }
-            "4" | "4." | "" => {
-                println!("Skipping API key setup. You can configure later by:");
-                println!("  - Editing {:?}", config_path);
-                println!("  - Setting environment variables:");
-                println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
-                println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
-            }
-            _ => {
-                println!("Invalid choice. Skipping API key setup.");
-            }
-        }
+        configure_providers(&mut config).await?;
 
         // Save config
         config
@@ -524,6 +565,54 @@ async fn configure_openai(config: &mut Config) -> Result<()> {
         }
     } else {
         println!("  Skipped OpenAI configuration.");
+    }
+
+    Ok(())
+}
+
+/// Configure OpenRouter provider.
+async fn configure_openrouter(config: &mut Config) -> Result<()> {
+    println!();
+    println!("OpenRouter Setup");
+    println!("----------------");
+    println!("Get your API key from: https://openrouter.ai/settings/keys");
+    println!("OpenRouter provides access to 400+ models via a single API key.");
+    println!();
+    print!("Enter OpenRouter API key (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let api_key = read_secret()?;
+
+    if !api_key.is_empty() {
+        print!("  Validating API key...");
+        io::stdout().flush()?;
+        let existing_base = config
+            .providers
+            .openrouter
+            .as_ref()
+            .and_then(|p| p.api_base.as_deref());
+        match super::common::validate_api_key("openrouter", &api_key, existing_base).await {
+            Ok(()) => println!(" valid!"),
+            Err(e) => {
+                println!(" failed.");
+                println!("  Warning: {}", e);
+                println!("  Saving anyway -- you can fix this later.");
+            }
+        }
+        let provider_config = config
+            .providers
+            .openrouter
+            .get_or_insert_with(Default::default);
+        provider_config.api_key = Some(api_key);
+        // Set openrouter/auto as default model only when OpenRouter is the sole provider.
+        let configured_providers = configured_provider_names(config);
+        if configured_providers.len() == 1 && configured_providers[0] == "openrouter" {
+            config.agents.defaults.model = "openrouter/auto".to_string();
+            println!("  Default model set to: openrouter/auto");
+        }
+        println!("  OpenRouter API key configured.");
+    } else {
+        println!("  Skipped OpenRouter configuration.");
     }
 
     Ok(())
