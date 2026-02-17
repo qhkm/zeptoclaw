@@ -537,14 +537,17 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_pinned_only() {
+    #[tokio::test]
+    async fn test_build_memory_injection_pinned_only() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
-        ltm.set("pref:lang", "Rust", "pinned", vec![], 1.0).unwrap();
+        ltm.set("pref:lang", "Rust", "pinned", vec![], 1.0)
+            .await
+            .unwrap();
 
         let result = build_memory_injection(&ltm, "", 2000);
         assert!(result.contains("## Memory"));
@@ -554,14 +557,16 @@ mod tests {
         assert!(!result.contains("### Relevant"));
     }
 
-    #[test]
-    fn test_build_memory_injection_query_match() {
+    #[tokio::test]
+    async fn test_build_memory_injection_query_match() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("fact:project", "ZeptoClaw is 4MB", "fact", vec![], 1.0)
+            .await
             .unwrap();
         ltm.set("fact:other", "unrelated thing", "fact", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "ZeptoClaw", 2000);
@@ -569,12 +574,13 @@ mod tests {
         assert!(result.contains("ZeptoClaw is 4MB"));
     }
 
-    #[test]
-    fn test_build_memory_injection_pinned_not_duplicated() {
+    #[tokio::test]
+    async fn test_build_memory_injection_pinned_not_duplicated() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "Alice", 2000);
@@ -582,8 +588,8 @@ mod tests {
         assert_eq!(result.matches("user:name: Alice").count(), 1);
     }
 
-    #[test]
-    fn test_build_memory_injection_budget_enforcement() {
+    #[tokio::test]
+    async fn test_build_memory_injection_budget_enforcement() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
@@ -596,6 +602,7 @@ mod tests {
                 vec![],
                 1.0,
             )
+            .await
             .unwrap();
         }
 
@@ -618,26 +625,30 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_empty_message_no_relevant() {
+    #[tokio::test]
+    async fn test_build_memory_injection_empty_message_no_relevant() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
-        ltm.set("fact:x", "value", "fact", vec![], 1.0).unwrap();
+        ltm.set("fact:x", "value", "fact", vec![], 1.0)
+            .await
+            .unwrap();
 
         let result = build_memory_injection(&ltm, "", 2000);
         // With empty message, no query-match, and no pinned entries => empty
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_build_memory_injection_mixed_pinned_and_relevant() {
+    #[tokio::test]
+    async fn test_build_memory_injection_mixed_pinned_and_relevant() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("lt.json");
         let mut ltm = crate::memory::longterm::LongTermMemory::with_path(path).unwrap();
         ltm.set("user:name", "Alice", "pinned", vec![], 1.0)
+            .await
             .unwrap();
         ltm.set("fact:rust", "Rust is fast", "fact", vec![], 1.0)
+            .await
             .unwrap();
 
         let result = build_memory_injection(&ltm, "Rust", 2000);

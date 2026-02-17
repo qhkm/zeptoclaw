@@ -87,7 +87,7 @@ async fn cmd_memory_set(
         })
         .unwrap_or_default();
     // Use default importance 1.0 for CLI-set memories
-    mem.set(&key, &value, &category, tag_vec, 1.0)?;
+    mem.set(&key, &value, &category, tag_vec, 1.0).await?;
     println!(
         "Stored: {} = \"{}\" ({})",
         key,
@@ -99,7 +99,7 @@ async fn cmd_memory_set(
 
 async fn cmd_memory_delete(key: String) -> Result<()> {
     let mut mem = LongTermMemory::new().with_context(|| "Failed to open long-term memory")?;
-    if mem.delete(&key)? {
+    if mem.delete(&key).await? {
         println!("Deleted: {}", key);
     } else {
         println!("Memory '{}' not found.", key);

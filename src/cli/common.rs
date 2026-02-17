@@ -624,7 +624,7 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
             ) {
                 Ok(ltm) => {
                     let tool = zeptoclaw::tools::longterm_memory::LongTermMemoryTool::with_memory(
-                        std::sync::Arc::new(std::sync::Mutex::new(ltm)),
+                        std::sync::Arc::new(tokio::sync::Mutex::new(ltm)),
                     );
                     agent.register_tool(Box::new(tool)).await;
                     info!(
