@@ -65,6 +65,8 @@ pub use security::{
     validate_extra_mounts, validate_path_in_workspace, SafePath, ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
+#[cfg(feature = "android")]
+pub use tools::AndroidTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
     EchoTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool,

@@ -53,6 +53,8 @@
 //! # });
 //! ```
 
+#[cfg(feature = "android")]
+pub mod android;
 pub mod approval;
 pub mod binary_plugin;
 pub mod cron;
@@ -74,6 +76,8 @@ mod types;
 pub mod web;
 pub mod whatsapp;
 
+#[cfg(feature = "android")]
+pub use android::AndroidTool;
 pub use binary_plugin::BinaryPluginTool;
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
