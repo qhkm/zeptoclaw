@@ -317,6 +317,8 @@ pub struct ChannelsConfig {
     pub slack: Option<SlackConfig>,
     /// WhatsApp bridge configuration
     pub whatsapp: Option<WhatsAppConfig>,
+    /// WhatsApp Cloud API configuration (official API, no bridge)
+    pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
     pub feishu: Option<FeishuConfig>,
     /// MaixCam configuration
@@ -473,6 +475,69 @@ impl Default for WhatsAppConfig {
             allow_from: Vec::new(),
             deny_by_default: false,
             bridge_managed: default_bridge_managed(),
+        }
+    }
+}
+
+/// WhatsApp Cloud API channel configuration (official Meta API).
+///
+/// Uses Meta's webhook system for inbound messages and the Cloud API
+/// for outbound replies. Does not require the whatsmeow-rs bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppCloudConfig {
+    /// Whether the channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Phone number ID from Meta Business dashboard.
+    #[serde(default)]
+    pub phone_number_id: String,
+    /// Permanent access token for Cloud API.
+    #[serde(default)]
+    pub access_token: String,
+    /// Webhook verify token (you choose this secret, must match Meta dashboard).
+    #[serde(default)]
+    pub webhook_verify_token: String,
+    /// Address to bind the webhook HTTP server to.
+    #[serde(default = "default_whatsapp_cloud_bind")]
+    pub bind_address: String,
+    /// Port for the webhook HTTP server.
+    #[serde(default = "default_whatsapp_cloud_port")]
+    pub port: u16,
+    /// URL path for the webhook endpoint.
+    #[serde(default = "default_whatsapp_cloud_path")]
+    pub path: String,
+    /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set).
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_whatsapp_cloud_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_whatsapp_cloud_port() -> u16 {
+    9877
+}
+
+fn default_whatsapp_cloud_path() -> String {
+    "/whatsapp".to_string()
+}
+
+impl Default for WhatsAppCloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            phone_number_id: String::new(),
+            access_token: String::new(),
+            webhook_verify_token: String::new(),
+            bind_address: default_whatsapp_cloud_bind(),
+            port: default_whatsapp_cloud_port(),
+            path: default_whatsapp_cloud_path(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
         }
     }
 }
