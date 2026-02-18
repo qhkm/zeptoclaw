@@ -379,7 +379,12 @@ impl Tool for WebFetchTool {
 
         let truncated = text.len() > max_chars;
         if truncated {
-            text.truncate(max_chars);
+            // Find a valid UTF-8 char boundary at or before max_chars to avoid panic
+            let mut end = max_chars;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
         }
 
         Ok(json!({

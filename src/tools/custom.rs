@@ -164,7 +164,11 @@ impl Tool for CustomTool {
             let mut stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             // Truncate oversized output to prevent blowing up the LLM context
             if stdout.len() > MAX_OUTPUT_BYTES {
-                stdout.truncate(MAX_OUTPUT_BYTES);
+                let mut end = MAX_OUTPUT_BYTES;
+                while !stdout.is_char_boundary(end) {
+                    end -= 1;
+                }
+                stdout.truncate(end);
                 stdout.push_str("\n... (output truncated)");
             }
             Ok(if stdout.is_empty() {
