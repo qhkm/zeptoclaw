@@ -170,7 +170,7 @@ impl Tool for R8rTool {
             "properties": {
                 "workflow": {
                     "type": "string",
-                    "description": "Name of the r8r workflow to execute"
+                    "description": "Name of the r8r workflow to execute or create"
                 },
                 "inputs": {
                     "type": "object",
@@ -184,9 +184,26 @@ impl Tool for R8rTool {
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["run", "list", "show"],
-                    "description": "Action to perform: 'run' executes workflow (default), 'list' shows available workflows, 'show' displays workflow details",
+                    "enum": ["run", "list", "show", "status", "emit", "create"],
+                    "description": "Action to perform: 'run' executes workflow (default), 'list' shows available workflows, 'show' displays workflow details, 'status' polls execution status, 'emit' publishes an event, 'create' creates a new workflow",
                     "default": "run"
+                },
+                "execution_id": {
+                    "type": "string",
+                    "description": "Execution ID to check status of (required for 'status' action)"
+                },
+                "event": {
+                    "type": "string",
+                    "description": "Event name to publish (required for 'emit' action)"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Event data payload (for 'emit' action)",
+                    "additionalProperties": true
+                },
+                "definition": {
+                    "type": "string",
+                    "description": "YAML workflow definition (required for 'create' action)"
                 }
             },
             "required": ["workflow"]
@@ -216,8 +233,34 @@ impl Tool for R8rTool {
 
                 self.run_workflow(workflow, inputs, wait).await
             }
+            "status" => {
+                let execution_id = args
+                    .get("execution_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ZeptoError::Tool("Missing 'execution_id' argument".into()))?;
+                self.get_execution_status(execution_id).await
+            }
+            "emit" => {
+                let event = args
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ZeptoError::Tool("Missing 'event' argument".into()))?;
+                let data = args.get("data").cloned().unwrap_or(json!({}));
+                self.emit_event(event, data).await
+            }
+            "create" => {
+                let name = args
+                    .get("workflow")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ZeptoError::Tool("Missing 'workflow' argument".into()))?;
+                let definition = args
+                    .get("definition")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ZeptoError::Tool("Missing 'definition' argument".into()))?;
+                self.create_workflow(name, definition).await
+            }
             _ => Err(ZeptoError::Tool(format!(
-                "Invalid 'action': {}. Expected one of: run, list, show",
+                "Invalid 'action': {}. Expected one of: run, list, show, status, emit, create",
                 action
             ))),
         }
@@ -336,6 +379,163 @@ impl R8rTool {
         let output = serde_json::to_string_pretty(&info).unwrap_or_else(|_| info.to_string());
 
         Ok(format!("Workflow '{}':\n\n{}", name, output))
+    }
+
+    /// Get execution status by ID
+    async fn get_execution_status(&self, id: &str) -> Result<String> {
+        validate_path_segment(id)?;
+        let url = format!("{}/api/executions/{}", self.endpoint, id);
+        debug!("R8r get execution status: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to connect to r8r: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ZeptoError::Tool(format!(
+                "R8r API error ({}): {}",
+                status, body
+            )));
+        }
+
+        let exec: Value = response
+            .json()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to parse r8r response: {}", e)))?;
+
+        let status = exec
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        match status {
+            "completed" => {
+                let duration = exec
+                    .get("duration_ms")
+                    .and_then(|v| v.as_i64())
+                    .map(|d| format!(" ({}ms)", d))
+                    .unwrap_or_default();
+
+                let output = exec
+                    .get("output")
+                    .map(|o| serde_json::to_string_pretty(o).unwrap_or_else(|_| o.to_string()))
+                    .unwrap_or_else(|| "(no output)".to_string());
+
+                Ok(format!(
+                    "Execution '{}' completed successfully{}.\n\nOutput:\n{}",
+                    id, duration, output
+                ))
+            }
+            "running" | "pending" => Ok(format!(
+                "Execution '{}' is still {}. Poll again later.",
+                id, status
+            )),
+            "failed" => {
+                let error = exec
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error");
+                Err(ZeptoError::Tool(format!(
+                    "Execution '{}' failed: {}",
+                    id, error
+                )))
+            }
+            "paused" => Ok(format!(
+                "Execution '{}' is paused. Resume it via the API to continue.",
+                id
+            )),
+            _ => Ok(format!("Execution '{}' status: {}", id, status)),
+        }
+    }
+
+    /// Emit an event to the r8r event system
+    async fn emit_event(&self, event: &str, data: Value) -> Result<String> {
+        let url = format!("{}/api/events/publish", self.endpoint);
+        debug!("R8r emit event: {} -> {}", event, url);
+
+        let body = json!({
+            "event": event,
+            "data": data,
+            "source": "zeptoclaw"
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to connect to r8r: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ZeptoError::Tool(format!(
+                "R8r API error ({}): {}",
+                status, body
+            )));
+        }
+
+        info!(event = event, "R8r event published");
+        Ok(format!("Event '{}' published successfully.", event))
+    }
+
+    /// Create a new workflow in r8r
+    async fn create_workflow(&self, name: &str, definition: &str) -> Result<String> {
+        let url = format!("{}/api/workflows", self.endpoint);
+        debug!("R8r create workflow: {} -> {}", name, url);
+
+        let body = json!({
+            "name": name,
+            "definition": definition,
+            "enabled": true
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to connect to r8r: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ZeptoError::Tool(format!(
+                "R8r API error ({}): {}",
+                status, body
+            )));
+        }
+
+        let result: Value = response
+            .json()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to parse r8r response: {}", e)))?;
+
+        let id = result
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let node_count = result
+            .get("node_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let trigger_count = result
+            .get("trigger_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        info!(workflow = name, id = id, "R8r workflow created");
+        Ok(format!(
+            "Workflow '{}' created successfully.\n\nID: {}\nNodes: {}\nTriggers: {}",
+            name, id, node_count, trigger_count
+        ))
     }
 
     /// Run a workflow
