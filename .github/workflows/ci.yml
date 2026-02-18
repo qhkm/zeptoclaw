@@ -45,6 +45,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -- -D warnings
 
+  riscv64-smoke:
+    name: RISC-V smoke test
+    runs-on: ubuntu-latest
+    env:
+      # Must include BOTH -Dwarnings AND the getrandom backend override.
+      # Cargo RUSTFLAGS env var overrides .cargo/config.toml target rustflags,
+      # so we must set the cfg here explicitly for CI.
+      RUSTFLAGS: -Dwarnings --cfg getrandom_backend="linux_raw"
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: riscv64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: riscv64
+      - name: Install QEMU and cross-linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user gcc-riscv64-linux-gnu
+      - name: Cross-compile smoke test
+        run: cargo build --release --target riscv64gc-unknown-linux-musl --example riscv_smoke
+      - name: Run under QEMU
+        run: |
+          qemu-riscv64 -L /usr/riscv64-linux-gnu \
+            target/riscv64gc-unknown-linux-musl/release/examples/riscv_smoke
+          echo "### ✅ RISC-V smoke test passed (Uuid::new_v4 ok)" >> "$GITHUB_STEP_SUMMARY"
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
