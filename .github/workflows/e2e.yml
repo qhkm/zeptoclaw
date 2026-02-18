@@ -1,0 +1,56 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run E2E tests (mock providers)
+        run: cargo test --test e2e
+
+  e2e-docker:
+    name: E2E Tests (Docker)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Run E2E tests with Docker
+        env:
+          ZEPTOCLAW_E2E_DOCKER: "1"
+        run: cargo test --test e2e
+
+  e2e-live:
+    name: E2E Tests (Live API)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run E2E tests with live providers
+        if: env.ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY != ''
+        env:
+          ZEPTOCLAW_E2E_LIVE: "1"
+          ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: cargo test --test e2e

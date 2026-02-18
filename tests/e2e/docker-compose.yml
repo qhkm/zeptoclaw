@@ -1,0 +1,45 @@
+# E2E Test Infrastructure for ZeptoClaw
+#
+# Usage:
+#   docker compose -f tests/e2e/docker-compose.yml up --build
+#
+# This compose file provides:
+#   - zeptoclaw: The main agent service built from the project Dockerfile
+#   - mock-llm:  A lightweight HTTP echo service for testing without real API keys
+#
+# Environment variables:
+#   ZEPTOCLAW_E2E_LIVE=1          - Enable live API tests (requires real keys)
+#   ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY - Anthropic API key (optional, live tests only)
+#   ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY    - OpenAI API key (optional, live tests only)
+
+services:
+  zeptoclaw:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      - RUST_LOG=zeptoclaw=debug
+      - ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=${ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY:-}
+      - ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=${ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY:-}
+    networks:
+      - e2e-net
+    volumes:
+      - zeptoclaw-data:/data
+    depends_on:
+      mock-llm:
+        condition: service_started
+
+  mock-llm:
+    image: hashicorp/http-echo:latest
+    command: ["-text", '{"id":"mock-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"mock response"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}']
+    ports:
+      - "5678:5678"
+    networks:
+      - e2e-net
+
+networks:
+  e2e-net:
+    driver: bridge
+
+volumes:
+  zeptoclaw-data:

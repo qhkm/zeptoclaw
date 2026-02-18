@@ -102,6 +102,12 @@ uuid = { version = "1.6", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # =============================================================================
+# SCREENSHOT (optional — feature-gated behind "screenshot")
+# =============================================================================
+# Headless Chromium via Chrome DevTools Protocol for web screenshots
+chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
+
+# =============================================================================
 # CHANNELS
 # =============================================================================
 # WebSocket support for future real-time channels
@@ -119,6 +125,8 @@ rpassword = "7.3"
 default = []
 # BM25 keyword scoring memory backend (adds ~0 extra deps for now)
 memory-bm25 = []
+# Web screenshot tool via headless Chromium (Chrome DevTools Protocol)
+screenshot = ["chromiumoxide"]
 
 [dev-dependencies]
 tokio-test = "0.4"

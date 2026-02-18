@@ -34,8 +34,8 @@ pub mod utils;
 pub use agent::{AgentLoop, ContextBuilder};
 pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 pub use channels::{
-    BaseChannelConfig, Channel, ChannelManager, SlackChannel, TelegramChannel, WhatsAppChannel,
-    WhatsAppCloudChannel,
+    BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,
+    TelegramChannel, WhatsAppChannel, WhatsAppCloudChannel,
 };
 pub use config::Config;
 pub use cron::{CronJob, CronPayload, CronSchedule, CronService, OnMiss};
@@ -66,6 +66,8 @@ pub use security::{
     validate_extra_mounts, validate_path_in_workspace, SafePath, ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
+#[cfg(feature = "screenshot")]
+pub use tools::screenshot::WebScreenshotTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
     EchoTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool,

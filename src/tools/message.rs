@@ -1,4 +1,10 @@
 //! Message tool for proactive outbound messages.
+//!
+//! Supports multiple action types:
+//! - `send` (default): Plain text message
+//! - `react`: Add emoji reaction (Discord only)
+//! - `rich_message`: Send Slack Block Kit message (Slack only)
+//! - `inline_keyboard`: Send inline keyboard buttons (Telegram only)
 
 use std::sync::Arc;
 
@@ -10,7 +16,21 @@ use crate::error::{Result, ZeptoError};
 
 use super::{Tool, ToolContext};
 
+/// Channels that the message tool is allowed to target.
+const ALLOWED_CHANNELS: &[&str] = &[
+    "telegram",
+    "slack",
+    "discord",
+    "webhook",
+    "whatsapp",
+    "whatsapp_cloud",
+];
+
 /// Tool for sending outbound messages to channels.
+///
+/// Supports plain text sends as well as channel-specific rich actions
+/// like reactions (Discord), Block Kit messages (Slack), and inline
+/// keyboards (Telegram).
 pub struct MessageTool {
     bus: Arc<MessageBus>,
 }
@@ -29,11 +49,15 @@ impl Tool for MessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a proactive message to a chat."
+        "Send a proactive message or perform a channel action. \
+         Supports actions: 'send' (default, all channels), \
+         'react' (Discord: add emoji reaction), \
+         'rich_message' (Slack: Block Kit blocks), \
+         'inline_keyboard' (Telegram: inline keyboard buttons)."
     }
 
     fn compact_description(&self) -> &str {
-        "Send message"
+        "Send message or channel action"
     }
 
     fn parameters(&self) -> Value {
@@ -51,6 +75,15 @@ impl Tool for MessageTool {
                 "chat_id": {
                     "type": "string",
                     "description": "Destination chat ID. Optional when context already has chat_id."
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform. Default: 'send'. Options: 'send', 'react', 'rich_message', 'inline_keyboard'",
+                    "default": "send"
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Action-specific payload (e.g., emoji for react, blocks for rich_message, buttons for inline_keyboard)"
                 }
             },
             "required": ["content"]
@@ -81,7 +114,6 @@ impl Tool for MessageTool {
 
         // Validate channel name: only allow known channel types to prevent
         // the LLM from targeting arbitrary/unexpected channels.
-        const ALLOWED_CHANNELS: &[&str] = &["telegram", "slack", "discord", "webhook"];
         if !ALLOWED_CHANNELS
             .iter()
             .any(|c| c.eq_ignore_ascii_case(&channel))
@@ -93,12 +125,134 @@ impl Tool for MessageTool {
             )));
         }
 
-        self.bus
-            .publish_outbound(OutboundMessage::new(&channel, &chat_id, content))
-            .await
-            .map_err(|e| ZeptoError::Tool(format!("Failed to publish message: {}", e)))?;
+        // Determine action — default to "send" when absent.
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("send");
 
-        Ok(format!("Message sent to {}:{}", channel, chat_id))
+        let payload = args.get("payload");
+
+        match action {
+            "send" => {
+                self.bus
+                    .publish_outbound(OutboundMessage::new(&channel, &chat_id, content))
+                    .await
+                    .map_err(|e| {
+                        ZeptoError::Tool(format!("Failed to publish message: {}", e))
+                    })?;
+                Ok(format!("Message sent to {}:{}", channel, chat_id))
+            }
+
+            "react" => {
+                if !channel.eq_ignore_ascii_case("discord") {
+                    return Err(ZeptoError::Tool(format!(
+                        "Action 'react' is not supported on channel '{}'. Only supported on: discord",
+                        channel
+                    )));
+                }
+                let emoji = payload
+                    .and_then(|p| p.get("emoji"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ZeptoError::Tool(
+                            "Action 'react' requires payload.emoji (string)".to_string(),
+                        )
+                    })?;
+                let message_id = payload
+                    .and_then(|p| p.get("message_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let rich_content = json!({
+                    "action": "react",
+                    "emoji": emoji,
+                    "message_id": message_id,
+                })
+                .to_string();
+
+                self.bus
+                    .publish_outbound(OutboundMessage::new(&channel, &chat_id, &rich_content))
+                    .await
+                    .map_err(|e| {
+                        ZeptoError::Tool(format!("Failed to publish react: {}", e))
+                    })?;
+                Ok(format!(
+                    "Reaction '{}' sent to {}:{}",
+                    emoji, channel, chat_id
+                ))
+            }
+
+            "rich_message" => {
+                if !channel.eq_ignore_ascii_case("slack") {
+                    return Err(ZeptoError::Tool(format!(
+                        "Action 'rich_message' is not supported on channel '{}'. Only supported on: slack",
+                        channel
+                    )));
+                }
+                let blocks = payload
+                    .and_then(|p| p.get("blocks"))
+                    .ok_or_else(|| {
+                        ZeptoError::Tool(
+                            "Action 'rich_message' requires payload.blocks (array)".to_string(),
+                        )
+                    })?;
+
+                let rich_content = json!({
+                    "action": "rich_message",
+                    "blocks": blocks,
+                })
+                .to_string();
+
+                self.bus
+                    .publish_outbound(OutboundMessage::new(&channel, &chat_id, &rich_content))
+                    .await
+                    .map_err(|e| {
+                        ZeptoError::Tool(format!("Failed to publish rich message: {}", e))
+                    })?;
+                Ok(format!("Rich message sent to {}:{}", channel, chat_id))
+            }
+
+            "inline_keyboard" => {
+                if !channel.eq_ignore_ascii_case("telegram") {
+                    return Err(ZeptoError::Tool(format!(
+                        "Action 'inline_keyboard' is not supported on channel '{}'. Only supported on: telegram",
+                        channel
+                    )));
+                }
+                let buttons = payload
+                    .and_then(|p| p.get("buttons"))
+                    .ok_or_else(|| {
+                        ZeptoError::Tool(
+                            "Action 'inline_keyboard' requires payload.buttons (array of arrays)"
+                                .to_string(),
+                        )
+                    })?;
+
+                let rich_content = json!({
+                    "action": "inline_keyboard",
+                    "text": content,
+                    "buttons": buttons,
+                })
+                .to_string();
+
+                self.bus
+                    .publish_outbound(OutboundMessage::new(&channel, &chat_id, &rich_content))
+                    .await
+                    .map_err(|e| {
+                        ZeptoError::Tool(format!("Failed to publish inline keyboard: {}", e))
+                    })?;
+                Ok(format!(
+                    "Inline keyboard sent to {}:{}",
+                    channel, chat_id
+                ))
+            }
+
+            unknown => Err(ZeptoError::Tool(format!(
+                "Unknown action '{}'. Supported actions: send, react, rich_message, inline_keyboard",
+                unknown
+            ))),
+        }
     }
 }
 
@@ -113,6 +267,9 @@ mod tests {
 
         assert_eq!(tool.name(), "message");
         assert!(tool.description().contains("proactive"));
+        assert!(tool.description().contains("react"));
+        assert!(tool.description().contains("rich_message"));
+        assert!(tool.description().contains("inline_keyboard"));
     }
 
     #[tokio::test]
@@ -176,7 +333,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_tool_allows_known_channels() {
-        for channel in &["telegram", "slack", "discord", "webhook"] {
+        for channel in &[
+            "telegram",
+            "slack",
+            "discord",
+            "webhook",
+            "whatsapp",
+            "whatsapp_cloud",
+        ] {
             let bus = Arc::new(MessageBus::new());
             let tool = MessageTool::new(bus.clone());
 
@@ -189,5 +353,378 @@ mod tests {
 
             assert!(result.is_ok(), "Channel '{}' should be allowed", channel);
         }
+    }
+
+    // ====================================================================
+    // WhatsApp channel tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_allows_whatsapp_channels() {
+        for channel in &["whatsapp", "whatsapp_cloud"] {
+            let bus = Arc::new(MessageBus::new());
+            let tool = MessageTool::new(bus.clone());
+
+            let result = tool
+                .execute(
+                    json!({"content": "Hi from WhatsApp", "channel": channel, "chat_id": "123"}),
+                    &ToolContext::new(),
+                )
+                .await;
+
+            assert!(result.is_ok(), "Channel '{}' should be allowed", channel);
+            let outbound = bus.consume_outbound().await.expect("outbound message");
+            assert_eq!(outbound.channel, *channel);
+            assert_eq!(outbound.content, "Hi from WhatsApp");
+        }
+    }
+
+    // ====================================================================
+    // Default action tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_default_action_is_send() {
+        // When no action field is provided, the tool should behave as a plain send.
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let result = tool
+            .execute(
+                json!({"content": "No action field", "channel": "telegram", "chat_id": "999"}),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.contains("Message sent"));
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.content, "No action field");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_explicit_send_action() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "Explicit send",
+                    "channel": "slack",
+                    "chat_id": "C01",
+                    "action": "send"
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.content, "Explicit send");
+    }
+
+    // ====================================================================
+    // React action tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_react_discord() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "reacting",
+                    "channel": "discord",
+                    "chat_id": "ch1",
+                    "action": "react",
+                    "payload": {
+                        "emoji": "thumbsup",
+                        "message_id": "msg_42"
+                    }
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.contains("Reaction"));
+        assert!(msg.contains("thumbsup"));
+
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.channel, "discord");
+
+        let parsed: Value = serde_json::from_str(&outbound.content).unwrap();
+        assert_eq!(parsed["action"], "react");
+        assert_eq!(parsed["emoji"], "thumbsup");
+        assert_eq!(parsed["message_id"], "msg_42");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_react_wrong_channel() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "react on telegram",
+                    "channel": "telegram",
+                    "chat_id": "123",
+                    "action": "react",
+                    "payload": {"emoji": "heart"}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("react"));
+        assert!(err.contains("not supported"));
+        assert!(err.contains("telegram"));
+        assert!(err.contains("discord"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_react_missing_emoji() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "react without emoji",
+                    "channel": "discord",
+                    "chat_id": "ch1",
+                    "action": "react",
+                    "payload": {}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("emoji"));
+    }
+
+    // ====================================================================
+    // Rich message action tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_rich_message_slack() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let blocks = json!([
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Hello *world*"}
+            }
+        ]);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "rich msg",
+                    "channel": "slack",
+                    "chat_id": "C01",
+                    "action": "rich_message",
+                    "payload": {"blocks": blocks}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.contains("Rich message sent"));
+
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.channel, "slack");
+
+        let parsed: Value = serde_json::from_str(&outbound.content).unwrap();
+        assert_eq!(parsed["action"], "rich_message");
+        assert!(parsed["blocks"].is_array());
+        assert_eq!(parsed["blocks"][0]["type"], "section");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_rich_message_wrong_channel() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "rich on discord",
+                    "channel": "discord",
+                    "chat_id": "ch1",
+                    "action": "rich_message",
+                    "payload": {"blocks": []}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("rich_message"));
+        assert!(err.contains("not supported"));
+        assert!(err.contains("discord"));
+        assert!(err.contains("slack"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_rich_message_missing_blocks() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "no blocks",
+                    "channel": "slack",
+                    "chat_id": "C01",
+                    "action": "rich_message",
+                    "payload": {}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("blocks"));
+    }
+
+    // ====================================================================
+    // Inline keyboard action tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_inline_keyboard_telegram() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let buttons = json!([
+            [
+                {"text": "Yes", "callback_data": "yes"},
+                {"text": "No", "callback_data": "no"}
+            ]
+        ]);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "Do you agree?",
+                    "channel": "telegram",
+                    "chat_id": "12345",
+                    "action": "inline_keyboard",
+                    "payload": {"buttons": buttons}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.contains("Inline keyboard sent"));
+
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.channel, "telegram");
+
+        let parsed: Value = serde_json::from_str(&outbound.content).unwrap();
+        assert_eq!(parsed["action"], "inline_keyboard");
+        assert_eq!(parsed["text"], "Do you agree?");
+        assert!(parsed["buttons"].is_array());
+        assert_eq!(parsed["buttons"][0][0]["text"], "Yes");
+        assert_eq!(parsed["buttons"][0][1]["callback_data"], "no");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_inline_keyboard_wrong_channel() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "keyboard on slack",
+                    "channel": "slack",
+                    "chat_id": "C01",
+                    "action": "inline_keyboard",
+                    "payload": {"buttons": []}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("inline_keyboard"));
+        assert!(err.contains("not supported"));
+        assert!(err.contains("slack"));
+        assert!(err.contains("telegram"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_inline_keyboard_missing_buttons() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "no buttons",
+                    "channel": "telegram",
+                    "chat_id": "12345",
+                    "action": "inline_keyboard",
+                    "payload": {}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("buttons"));
+    }
+
+    // ====================================================================
+    // Unknown action test
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_message_tool_unknown_action() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "test",
+                    "channel": "telegram",
+                    "chat_id": "123",
+                    "action": "foobar"
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown action"));
+        assert!(err.contains("foobar"));
+        assert!(err.contains("send"));
+        assert!(err.contains("react"));
+        assert!(err.contains("rich_message"));
+        assert!(err.contains("inline_keyboard"));
     }
 }

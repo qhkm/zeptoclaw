@@ -337,6 +337,9 @@ pub struct ChannelsConfig {
     pub dingtalk: Option<DingTalkConfig>,
     /// Webhook inbound channel configuration
     pub webhook: Option<WebhookConfig>,
+    /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
+    #[serde(default)]
+    pub channel_plugins_dir: Option<String>,
 }
 
 /// Webhook inbound channel configuration
@@ -680,6 +683,8 @@ pub struct ProvidersConfig {
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
     pub fallback: FallbackConfig,
+    /// Provider rotation configuration for 3+ health-aware providers
+    pub rotation: RotationConfig,
 }
 
 /// Generic provider configuration
@@ -736,6 +741,47 @@ pub struct FallbackConfig {
     pub enabled: bool,
     /// Optional preferred fallback provider id (e.g. "openai", "anthropic").
     pub provider: Option<String>,
+}
+
+/// Provider rotation configuration for 3+ health-aware providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RotationConfig {
+    /// Enable provider rotation.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider names in rotation order (e.g., \["anthropic", "openai", "groq"\]).
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Rotation strategy (priority or round_robin).
+    #[serde(default)]
+    pub strategy: crate::providers::rotation::RotationStrategy,
+    /// Consecutive failures before marking provider unhealthy (default: 3).
+    #[serde(default = "default_rotation_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Seconds to wait before retrying unhealthy provider (default: 30).
+    #[serde(default = "default_rotation_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+fn default_rotation_failure_threshold() -> u32 {
+    3
+}
+
+fn default_rotation_cooldown_secs() -> u64 {
+    30
+}
+
+impl Default for RotationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            order: Vec::new(),
+            strategy: crate::providers::rotation::RotationStrategy::default(),
+            failure_threshold: default_rotation_failure_threshold(),
+            cooldown_secs: default_rotation_cooldown_secs(),
+        }
+    }
 }
 
 // ============================================================================

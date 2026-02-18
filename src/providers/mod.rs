@@ -26,6 +26,7 @@ pub mod fallback;
 pub mod openai;
 mod registry;
 pub mod retry;
+pub mod rotation;
 pub mod structured;
 mod types;
 
@@ -53,6 +54,7 @@ pub use registry::{
     PROVIDER_REGISTRY,
 };
 pub use retry::RetryProvider;
+pub use rotation::{RotationProvider, RotationStrategy};
 pub use structured::{validate_json_response, OutputFormat};
 pub use types::{
     ChatOptions, LLMProvider, LLMResponse, LLMToolCall, StreamEvent, ToolDefinition, Usage,

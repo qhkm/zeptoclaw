@@ -68,6 +68,8 @@ pub mod plugin;
 pub mod r8r;
 mod registry;
 pub mod reminder;
+#[cfg(feature = "screenshot")]
+pub mod screenshot;
 pub mod shell;
 pub mod spawn;
 mod types;
@@ -84,6 +86,8 @@ pub use message::MessageTool;
 pub use r8r::R8rTool;
 pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;
+#[cfg(feature = "screenshot")]
+pub use screenshot::WebScreenshotTool;
 pub use types::{Tool, ToolContext};
 pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;

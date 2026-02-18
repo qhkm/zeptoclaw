@@ -345,6 +345,24 @@ impl Config {
             let value = val.trim().to_string();
             self.providers.fallback.provider = if value.is_empty() { None } else { Some(value) };
         }
+
+        // Provider rotation behavior
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ROTATION_ENABLED") {
+            self.providers.rotation.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ROTATION_STRATEGY") {
+            match val.trim().to_ascii_lowercase().as_str() {
+                "priority" => {
+                    self.providers.rotation.strategy =
+                        crate::providers::rotation::RotationStrategy::Priority
+                }
+                "round_robin" | "roundrobin" => {
+                    self.providers.rotation.strategy =
+                        crate::providers::rotation::RotationStrategy::RoundRobin
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Apply channel-specific environment variable overrides

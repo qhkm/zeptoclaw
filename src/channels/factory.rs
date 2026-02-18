@@ -1,5 +1,6 @@
 //! Channel factory/registration helpers.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -7,6 +8,7 @@ use tracing::{info, warn};
 use crate::bus::MessageBus;
 use crate::config::Config;
 
+use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
 use super::WhatsAppCloudChannel;
@@ -171,6 +173,25 @@ pub async fn register_configured_channels(
         .unwrap_or(false)
     {
         warn!("DingTalk channel is enabled but not implemented");
+    }
+
+    // Channel plugins
+    let plugin_dir: Option<PathBuf> = config
+        .channels
+        .channel_plugins_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(default_channel_plugins_dir);
+
+    if let Some(ref dir) = plugin_dir {
+        let discovered = discover_channel_plugins(dir);
+        for (manifest, plugin_path) in discovered {
+            let name = manifest.name.clone();
+            let base_config = BaseChannelConfig::new(&name);
+            let adapter = ChannelPluginAdapter::new(manifest, plugin_path, base_config);
+            manager.register(Box::new(adapter)).await;
+            info!("Registered channel plugin: {}", name);
+        }
     }
 
     manager.channel_count().await
