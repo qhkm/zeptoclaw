@@ -950,6 +950,21 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    // Build provider registry for runtime model switching (/model command).
+    // Each configured provider is registered individually (without retry/fallback wrappers)
+    // so /model can switch between them at runtime.
+    for selection in resolve_runtime_providers(&config) {
+        if let Some(provider) = provider_from_runtime_selection(&selection) {
+            agent
+                .set_provider_in_registry(selection.name, provider)
+                .await;
+            info!(
+                provider = selection.name,
+                "Registered provider in model-switch registry"
+            );
+        }
+    }
+
     let unsupported = zeptoclaw::providers::configured_unsupported_provider_names(&config);
     if !unsupported.is_empty() {
         warn!(

@@ -202,6 +202,52 @@ async fn test_tool_execution_with_context() {
     assert_eq!(result.unwrap(), "Context test");
 }
 
+// ============================================================================
+// Model Switching Integration Tests
+// ============================================================================
+
+#[test]
+fn test_model_switch_end_to_end_parsing() {
+    use zeptoclaw::channels::model_switch::*;
+
+    assert!(parse_model_command("hello").is_none());
+    assert_eq!(parse_model_command("/model"), Some(ModelCommand::Show));
+    assert_eq!(parse_model_command("/model list"), Some(ModelCommand::List));
+    assert_eq!(
+        parse_model_command("/model reset"),
+        Some(ModelCommand::Reset)
+    );
+
+    let cmd = parse_model_command("/model groq:llama-4-scout-17b-16e-instruct");
+    match cmd {
+        Some(ModelCommand::Set(ov)) => {
+            assert_eq!(ov.provider.as_deref(), Some("groq"));
+            assert_eq!(ov.model, "llama-4-scout-17b-16e-instruct");
+        }
+        _ => panic!("Expected Set command"),
+    }
+}
+
+#[test]
+fn test_model_list_format() {
+    use zeptoclaw::channels::model_switch::*;
+
+    let configured = vec!["anthropic".to_string(), "groq".to_string()];
+    let output = format_model_list(&configured, None);
+    let anthropic_section = output
+        .split("\n\n")
+        .find(|section| section.contains("anthropic"))
+        .expect("anthropic section missing");
+    assert!(
+        !anthropic_section.contains("no API key configured"),
+        "Configured provider should not show missing key warning"
+    );
+    assert!(
+        output.contains("no API key configured"),
+        "Unconfigured providers should show warning"
+    );
+}
+
 #[tokio::test]
 async fn test_tool_definitions_for_llm() {
     let mut registry = ToolRegistry::new();
