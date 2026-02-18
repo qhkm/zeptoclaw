@@ -954,7 +954,9 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     // Each configured provider is registered individually (without retry/fallback wrappers)
     // so /model can switch between them at runtime.
     for selection in resolve_runtime_providers(&config) {
-        if let Some(provider) = provider_from_runtime_selection(&selection) {
+        if let Some(provider) =
+            provider_from_runtime_selection(&selection, &config.agents.defaults.model)
+        {
             agent
                 .set_provider_in_registry(selection.name, provider)
                 .await;
