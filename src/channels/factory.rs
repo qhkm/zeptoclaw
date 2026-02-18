@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::bus::MessageBus;
-use crate::config::Config;
+use crate::config::{Config, MemoryBackend};
+use crate::providers::configured_provider_names;
 
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
@@ -32,6 +33,12 @@ pub async fn register_configured_channels(
                     .register(Box::new(TelegramChannel::new(
                         telegram_config.clone(),
                         bus.clone(),
+                        config.agents.defaults.model.clone(),
+                        configured_provider_names(config)
+                            .into_iter()
+                            .map(|name| name.to_string())
+                            .collect(),
+                        !matches!(config.memory.backend, MemoryBackend::Disabled),
                     )))
                     .await;
                 info!("Registered Telegram channel");

@@ -23,16 +23,10 @@ jobs:
       - run: cargo test --bin zeptoclaw
       - run: cargo test --test cli_smoke
       - run: cargo test --test integration
+      - run: cargo test --test e2e
       - run: cargo test --doc
-
-  test-features:
-    name: Test (memory-bm25)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --lib --features memory-bm25
+      - name: Test with memory-bm25 feature
+        run: cargo test --lib --features memory-bm25
 
   clippy:
     name: Clippy
@@ -45,13 +39,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -- -D warnings
 
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Heavy checks that only run on main merges
   riscv64-smoke:
     name: RISC-V smoke test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
-      # Must include BOTH -Dwarnings AND the getrandom backend override.
-      # Cargo RUSTFLAGS env var overrides .cargo/config.toml target rustflags,
-      # so we must set the cfg here explicitly for CI.
       RUSTFLAGS: -Dwarnings --cfg getrandom_backend="linux_raw"
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: riscv64-linux-gnu-gcc
     steps:
@@ -72,20 +84,11 @@ jobs:
         run: |
           qemu-riscv64 -L /usr/riscv64-linux-gnu \
             target/riscv64gc-unknown-linux-musl/release/examples/riscv_smoke
-          echo "### ✅ RISC-V smoke test passed (Uuid::new_v4 ok)" >> "$GITHUB_STEP_SUMMARY"
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
+          echo "### RISC-V smoke test passed (Uuid::new_v4 ok)" >> "$GITHUB_STEP_SUMMARY"
 
   binary-size:
     name: Binary size
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,12 +106,3 @@ jobs:
             echo "Binary exceeds ${BINARY_SIZE_LIMIT_MB} MB limit!" >&2
             exit 1
           fi
-
-  audit:
-    name: Security audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}

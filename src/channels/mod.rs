@@ -111,6 +111,7 @@
 pub mod discord;
 mod factory;
 mod manager;
+pub mod model_switch;
 pub mod plugin;
 pub mod slack;
 pub mod telegram;
