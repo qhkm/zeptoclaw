@@ -137,13 +137,20 @@ pub fn new_override_store() -> ModelOverrideStore {
 }
 
 /// Parse a message as a `/model` command. Returns None if not a `/model` command.
+///
+/// Only matches exactly `/model` or `/model <arg>`. Does NOT match `/models`,
+/// `/model_test`, or other commands that happen to start with `/model`.
 pub fn parse_model_command(text: &str) -> Option<ModelCommand> {
     let trimmed = text.trim();
-    if !trimmed.starts_with("/model") {
-        return None;
-    }
 
-    let rest = trimmed.strip_prefix("/model").unwrap_or("").trim();
+    // Must be exactly "/model" or "/model " followed by args
+    let rest = if trimmed == "/model" {
+        ""
+    } else if let Some(after) = trimmed.strip_prefix("/model ") {
+        after.trim()
+    } else {
+        return None;
+    };
 
     if rest.is_empty() {
         return Some(ModelCommand::Show);
@@ -334,6 +341,15 @@ mod tests {
     fn test_parse_model_command_not_model() {
         let cmd = parse_model_command("hello world");
         assert_eq!(cmd, None);
+    }
+
+    #[test]
+    fn test_parse_model_command_rejects_similar_commands() {
+        // Must not match commands that merely start with "/model"
+        assert_eq!(parse_model_command("/models"), None);
+        assert_eq!(parse_model_command("/model_test"), None);
+        assert_eq!(parse_model_command("/modelling"), None);
+        assert_eq!(parse_model_command("/modelx gpt-5"), None);
     }
 
     #[test]

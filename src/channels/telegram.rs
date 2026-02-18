@@ -173,7 +173,9 @@ impl TelegramChannel {
             deny_by_default: config.deny_by_default,
         };
         let longterm_memory = if memory_enabled {
-            let ltm_path = Config::dir().join("memory").join("longterm.json");
+            // Use a dedicated file to avoid conflicts with the agent loop's longterm.json.
+            // Two LongTermMemory instances writing to the same file can cause data loss.
+            let ltm_path = Config::dir().join("memory").join("model_prefs.json");
             match LongTermMemory::with_path_and_searcher(ltm_path, Arc::new(BuiltinSearcher)) {
                 Ok(ltm) => Some(Arc::new(Mutex::new(ltm))),
                 Err(e) => {
@@ -365,7 +367,7 @@ impl Channel for TelegramChannel {
                 // Note: dptree injects dependencies separately, not as tuples
                 let handler =
                     Update::filter_message().endpoint(
-                        |_bot: Bot,
+                        |bot: Bot,
                          msg: Message,
                          bus: Arc<MessageBus>,
                          allowlist: Vec<String>,
@@ -418,7 +420,7 @@ impl Channel for TelegramChannel {
                                             };
                                             let reply =
                                                 format_current_model(current.as_ref(), &default_model);
-                                            let _ = _bot
+                                            let _ = bot
                                                 .send_message(
                                                     teloxide::types::ChatId(chat_id_num),
                                                     reply,
@@ -438,7 +440,7 @@ impl Channel for TelegramChannel {
                                             if let Some(ref ltm) = longterm_memory {
                                                 persist_single(&chat_id, &ov, ltm).await;
                                             }
-                                            let _ = _bot
+                                            let _ = bot
                                                 .send_message(
                                                     teloxide::types::ChatId(chat_id_num),
                                                     reply,
@@ -454,7 +456,7 @@ impl Channel for TelegramChannel {
                                                 remove_single(&chat_id, ltm).await;
                                             }
                                             let reply = format!("Reset to default: {}", default_model);
-                                            let _ = _bot
+                                            let _ = bot
                                                 .send_message(
                                                     teloxide::types::ChatId(chat_id_num),
                                                     reply,
@@ -470,7 +472,7 @@ impl Channel for TelegramChannel {
                                                 &configured_providers,
                                                 current.as_ref(),
                                             );
-                                            let _ = _bot
+                                            let _ = bot
                                                 .send_message(
                                                     teloxide::types::ChatId(chat_id_num),
                                                     reply,
