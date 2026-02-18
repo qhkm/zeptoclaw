@@ -1,0 +1,10 @@
+# RISC-V getrandom fix: getrandom 0.4's libc::getrandom() wrapper resolves to a
+# null pointer on riscv64gc-unknown-linux-musl in release builds, causing SIGSEGV
+# in Uuid::new_v4(). Force the linux_raw backend (raw asm! syscalls). (GH-48)
+#
+# This file applies rustflags globally so the cfg reaches the getrandom crate.
+# Note: .cargo/config.toml is NOT included in crates.io publishes. Users installing
+# via `cargo install zeptoclaw` on RISC-V must set RUSTFLAGS manually:
+#   RUSTFLAGS='--cfg getrandom_backend="linux_raw"' cargo install zeptoclaw
+[target.riscv64gc-unknown-linux-musl]
+rustflags = ['--cfg', 'getrandom_backend="linux_raw"']
