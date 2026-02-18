@@ -833,7 +833,10 @@ mod tests {
         .unwrap();
 
         let plugins = discover_channel_plugins(dir.path());
-        assert!(plugins.is_empty(), "path traversal binary should be rejected");
+        assert!(
+            plugins.is_empty(),
+            "path traversal binary should be rejected"
+        );
     }
 
     // ---- Debug formatting ----
