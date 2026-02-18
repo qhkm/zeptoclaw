@@ -2,6 +2,7 @@
 
 pub mod cost;
 pub mod metrics;
+pub mod pidfile;
 pub mod sanitize;
 pub mod slo;
 pub mod telemetry;

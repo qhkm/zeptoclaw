@@ -142,6 +142,21 @@ impl TelegramChannel {
         let longterm_memory = if memory_enabled {
             // Use a dedicated file to avoid conflicts with the agent loop's longterm.json.
             // Two LongTermMemory instances writing to the same file can cause data loss.
+            //
+            // CONCURRENCY NOTE: This implementation assumes a single gateway process.
+            // Running multiple gateway processes concurrently would create multiple
+            // TelegramChannel instances, each with its own LongTermMemory pointing to
+            // model_prefs.json. Without file-level locking, concurrent writes could
+            // corrupt the file. This is acceptable because:
+            //
+            // 1. The gateway is designed to run as a single process (daemon/service)
+            // 2. The in-process Mutex prevents concurrent writes within the same process
+            // 3. Running multiple gateways is not a supported deployment pattern
+            // 4. Users who need high availability should use a single gateway with
+            //    restart policies rather than multiple concurrent instances
+            //
+            // If multi-process deployment becomes necessary, file-level locking (e.g.,
+            // fs2, fslock) or a shared database backend would be required.
             let ltm_path = Config::dir().join("memory").join("model_prefs.json");
             match LongTermMemory::with_path_and_searcher(ltm_path, Arc::new(BuiltinSearcher)) {
                 Ok(ltm) => Some(Arc::new(Mutex::new(ltm))),

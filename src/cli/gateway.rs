@@ -17,6 +17,7 @@ use zeptoclaw::heartbeat::{ensure_heartbeat_file, HeartbeatService};
 use zeptoclaw::providers::{
     configured_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
 };
+use zeptoclaw::utils::pidfile::PidFileGuard;
 
 use super::common::create_agent;
 use super::heartbeat::heartbeat_file_path;
@@ -27,6 +28,11 @@ pub(crate) async fn cmd_gateway(
     tunnel_flag: Option<String>,
 ) -> Result<()> {
     println!("Starting ZeptoClaw Gateway...");
+
+    // Acquire PID file lock to prevent multiple gateway instances
+    let _pid_guard = PidFileGuard::acquire()
+        .with_context(|| "Failed to acquire gateway PID lock")?;
+
 
     // Load configuration
     let mut config = Config::load().with_context(|| "Failed to load configuration")?;
