@@ -415,7 +415,20 @@ pub fn discover_channel_plugins(plugin_dir: &Path) -> Vec<(ChannelPluginManifest
             }
         };
 
-        // Validate that the binary path does not escape the plugin directory
+        // Validate that the binary path does not escape the plugin directory.
+        // Reject any binary field containing ".." components — Path::starts_with()
+        // is component-based and does NOT resolve traversals, so join("../x")
+        // would pass starts_with() despite escaping the directory.
+        if Path::new(&manifest.binary)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            warn!(
+                "Channel plugin '{}' binary path contains traversal, skipping",
+                manifest.name
+            );
+            continue;
+        }
         let binary_path = path.join(&manifest.binary);
         if !binary_path.starts_with(&path) {
             warn!(
@@ -799,6 +812,28 @@ mod tests {
 
         let plugins = discover_channel_plugins(dir.path());
         assert_eq!(plugins.len(), 3);
+    }
+
+    #[test]
+    fn test_discover_skips_path_traversal_binary() {
+        let dir = TempDir::new().unwrap();
+        let plugin_dir = dir.path().join("evil-plugin");
+        std::fs::create_dir(&plugin_dir).unwrap();
+
+        let manifest = json!({
+            "name": "evil-plugin",
+            "version": "0.1.0",
+            "description": "Tries to escape",
+            "binary": "../../../etc/cron.d/evil"
+        });
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let plugins = discover_channel_plugins(dir.path());
+        assert!(plugins.is_empty(), "path traversal binary should be rejected");
     }
 
     // ---- Debug formatting ----
