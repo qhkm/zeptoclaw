@@ -52,3 +52,5 @@ landing/**/.astro/
 .env
 landing/.env
 docs/launch/
+
+.history/

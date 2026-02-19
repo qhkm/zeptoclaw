@@ -317,11 +317,7 @@ impl Channel for TelegramChannel {
                                     "Telegram: Received message from user {} in chat {}: {}",
                                     user_id,
                                     chat_id,
-                                    if text.len() > 50 {
-                                        format!("{}...", &text[..50])
-                                    } else {
-                                        text.to_string()
-                                    }
+                                    crate::utils::string::preview(text, 50)
                                 );
 
                                 // Create and publish the inbound message

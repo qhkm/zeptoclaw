@@ -573,11 +573,7 @@ impl Channel for WebhookChannel {
         info!(
             "Webhook: outbound message to chat {} (logged only, no delivery): {}",
             msg.chat_id,
-            if msg.content.len() > 80 {
-                format!("{}...", &msg.content[..80])
-            } else {
-                msg.content.clone()
-            }
+            crate::utils::string::preview(&msg.content, 80)
         );
 
         Ok(())

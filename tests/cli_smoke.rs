@@ -11,6 +11,12 @@ fn run_cli(args: &[&str]) -> (i32, String, String) {
     let output = Command::new(bin)
         .args(args)
         .env("RUST_LOG", "") // suppress tracing noise
+        // Ensure tests run non-interactively: provide a dummy 32-byte hex master key
+        // so commands that attempt to resolve the master key won't prompt.
+        .env(
+            "ZEPTOCLAW_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
         .output()
         .expect("failed to execute zeptoclaw binary");
     let code = output.status.code().unwrap_or(-1);
