@@ -23,6 +23,7 @@
 
 pub mod claude;
 pub mod fallback;
+pub mod gemini;
 pub mod openai;
 mod registry;
 pub mod retry;
@@ -47,6 +48,7 @@ use crate::error::ProviderError;
 
 pub use claude::ClaudeProvider;
 pub use fallback::FallbackProvider;
+pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;
 pub use registry::{
     configured_provider_names, configured_unsupported_provider_names, provider_config_by_name,
