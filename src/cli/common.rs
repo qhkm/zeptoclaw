@@ -30,7 +30,7 @@ use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
     EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, ProjectTool, R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    MessageTool, PdfReadTool, ProjectTool, R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -637,6 +637,15 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                 info!("Registered http_request tool");
             }
         }
+    }
+
+    // Register PDF read tool — always available; extraction requires --features tool-pdf.
+    if tool_enabled("pdf_read") {
+        let workspace_str = config.workspace_path().to_string_lossy().into_owned();
+        agent
+            .register_tool(Box::new(PdfReadTool::new(workspace_str)))
+            .await;
+        info!("Registered pdf_read tool");
     }
 
     // Register proactive messaging tool.

@@ -114,6 +114,12 @@ chromiumoxide = { version = "0.7", optional = true, default-features = false, fe
 instant-distance = { version = "0.6.1", optional = true }
 
 # =============================================================================
+# PDF (optional — feature-gated behind "tool-pdf")
+# =============================================================================
+# Pure-Rust PDF parser for text extraction
+lopdf = { version = "0.34", optional = true }
+
+# =============================================================================
 # CHANNELS
 # =============================================================================
 # WebSocket support for future real-time channels
@@ -137,6 +143,8 @@ memory-embedding = []
 memory-hnsw = ["dep:instant-distance"]
 # Web screenshot tool via headless Chromium (Chrome DevTools Protocol)
 screenshot = ["chromiumoxide"]
+# PDF text extraction tool via lopdf
+tool-pdf = ["lopdf"]
 
 [dev-dependencies]
 tokio-test = "0.4"
