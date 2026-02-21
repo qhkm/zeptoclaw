@@ -153,6 +153,22 @@ rustls       = { version = "0.23", optional = true }
 # Mozilla TLS root certificates for rustls
 webpki-roots = { version = "0.26", optional = true }
 
+# =============================================================================
+# HARDWARE (optional — feature-gated)
+# =============================================================================
+# Serial port communication for peripherals (STM32, Arduino, ESP32)
+tokio-serial = { version = "5", default-features = false, optional = true }
+# probe-rs for STM32/Nucleo memory read (adds ~50 deps; optional)
+probe-rs = { version = "0.31", optional = true }
+
+# USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+nusb = { version = "0.2", default-features = false, optional = true }
+
+# Raspberry Pi GPIO (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
+rppal = { version = "0.22", optional = true }
+
 [features]
 default = []
 # BM25 keyword scoring memory backend (adds ~0 extra deps for now)
@@ -167,6 +183,12 @@ screenshot = ["chromiumoxide"]
 tool-pdf = ["lopdf"]
 # Email channel: IMAP IDLE (inbound) + SMTP (outbound) via TLS
 channel-email = ["async-imap", "lettre", "mail-parser", "tokio-rustls", "rustls", "webpki-roots"]
+# Hardware discovery + serial peripherals (USB enumeration, serial port communication)
+hardware = ["nusb", "tokio-serial"]
+# Raspberry Pi GPIO peripheral (Linux only, requires rppal)
+peripheral-rpi = ["rppal"]
+# Debug probe for STM32/Nucleo memory read via USB (adds ~50 deps)
+probe = ["probe-rs"]
 
 [dev-dependencies]
 tokio-test = "0.4"

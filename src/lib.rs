@@ -12,11 +12,13 @@ pub mod cron;
 pub mod deps;
 pub mod error;
 pub mod gateway;
+pub mod hardware;
 pub mod health;
 pub mod heartbeat;
 pub mod hooks;
 pub mod memory;
 pub mod migrate;
+pub mod peripherals;
 pub mod plugins;
 pub mod providers;
 pub mod routines;
@@ -73,7 +75,7 @@ pub use session::{Message, Role, Session, SessionManager, ToolCall};
 pub use tools::screenshot::WebScreenshotTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
-    EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolCategory,
-    ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, HardwareTool, HttpRequestTool, MemoryGetTool,
+    MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool,
+    Tool, ToolCategory, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
