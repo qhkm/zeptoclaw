@@ -55,6 +55,19 @@ impl Tool for InstallSkillTool {
             _ => return Ok(ToolOutput::error("slug is required")),
         };
 
+        // Validate the slug early so the error message is clear to the caller
+        // before any network or filesystem operations are attempted.
+        if slug.is_empty()
+            || !slug
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Ok(ToolOutput::error(format!(
+                "Invalid skill slug '{}': only alphanumeric characters, hyphens, and underscores are allowed",
+                slug
+            )));
+        }
+
         match self
             .registry
             .download_and_install(slug, &self.skills_dir)
@@ -123,5 +136,49 @@ mod tests {
     fn test_install_skill_tool_skills_dir_stored() {
         let tool = make_tool();
         assert_eq!(tool.skills_dir, "/tmp/skills");
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix 2: slug validation in the tool layer
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_install_path_traversal_slug_returns_error() {
+        let tool = make_tool();
+        let ctx = ToolContext::new();
+        let result = tool
+            .execute(serde_json::json!({"slug": "../etc/passwd"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(
+            result.for_llm.contains("Invalid skill slug"),
+            "expected validation error message, got: {}",
+            result.for_llm
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_slug_with_slash_returns_error() {
+        let tool = make_tool();
+        let ctx = ToolContext::new();
+        let result = tool
+            .execute(serde_json::json!({"slug": "foo/bar"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.for_llm.contains("Invalid skill slug"));
+    }
+
+    #[tokio::test]
+    async fn test_install_slug_with_space_returns_error() {
+        let tool = make_tool();
+        let ctx = ToolContext::new();
+        let result = tool
+            .execute(serde_json::json!({"slug": "web scraper"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.for_llm.contains("Invalid skill slug"));
     }
 }

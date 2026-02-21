@@ -47,10 +47,10 @@ impl SearchCache {
         }
     }
 
-    /// Return cached results for `query` if present and not expired.
-    pub fn get(&self, query: &str) -> Option<Vec<SkillSearchResult>> {
+    /// Return cached results for `key` if present and not expired.
+    pub fn get(&self, key: &str) -> Option<Vec<SkillSearchResult>> {
         let entries = self.entries.read().unwrap();
-        entries.get(query).and_then(|e| {
+        entries.get(key).and_then(|e| {
             if e.inserted_at.elapsed() < self.ttl {
                 Some(e.results.clone())
             } else {
@@ -59,8 +59,13 @@ impl SearchCache {
         })
     }
 
-    /// Store results for `query`.  Evicts the oldest entry when full.
-    pub fn set(&self, query: &str, results: Vec<SkillSearchResult>) {
+    /// Store results for `key`.  Evicts the oldest entry when full.
+    ///
+    /// When `max_size` is 0 the cache is disabled and this is a no-op.
+    pub fn set(&self, key: &str, results: Vec<SkillSearchResult>) {
+        if self.max_size == 0 {
+            return; // cache disabled
+        }
         let mut entries = self.entries.write().unwrap();
         if entries.len() >= self.max_size {
             if let Some(oldest_key) = entries
@@ -72,13 +77,50 @@ impl SearchCache {
             }
         }
         entries.insert(
-            query.to_string(),
+            key.to_string(),
             CacheEntry {
                 results,
                 inserted_at: Instant::now(),
             },
         );
     }
+}
+
+/// Percent-encode a string using RFC 3986 unreserved characters.
+///
+/// Characters in `[A-Za-z0-9\-_.~]` are passed through unchanged; every other
+/// byte is encoded as `%XX` (uppercase hex).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+/// Validate that `slug` contains only safe characters for use in URLs and
+/// filesystem paths.
+///
+/// Allowed: ASCII alphanumeric characters, hyphens (`-`), and underscores (`_`).
+fn validate_slug(slug: &str) -> crate::error::Result<()> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(crate::error::ZeptoError::Tool(format!(
+            "Invalid skill slug '{}': only alphanumeric characters, hyphens, and underscores are allowed",
+            slug
+        )));
+    }
+    Ok(())
 }
 
 /// HTTP client for the ClawHub REST API.
@@ -110,18 +152,23 @@ impl ClawHubRegistry {
     /// Search for skills matching `query`, returning at most `limit` results.
     ///
     /// Results are returned from the in-memory cache when available.
+    /// The cache key includes both the query and limit to prevent stale
+    /// truncated results from being served for a different limit value.
     pub async fn search(
         &self,
         query: &str,
         limit: usize,
     ) -> crate::error::Result<Vec<SkillSearchResult>> {
-        if let Some(cached) = self.cache.get(query) {
+        let cache_key = format!("{}:{}", query, limit);
+        if let Some(cached) = self.cache.get(&cache_key) {
             return Ok(cached);
         }
 
         let url = format!(
             "{}/api/v1/search?q={}&limit={}",
-            self.base_url, query, limit
+            self.base_url,
+            percent_encode(query),
+            limit
         );
         let mut req = self.client.get(&url);
         if let Some(token) = &self.auth_token {
@@ -145,7 +192,7 @@ impl ClawHubRegistry {
             .await
             .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?;
 
-        self.cache.set(query, results.clone());
+        self.cache.set(&cache_key, results.clone());
         Ok(results)
     }
 
@@ -157,6 +204,9 @@ impl ClawHubRegistry {
         slug: &str,
         skills_dir: &str,
     ) -> crate::error::Result<String> {
+        // Validate slug before using it in a URL or filesystem path.
+        validate_slug(slug)?;
+
         let url = format!("{}/api/v1/download/{}", self.base_url, slug);
         let mut req = self.client.get(&url);
         if let Some(token) = &self.auth_token {
@@ -173,6 +223,16 @@ impl ClawHubRegistry {
                 "ClawHub download failed: {}",
                 resp.status()
             )));
+        }
+
+        // Reject archives that are larger than 50 MB before buffering.
+        if let Some(content_length) = resp.content_length() {
+            if content_length > 50 * 1024 * 1024 {
+                return Err(crate::error::ZeptoError::Tool(format!(
+                    "Skill archive too large ({} bytes, max 50MB)",
+                    content_length
+                )));
+            }
         }
 
         let bytes = resp
@@ -250,17 +310,17 @@ mod tests {
             version: "1.0.0".into(),
             is_suspicious: false,
         }];
-        cache.set("test query", results.clone());
-        let hit = cache.get("test query").unwrap();
+        cache.set("test query:10", results.clone());
+        let hit = cache.get("test query:10").unwrap();
         assert_eq!(hit[0].slug, "test");
     }
 
     #[test]
     fn test_search_cache_ttl_expire() {
         let cache = SearchCache::new(10, Duration::from_millis(1));
-        cache.set("q", vec![]);
+        cache.set("q:10", vec![]);
         std::thread::sleep(Duration::from_millis(5));
-        assert!(cache.get("q").is_none());
+        assert!(cache.get("q:10").is_none());
     }
 
     #[test]
@@ -304,16 +364,16 @@ mod tests {
             version: "2.0".into(),
             is_suspicious: false,
         }];
-        cache.set("query1", r1);
-        cache.set("query2", r2);
-        assert_eq!(cache.get("query1").unwrap()[0].slug, "a");
-        assert_eq!(cache.get("query2").unwrap()[0].slug, "b");
+        cache.set("query1:10", r1);
+        cache.set("query2:10", r2);
+        assert_eq!(cache.get("query1:10").unwrap()[0].slug, "a");
+        assert_eq!(cache.get("query2:10").unwrap()[0].slug, "b");
     }
 
     #[test]
     fn test_search_cache_overwrite_same_key() {
         let cache = SearchCache::new(10, Duration::from_secs(60));
-        cache.set("q", vec![]);
+        cache.set("q:10", vec![]);
         let results = vec![SkillSearchResult {
             slug: "new".into(),
             display_name: "New".into(),
@@ -321,7 +381,81 @@ mod tests {
             version: "2.0".into(),
             is_suspicious: false,
         }];
-        cache.set("q", results);
-        assert_eq!(cache.get("q").unwrap()[0].slug, "new");
+        cache.set("q:10", results);
+        assert_eq!(cache.get("q:10").unwrap()[0].slug, "new");
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix 4: max_size == 0 disables the cache
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_search_cache_max_size_zero_is_noop() {
+        let cache = SearchCache::new(0, Duration::from_secs(60));
+        cache.set("key", vec![]);
+        // Nothing should have been stored.
+        assert!(cache.get("key").is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix 1: percent_encode
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_percent_encode_unreserved_passthrough() {
+        assert_eq!(percent_encode("hello"), "hello");
+        assert_eq!(percent_encode("test-value_123.txt~"), "test-value_123.txt~");
+    }
+
+    #[test]
+    fn test_percent_encode_spaces_and_specials() {
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+        assert_eq!(percent_encode("web scraper"), "web%20scraper");
+    }
+
+    #[test]
+    fn test_percent_encode_empty() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix 2: validate_slug
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_slug_valid() {
+        assert!(validate_slug("web-scraper").is_ok());
+        assert!(validate_slug("my_skill").is_ok());
+        assert!(validate_slug("skill123").is_ok());
+        assert!(validate_slug("ABC").is_ok());
+    }
+
+    #[test]
+    fn test_validate_slug_empty_is_error() {
+        assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_path_traversal_is_error() {
+        assert!(validate_slug("../etc/passwd").is_err());
+        assert!(validate_slug("../../secret").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_slash_is_error() {
+        assert!(validate_slug("foo/bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_space_is_error() {
+        assert!(validate_slug("web scraper").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_special_chars_are_error() {
+        assert!(validate_slug("skill;rm -rf").is_err());
+        assert!(validate_slug("skill<script>").is_err());
+        assert!(validate_slug("skill%20encoded").is_err());
     }
 }
