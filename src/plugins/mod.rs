@@ -72,7 +72,9 @@
 mod loader;
 pub mod registry;
 pub mod types;
+pub mod watcher;
 
 pub use loader::{discover_plugins, load_plugin, validate_binary_path, validate_manifest};
 pub use registry::PluginRegistry;
 pub use types::{BinaryPluginConfig, Plugin, PluginConfig, PluginManifest, PluginToolDef};
+pub use watcher::{check_binary_health, PluginWatcher};
