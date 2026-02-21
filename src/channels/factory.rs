@@ -127,10 +127,12 @@ pub async fn register_configured_channels(
                     "WhatsApp Cloud channel enabled but phone_number_id or access_token is empty"
                 );
             } else {
+                let transcriber = crate::transcription::TranscriberService::from_config(config);
                 manager
                     .register(Box::new(WhatsAppCloudChannel::new(
                         wac_config.clone(),
                         bus.clone(),
+                        transcriber,
                     )))
                     .await;
                 info!(

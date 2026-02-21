@@ -102,6 +102,9 @@ struct WebhookMessage {
     /// Text content (only present when type = "text").
     #[serde(default)]
     text: Option<WebhookTextContent>,
+    /// Audio content (present when type = "audio").
+    #[serde(default)]
+    audio: Option<AudioContent>,
 }
 
 /// Text content within a message.
@@ -109,6 +112,16 @@ struct WebhookMessage {
 struct WebhookTextContent {
     #[serde(default)]
     body: String,
+}
+
+/// Audio content within a WhatsApp message.
+#[derive(Debug, Clone, Deserialize)]
+struct AudioContent {
+    /// Media object ID — used to fetch download URL from Meta API.
+    id: String,
+    /// MIME type reported by WhatsApp (e.g. "audio/ogg; codecs=opus").
+    #[serde(default)]
+    mime_type: String,
 }
 
 /// Contact info from the webhook.
@@ -298,6 +311,117 @@ fn extract_text_messages(
     messages
 }
 
+/// Download media URL and transcribe audio; returns transcript or None on any failure.
+async fn fetch_and_transcribe(
+    svc: &crate::transcription::TranscriberService,
+    media_id: &str,
+    mime_type: &str,
+    token: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    // Resolve media download URL via Meta Graph API
+    let meta_url = format!("https://graph.facebook.com/v18.0/{}", media_id);
+    let url_resp = client.get(&meta_url).bearer_auth(token).send().await.ok()?;
+    let url_json: serde_json::Value = url_resp.json().await.ok()?;
+    let media_url = url_json.get("url")?.as_str()?.to_string();
+
+    // Download audio bytes
+    let audio_resp = client
+        .get(&media_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()?;
+    if !audio_resp.status().is_success() {
+        warn!(
+            "WhatsApp Cloud: failed to download audio HTTP {}",
+            audio_resp.status()
+        );
+        return None;
+    }
+    let bytes = audio_resp.bytes().await.ok()?.to_vec();
+
+    // Strip codec params from MIME (e.g. "audio/ogg; codecs=opus" -> "audio/ogg")
+    let base_mime = mime_type.split(';').next().unwrap_or("audio/ogg").trim();
+
+    let transcript = svc.transcribe(bytes, base_mime).await;
+    if transcript == "[Voice Message]" {
+        None
+    } else {
+        Some(transcript)
+    }
+}
+
+/// Extract audio messages from a webhook notification, optionally transcribing them.
+///
+/// Returns one `InboundMessage` per audio message with content `[Voice: <transcript>]`
+/// or `[Voice Message]` when no transcriber is available or transcription fails.
+async fn extract_audio_messages(
+    notification: &WebhookNotification,
+    allowlist: &[String],
+    deny_by_default: bool,
+    transcriber: Option<&crate::transcription::TranscriberService>,
+    token: &str,
+    client: &reqwest::Client,
+) -> Vec<InboundMessage> {
+    let mut messages = Vec::new();
+
+    for entry in &notification.entry {
+        for change in &entry.changes {
+            let value = match &change.value {
+                Some(v) => v,
+                None => continue,
+            };
+
+            for msg in &value.messages {
+                if msg.msg_type != "audio" {
+                    continue;
+                }
+                let from = msg.from.trim().to_string();
+                if from.is_empty() {
+                    continue;
+                }
+
+                // Allowlist check (same logic as extract_text_messages)
+                let allowed = if allowlist.is_empty() {
+                    !deny_by_default
+                } else {
+                    allowlist.contains(&from)
+                };
+                if !allowed {
+                    info!(
+                        "WhatsApp Cloud: user {} not in allowlist, ignoring audio",
+                        from
+                    );
+                    continue;
+                }
+
+                let content = match (transcriber, &msg.audio) {
+                    (Some(svc), Some(audio)) => {
+                        match fetch_and_transcribe(svc, &audio.id, &audio.mime_type, token, client)
+                            .await
+                        {
+                            Some(t) => format!("[Voice: {}]", t),
+                            None => "[Voice Message]".to_string(),
+                        }
+                    }
+                    _ => "[Voice Message]".to_string(),
+                };
+
+                let mut inbound = InboundMessage::new("whatsapp_cloud", &from, &from, &content);
+                if !msg.id.is_empty() {
+                    inbound = inbound.with_metadata("whatsapp_message_id", &msg.id);
+                }
+                if !msg.timestamp.is_empty() {
+                    inbound = inbound.with_metadata("timestamp", &msg.timestamp);
+                }
+                messages.push(inbound);
+            }
+        }
+    }
+    messages
+}
+
 /// Truncate a message to the WhatsApp character limit.
 fn truncate_message(content: &str) -> String {
     if content.chars().count() <= MAX_MESSAGE_LENGTH {
@@ -322,11 +446,19 @@ pub struct WhatsAppCloudChannel {
     client: Client,
     running: Arc<AtomicBool>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    transcriber: Option<Arc<crate::transcription::TranscriberService>>,
 }
 
 impl WhatsAppCloudChannel {
     /// Creates a new WhatsApp Cloud API channel.
-    pub fn new(config: WhatsAppCloudConfig, bus: Arc<MessageBus>) -> Self {
+    ///
+    /// Pass a `TranscriberService` to enable voice message transcription.
+    /// When `None`, audio messages produce `[Voice Message]` without transcription.
+    pub fn new(
+        config: WhatsAppCloudConfig,
+        bus: Arc<MessageBus>,
+        transcriber: Option<crate::transcription::TranscriberService>,
+    ) -> Self {
         let base_config = BaseChannelConfig {
             name: "whatsapp_cloud".to_string(),
             allowlist: config.allow_from.clone(),
@@ -340,6 +472,7 @@ impl WhatsAppCloudChannel {
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
+            transcriber: transcriber.map(Arc::new),
         }
     }
 
@@ -365,6 +498,8 @@ impl WhatsAppCloudChannel {
         config: &WhatsAppCloudConfig,
         base_config: &BaseChannelConfig,
         bus: &MessageBus,
+        transcriber: Option<&crate::transcription::TranscriberService>,
+        client: &Client,
     ) {
         // Read request
         let mut buf = vec![0u8; MAX_HEADER_SIZE + MAX_BODY_SIZE];
@@ -464,13 +599,24 @@ impl WhatsAppCloudChannel {
                 }
 
                 // Extract and publish text messages
-                let messages = extract_text_messages(
+                let text_messages = extract_text_messages(
                     &notification,
                     &base_config.allowlist,
                     base_config.deny_by_default,
                 );
 
-                for inbound in messages {
+                // Extract and publish audio messages (with optional transcription)
+                let audio_messages = extract_audio_messages(
+                    &notification,
+                    &base_config.allowlist,
+                    base_config.deny_by_default,
+                    transcriber,
+                    &config.access_token,
+                    client,
+                )
+                .await;
+
+                for inbound in text_messages.into_iter().chain(audio_messages) {
                     info!(
                         "WhatsApp Cloud: received message from {} in chat {}",
                         inbound.sender_id, inbound.chat_id
@@ -535,6 +681,8 @@ impl Channel for WhatsAppCloudChannel {
         let base_config = self.base_config.clone();
         let bus = Arc::clone(&self.bus);
         let running = Arc::clone(&self.running);
+        let transcriber = self.transcriber.clone();
+        let http_client = self.client.clone();
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_rx;
@@ -548,8 +696,10 @@ impl Channel for WhatsAppCloudChannel {
                                 let cfg = config.clone();
                                 let bc = base_config.clone();
                                 let bus_ref = Arc::clone(&bus);
+                                let tx = transcriber.clone();
+                                let cl = http_client.clone();
                                 tokio::spawn(async move {
-                                    Self::handle_connection(stream, &cfg, &bc, &bus_ref).await;
+                                    Self::handle_connection(stream, &cfg, &bc, &bus_ref, tx.as_deref(), &cl).await;
                                 });
                             }
                             Err(e) => {
@@ -694,13 +844,13 @@ mod tests {
 
     #[test]
     fn test_channel_name() {
-        let channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         assert_eq!(channel.name(), "whatsapp_cloud");
     }
 
     #[test]
     fn test_channel_not_running_initially() {
-        let channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         assert!(!channel.is_running());
     }
 
@@ -874,13 +1024,13 @@ mod tests {
 
     #[test]
     fn test_is_allowed_in_list() {
-        let channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         assert!(channel.is_allowed("60123456789"));
     }
 
     #[test]
     fn test_is_allowed_not_in_list() {
-        let channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         assert!(!channel.is_allowed("60999999999"));
     }
 
@@ -931,7 +1081,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_when_not_running() {
-        let channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         let msg = OutboundMessage::new("whatsapp_cloud", "60123456789", "Hello");
         let result = channel.send(msg).await;
         assert!(result.is_err());
@@ -939,7 +1089,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_when_not_running() {
-        let mut channel = WhatsAppCloudChannel::new(test_config(), test_bus());
+        let mut channel = WhatsAppCloudChannel::new(test_config(), test_bus(), None);
         let result = channel.stop().await;
         assert!(result.is_ok());
     }
@@ -948,7 +1098,7 @@ mod tests {
     async fn test_start_disabled_config() {
         let mut config = test_config();
         config.enabled = false;
-        let mut channel = WhatsAppCloudChannel::new(config, test_bus());
+        let mut channel = WhatsAppCloudChannel::new(config, test_bus(), None);
         let result = channel.start().await;
         assert!(result.is_ok());
         assert!(!channel.is_running());
@@ -958,7 +1108,7 @@ mod tests {
     async fn test_start_missing_credentials() {
         let mut config = test_config();
         config.phone_number_id = String::new();
-        let mut channel = WhatsAppCloudChannel::new(config, test_bus());
+        let mut channel = WhatsAppCloudChannel::new(config, test_bus(), None);
         let result = channel.start().await;
         assert!(result.is_err());
     }
@@ -999,7 +1149,7 @@ mod tests {
 
         let mut config = test_config();
         config.port = port;
-        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus));
+        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus), None);
         channel.start().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1033,7 +1183,7 @@ mod tests {
         let mut config = test_config();
         config.port = port;
         config.allow_from = vec![]; // Allow all
-        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus));
+        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus), None);
         channel.start().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1071,5 +1221,109 @@ mod tests {
         assert_eq!(received.content, "Hello there!");
 
         channel.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Audio content parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_audio_content_deserialized() {
+        let json = r#"{"id": "media_abc", "mime_type": "audio/ogg; codecs=opus"}"#;
+        let audio: AudioContent = serde_json::from_str(json).unwrap();
+        assert_eq!(audio.id, "media_abc");
+        assert_eq!(audio.mime_type, "audio/ogg; codecs=opus");
+    }
+
+    #[test]
+    fn test_webhook_message_audio_field_parsed() {
+        let notification = serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {
+                "messaging_product": "whatsapp",
+                "contacts": [{"profile": {"name": "Test"}}],
+                "messages": [{
+                    "from": "60123", "id": "wamid.audio", "timestamp": "1",
+                    "type": "audio",
+                    "audio": {"id": "media_id_123", "mime_type": "audio/ogg; codecs=opus"}
+                }]
+            }}]}]
+        });
+        let n: WebhookNotification = serde_json::from_value(notification).unwrap();
+        let msg = &n.entry[0].changes[0].value.as_ref().unwrap().messages[0];
+        assert_eq!(msg.msg_type, "audio");
+        assert!(msg.audio.is_some());
+        let audio = msg.audio.as_ref().unwrap();
+        assert_eq!(audio.id, "media_id_123");
+    }
+
+    #[tokio::test]
+    async fn test_extract_audio_messages_no_transcriber() {
+        let notification = serde_json::from_value(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {
+                "messages": [{
+                    "from": "60123", "id": "wamid.audio1", "timestamp": "1",
+                    "type": "audio",
+                    "audio": {"id": "media_1", "mime_type": "audio/ogg"}
+                }],
+                "contacts": []
+            }}]}]
+        }))
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        let msgs = extract_audio_messages(&notification, &[], false, None, "token", &client).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "[Voice Message]");
+        assert_eq!(msgs[0].sender_id, "60123");
+    }
+
+    #[tokio::test]
+    async fn test_extract_audio_messages_denied_by_allowlist() {
+        let notification = serde_json::from_value(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {
+                "messages": [{
+                    "from": "60123", "id": "wamid.audio2", "timestamp": "1",
+                    "type": "audio",
+                    "audio": {"id": "media_2", "mime_type": "audio/ogg"}
+                }],
+                "contacts": []
+            }}]}]
+        }))
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        let msgs = extract_audio_messages(
+            &notification,
+            &["60999".to_string()],
+            false,
+            None,
+            "token",
+            &client,
+        )
+        .await;
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_audio_messages_skips_text() {
+        let notification = serde_json::from_value(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {
+                "messages": [{
+                    "from": "60123", "id": "wamid.text", "timestamp": "1",
+                    "type": "text",
+                    "text": {"body": "Hello"}
+                }],
+                "contacts": []
+            }}]}]
+        }))
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        let msgs = extract_audio_messages(&notification, &[], false, None, "token", &client).await;
+        assert!(msgs.is_empty());
     }
 }
