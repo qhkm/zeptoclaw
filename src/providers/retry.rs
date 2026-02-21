@@ -325,6 +325,14 @@ impl LLMProvider for RetryProvider {
             .chat_stream(messages, tools, model, options)
             .await
     }
+
+    /// Delegate embed() directly to the inner provider without retry.
+    ///
+    /// Embedding calls are simple synchronous-style requests — retrying on
+    /// transient failures is handled by the caller if needed.
+    async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+        self.inner.embed(texts).await
+    }
 }
 
 #[cfg(test)]

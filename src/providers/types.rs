@@ -133,6 +133,19 @@ pub trait LLMProvider: Send + Sync {
             .await;
         Ok(rx)
     }
+
+    /// Embed texts into vector representations.
+    ///
+    /// Returns one embedding vector per input text. The dimensionality depends on
+    /// the underlying model (e.g., 1536 for `text-embedding-3-small`).
+    ///
+    /// The default implementation returns an error because not all providers
+    /// support embeddings. Override this on providers that do (e.g., OpenAI).
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Err(ZeptoError::Provider(
+            "Embedding not supported by this provider".into(),
+        ))
+    }
 }
 
 /// Options for chat completion requests.
@@ -671,5 +684,106 @@ mod tests {
             }
             _ => panic!("Expected Done event from default chat_stream"),
         }
+    }
+
+    // ====================================================================
+    // embed() tests
+    // ====================================================================
+
+    /// Compile-time check: if this test compiles, embed() exists on the trait.
+    #[tokio::test]
+    async fn test_embed_method_exists_on_trait() {
+        struct MinimalProvider;
+
+        #[async_trait]
+        impl LLMProvider for MinimalProvider {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+                _model: Option<&str>,
+                _options: ChatOptions,
+            ) -> Result<LLMResponse> {
+                Ok(LLMResponse::text("ok"))
+            }
+            fn default_model(&self) -> &str {
+                "minimal"
+            }
+            fn name(&self) -> &str {
+                "minimal"
+            }
+            // Note: embed() is NOT overridden here — default impl is used.
+        }
+
+        // The test succeeds if it compiles: embed() is on the trait.
+        let provider = MinimalProvider;
+        let result = provider.embed(&["hello".to_string()]).await;
+        // Default impl returns an error.
+        assert!(result.is_err());
+    }
+
+    /// Default impl of embed() returns a Provider error.
+    #[tokio::test]
+    async fn test_embed_default_returns_error() {
+        struct DefaultProvider;
+
+        #[async_trait]
+        impl LLMProvider for DefaultProvider {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+                _model: Option<&str>,
+                _options: ChatOptions,
+            ) -> Result<LLMResponse> {
+                Ok(LLMResponse::text("ok"))
+            }
+            fn default_model(&self) -> &str {
+                "default"
+            }
+            fn name(&self) -> &str {
+                "default"
+            }
+        }
+
+        let provider = DefaultProvider;
+        let result = provider.embed(&["text".to_string()]).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Embedding not supported by this provider"),
+            "Expected 'Embedding not supported' error, got: {}",
+            err
+        );
+    }
+
+    /// Default impl of embed() with an empty input also returns an error.
+    #[tokio::test]
+    async fn test_embed_default_empty_input_returns_error() {
+        struct DefaultProvider;
+
+        #[async_trait]
+        impl LLMProvider for DefaultProvider {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+                _model: Option<&str>,
+                _options: ChatOptions,
+            ) -> Result<LLMResponse> {
+                Ok(LLMResponse::text("ok"))
+            }
+            fn default_model(&self) -> &str {
+                "default"
+            }
+            fn name(&self) -> &str {
+                "default"
+            }
+        }
+
+        let provider = DefaultProvider;
+        let result = provider.embed(&[]).await;
+        assert!(result.is_err());
     }
 }

@@ -316,6 +316,14 @@ impl LLMProvider for FallbackProvider {
             }
         }
     }
+
+    /// Delegate embed() to the primary provider.
+    ///
+    /// Embeddings are not subject to fallback logic — the primary provider is
+    /// the authoritative embedding source (its model is the one configured).
+    async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+        self.primary.embed(texts).await
+    }
 }
 
 #[cfg(test)]

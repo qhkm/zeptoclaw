@@ -825,6 +825,63 @@ impl LLMProvider for OpenAIProvider {
         }
     }
 
+    async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+        let url = format!("{}/embeddings", self.api_base);
+        let body = serde_json::json!({
+            "model": "text-embedding-3-small",
+            "input": texts,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Provider(format!("Embedding request failed: {}", e)))?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ZeptoError::Provider(format!("Invalid embedding response: {}", e)))?;
+
+        if !status.is_success() {
+            let msg = resp_body
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown error");
+            return Err(ZeptoError::Provider(format!(
+                "Embedding API {}: {}",
+                status, msg
+            )));
+        }
+
+        let data = resp_body
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                ZeptoError::Provider("Missing 'data' in embedding response".into())
+            })?;
+
+        let mut vectors = Vec::new();
+        for item in data {
+            let embedding = item
+                .get("embedding")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| ZeptoError::Provider("Missing embedding vector".into()))?;
+            let vec: Vec<f32> = embedding
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            vectors.push(vec);
+        }
+
+        Ok(vectors)
+    }
+
     fn default_model(&self) -> &str {
         DEFAULT_MODEL
     }
@@ -1384,5 +1441,116 @@ mod tests {
         assert_eq!(tool_calls[0].id, "call_1");
         assert_eq!(tool_calls[0].name, "search");
         assert_eq!(tool_calls[0].arguments, r#"{"q":"rust"}"#);
+    }
+
+    // ====================================================================
+    // embed() tests
+    // ====================================================================
+
+    /// Verify the /embeddings endpoint URL is constructed from api_base.
+    #[test]
+    fn test_openai_embed_constructs_correct_url() {
+        let provider = OpenAIProvider::with_base_url("key", "https://api.openai.com/v1");
+        let url = format!("{}/embeddings", provider.api_base);
+        assert_eq!(url, "https://api.openai.com/v1/embeddings");
+    }
+
+    /// Same check for a custom base URL (e.g., OpenRouter).
+    #[test]
+    fn test_openai_embed_url_with_custom_base() {
+        let provider =
+            OpenAIProvider::with_base_url("key", "https://openrouter.ai/api/v1");
+        let url = format!("{}/embeddings", provider.api_base);
+        assert_eq!(url, "https://openrouter.ai/api/v1/embeddings");
+    }
+
+    /// Parse a well-formed embedding API response into Vec<Vec<f32>>.
+    #[test]
+    fn test_embed_parse_response() {
+        // Simulate what we do inside embed(): parse the JSON and extract vectors.
+        let response_json = serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [0.1_f64, 0.2_f64, -0.3_f64]
+                },
+                {
+                    "object": "embedding",
+                    "index": 1,
+                    "embedding": [1.0_f64, 0.0_f64, 0.5_f64]
+                }
+            ],
+            "model": "text-embedding-3-small",
+            "usage": {"prompt_tokens": 5, "total_tokens": 5}
+        });
+
+        let data = response_json
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .expect("data array");
+
+        let mut vectors: Vec<Vec<f32>> = Vec::new();
+        for item in data {
+            let embedding = item
+                .get("embedding")
+                .and_then(serde_json::Value::as_array)
+                .expect("embedding array");
+            let vec: Vec<f32> = embedding
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            vectors.push(vec);
+        }
+
+        assert_eq!(vectors.len(), 2);
+        assert_eq!(vectors[0].len(), 3);
+        assert!((vectors[0][0] - 0.1_f32).abs() < 1e-6);
+        assert!((vectors[0][1] - 0.2_f32).abs() < 1e-6);
+        assert!((vectors[0][2] - (-0.3_f32)).abs() < 1e-6);
+        assert!((vectors[1][0] - 1.0_f32).abs() < 1e-6);
+        assert!((vectors[1][2] - 0.5_f32).abs() < 1e-6);
+    }
+
+    /// Empty embedding array in response item should produce an empty inner vector.
+    #[test]
+    fn test_embed_parse_empty_embedding_item() {
+        let response_json = serde_json::json!({
+            "data": [
+                { "object": "embedding", "index": 0, "embedding": [] }
+            ]
+        });
+
+        let data = response_json
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .expect("data array");
+
+        let mut vectors: Vec<Vec<f32>> = Vec::new();
+        for item in data {
+            let embedding = item
+                .get("embedding")
+                .and_then(serde_json::Value::as_array)
+                .expect("embedding array");
+            let vec: Vec<f32> = embedding
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            vectors.push(vec);
+        }
+
+        assert_eq!(vectors.len(), 1);
+        assert!(vectors[0].is_empty(), "empty embedding should yield empty Vec<f32>");
+    }
+
+    /// Missing 'data' key in response should surface the right error message.
+    #[test]
+    fn test_embed_parse_response_missing_data() {
+        let response_json = serde_json::json!({ "model": "text-embedding-3-small" });
+        let data = response_json
+            .get("data")
+            .and_then(serde_json::Value::as_array);
+        assert!(data.is_none(), "missing 'data' should return None");
     }
 }

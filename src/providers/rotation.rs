@@ -377,6 +377,15 @@ impl LLMProvider for RotationProvider {
             crate::error::ZeptoError::Provider("All rotation providers failed (streaming)".into())
         }))
     }
+
+    /// Delegate embed() to the currently selected provider.
+    ///
+    /// Uses the same provider-selection logic as `chat()` so the embedding
+    /// request lands on the healthiest available provider in the rotation.
+    async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+        let index = self.select_provider_index();
+        self.providers[index].0.embed(texts).await
+    }
 }
 
 #[cfg(test)]
