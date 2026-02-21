@@ -6,6 +6,50 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Project management backend selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectBackend {
+    /// GitHub Issues REST API.
+    #[default]
+    Github,
+    /// Jira REST API v3.
+    Jira,
+    /// Linear GraphQL API.
+    Linear,
+}
+
+/// Project management tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    /// Backend to use (github, jira, linear).
+    pub backend: ProjectBackend,
+    /// Default project key/repo (e.g., "owner/repo" for GitHub, "PROJ" for Jira).
+    pub default_project: String,
+    /// Jira base URL (e.g., "https://your-org.atlassian.net").
+    pub jira_url: String,
+    /// Jira API token (base64 encoded "email:token").
+    pub jira_token: Option<String>,
+    /// GitHub personal access token.
+    pub github_token: Option<String>,
+    /// Linear API key.
+    pub linear_api_key: Option<String>,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            backend: ProjectBackend::Github,
+            default_project: String::new(),
+            jira_url: String::new(),
+            jira_token: None,
+            github_token: None,
+            linear_api_key: None,
+        }
+    }
+}
+
 /// Main configuration struct for ZeptoClaw
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +108,8 @@ pub struct Config {
     /// Key = profile name, Value = None means all tools, Some(vec) means only those tools.
     #[serde(default)]
     pub tool_profiles: HashMap<String, Option<Vec<String>>>,
+    /// Project management tool configuration (GitHub Issues, Jira, Linear).
+    pub project: ProjectConfig,
 }
 
 // ============================================================================

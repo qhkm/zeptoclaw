@@ -166,6 +166,9 @@ impl Config {
 
         // Stripe
         self.apply_stripe_env_overrides();
+
+        // Project management tool
+        self.apply_project_env_overrides();
     }
 
     /// Apply provider-specific environment variable overrides
@@ -681,6 +684,36 @@ impl Config {
             if let Ok(v) = val.parse::<f64>() {
                 self.compaction.threshold = v.clamp(0.1, 1.0);
             }
+        }
+    }
+
+    /// Apply project management tool environment variable overrides.
+    fn apply_project_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_BACKEND") {
+            match val.trim().to_ascii_lowercase().as_str() {
+                "github" => self.project.backend = ProjectBackend::Github,
+                "jira" => self.project.backend = ProjectBackend::Jira,
+                "linear" => self.project.backend = ProjectBackend::Linear,
+                _ => {}
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_DEFAULT_PROJECT") {
+            self.project.default_project = val;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_GITHUB_TOKEN") {
+            let val = val.trim().to_string();
+            self.project.github_token = if val.is_empty() { None } else { Some(val) };
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_JIRA_URL") {
+            self.project.jira_url = val;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_JIRA_TOKEN") {
+            let val = val.trim().to_string();
+            self.project.jira_token = if val.is_empty() { None } else { Some(val) };
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROJECT_LINEAR_API_KEY") {
+            let val = val.trim().to_string();
+            self.project.linear_api_key = if val.is_empty() { None } else { Some(val) };
         }
     }
 
