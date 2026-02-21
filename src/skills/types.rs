@@ -30,6 +30,23 @@ pub struct SkillInfo {
     pub source: String,
 }
 
+fn default_required() -> bool {
+    true
+}
+
+/// A required/optional environment variable declared by a skill.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnvSpec {
+    /// Environment variable name (e.g. "WHATSAPP_PHONE_NUMBER_ID").
+    pub name: String,
+    /// Human-readable description shown in `skills show`.
+    pub description: String,
+    /// Whether this env var is required (default: true).
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
 /// Parsed frontmatter metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,6 +59,22 @@ pub struct SkillMetadata {
     pub version: Option<String>,
     /// Optional homepage URL.
     pub homepage: Option<String>,
+    /// Skill author name.
+    pub author: Option<String>,
+    /// Skill license identifier (e.g. "MIT").
+    pub license: Option<String>,
+    /// Categorization tags (e.g. ["messaging", "sea"]).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Skill names that must be present for this skill to be available.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Skill names that conflict with this skill.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Environment variables needed by this skill (informational + gating).
+    #[serde(default)]
+    pub env_needed: Vec<EnvSpec>,
     /// ZeptoClaw metadata payload.
     pub metadata: Option<serde_json::Value>,
 }

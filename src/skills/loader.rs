@@ -736,4 +736,31 @@ Use wttr.in.
             os
         );
     }
+
+    #[test]
+    fn test_parse_new_manifest_fields() {
+        let loader = SkillsLoader::with_defaults();
+        let content = "---\nname: sea-orders\ndescription: SEA order management\nversion: 1.0.0\nauthor: Kitakod Ventures\nlicense: MIT\ntags:\n  - messaging\n  - sea\ndepends:\n  - longterm-memory\nconflicts:\n  - orders-lite\nenv_needed:\n  - name: WHATSAPP_PHONE_NUMBER_ID\n    description: Your phone number ID\n    required: true\n  - name: WEBHOOK_TOKEN\n    description: Webhook verify token\n    required: false\nmetadata: {\"zeptoclaw\": {\"emoji\": \"\u{1F6D2}\"}}\n---\nBody.\n";
+        let (meta, _) = loader.parse_frontmatter(content);
+        assert_eq!(meta.author.as_deref(), Some("Kitakod Ventures"));
+        assert_eq!(meta.license.as_deref(), Some("MIT"));
+        assert_eq!(meta.tags, vec!["messaging", "sea"]);
+        assert_eq!(meta.depends, vec!["longterm-memory"]);
+        assert_eq!(meta.conflicts, vec!["orders-lite"]);
+        assert_eq!(meta.env_needed.len(), 2);
+        assert_eq!(meta.env_needed[0].name, "WHATSAPP_PHONE_NUMBER_ID");
+        assert_eq!(meta.env_needed[0].description, "Your phone number ID");
+        assert!(meta.env_needed[0].required);
+        assert!(!meta.env_needed[1].required);
+    }
+
+    #[test]
+    fn test_old_skills_load_without_new_fields() {
+        let loader = SkillsLoader::with_defaults();
+        let content = "---\nname: old\ndescription: Old skill\n---\nBody.";
+        let (meta, _) = loader.parse_frontmatter(content);
+        assert!(meta.tags.is_empty());
+        assert!(meta.depends.is_empty());
+        assert!(meta.author.is_none());
+    }
 }
