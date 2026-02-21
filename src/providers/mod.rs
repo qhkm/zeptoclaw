@@ -22,6 +22,7 @@
 //! ```
 
 pub mod claude;
+pub mod cooldown;
 pub mod fallback;
 pub mod gemini;
 pub mod openai;
@@ -47,6 +48,7 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
 use crate::error::ProviderError;
 
 pub use claude::ClaudeProvider;
+pub use cooldown::{CooldownTracker, FailoverReason};
 pub use fallback::FallbackProvider;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;

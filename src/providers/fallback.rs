@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use crate::error::Result;
 use crate::session::Message;
 
+use super::cooldown::{CooldownTracker, FailoverReason};
 use super::{ChatOptions, LLMProvider, LLMResponse, StreamEvent, ToolDefinition};
 
 // ============================================================================
@@ -157,6 +158,8 @@ pub struct FallbackProvider {
     composite_name: String,
     /// Circuit breaker tracking primary provider health.
     circuit_breaker: CircuitBreaker,
+    /// Per-reason cooldown tracker for smarter provider skipping.
+    cooldown: CooldownTracker,
 }
 
 impl fmt::Debug for FallbackProvider {
@@ -165,6 +168,7 @@ impl fmt::Debug for FallbackProvider {
             .field("primary", &self.primary.name())
             .field("fallback", &self.fallback.name())
             .field("circuit_breaker", &self.circuit_breaker)
+            .field("cooldown", &"CooldownTracker")
             .finish()
     }
 }
@@ -182,6 +186,7 @@ impl FallbackProvider {
             fallback,
             composite_name,
             circuit_breaker: CircuitBreaker::new(3, 30),
+            cooldown: CooldownTracker::new(),
         }
     }
 }
@@ -205,12 +210,13 @@ impl LLMProvider for FallbackProvider {
     ) -> Result<LLMResponse> {
         let circuit_state = self.circuit_breaker.state();
 
-        // When the circuit is Open, skip the primary entirely.
-        if circuit_state == CircuitState::Open {
+        // When the circuit is Open or per-reason cooldown is active, skip the primary entirely.
+        if circuit_state == CircuitState::Open || self.cooldown.is_in_cooldown(self.primary.name())
+        {
             info!(
                 primary = self.primary.name(),
                 fallback = self.fallback.name(),
-                "Circuit open: skipping primary, using fallback directly"
+                "Circuit open or cooldown active: skipping primary, using fallback directly"
             );
             return self.fallback.chat(messages, tools, model, options).await;
         }
@@ -223,6 +229,7 @@ impl LLMProvider for FallbackProvider {
         {
             Ok(response) => {
                 self.circuit_breaker.record_success();
+                self.cooldown.mark_success(self.primary.name());
                 Ok(response)
             }
             Err(primary_err) => {
@@ -234,11 +241,20 @@ impl LLMProvider for FallbackProvider {
 
                 if should_fallback {
                     self.circuit_breaker.record_failure();
+                    // Classify the error and apply per-reason cooldown.
+                    let reason = match &primary_err {
+                        crate::error::ZeptoError::ProviderTyped(pe) => {
+                            FailoverReason::from_provider_error(pe)
+                        }
+                        _ => FailoverReason::Unknown,
+                    };
+                    self.cooldown.mark_failure(self.primary.name(), reason);
                     warn!(
                         primary = self.primary.name(),
                         fallback = self.fallback.name(),
                         error = %primary_err,
                         circuit_state = ?self.circuit_breaker.state(),
+                        ?reason,
                         "Primary provider failed, falling back"
                     );
                     self.fallback.chat(messages, tools, model, options).await
@@ -263,12 +279,13 @@ impl LLMProvider for FallbackProvider {
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let circuit_state = self.circuit_breaker.state();
 
-        // When the circuit is Open, skip the primary entirely.
-        if circuit_state == CircuitState::Open {
+        // When the circuit is Open or per-reason cooldown is active, skip the primary entirely.
+        if circuit_state == CircuitState::Open || self.cooldown.is_in_cooldown(self.primary.name())
+        {
             info!(
                 primary = self.primary.name(),
                 fallback = self.fallback.name(),
-                "Circuit open: skipping primary streaming, using fallback directly"
+                "Circuit open or cooldown active: skipping primary streaming, using fallback directly"
             );
             return self
                 .fallback
@@ -284,6 +301,7 @@ impl LLMProvider for FallbackProvider {
         {
             Ok(receiver) => {
                 self.circuit_breaker.record_success();
+                self.cooldown.mark_success(self.primary.name());
                 Ok(receiver)
             }
             Err(primary_err) => {
@@ -295,11 +313,20 @@ impl LLMProvider for FallbackProvider {
 
                 if should_fallback {
                     self.circuit_breaker.record_failure();
+                    // Classify the error and apply per-reason cooldown.
+                    let reason = match &primary_err {
+                        crate::error::ZeptoError::ProviderTyped(pe) => {
+                            FailoverReason::from_provider_error(pe)
+                        }
+                        _ => FailoverReason::Unknown,
+                    };
+                    self.cooldown.mark_failure(self.primary.name(), reason);
                     warn!(
                         primary = self.primary.name(),
                         fallback = self.fallback.name(),
                         error = %primary_err,
                         circuit_state = ?self.circuit_breaker.state(),
+                        ?reason,
                         "Primary provider streaming failed, falling back"
                     );
                     self.fallback
@@ -910,30 +937,30 @@ mod tests {
             }),
         );
 
-        // Trigger 3 failures to open the circuit.
-        for _ in 0..3 {
-            let _ = provider
-                .chat(vec![], vec![], None, ChatOptions::default())
-                .await;
-        }
+        // One failure is enough: after primary fails, CooldownTracker puts it
+        // in cooldown immediately, so subsequent calls bypass primary.
+        let _ = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
 
-        assert_eq!(primary_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(fallback_calls.load(Ordering::SeqCst), 3); // fallback called each time
+        // Primary was called once, fallback was called once.
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
 
-        // Now the circuit should be Open. Next call should NOT call primary.
+        // Now cooldown is active. Next call should NOT call primary.
         let result = provider
             .chat(vec![], vec![], None, ChatOptions::default())
             .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "success from fallback");
-        // Primary should NOT have been called again.
+        // Primary should NOT have been called again (cooldown active).
         assert_eq!(
             primary_calls.load(Ordering::SeqCst),
-            3,
-            "primary should be skipped when circuit is open"
+            1,
+            "primary should be skipped while in cooldown"
         );
-        assert_eq!(fallback_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -952,17 +979,29 @@ mod tests {
             }),
         );
 
-        // Trip the circuit with 3 failures.
-        for _ in 0..3 {
-            let _ = provider
-                .chat(vec![], vec![], None, ChatOptions::default())
-                .await;
-        }
+        // With CooldownTracker, after the first failure primary is in cooldown.
+        // To trip the circuit breaker (needs 3 failures), directly manipulate
+        // the atomic counter — this simulates 3 consecutive circuit failures.
+        provider
+            .circuit_breaker
+            .failure_count
+            .store(3, Ordering::Relaxed);
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        provider
+            .circuit_breaker
+            .last_failure_epoch
+            .store(now_epoch, Ordering::Relaxed);
 
-        assert_eq!(primary_calls.load(Ordering::SeqCst), 3);
         assert_eq!(provider.circuit_breaker.state(), CircuitState::Open);
 
-        // Simulate cooldown elapsed by back-dating the last failure timestamp.
+        // Also make sure the CooldownTracker is clear (no cooldown active)
+        // so that the HalfOpen probe path is exercised, not the cooldown bypass.
+        provider.cooldown.mark_success("primary");
+
+        // Simulate circuit cooldown elapsed by back-dating the last failure timestamp.
         let past = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -974,8 +1013,9 @@ mod tests {
             .store(past, Ordering::Relaxed);
 
         assert_eq!(provider.circuit_breaker.state(), CircuitState::HalfOpen);
+        assert!(!provider.cooldown.is_in_cooldown("primary"));
 
-        // Next call should probe the primary (HalfOpen allows one request).
+        // Next call should probe the primary (HalfOpen allows one request, cooldown is clear).
         let result = provider
             .chat(vec![], vec![], None, ChatOptions::default())
             .await;
@@ -985,7 +1025,7 @@ mod tests {
         assert_eq!(result.unwrap().content, "success from fallback");
         assert_eq!(
             primary_calls.load(Ordering::SeqCst),
-            4,
+            1,
             "primary should be probed once in HalfOpen state"
         );
     }

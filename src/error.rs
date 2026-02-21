@@ -33,6 +33,10 @@ pub enum ProviderError {
     Timeout(String),
     /// Catch-all for unrecognized errors
     Unknown(String),
+    /// Provider is overloaded (e.g. Anthropic `overloaded_error`) — retry with backoff
+    Overloaded(String),
+    /// Request format error (e.g. malformed tool_use.id) — do not retry
+    Format(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -46,6 +50,8 @@ impl fmt::Display for ProviderError {
             ProviderError::ModelNotFound(msg) => write!(f, "Model not found: {}", msg),
             ProviderError::Timeout(msg) => write!(f, "Timeout: {}", msg),
             ProviderError::Unknown(msg) => write!(f, "Unknown provider error: {}", msg),
+            ProviderError::Overloaded(msg) => write!(f, "Overloaded error: {}", msg),
+            ProviderError::Format(msg) => write!(f, "Format error: {}", msg),
         }
     }
 }
@@ -57,7 +63,10 @@ impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ProviderError::RateLimit(_) | ProviderError::ServerError(_) | ProviderError::Timeout(_)
+            ProviderError::RateLimit(_)
+                | ProviderError::ServerError(_)
+                | ProviderError::Timeout(_)
+                | ProviderError::Overloaded(_)
         )
     }
 
@@ -68,7 +77,10 @@ impl ProviderError {
     pub fn should_fallback(&self) -> bool {
         !matches!(
             self,
-            ProviderError::Auth(_) | ProviderError::InvalidRequest(_) | ProviderError::Billing(_)
+            ProviderError::Auth(_)
+                | ProviderError::InvalidRequest(_)
+                | ProviderError::Billing(_)
+                | ProviderError::Format(_)
         )
     }
 
@@ -82,6 +94,8 @@ impl ProviderError {
             ProviderError::InvalidRequest(_) => Some(400),
             ProviderError::ModelNotFound(_) => Some(404),
             ProviderError::Timeout(_) => None,
+            ProviderError::Overloaded(_) => Some(503),
+            ProviderError::Format(_) => Some(400),
             ProviderError::Unknown(_) => None,
         }
     }
@@ -246,6 +260,12 @@ mod tests {
         assert!(ProviderError::Unknown("???".into())
             .to_string()
             .contains("Unknown provider error"));
+        assert!(ProviderError::Overloaded("busy".into())
+            .to_string()
+            .contains("Overloaded error"));
+        assert!(ProviderError::Format("bad id".into())
+            .to_string()
+            .contains("Format error"));
     }
 
     #[test]
@@ -255,12 +275,16 @@ mod tests {
         assert!(ProviderError::ServerError("500".into()).is_retryable());
         assert!(ProviderError::Timeout("timeout".into()).is_retryable());
 
+        // Also retryable
+        assert!(ProviderError::Overloaded("busy".into()).is_retryable());
+
         // Not retryable
         assert!(!ProviderError::Auth("401".into()).is_retryable());
         assert!(!ProviderError::Billing("402".into()).is_retryable());
         assert!(!ProviderError::InvalidRequest("400".into()).is_retryable());
         assert!(!ProviderError::ModelNotFound("404".into()).is_retryable());
         assert!(!ProviderError::Unknown("???".into()).is_retryable());
+        assert!(!ProviderError::Format("bad id".into()).is_retryable());
     }
 
     #[test]
@@ -272,10 +296,14 @@ mod tests {
         assert!(ProviderError::ModelNotFound("404".into()).should_fallback());
         assert!(ProviderError::Unknown("???".into()).should_fallback());
 
+        // Also fallbacks
+        assert!(ProviderError::Overloaded("busy".into()).should_fallback());
+
         // Should NOT fallback
         assert!(!ProviderError::Auth("401".into()).should_fallback());
         assert!(!ProviderError::InvalidRequest("400".into()).should_fallback());
         assert!(!ProviderError::Billing("402".into()).should_fallback());
+        assert!(!ProviderError::Format("bad id".into()).should_fallback());
     }
 
     #[test]
@@ -299,6 +327,11 @@ mod tests {
             Some(404)
         );
         assert_eq!(ProviderError::Timeout("x".into()).status_code(), None);
+        assert_eq!(
+            ProviderError::Overloaded("x".into()).status_code(),
+            Some(503)
+        );
+        assert_eq!(ProviderError::Format("x".into()).status_code(), Some(400));
         assert_eq!(ProviderError::Unknown("x".into()).status_code(), None);
     }
 
