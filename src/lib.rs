@@ -64,7 +64,8 @@ pub use health::{health_port, start_health_server, start_periodic_usage_flush, U
 #[cfg(target_os = "macos")]
 pub use runtime::AppleContainerRuntime;
 pub use security::{
-    validate_extra_mounts, validate_path_in_workspace, SafePath, ShellSecurityConfig,
+    validate_extra_mounts, validate_path_in_workspace, AgentMode, AgentModeConfig,
+    CategoryPermission, ModePolicy, SafePath, ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 #[cfg(feature = "screenshot")]
@@ -72,6 +73,6 @@ pub use tools::screenshot::WebScreenshotTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
     EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolContext,
-    ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolCategory,
+    ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
 };

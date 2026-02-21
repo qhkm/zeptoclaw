@@ -10,7 +10,7 @@ use crate::cron::{
 };
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool for creating and managing scheduled jobs.
 pub struct CronTool {
@@ -36,6 +36,10 @@ impl Tool for CronTool {
 
     fn compact_description(&self) -> &str {
         "Schedule task"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Destructive
     }
 
     fn parameters(&self) -> Value {

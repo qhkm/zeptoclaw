@@ -13,7 +13,7 @@ use crate::config::CustomToolDef;
 use crate::error::{Result, ZeptoError};
 use crate::security::ShellSecurityConfig;
 
-use super::types::{Tool, ToolContext};
+use super::types::{Tool, ToolCategory, ToolContext};
 
 /// Maximum output bytes to capture from custom tool stdout (50KB).
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -65,6 +65,10 @@ impl Tool for CustomTool {
 
     fn compact_description(&self) -> &str {
         self.description()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

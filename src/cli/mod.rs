@@ -55,6 +55,9 @@ enum Commands {
         /// Show what tools would be called without executing them
         #[arg(long)]
         dry_run: bool,
+        /// Agent mode: observer (read-only), assistant (read/write + approval), autonomous (full access)
+        #[arg(long)]
+        mode: Option<String>,
     },
     /// Process prompts from a file
     Batch {
@@ -373,8 +376,9 @@ pub async fn run() -> Result<()> {
             template,
             stream,
             dry_run,
+            mode,
         }) => {
-            agent::cmd_agent(message, template, stream, dry_run).await?;
+            agent::cmd_agent(message, template, stream, dry_run, mode).await?;
         }
         Some(Commands::Batch {
             input,

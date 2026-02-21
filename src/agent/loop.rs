@@ -128,6 +128,8 @@ pub struct AgentLoop {
     token_budget: Arc<TokenBudget>,
     /// Tool approval gate for policy-based tool gating.
     approval_gate: Arc<ApprovalGate>,
+    /// Agent mode for category-based tool enforcement.
+    agent_mode: crate::security::AgentMode,
     /// Optional safety layer for tool output sanitization.
     safety_layer: Option<Arc<SafetyLayer>>,
     /// Optional context monitor for compaction.
@@ -176,6 +178,7 @@ impl AgentLoop {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
+        let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
             Some(Arc::new(SafetyLayer::new(config.safety.clone())))
         } else {
@@ -207,6 +210,7 @@ impl AgentLoop {
             dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
+            agent_mode,
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
@@ -230,6 +234,7 @@ impl AgentLoop {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
+        let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
             Some(Arc::new(SafetyLayer::new(config.safety.clone())))
         } else {
@@ -261,6 +266,7 @@ impl AgentLoop {
             dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
+            agent_mode,
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
@@ -542,6 +548,7 @@ impl AgentLoop {
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
             let is_dry_run = self.dry_run.load(Ordering::SeqCst);
+            let current_agent_mode = self.agent_mode;
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -559,6 +566,7 @@ impl AgentLoop {
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run;
+                    let agent_mode = current_agent_mode;
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -576,6 +584,40 @@ impl AgentLoop {
                             hooks.before_tool(&name, &args, channel_name, chat_id)
                         {
                             return (id, format!("Tool '{}' blocked by hook: {}", name, msg));
+                        }
+
+                        // Agent mode enforcement (before approval gate).
+                        // RequiresApproval: blocks the tool unless ApprovalGate is
+                        // already configured to gate this tool name. In practice, this
+                        // means Assistant mode blocks Shell/Hardware/Destructive tools
+                        // unless the operator has explicitly listed them in
+                        // `approval.require_approval_for`. This is "fail-closed" by design.
+                        {
+                            let mode_policy = crate::security::ModePolicy::new(agent_mode);
+                            let tools_guard = tools.read().await;
+                            if let Some(tool) = tools_guard.get(&name) {
+                                let tool_category = tool.category();
+                                match mode_policy.check(tool_category) {
+                                    crate::security::CategoryPermission::Blocked => {
+                                        info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool blocked by agent mode");
+                                        return (id, format!(
+                                            "Tool '{}' is blocked in {} mode (category: {})",
+                                            name, agent_mode, tool_category
+                                        ));
+                                    }
+                                    crate::security::CategoryPermission::RequiresApproval => {
+                                        if !gate.requires_approval(&name) {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
+                                            return (id, format!(
+                                                "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
+                                                name, agent_mode, tool_category
+                                            ));
+                                        }
+                                        // Fall through to approval gate — it will prompt for approval
+                                    }
+                                    crate::security::CategoryPermission::Allowed => {}
+                                }
+                            }
                         }
 
                         // Check approval gate before executing
@@ -843,6 +885,7 @@ impl AgentLoop {
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
             let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
+            let current_agent_mode_stream = self.agent_mode;
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -858,10 +901,39 @@ impl AgentLoop {
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run_stream;
+                    let agent_mode = current_agent_mode_stream;
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
                             .unwrap_or_else(|_| serde_json::json!({}));
+
+                        // Agent mode enforcement — same fail-closed logic as non-streaming path.
+                        {
+                            let mode_policy = crate::security::ModePolicy::new(agent_mode);
+                            let tools_guard = tools.read().await;
+                            if let Some(tool) = tools_guard.get(&name) {
+                                let tool_category = tool.category();
+                                match mode_policy.check(tool_category) {
+                                    crate::security::CategoryPermission::Blocked => {
+                                        info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool blocked by agent mode");
+                                        return (id, format!(
+                                            "Tool '{}' is blocked in {} mode (category: {})",
+                                            name, agent_mode, tool_category
+                                        ));
+                                    }
+                                    crate::security::CategoryPermission::RequiresApproval => {
+                                        if !gate.requires_approval(&name) {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
+                                            return (id, format!(
+                                                "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
+                                                name, agent_mode, tool_category
+                                            ));
+                                        }
+                                    }
+                                    crate::security::CategoryPermission::Allowed => {}
+                                }
+                            }
+                        }
 
                         // Check approval gate before executing
                         if gate.requires_approval(&name) {

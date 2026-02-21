@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use crate::error::{Result, ZeptoError};
 use crate::memory::longterm::LongTermMemory;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool for storing and retrieving long-term memories across sessions.
 pub struct LongTermMemoryTool {
@@ -51,6 +51,10 @@ impl Tool for LongTermMemoryTool {
 
     fn compact_description(&self) -> &str {
         "Long-term memory store"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
 
     fn parameters(&self) -> Value {

@@ -12,7 +12,7 @@ use crate::error::{Result, ZeptoError};
 use crate::runtime::{ContainerConfig, ContainerRuntime, NativeRuntime};
 use crate::security::ShellSecurityConfig;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool for executing shell commands.
 ///
@@ -118,6 +118,10 @@ impl Tool for ShellTool {
 
     fn compact_description(&self) -> &str {
         "Run shell command"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

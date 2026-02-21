@@ -171,7 +171,13 @@ impl Config {
         self.apply_project_env_overrides();
 
         // Cache
-        self.apply_cache_env_overrides();    }
+        self.apply_cache_env_overrides();
+
+        // Agent mode
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_AGENT_MODE") {
+            self.agent_mode.mode = val;
+        }
+    }
 
     /// Apply provider-specific environment variable overrides
     fn apply_provider_env_overrides(&mut self) {

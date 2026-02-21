@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::error::{Result, ZeptoError};
 use crate::plugins::types::PluginToolDef;
-use crate::tools::types::{Tool, ToolContext};
+use crate::tools::types::{Tool, ToolCategory, ToolContext};
 
 // ---- JSON-RPC 2.0 types (local, not coupled to MCP) ----
 
@@ -117,6 +117,10 @@ impl Tool for BinaryPluginTool {
 
     fn compact_description(&self) -> &str {
         self.description()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

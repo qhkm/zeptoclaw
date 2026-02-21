@@ -103,6 +103,8 @@ pub struct Config {
     pub stripe: StripeConfig,
     /// LLM response cache configuration
     pub cache: CacheConfig,
+    /// Agent mode configuration (observer/assistant/autonomous)
+    pub agent_mode: crate::security::agent_mode::AgentModeConfig,
     /// Custom CLI-defined tools (shell commands as agent tools).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolDef>,

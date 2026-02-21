@@ -16,7 +16,7 @@ use crate::memory::builtin_searcher::BuiltinSearcher;
 use crate::memory::traits::MemorySearcher;
 use crate::memory::{read_workspace_memory, search_workspace_memory};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool for searching workspace memory files.
 pub struct MemorySearchTool {
@@ -63,6 +63,10 @@ impl Tool for MemorySearchTool {
 
     fn compact_description(&self) -> &str {
         "Search memory"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
 
     fn parameters(&self) -> Value {
@@ -161,6 +165,10 @@ impl Tool for MemoryGetTool {
 
     fn compact_description(&self) -> &str {
         "Read memory"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
 
     fn parameters(&self) -> Value {

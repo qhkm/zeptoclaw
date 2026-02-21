@@ -98,7 +98,7 @@ pub use reminder::ReminderTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
 pub use stripe::StripeTool;
-pub use types::{Tool, ToolContext};
+pub use types::{Tool, ToolCategory, ToolContext};
 pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;
 

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::client::McpClient;
-use crate::tools::{Tool, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext};
 
 /// Wraps a single MCP tool as a ZeptoClaw `Tool` implementation.
 pub struct McpToolWrapper {
@@ -63,6 +63,10 @@ impl Tool for McpToolWrapper {
 
     fn compact_description(&self) -> &str {
         self.description()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkWrite
     }
 
     fn parameters(&self) -> serde_json::Value {

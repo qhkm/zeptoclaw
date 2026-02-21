@@ -16,7 +16,7 @@ use tokio::net::lookup_host;
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 const BRAVE_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const WEB_USER_AGENT: &str = "zeptoclaw/0.1 (+https://github.com/zeptoclaw/zeptoclaw)";
@@ -86,6 +86,10 @@ impl Tool for WebSearchTool {
 
     fn compact_description(&self) -> &str {
         "Web search"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkRead
     }
 
     fn parameters(&self) -> Value {
@@ -255,6 +259,10 @@ impl Tool for WebFetchTool {
 
     fn compact_description(&self) -> &str {
         "Fetch URL"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkRead
     }
 
     fn parameters(&self) -> Value {

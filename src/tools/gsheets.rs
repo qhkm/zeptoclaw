@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 
@@ -259,6 +259,10 @@ impl Tool for GoogleSheetsTool {
 
     fn compact_description(&self) -> &str {
         "Google Sheets"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkWrite
     }
 
     fn parameters(&self) -> Value {
