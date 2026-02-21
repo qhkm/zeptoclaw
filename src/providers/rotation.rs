@@ -1071,12 +1071,18 @@ mod tests {
         );
 
         // Mark haiku as unhealthy by storing failure_count >= threshold and a recent timestamp.
-        provider.providers[0].1.failure_count.store(1, Ordering::Relaxed);
+        provider.providers[0]
+            .1
+            .failure_count
+            .store(1, Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        provider.providers[0].1.last_failure_epoch.store(now, Ordering::Relaxed);
+        provider.providers[0]
+            .1
+            .last_failure_epoch
+            .store(now, Ordering::Relaxed);
 
         let response = provider
             .chat(vec![], vec![], None, ChatOptions::default())
@@ -1186,11 +1192,23 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        provider.providers[0].1.failure_count.store(1, Ordering::Relaxed);
-        provider.providers[0].1.last_failure_epoch.store(now - 100, Ordering::Relaxed);
+        provider.providers[0]
+            .1
+            .failure_count
+            .store(1, Ordering::Relaxed);
+        provider.providers[0]
+            .1
+            .last_failure_epoch
+            .store(now - 100, Ordering::Relaxed);
 
-        provider.providers[1].1.failure_count.store(1, Ordering::Relaxed);
-        provider.providers[1].1.last_failure_epoch.store(now - 10, Ordering::Relaxed);
+        provider.providers[1]
+            .1
+            .failure_count
+            .store(1, Ordering::Relaxed);
+        provider.providers[1]
+            .1
+            .last_failure_epoch
+            .store(now - 10, Ordering::Relaxed);
 
         // When all unhealthy, should use oldest failure (index 0) regardless of cost.
         let idx = provider.select_provider_index();
