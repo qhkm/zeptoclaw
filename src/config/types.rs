@@ -1109,6 +1109,9 @@ pub struct ToolsConfig {
     /// Voice transcription tool configuration
     #[serde(default)]
     pub transcribe: TranscribeConfig,
+    /// Skills marketplace (ClawHub) configuration
+    #[serde(default)]
+    pub skills: SkillsMarketplaceConfig,
 }
 
 /// Configuration for the HTTP request tool.
@@ -1328,6 +1331,84 @@ impl Default for HeartbeatConfig {
 }
 
 // ============================================================================
+
+// ============================================================================
+// Skills Marketplace (ClawHub) Configuration
+// ============================================================================
+
+/// Skills marketplace (ClawHub) tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillsMarketplaceConfig {
+    /// Enable skills marketplace tools (find_skills, install_skill).
+    #[serde(default)]
+    pub enabled: bool,
+    /// ClawHub registry settings.
+    #[serde(default)]
+    pub clawhub: ClawHubConfig,
+    /// In-memory search cache settings.
+    #[serde(default)]
+    pub search_cache: SearchCacheConfig,
+}
+
+/// ClawHub registry connection settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClawHubConfig {
+    /// Enable the ClawHub registry (requires skills.enabled too).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Base URL for the ClawHub API.
+    #[serde(default = "default_clawhub_url")]
+    pub base_url: String,
+    /// Optional Bearer token for authenticated registry access.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_clawhub_url() -> String {
+    "https://clawhub.ai".to_string()
+}
+
+impl Default for ClawHubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: default_clawhub_url(),
+            auth_token: None,
+        }
+    }
+}
+
+/// In-memory search result cache settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchCacheConfig {
+    /// Maximum number of cached queries.
+    #[serde(default = "default_cache_size")]
+    pub max_size: usize,
+    /// Cache entry TTL in seconds.
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_seconds: u64,
+}
+
+fn default_cache_size() -> usize {
+    50
+}
+
+fn default_cache_ttl() -> u64 {
+    300
+}
+
+impl Default for SearchCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_size: default_cache_size(),
+            ttl_seconds: default_cache_ttl(),
+        }
+    }
+}
+
 // Skills Configuration
 // ============================================================================
 

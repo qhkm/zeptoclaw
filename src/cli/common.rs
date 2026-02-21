@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use std::time::Duration;
 use zeptoclaw::agent::{AgentLoop, ContextBuilder, RuntimeContext};
 use zeptoclaw::auth::{self, AuthMethod};
 use zeptoclaw::bus::MessageBus;
@@ -22,6 +23,7 @@ use zeptoclaw::providers::{
 };
 use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
+use zeptoclaw::skills::registry::{ClawHubRegistry, SearchCache};
 use zeptoclaw::skills::SkillsLoader;
 use zeptoclaw::tools::cron::CronTool;
 use zeptoclaw::tools::delegate::DelegateTool;
@@ -29,8 +31,10 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, PdfReadTool, ProjectTool, R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool, InstallSkillTool,
+    MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool,
+    TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -835,6 +839,45 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                 info!("Registered reminder tool");
             }
             Err(e) => warn!("Failed to initialize reminder tool: {}", e),
+        }
+    }
+
+    // Register ClawHub skills marketplace tools
+    if config.tools.skills.enabled && config.tools.skills.clawhub.enabled {
+        let cache = Arc::new(SearchCache::new(
+            config.tools.skills.search_cache.max_size,
+            Duration::from_secs(config.tools.skills.search_cache.ttl_seconds),
+        ));
+        let registry = Arc::new(ClawHubRegistry::new(
+            &config.tools.skills.clawhub.base_url,
+            config.tools.skills.clawhub.auth_token.clone(),
+            cache,
+        ));
+        if tool_enabled("find_skills") {
+            agent
+                .register_tool(Box::new(FindSkillsTool::new(Arc::clone(&registry))))
+                .await;
+            info!("Registered find_skills tool");
+        }
+        if tool_enabled("install_skill") {
+            let skills_dir = config
+                .skills
+                .workspace_dir
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    zeptoclaw::config::Config::dir()
+                        .join("skills")
+                        .to_string_lossy()
+                        .into_owned()
+                });
+            agent
+                .register_tool(Box::new(InstallSkillTool::new(
+                    Arc::clone(&registry),
+                    skills_dir,
+                )))
+                .await;
+            info!("Registered install_skill tool");
         }
     }
 

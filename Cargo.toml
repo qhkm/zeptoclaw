@@ -137,6 +137,8 @@ base64 = "0.22"
 tempfile = "3.10"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
+# Zip archive extraction for ClawHub skill installs
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # =============================================================================
 # EMAIL CHANNEL (optional — feature-gated behind "channel-email")

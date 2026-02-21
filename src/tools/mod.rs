@@ -77,6 +77,8 @@ pub mod reminder;
 #[cfg(feature = "screenshot")]
 pub mod screenshot;
 pub mod shell;
+pub mod skills_install;
+pub mod skills_search;
 pub mod spawn;
 pub mod stripe;
 pub mod transcribe;
@@ -101,6 +103,8 @@ pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
+pub use skills_install::InstallSkillTool;
+pub use skills_search::FindSkillsTool;
 pub use stripe::StripeTool;
 pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
