@@ -193,7 +193,7 @@ pub async fn register_configured_channels(
 
     // Email (IMAP IDLE + SMTP) — requires channel-email feature
     if let Some(ref email_cfg) = config.channels.email {
-        if !email_cfg.username.is_empty() {
+        if email_cfg.enabled && !email_cfg.username.is_empty() {
             manager
                 .register(Box::new(EmailChannel::new(email_cfg.clone(), bus.clone())))
                 .await;
@@ -201,6 +201,8 @@ pub async fn register_configured_channels(
                 "Registered Email channel (IMAP IDLE on {})",
                 email_cfg.imap_host
             );
+        } else if !email_cfg.enabled {
+            // Channel is present in config but not enabled — skip silently.
         } else {
             warn!("Email channel configured but username is empty");
         }

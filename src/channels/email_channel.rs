@@ -77,11 +77,6 @@ impl EmailChannel {
         }
     }
 
-    /// Returns the channel name.
-    pub fn channel_name(&self) -> &str {
-        "email"
-    }
-
     /// Check whether the given sender email address is permitted.
     ///
     /// Rules (applied in order):
@@ -192,6 +187,11 @@ impl EmailChannel {
 
     /// Run a single IMAP IDLE session: connect → select mailbox → process
     /// existing unseen messages → IDLE loop.
+    ///
+    /// The `_stop` handle returned by `idle.wait()` is intentionally held until
+    /// `idle.done()` is called. The IDLE timeout is capped at
+    /// `config.idle_timeout_secs` (default 1740 s ≈ 29 min) so the loop
+    /// re-checks `running` at least that often even without an explicit interrupt.
     #[cfg(feature = "channel-email")]
     async fn run_idle_session(&self) -> std::result::Result<(), ZeptoError> {
         use async_imap::extensions::idle::IdleResponse;
@@ -212,7 +212,7 @@ impl EmailChannel {
         self.process_unseen(&mut session).await?;
 
         loop {
-            if !self.running.load(Ordering::Relaxed) {
+            if !self.running.load(Ordering::SeqCst) {
                 break;
             }
 
@@ -317,16 +317,18 @@ impl EmailChannel {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".into());
 
-            if !self.is_sender_allowed(&from) {
-                warn!("Blocked email from {from}");
-                continue;
-            }
-
+            // Dedup BEFORE allowlist check so blocked messages are not
+            // re-warned on every reconnect.
             let is_new = {
                 let mut seen = self.seen_ids.lock().await;
                 seen.insert(msg_id.clone())
             };
             if !is_new {
+                continue;
+            }
+
+            if !self.is_sender_allowed(&from) {
+                warn!("Blocked email from {from}");
                 continue;
             }
 
@@ -376,12 +378,11 @@ impl Channel for EmailChannel {
 
         #[cfg(feature = "channel-email")]
         {
-            if self.running.load(Ordering::Relaxed) {
+            // Fix 4: atomic swap prevents a double-start race condition.
+            if self.running.swap(true, Ordering::SeqCst) {
                 warn!("Email channel already running");
                 return Ok(());
             }
-
-            self.running.store(true, Ordering::Relaxed);
 
             let config = self.config.clone();
             let bus = Arc::clone(&self.bus);
@@ -400,7 +401,7 @@ impl Channel for EmailChannel {
                 let mut backoff = std::time::Duration::from_secs(1);
                 let max_backoff = std::time::Duration::from_secs(60);
 
-                while this_running.load(Ordering::Relaxed) {
+                while this_running.load(Ordering::SeqCst) {
                     match channel.run_idle_session().await {
                         Ok(()) => break,
                         Err(e) => {
@@ -411,7 +412,7 @@ impl Channel for EmailChannel {
                     }
                 }
 
-                this_running.store(false, Ordering::Relaxed);
+                this_running.store(false, Ordering::SeqCst);
                 info!("Email channel stopped");
             });
 
@@ -424,7 +425,10 @@ impl Channel for EmailChannel {
     }
 
     async fn stop(&mut self) -> Result<()> {
-        self.running.store(false, Ordering::Relaxed);
+        // Fix 3: use SeqCst to match the rest of the codebase.
+        // The IDLE loop re-checks `running` on each timeout (≤ idle_timeout_secs),
+        // so shutdown latency is bounded without needing extra plumbing.
+        self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -441,10 +445,12 @@ impl Channel for EmailChannel {
 
         #[cfg(feature = "channel-email")]
         {
+            // Fix 1: use async SMTP transport so we don't block the Tokio thread.
             use lettre::{
                 message::SinglePart,
                 transport::smtp::authentication::Credentials,
-                Message as LettreMessage, SmtpTransport, Transport,
+                AsyncSmtpTransport, AsyncTransport, Message as LettreMessage,
+                Tokio1Executor,
             };
 
             let (subject, body) = if msg.content.starts_with("Subject: ") {
@@ -491,14 +497,17 @@ impl Channel for EmailChannel {
             let creds =
                 Credentials::new(self.config.username.clone(), self.config.password.clone());
 
-            let transport = SmtpTransport::starttls_relay(&self.config.smtp_host)
-                .map_err(|e| ZeptoError::Channel(format!("SMTP relay error: {e}")))?
-                .port(self.config.smtp_port)
-                .credentials(creds)
-                .build();
+            let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
+                &self.config.smtp_host,
+            )
+            .map_err(|e| ZeptoError::Channel(format!("SMTP relay error: {e}")))?
+            .port(self.config.smtp_port)
+            .credentials(creds)
+            .build();
 
             transport
-                .send(&email)
+                .send(email)
+                .await
                 .map_err(|e| ZeptoError::Channel(format!("SMTP send failed: {e}")))?;
 
             info!("Email sent to {}", msg.chat_id);
@@ -507,7 +516,7 @@ impl Channel for EmailChannel {
     }
 
     fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
+        self.running.load(Ordering::SeqCst)
     }
 
     fn is_allowed(&self, user_id: &str) -> bool {
@@ -536,6 +545,7 @@ mod tests {
             allowed_senders: vec![],
             deny_by_default: false,
             idle_timeout_secs: 1740,
+            enabled: false,
         }
     }
 
@@ -723,5 +733,26 @@ mod tests {
     fn test_is_running_default_false() {
         let ch = make_channel(make_config());
         assert!(!ch.is_running());
+    }
+
+    // ---- enabled field ----
+
+    #[test]
+    fn test_config_enabled_default_false() {
+        let cfg = EmailConfig::default();
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn test_config_enabled_serde() {
+        let json = serde_json::json!({
+            "imap_host": "imap.gmail.com",
+            "smtp_host": "smtp.gmail.com",
+            "username": "user@gmail.com",
+            "password": "pass",
+            "enabled": true
+        });
+        let cfg: EmailConfig = serde_json::from_value(json).unwrap();
+        assert!(cfg.enabled);
     }
 }

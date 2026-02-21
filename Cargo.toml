@@ -141,7 +141,7 @@ rpassword = "7.3"
 # IMAP IDLE client for real-time inbound email
 async-imap   = { version = "0.10", optional = true, default-features = false, features = ["runtime-tokio"] }
 # SMTP client for outbound email (STARTTLS, builder API)
-lettre       = { version = "0.11", optional = true, default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }
+lettre       = { version = "0.11", optional = true, default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 # Fast RFC 5322 / MIME parser (zero-copy)
 mail-parser  = { version = "0.9",  optional = true }
 # TLS adapter for Tokio async streams (IMAP over TLS)

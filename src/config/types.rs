@@ -1793,7 +1793,7 @@ fn default_email_idle_timeout_secs() -> u64 { 1740 }
 ///
 /// Stored under `channels.email` in `config.json`.
 /// The channel is only functional when built with `--features channel-email`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EmailConfig {
     /// IMAP server hostname (e.g. `imap.gmail.com`)
     pub imap_host: String,
@@ -1824,6 +1824,9 @@ pub struct EmailConfig {
     /// Seconds before restarting IDLE (RFC 2177 recommends < 30 min). Default: 1740.
     #[serde(default = "default_email_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// When `true`, the channel is active. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for EmailConfig {
@@ -1840,6 +1843,26 @@ impl Default for EmailConfig {
             allowed_senders: Vec::new(),
             deny_by_default: false,
             idle_timeout_secs: default_email_idle_timeout_secs(),
+            enabled: false,
         }
+    }
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("imap_folder", &self.imap_folder)
+            .field("display_name", &self.display_name)
+            .field("allowed_senders", &self.allowed_senders)
+            .field("deny_by_default", &self.deny_by_default)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("enabled", &self.enabled)
+            .finish()
     }
 }
