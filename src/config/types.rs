@@ -921,6 +921,9 @@ pub struct ProvidersConfig {
     pub fallback: FallbackConfig,
     /// Provider rotation configuration for 3+ health-aware providers
     pub rotation: RotationConfig,
+    /// External binary provider plugins (JSON-RPC 2.0 over stdin/stdout)
+    #[serde(default)]
+    pub plugins: Vec<ProviderPluginConfig>,
 }
 
 /// Generic provider configuration
@@ -942,6 +945,32 @@ impl ProviderConfig {
     pub fn resolved_auth_method(&self) -> crate::auth::AuthMethod {
         crate::auth::AuthMethod::from_option(self.auth_method.as_deref())
     }
+}
+
+/// Configuration for an external binary LLM provider plugin.
+///
+/// The binary is invoked once per `chat()` call and communicates via
+/// JSON-RPC 2.0 over stdin/stdout.
+///
+/// # Example (config.json)
+/// ```json
+/// {
+///   "providers": {
+///     "plugins": [
+///       {"name": "myprovider", "command": "/usr/local/bin/my-provider", "args": ["--mode", "chat"]}
+///     ]
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderPluginConfig {
+    /// Unique provider name (used in `providers.primary` / `providers.fallback.provider`)
+    pub name: String,
+    /// Path to the provider binary
+    pub command: String,
+    /// Additional arguments passed to the binary
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// Retry behavior for runtime provider calls.

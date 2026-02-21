@@ -18,7 +18,7 @@ use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
-    GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
+    GeminiProvider, LLMProvider, OpenAIProvider, ProviderPlugin, RetryProvider, RuntimeProviderSelection,
 };
 use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
@@ -980,6 +980,53 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                 provider = selection.name,
                 "Registered provider in model-switch registry"
             );
+        }
+    }
+
+    // Register provider plugins (JSON-RPC 2.0 over stdin/stdout).
+    // Plugin providers are registered only when no runtime provider (Claude/OpenAI/etc.)
+    // has been configured. The first plugin becomes primary; subsequent plugins are
+    // chained as fallbacks when `providers.fallback.enabled` is true.
+    if agent.provider().await.is_none() && !config.providers.plugins.is_empty() {
+        let mut plugin_iter = config.providers.plugins.iter();
+
+        // First plugin becomes the primary provider
+        if let Some(first_cfg) = plugin_iter.next() {
+            let first = ProviderPlugin::new(
+                first_cfg.name.clone(),
+                first_cfg.command.clone(),
+                first_cfg.args.clone(),
+            );
+            let mut chain: Box<dyn LLMProvider> = Box::new(first);
+            let mut chain_names = vec![first_cfg.name.clone()];
+
+            // Additional plugins are appended as fallbacks when enabled
+            if config.providers.fallback.enabled {
+                for plugin_cfg in plugin_iter {
+                    let fallback = ProviderPlugin::new(
+                        plugin_cfg.name.clone(),
+                        plugin_cfg.command.clone(),
+                        plugin_cfg.args.clone(),
+                    );
+                    chain = Box::new(FallbackProvider::new(chain, Box::new(fallback)));
+                    chain_names.push(plugin_cfg.name.clone());
+                }
+            }
+
+            let chain_label = chain_names.join(" -> ");
+            let plugin_count = chain_names.len();
+            let chain = apply_retry_wrapper(chain, &config);
+            agent.set_provider(chain).await;
+
+            if plugin_count > 1 {
+                info!(
+                    plugin_count = plugin_count,
+                    plugin_chain = %chain_label,
+                    "Configured provider plugin fallback chain"
+                );
+            } else {
+                info!("Configured provider plugin: {}", chain_label);
+            }
         }
     }
 
