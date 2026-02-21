@@ -167,6 +167,14 @@ impl SkillsLoader {
                 return false;
             }
         }
+
+        // All declared skill dependencies must exist in skill directories.
+        for dep in &skill.metadata.depends {
+            if self.load_skill(dep).is_none() {
+                return false;
+            }
+        }
+
         true
     }
 
@@ -722,5 +730,43 @@ Use wttr.in.
         assert!(meta.tags.is_empty());
         assert!(meta.depends.is_empty());
         assert!(meta.author.is_none());
+    }
+
+    #[test]
+    fn test_depends_missing_makes_skill_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("skills");
+        std::fs::create_dir_all(ws.join("child")).unwrap();
+        std::fs::write(
+            ws.join("child/SKILL.md"),
+            "---\nname: child\ndescription: Needs parent\ndepends:\n  - nonexistent-parent\n---\nBody.",
+        )
+        .unwrap();
+
+        let loader = SkillsLoader::new(ws, Some(temp.path().join("empty")));
+        let skill = loader.load_skill("child").unwrap();
+        assert!(!loader.check_requirements(&skill));
+    }
+
+    #[test]
+    fn test_depends_present_does_not_block() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("skills");
+        std::fs::create_dir_all(ws.join("parent")).unwrap();
+        std::fs::create_dir_all(ws.join("child")).unwrap();
+        std::fs::write(
+            ws.join("parent/SKILL.md"),
+            "---\nname: parent\ndescription: Parent\n---\nBody.",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("child/SKILL.md"),
+            "---\nname: child\ndescription: Needs parent\ndepends:\n  - parent\n---\nBody.",
+        )
+        .unwrap();
+
+        let loader = SkillsLoader::new(ws, Some(temp.path().join("empty")));
+        let skill = loader.load_skill("child").unwrap();
+        assert!(loader.check_requirements(&skill));
     }
 }
