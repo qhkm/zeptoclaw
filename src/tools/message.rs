@@ -76,6 +76,22 @@ impl Tool for MessageTool {
                     "type": "string",
                     "description": "Destination chat ID. Optional when context already has chat_id."
                 },
+                "reply_to": {
+                    "type": "string",
+                    "description": "Optional message ID to reply to (send action only)."
+                },
+                "discord_thread_name": {
+                    "type": "string",
+                    "description": "Discord only: create a thread in this channel with this name (send action only)."
+                },
+                "discord_thread_message_id": {
+                    "type": "string",
+                    "description": "Discord only: message ID to create a thread from (send action only)."
+                },
+                "discord_thread_auto_archive_minutes": {
+                    "type": "integer",
+                    "description": "Discord only: auto archive duration in minutes for new thread (send action only)."
+                },
                 "action": {
                     "type": "string",
                     "description": "Action to perform. Default: 'send'. Options: 'send', 'react', 'rich_message', 'inline_keyboard'",
@@ -111,6 +127,32 @@ impl Tool for MessageTool {
             .map(str::to_string)
             .or_else(|| ctx.chat_id.clone())
             .ok_or_else(|| ZeptoError::Tool("No target chat_id specified".to_string()))?;
+        let reply_to = args
+            .get("reply_to")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let discord_thread_name = args
+            .get("discord_thread_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let discord_thread_message_id = args
+            .get("discord_thread_message_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let discord_thread_auto_archive_minutes = args
+            .get("discord_thread_auto_archive_minutes")
+            .and_then(|v| match v {
+                Value::Number(n) => n.as_u64(),
+                Value::String(s) => s.parse::<u64>().ok(),
+                _ => None,
+            })
+            .map(|n| n.to_string());
 
         // Validate channel name: only allow known channel types to prevent
         // the LLM from targeting arbitrary/unexpected channels.
@@ -132,11 +174,49 @@ impl Tool for MessageTool {
             .unwrap_or("send");
 
         let payload = args.get("payload");
+        let has_discord_thread_options = discord_thread_name.is_some()
+            || discord_thread_message_id.is_some()
+            || discord_thread_auto_archive_minutes.is_some();
+        if has_discord_thread_options && !channel.eq_ignore_ascii_case("discord") {
+            return Err(ZeptoError::Tool(
+                "Discord thread options require channel='discord'".to_string(),
+            ));
+        }
+        if has_discord_thread_options && discord_thread_name.is_none() {
+            return Err(ZeptoError::Tool(
+                "Missing 'discord_thread_name' for Discord thread creation".to_string(),
+            ));
+        }
+        if (reply_to.is_some() || has_discord_thread_options) && action != "send" {
+            return Err(ZeptoError::Tool(
+                "reply_to and Discord thread options are only supported with action='send'"
+                    .to_string(),
+            ));
+        }
 
         match action {
             "send" => {
+                let mut outbound = OutboundMessage::new(&channel, &chat_id, content);
+                if let Some(reply_id) = reply_to.as_deref() {
+                    outbound = outbound.with_reply(reply_id);
+                }
+                if let Some(name) = discord_thread_name.as_deref() {
+                    outbound = outbound.with_metadata("discord_thread_name", name);
+                }
+                if let Some(message_id) = discord_thread_message_id.as_deref() {
+                    outbound = outbound.with_metadata("discord_thread_message_id", message_id);
+                }
+                if let Some(auto_archive_minutes) =
+                    discord_thread_auto_archive_minutes.as_deref()
+                {
+                    outbound = outbound.with_metadata(
+                        "discord_thread_auto_archive_minutes",
+                        auto_archive_minutes,
+                    );
+                }
+
                 self.bus
-                    .publish_outbound(OutboundMessage::new(&channel, &chat_id, content))
+                    .publish_outbound(outbound)
                     .await
                     .map_err(|e| {
                         ZeptoError::Tool(format!("Failed to publish message: {}", e))
@@ -423,6 +503,105 @@ mod tests {
         assert!(result.is_ok());
         let outbound = bus.consume_outbound().await.expect("outbound message");
         assert_eq!(outbound.content, "Explicit send");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_with_reply_to() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let result = tool
+            .execute(
+                json!({"content": "Reply", "channel": "discord", "chat_id": "c1", "reply_to": "m123"}),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(outbound.reply_to.as_deref(), Some("m123"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_with_discord_thread_metadata() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus.clone());
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "thread starter",
+                    "channel": "discord",
+                    "chat_id": "c1",
+                    "discord_thread_name": "Daily Ops",
+                    "discord_thread_auto_archive_minutes": 60
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let outbound = bus.consume_outbound().await.expect("outbound message");
+        assert_eq!(
+            outbound
+                .metadata
+                .get("discord_thread_name")
+                .map(String::as_str),
+            Some("Daily Ops")
+        );
+        assert_eq!(
+            outbound
+                .metadata
+                .get("discord_thread_auto_archive_minutes")
+                .map(String::as_str),
+            Some("60")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_discord_thread_rejects_non_discord_channel() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "bad",
+                    "channel": "telegram",
+                    "chat_id": "123",
+                    "discord_thread_name": "Nope"
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Discord thread options require channel='discord'"));
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_discord_thread_requires_send_action() {
+        let bus = Arc::new(MessageBus::new());
+        let tool = MessageTool::new(bus);
+
+        let result = tool
+            .execute(
+                json!({
+                    "content": "bad",
+                    "channel": "discord",
+                    "chat_id": "123",
+                    "action": "react",
+                    "discord_thread_name": "Nope",
+                    "payload": {"emoji": "heart"}
+                }),
+                &ToolContext::new(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("only supported with action='send'"));
     }
 
     // ====================================================================

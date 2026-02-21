@@ -162,9 +162,9 @@ src/
 ├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.)
 │   ├── factory.rs  # Channel factory/registry
 │   ├── manager.rs  # Channel lifecycle management
-│   ├── telegram.rs # Telegram bot channel
+│   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support)
 │   ├── slack.rs    # Slack outbound channel
-│   ├── discord.rs  # Discord Gateway WebSocket + REST
+│   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
 │   ├── webhook.rs  # Generic HTTP webhook inbound
 │   ├── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
 │   └── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
@@ -173,7 +173,7 @@ src/
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types and loading
-├── cron/           # Persistent cron scheduler service
+├── cron/           # Persistent cron scheduler service (dispatch timeout + error backoff)
 ├── deps/           # Dependency manager (install, start, stop, health check)
 │   ├── types.rs    # Dependency, DepKind, HealthCheck, HasDependencies
 │   ├── registry.rs # JSON registry (installed state tracking)
@@ -205,7 +205,7 @@ src/
 │   ├── web.rs         # Web search (Brave) and fetch with SSRF protection
 │   ├── whatsapp.rs    # WhatsApp Cloud API messaging
 │   ├── gsheets.rs     # Google Sheets read/write
-│   ├── message.rs     # Proactive channel messaging
+│   ├── message.rs     # Proactive channel messaging (reply/thread hints)
 │   ├── memory.rs      # Workspace memory get/search
 │   ├── longterm_memory.rs # Long-term memory tool (set/get/search/delete/list/categories/pin)
 │   ├── cron.rs        # Cron job scheduling
@@ -266,7 +266,7 @@ OAuth support with PKCE, CSRF state validation, encrypted token persistence, and
 Message input channels via `Channel` trait:
 - `TelegramChannel` - Telegram bot integration
 - `SlackChannel` - Slack outbound messaging
-- `DiscordChannel` - Discord Gateway WebSocket + REST API messaging
+- `DiscordChannel` - Discord Gateway WebSocket + REST API messaging (replies + thread creation)
 - `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth
 - `WhatsAppChannel` - WhatsApp via whatsmeow-rs bridge (WebSocket JSON protocol)
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
@@ -436,19 +436,22 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (1719 tests)
+# Unit tests (1791 tests)
 cargo test --lib
 
-# Main binary tests (54 tests)
+# Main binary tests (59 tests)
 cargo test --bin zeptoclaw
 
 # CLI smoke tests (23 tests)
 cargo test --test cli_smoke
 
+# End-to-end tests (13 tests)
+cargo test --test e2e
+
 # Integration tests (68 tests)
 cargo test --test integration
 
-# All tests (~2,004 total including doc tests)
+# All tests (~2,101 total including doc tests)
 cargo test
 
 # Specific test

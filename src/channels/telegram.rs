@@ -56,6 +56,39 @@ const MAX_RETRY_DELAY_SECS: u64 = 120;
 
 use super::{BaseChannelConfig, Channel};
 
+fn render_telegram_html(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 16);
+    let mut chars = content.chars().peekable();
+    let mut spoiler_open = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '|' && chars.peek() == Some(&'|') {
+            let _ = chars.next();
+            if spoiler_open {
+                out.push_str("</tg-spoiler>");
+            } else {
+                out.push_str("<tg-spoiler>");
+            }
+            spoiler_open = !spoiler_open;
+            continue;
+        }
+
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+
+    // Graceful fallback for unmatched spoiler marker.
+    if spoiler_open {
+        out.push_str("</tg-spoiler>");
+    }
+
+    out
+}
+
 /// Telegram channel implementation using teloxide.
 ///
 /// This channel connects to Telegram's Bot API to receive and send messages.
@@ -408,7 +441,7 @@ impl Channel for TelegramChannel {
     /// - The Telegram API request fails
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
-        use teloxide::types::ChatId;
+        use teloxide::types::{ChatId, ParseMode};
 
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
@@ -430,7 +463,9 @@ impl Channel for TelegramChannel {
             .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
 
-        bot.send_message(ChatId(chat_id), &msg.content)
+        let rendered = render_telegram_html(&msg.content);
+        bot.send_message(ChatId(chat_id), rendered)
+            .parse_mode(ParseMode::Html)
             .await
             .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
 
@@ -539,6 +574,24 @@ mod tests {
         assert!(channel.is_allowed("admin"));
         assert!(!channel.is_allowed("user3"));
         assert!(!channel.is_allowed("hacker"));
+    }
+
+    #[test]
+    fn test_render_telegram_html_escapes_html() {
+        let rendered = render_telegram_html("5 < 7 & 9 > 2");
+        assert_eq!(rendered, "5 &lt; 7 &amp; 9 &gt; 2");
+    }
+
+    #[test]
+    fn test_render_telegram_html_spoiler_pairs() {
+        let rendered = render_telegram_html("Secret: ||classified|| data");
+        assert_eq!(rendered, "Secret: <tg-spoiler>classified</tg-spoiler> data");
+    }
+
+    #[test]
+    fn test_render_telegram_html_unmatched_spoiler() {
+        let rendered = render_telegram_html("Dangling ||spoiler");
+        assert_eq!(rendered, "Dangling <tg-spoiler>spoiler</tg-spoiler>");
     }
 
     #[tokio::test]

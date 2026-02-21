@@ -52,6 +52,8 @@ const GATEWAY_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
 
 /// Discord message content length limit.
 const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
+const DISCORD_CHANNEL_TYPE_GUILD_FORUM: u8 = 15;
+const DISCORD_CHANNEL_TYPE_GUILD_MEDIA: u8 = 16;
 
 // ---------------------------------------------------------------------------
 // Gateway payload types (deserialization)
@@ -107,6 +109,19 @@ struct MessageAuthor {
 #[derive(Debug, Deserialize)]
 struct GatewayResponse {
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordChannelInfo {
+    #[serde(rename = "type")]
+    channel_type: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordThreadRequest {
+    name: String,
+    message_id: Option<String>,
+    auto_archive_minutes: Option<u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +341,166 @@ impl DiscordChannel {
         }
 
         Ok(payload)
+    }
+
+    fn parse_discord_thread_request(msg: &OutboundMessage) -> Result<Option<DiscordThreadRequest>> {
+        let thread_name = msg
+            .metadata
+            .get("discord_thread_name")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let message_id = msg
+            .metadata
+            .get("discord_thread_message_id")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let auto_archive_minutes = match msg
+            .metadata
+            .get("discord_thread_auto_archive_minutes")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => Some(raw.parse::<u16>().map_err(|_| {
+                ZeptoError::Channel(format!(
+                    "Invalid discord_thread_auto_archive_minutes '{}'",
+                    raw
+                ))
+            })?),
+            None => None,
+        };
+
+        if thread_name.is_none() && message_id.is_none() && auto_archive_minutes.is_none() {
+            return Ok(None);
+        }
+
+        let name = thread_name.ok_or_else(|| {
+            ZeptoError::Channel("Missing discord_thread_name for Discord thread create".to_string())
+        })?;
+        Ok(Some(DiscordThreadRequest {
+            name,
+            message_id,
+            auto_archive_minutes,
+        }))
+    }
+
+    fn build_create_thread_payload(
+        req: &DiscordThreadRequest,
+        content: &str,
+        forum_like: bool,
+    ) -> Value {
+        let mut payload = json!({ "name": req.name });
+        if let Some(minutes) = req.auto_archive_minutes {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("auto_archive_duration".to_string(), json!(minutes));
+            }
+        }
+        if forum_like {
+            let starter = content.trim();
+            let starter_content = if starter.is_empty() {
+                &req.name
+            } else {
+                starter
+            };
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("message".to_string(), json!({ "content": starter_content }));
+            }
+        }
+        payload
+    }
+
+    async fn fetch_channel_type(&self, token: &str, channel_id: &str) -> Result<Option<u8>> {
+        let url = format!("{}/channels/{}", DISCORD_API_BASE, channel_id);
+        let response = self
+            .http_client
+            .get(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+            .map_err(|e| {
+                ZeptoError::Channel(format!(
+                    "Failed to fetch Discord channel metadata for thread create: {}",
+                    e
+                ))
+            })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            ZeptoError::Channel(format!("Failed to read Discord channel response: {}", e))
+        })?;
+
+        if !status.is_success() {
+            warn!(
+                "Discord channel lookup returned HTTP {} while creating thread: {}",
+                status, body
+            );
+            return Ok(None);
+        }
+
+        let parsed: DiscordChannelInfo = match serde_json::from_str(&body) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Discord channel lookup JSON parse failed: {}", e);
+                return Ok(None);
+            }
+        };
+        Ok(Some(parsed.channel_type))
+    }
+
+    async fn create_thread(
+        &self,
+        token: &str,
+        channel_id: &str,
+        req: &DiscordThreadRequest,
+        content: &str,
+    ) -> Result<()> {
+        let is_forum_like = if req.message_id.is_none() {
+            matches!(
+                self.fetch_channel_type(token, channel_id).await?,
+                Some(channel_type)
+                    if channel_type == DISCORD_CHANNEL_TYPE_GUILD_FORUM
+                        || channel_type == DISCORD_CHANNEL_TYPE_GUILD_MEDIA
+            )
+        } else {
+            false
+        };
+
+        let payload = Self::build_create_thread_payload(req, content, is_forum_like);
+        let url = if let Some(message_id) = req.message_id.as_deref() {
+            format!(
+                "{}/channels/{}/messages/{}/threads",
+                DISCORD_API_BASE, channel_id, message_id
+            )
+        } else {
+            format!("{}/channels/{}/threads", DISCORD_API_BASE, channel_id)
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                ZeptoError::Channel(format!("Failed to call Discord thread create API: {}", e))
+            })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            ZeptoError::Channel(format!(
+                "Failed to read Discord thread create response: {}",
+                e
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(ZeptoError::Channel(format!(
+                "Discord thread create API returned HTTP {}: {}",
+                status, body
+            )));
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -725,6 +900,13 @@ impl Channel for DiscordChannel {
             ));
         }
 
+        if let Some(thread_req) = Self::parse_discord_thread_request(&msg)? {
+            self.create_thread(token, channel_id, &thread_req, &msg.content)
+                .await?;
+            info!("Discord: thread created successfully");
+            return Ok(());
+        }
+
         let payload = Self::build_send_payload(&msg)?;
         let url = format!("{}/channels/{}/messages", DISCORD_API_BASE, channel_id);
 
@@ -1003,6 +1185,49 @@ mod tests {
         let content = payload["content"].as_str().unwrap();
         assert!(content.len() <= DISCORD_MAX_MESSAGE_LENGTH);
         assert!(content.ends_with("..."));
+    }
+
+    #[test]
+    fn test_parse_discord_thread_request_none() {
+        let msg = OutboundMessage::new("discord", "ch-100", "hello");
+        let req = DiscordChannel::parse_discord_thread_request(&msg).expect("parse should succeed");
+        assert!(req.is_none());
+    }
+
+    #[test]
+    fn test_parse_discord_thread_request_success() {
+        let msg = OutboundMessage::new("discord", "ch-100", "hello")
+            .with_metadata("discord_thread_name", "Ops")
+            .with_metadata("discord_thread_auto_archive_minutes", "60");
+        let req = DiscordChannel::parse_discord_thread_request(&msg)
+            .expect("parse should succeed")
+            .expect("thread request should exist");
+        assert_eq!(req.name, "Ops");
+        assert_eq!(req.auto_archive_minutes, Some(60));
+        assert_eq!(req.message_id, None);
+    }
+
+    #[test]
+    fn test_parse_discord_thread_request_requires_name() {
+        let msg = OutboundMessage::new("discord", "ch-100", "hello")
+            .with_metadata("discord_thread_message_id", "m1");
+        let err = DiscordChannel::parse_discord_thread_request(&msg).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Missing discord_thread_name for Discord thread create"));
+    }
+
+    #[test]
+    fn test_build_create_thread_payload_forum_like_uses_starter_message() {
+        let req = DiscordThreadRequest {
+            name: "Daily".to_string(),
+            message_id: None,
+            auto_archive_minutes: Some(1440),
+        };
+        let payload = DiscordChannel::build_create_thread_payload(&req, "  ", true);
+        assert_eq!(payload["name"], "Daily");
+        assert_eq!(payload["auto_archive_duration"], 1440);
+        assert_eq!(payload["message"]["content"], "Daily");
     }
 
     // -----------------------------------------------------------------------

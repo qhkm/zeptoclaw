@@ -35,6 +35,9 @@ pub struct CronJobState {
     pub last_run_at_ms: Option<i64>,
     pub last_status: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub consecutive_errors: u32,
+    pub last_duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +70,27 @@ impl Default for CronStore {
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+const DEFAULT_DISPATCH_TIMEOUT_MS: u64 = 50;
+#[cfg(not(test))]
+const DEFAULT_DISPATCH_TIMEOUT_MS: u64 = 5_000;
+
+const ERROR_BACKOFF_SCHEDULE_MS: [i64; 5] = [
+    30_000,      // 1st error  -> 30s
+    60_000,      // 2nd error  -> 1m
+    5 * 60_000,  // 3rd error  -> 5m
+    15 * 60_000, // 4th error  -> 15m
+    60 * 60_000, // 5th+ error -> 60m
+];
+
+fn error_backoff_ms(consecutive_errors: u32) -> i64 {
+    if consecutive_errors == 0 {
+        return 0;
+    }
+    let idx = ((consecutive_errors - 1) as usize).min(ERROR_BACKOFF_SCHEDULE_MS.len() - 1);
+    ERROR_BACKOFF_SCHEDULE_MS[idx]
 }
 
 fn parse_cron_field(field: &str, min: u32, max: u32) -> Option<Vec<u32>> {
@@ -402,8 +426,9 @@ async fn tick(
         return Ok(());
     }
 
-    let mut results: Vec<(String, bool, Option<String>)> = Vec::new();
+    let mut results: Vec<(String, bool, Option<String>, i64, i64)> = Vec::new();
     for job in &due_jobs {
+        let started_at = now_ms();
         let inbound = InboundMessage::new(
             &job.payload.channel,
             "cron",
@@ -413,41 +438,72 @@ async fn tick(
         if jitter_ms > 0 {
             tokio::time::sleep(jitter_delay(jitter_ms)).await;
         }
-        match bus.publish_inbound(inbound).await {
-            Ok(_) => results.push((job.id.clone(), true, None)),
-            Err(e) => results.push((job.id.clone(), false, Some(e.to_string()))),
+        let send_result = tokio::time::timeout(
+            std::time::Duration::from_millis(DEFAULT_DISPATCH_TIMEOUT_MS),
+            bus.publish_inbound(inbound),
+        )
+        .await;
+        let ended_at = now_ms();
+        match send_result {
+            Ok(Ok(())) => results.push((job.id.clone(), true, None, started_at, ended_at)),
+            Ok(Err(e)) => results.push((
+                job.id.clone(),
+                false,
+                Some(e.to_string()),
+                started_at,
+                ended_at,
+            )),
+            Err(_) => results.push((
+                job.id.clone(),
+                false,
+                Some("cron dispatch timed out".to_string()),
+                started_at,
+                ended_at,
+            )),
         }
     }
 
     {
         let mut store_guard = store.write().await;
-        for (job_id, ok, err) in results {
+        for (job_id, ok, err, started_at, ended_at) in results {
             if let Some(job) = store_guard.jobs.iter_mut().find(|j| j.id == job_id) {
-                job.state.last_run_at_ms = Some(now);
+                job.state.last_run_at_ms = Some(started_at);
+                job.state.last_duration_ms = Some((ended_at - started_at).max(0));
                 job.state.last_status = Some(if ok { "ok" } else { "error" }.to_string());
                 job.state.last_error = err;
-                job.updated_at_ms = now;
+                job.updated_at_ms = ended_at;
+                if ok {
+                    job.state.consecutive_errors = 0;
+                } else {
+                    job.state.consecutive_errors = job.state.consecutive_errors.saturating_add(1);
+                }
 
                 match job.schedule {
                     CronSchedule::At { .. } => {
-                        if job.delete_after_run {
-                            job.enabled = false;
-                        } else {
-                            job.enabled = false;
-                            job.state.next_run_at_ms = None;
-                        }
+                        job.enabled = false;
+                        job.state.next_run_at_ms = None;
                     }
                     _ => {
-                        job.state.next_run_at_ms = next_run_at(&job.schedule, now);
+                        if ok {
+                            job.state.next_run_at_ms = next_run_at(&job.schedule, ended_at);
+                        } else {
+                            let base_next = next_run_at(&job.schedule, ended_at).unwrap_or(
+                                ended_at + error_backoff_ms(job.state.consecutive_errors),
+                            );
+                            let backoff_next =
+                                ended_at + error_backoff_ms(job.state.consecutive_errors);
+                            job.state.next_run_at_ms = Some(base_next.max(backoff_next));
+                        }
                     }
                 }
             }
         }
-        // Remove one-shot jobs marked for deletion.
+        // Remove one-shot jobs marked for delete-after-run only after success.
         store_guard.jobs.retain(|job| {
             !(matches!(job.schedule, CronSchedule::At { .. })
                 && job.delete_after_run
                 && !job.enabled)
+                || job.state.last_status.as_deref() != Some("ok")
         });
     }
 
@@ -648,6 +704,148 @@ mod tests {
         assert!(
             next > now_ms() - 5000,
             "next_run should be in the future after run_once"
+        );
+    }
+
+    #[test]
+    fn test_error_backoff_schedule() {
+        assert_eq!(error_backoff_ms(0), 0);
+        assert_eq!(error_backoff_ms(1), 30_000);
+        assert_eq!(error_backoff_ms(2), 60_000);
+        assert_eq!(error_backoff_ms(3), 300_000);
+        assert_eq!(error_backoff_ms(10), 3_600_000);
+    }
+
+    #[tokio::test]
+    async fn test_tick_timeout_applies_error_backoff() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::with_buffer_size(1));
+        let store = Arc::new(RwLock::new(CronStore {
+            version: 1,
+            jobs: vec![
+                CronJob {
+                    id: "fill".to_string(),
+                    name: "fill queue".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::Every { every_ms: 1_000 },
+                    payload: CronPayload {
+                        message: "fill".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: false,
+                },
+                CronJob {
+                    id: "timeout".to_string(),
+                    name: "should timeout".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::Every { every_ms: 1_000 },
+                    payload: CronPayload {
+                        message: "timeout".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: false,
+                },
+            ],
+        }));
+        let store_path = temp.path().join("jobs.json");
+
+        tick(&store, &store_path, &bus, 0).await.unwrap();
+
+        let store_guard = store.read().await;
+        let timed_out = store_guard
+            .jobs
+            .iter()
+            .find(|j| j.id == "timeout")
+            .expect("timeout job");
+        assert_eq!(timed_out.state.last_status.as_deref(), Some("error"));
+        assert_eq!(timed_out.state.consecutive_errors, 1);
+        let last_run = timed_out.state.last_run_at_ms.expect("last_run_at_ms");
+        let duration = timed_out.state.last_duration_ms.unwrap_or(0);
+        let ended_at = last_run + duration;
+        let next = timed_out
+            .state
+            .next_run_at_ms
+            .expect("next_run_at_ms should be set");
+        assert!(
+            next >= ended_at + 29_000,
+            "expected backoff >= ~30s, got next={} ended_at={}",
+            next,
+            ended_at
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_after_run_at_job_not_removed_on_error() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::with_buffer_size(1));
+        let store = Arc::new(RwLock::new(CronStore {
+            version: 1,
+            jobs: vec![
+                CronJob {
+                    id: "fill".to_string(),
+                    name: "fill queue".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::Every { every_ms: 1_000 },
+                    payload: CronPayload {
+                        message: "fill".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: false,
+                },
+                CronJob {
+                    id: "atdel".to_string(),
+                    name: "one-shot delete".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::At {
+                        at_ms: now_ms() - 1,
+                    },
+                    payload: CronPayload {
+                        message: "one-shot".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: true,
+                },
+            ],
+        }));
+        let store_path = temp.path().join("jobs.json");
+
+        tick(&store, &store_path, &bus, 0).await.unwrap();
+
+        let store_guard = store.read().await;
+        let job = store_guard.jobs.iter().find(|j| j.id == "atdel").unwrap();
+        assert_eq!(job.state.last_status.as_deref(), Some("error"));
+        assert!(!job.enabled, "one-shot should be disabled after run");
+        assert!(
+            job.state.next_run_at_ms.is_none(),
+            "one-shot should not be rescheduled after error"
         );
     }
 }

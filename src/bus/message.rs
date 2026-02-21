@@ -36,6 +36,9 @@ pub struct OutboundMessage {
     pub content: String,
     /// Optional message ID to reply to
     pub reply_to: Option<String>,
+    /// Additional metadata key-value pairs for channel-specific delivery hints
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Represents a media attachment (image, audio, video, or document)
@@ -153,6 +156,7 @@ impl OutboundMessage {
             chat_id: chat_id.to_string(),
             content: content.to_string(),
             reply_to: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -168,6 +172,12 @@ impl OutboundMessage {
     /// ```
     pub fn with_reply(mut self, message_id: &str) -> Self {
         self.reply_to = Some(message_id.to_string());
+        self
+    }
+
+    /// Adds a metadata key-value pair to the outbound message.
+    pub fn with_metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
         self
     }
 
@@ -283,6 +293,7 @@ mod tests {
         assert_eq!(msg.chat_id, "chat456");
         assert_eq!(msg.content, "Response");
         assert!(msg.reply_to.is_none());
+        assert!(msg.metadata.is_empty());
     }
 
     #[test]
@@ -291,6 +302,22 @@ mod tests {
             .with_reply("original_msg_123");
 
         assert_eq!(msg.reply_to, Some("original_msg_123".to_string()));
+    }
+
+    #[test]
+    fn test_outbound_message_with_metadata() {
+        let msg = OutboundMessage::new("discord", "channel1", "Hello")
+            .with_metadata("discord_thread_name", "Daily Updates")
+            .with_metadata("discord_thread_auto_archive_minutes", "60");
+
+        assert_eq!(
+            msg.metadata.get("discord_thread_name"),
+            Some(&"Daily Updates".to_string())
+        );
+        assert_eq!(
+            msg.metadata.get("discord_thread_auto_archive_minutes"),
+            Some(&"60".to_string())
+        );
     }
 
     #[test]
@@ -339,8 +366,9 @@ mod tests {
 
     #[test]
     fn test_outbound_message_serialization() {
-        let msg =
-            OutboundMessage::new("discord", "channel1", "Hello Discord!").with_reply("msg_123");
+        let msg = OutboundMessage::new("discord", "channel1", "Hello Discord!")
+            .with_reply("msg_123")
+            .with_metadata("discord_thread_name", "ops-thread");
 
         let json = serde_json::to_string(&msg).expect("Failed to serialize");
         let deserialized: OutboundMessage =
@@ -348,5 +376,9 @@ mod tests {
 
         assert_eq!(deserialized.channel, "discord");
         assert_eq!(deserialized.reply_to, Some("msg_123".to_string()));
+        assert_eq!(
+            deserialized.metadata.get("discord_thread_name"),
+            Some(&"ops-thread".to_string())
+        );
     }
 }
