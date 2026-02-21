@@ -303,10 +303,8 @@ impl StripeTool {
             .to_string();
 
         let url = format!("{}/payment_intents", STRIPE_API_BASE);
-        let mut form: Vec<(&str, String)> = vec![
-            ("amount", amount.to_string()),
-            ("currency", currency),
-        ];
+        let mut form: Vec<(&str, String)> =
+            vec![("amount", amount.to_string()), ("currency", currency)];
         if !description.is_empty() {
             form.push(("description", description));
         }
@@ -315,18 +313,10 @@ impl StripeTool {
         let idem_key = generate_idempotency_key();
 
         let data = self
-            .stripe_request_with_retry(
-                reqwest::Method::POST,
-                &url,
-                Some(form),
-                Some(&idem_key),
-            )
+            .stripe_request_with_retry(reqwest::Method::POST, &url, Some(form), Some(&idem_key))
             .await?;
 
-        let id = data
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let id = data.get("id").and_then(Value::as_str).unwrap_or("unknown");
         let status = data
             .get("status")
             .and_then(Value::as_str)
@@ -402,18 +392,10 @@ impl StripeTool {
 
         let idem_key = generate_idempotency_key();
         let data = self
-            .stripe_request_with_retry(
-                reqwest::Method::POST,
-                &url,
-                Some(form),
-                Some(&idem_key),
-            )
+            .stripe_request_with_retry(reqwest::Method::POST, &url, Some(form), Some(&idem_key))
             .await?;
 
-        let id = data
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let id = data.get("id").and_then(Value::as_str).unwrap_or("unknown");
 
         Ok(format!(
             "Customer created. id={} email={} idempotency_key={}",
@@ -468,8 +450,7 @@ impl StripeTool {
             .ok_or_else(|| ZeptoError::Tool("Missing 'payment_intent_id' parameter".into()))?;
 
         let url = format!("{}/refunds", STRIPE_API_BASE);
-        let mut form: Vec<(&str, String)> =
-            vec![("payment_intent", payment_intent_id.to_string())];
+        let mut form: Vec<(&str, String)> = vec![("payment_intent", payment_intent_id.to_string())];
 
         if let Some(amount) = args.get("amount").and_then(Value::as_i64) {
             if amount > 0 {
@@ -479,18 +460,10 @@ impl StripeTool {
 
         let idem_key = generate_idempotency_key();
         let data = self
-            .stripe_request_with_retry(
-                reqwest::Method::POST,
-                &url,
-                Some(form),
-                Some(&idem_key),
-            )
+            .stripe_request_with_retry(reqwest::Method::POST, &url, Some(form), Some(&idem_key))
             .await?;
 
-        let id = data
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let id = data.get("id").and_then(Value::as_str).unwrap_or("unknown");
         let status = data
             .get("status")
             .and_then(Value::as_str)
@@ -559,15 +532,11 @@ impl StripeTool {
         }
 
         let ts_str = timestamp_str.ok_or_else(|| {
-            ZeptoError::Tool(
-                "Invalid Stripe-Signature header: missing t= timestamp field".into(),
-            )
+            ZeptoError::Tool("Invalid Stripe-Signature header: missing t= timestamp field".into())
         })?;
 
         let received_sig = sig_v1.ok_or_else(|| {
-            ZeptoError::Tool(
-                "Invalid Stripe-Signature header: missing v1= signature field".into(),
-            )
+            ZeptoError::Tool("Invalid Stripe-Signature header: missing v1= signature field".into())
         })?;
 
         // Validate timestamp (reject events older than 5 minutes or 60s in future).
@@ -782,10 +751,7 @@ mod tests {
         // Verify stripe field is recognized at the top level of Config.
         let json = r#"{"stripe": {"secret_key": "sk_test_abc", "default_currency": "myr"}}"#;
         let config: crate::config::Config = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.stripe.secret_key.as_deref(),
-            Some("sk_test_abc")
-        );
+        assert_eq!(config.stripe.secret_key.as_deref(), Some("sk_test_abc"));
         assert_eq!(config.stripe.default_currency, "myr");
     }
 
@@ -800,8 +766,7 @@ mod tests {
 
     #[test]
     fn test_stripe_tool_with_webhook_secret() {
-        let tool = StripeTool::new("sk_test_abc", "usd")
-            .with_webhook_secret("whsec_test_secret");
+        let tool = StripeTool::new("sk_test_abc", "usd").with_webhook_secret("whsec_test_secret");
         assert_eq!(tool.webhook_secret.as_deref(), Some("whsec_test_secret"));
     }
 
@@ -840,7 +805,11 @@ mod tests {
     #[test]
     fn test_idempotency_key_format() {
         let key = generate_idempotency_key();
-        assert!(key.starts_with("zc_"), "key should start with 'zc_': {}", key);
+        assert!(
+            key.starts_with("zc_"),
+            "key should start with 'zc_': {}",
+            key
+        );
         // Should have three hex components after the 'zc' prefix: ts, pid, seq.
         let parts: Vec<&str> = key.splitn(4, '_').collect();
         assert_eq!(
@@ -902,8 +871,7 @@ mod tests {
         let data = b"Hi There";
         let result = hmac_sha256_hex(&key, data);
         assert_eq!(
-            result,
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            result, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
             "HMAC-SHA256 RFC 2202 test vector 1 failed"
         );
     }
@@ -1158,7 +1126,9 @@ mod tests {
     async fn test_unknown_action_returns_error() {
         let tool = StripeTool::new("sk_test_abc", "usd");
         let ctx = ToolContext::new();
-        let result = tool.execute(json!({"action": "fly_to_the_moon"}), &ctx).await;
+        let result = tool
+            .execute(json!({"action": "fly_to_the_moon"}), &ctx)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("fly_to_the_moon"));
     }
@@ -1206,10 +1176,7 @@ mod tests {
         let tool = StripeTool::new("sk_test_abc", "usd");
         let ctx = ToolContext::new();
         let result = tool
-            .execute(
-                json!({"action": "create_payment", "amount": -100}),
-                &ctx,
-            )
+            .execute(json!({"action": "create_payment", "amount": -100}), &ctx)
             .await;
         assert!(result.is_err());
     }
@@ -1222,9 +1189,7 @@ mod tests {
     async fn test_get_payment_missing_id_returns_error() {
         let tool = StripeTool::new("sk_test_abc", "usd");
         let ctx = ToolContext::new();
-        let result = tool
-            .execute(json!({"action": "get_payment"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"action": "get_payment"}), &ctx).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("payment_id"));
     }
@@ -1252,9 +1217,7 @@ mod tests {
     async fn test_create_refund_missing_payment_intent_id_returns_error() {
         let tool = StripeTool::new("sk_test_abc", "usd");
         let ctx = ToolContext::new();
-        let result = tool
-            .execute(json!({"action": "create_refund"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"action": "create_refund"}), &ctx).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1277,10 +1240,7 @@ mod tests {
         let path = std::path::PathBuf::from("/nonexistent/stripe_test_config.json");
         let config = crate::config::Config::load_from_path(&path).unwrap();
 
-        assert_eq!(
-            config.stripe.secret_key.as_deref(),
-            Some("sk_test_env_key")
-        );
+        assert_eq!(config.stripe.secret_key.as_deref(), Some("sk_test_env_key"));
         assert_eq!(config.stripe.default_currency, "sgd"); // env var is lowercased
         assert_eq!(
             config.stripe.webhook_secret.as_deref(),

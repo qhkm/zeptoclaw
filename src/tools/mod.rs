@@ -87,9 +87,9 @@ pub use message::MessageTool;
 pub use r8r::R8rTool;
 pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;
-pub use stripe::StripeTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
+pub use stripe::StripeTool;
 pub use types::{Tool, ToolContext};
 pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;
