@@ -153,7 +153,9 @@ impl Tool for PdfReadTool {
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
         let path_str = args["path"].as_str().unwrap_or("");
         if path_str.is_empty() {
-            return Err(ZeptoError::Tool("Missing required argument: path".to_string()));
+            return Err(ZeptoError::Tool(
+                "Missing required argument: path".to_string(),
+            ));
         }
 
         let max_chars = args["max_chars"]
@@ -165,9 +167,9 @@ impl Tool for PdfReadTool {
         let resolved = self.resolve_path(path_str)?;
 
         // Size guard before we do any I/O-heavy work.
-        let meta = tokio::fs::metadata(&resolved).await.map_err(|e| {
-            ZeptoError::Tool(format!("Cannot stat file: {e}"))
-        })?;
+        let meta = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Cannot stat file: {e}")))?;
         if meta.len() > MAX_PDF_BYTES {
             return Err(ZeptoError::Tool(format!(
                 "PDF too large: {} bytes (max {}MB)",
@@ -245,7 +247,11 @@ mod tests {
             .unwrap();
         let t = tool(tmp.path().to_str().unwrap());
         let result = t.resolve_path("invoice.pdf");
-        assert!(result.is_ok(), "expected Ok for valid pdf path: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok for valid pdf path: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -277,10 +283,19 @@ mod tests {
         // Each '日' is 3 bytes. Slicing by byte index would panic at the char boundary.
         let long = "日".repeat(100_000);
         let result = PdfReadTool::truncate_output(long, 50_000);
-        assert!(result.contains("[TRUNCATED]"), "should contain TRUNCATED marker");
+        assert!(
+            result.contains("[TRUNCATED]"),
+            "should contain TRUNCATED marker"
+        );
         // The body before the marker must be exactly 50_000 chars.
-        let marker_pos = result.find('\n').expect("should have newline before marker");
+        let marker_pos = result
+            .find('\n')
+            .expect("should have newline before marker");
         let body = &result[..marker_pos];
-        assert_eq!(body.chars().count(), 50_000, "body should be exactly max_chars wide");
+        assert_eq!(
+            body.chars().count(),
+            50_000,
+            "body should be exactly max_chars wide"
+        );
     }
 }

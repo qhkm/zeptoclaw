@@ -49,8 +49,7 @@ impl HttpRequestTool {
                 "http_request tool: no allowed_domains configured".into(),
             ));
         }
-        let parsed =
-            Url::parse(url).map_err(|e| ZeptoError::Tool(format!("Invalid URL: {e}")))?;
+        let parsed = Url::parse(url).map_err(|e| ZeptoError::Tool(format!("Invalid URL: {e}")))?;
         if is_blocked_host(&parsed) {
             return Err(ZeptoError::Tool(format!(
                 "Blocked private/local host: {url}"
@@ -177,10 +176,7 @@ impl Tool for HttpRequestTool {
             // untyped JSON payload).
             let caller_set_ct = args["headers"]
                 .as_object()
-                .map(|h| {
-                    h.keys()
-                        .any(|k| k.to_lowercase() == "content-type")
-                })
+                .map(|h| h.keys().any(|k| k.to_lowercase() == "content-type"))
                 .unwrap_or(false);
             let trimmed = body.trim_start();
             if !caller_set_ct && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
@@ -263,7 +259,9 @@ mod tests {
 
     #[test]
     fn test_validate_url_accepts_allowed_domain() {
-        assert!(tool().validate_url("https://api.example.com/v1/users").is_ok());
+        assert!(tool()
+            .validate_url("https://api.example.com/v1/users")
+            .is_ok());
     }
 
     #[test]
@@ -296,10 +294,7 @@ mod tests {
     #[test]
     fn test_strip_dangerous_headers() {
         let headers = vec![
-            (
-                "Authorization".to_string(),
-                "Bearer steal-me".to_string(),
-            ),
+            ("Authorization".to_string(), "Bearer steal-me".to_string()),
             ("Host".to_string(), "evil.com".to_string()),
             ("X-Custom".to_string(), "ok".to_string()),
         ];

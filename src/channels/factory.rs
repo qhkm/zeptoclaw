@@ -9,11 +9,11 @@ use crate::bus::MessageBus;
 use crate::config::Config;
 
 use super::email_channel::EmailChannel;
+use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
 use super::WhatsAppCloudChannel;
-use super::lark::LarkChannel;
 use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel};
 
 /// Register all configured channels that currently have implementations.

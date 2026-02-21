@@ -114,13 +114,11 @@ impl EmailChannel {
     /// Only available when the `channel-email` feature is enabled.
     #[cfg(feature = "channel-email")]
     pub fn extract_plain_text(msg: &mail_parser::Message) -> String {
-        msg.body_text(0)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                msg.body_html(0)
-                    .map(|h| Self::strip_html(h.as_ref()))
-                    .unwrap_or_default()
-            })
+        msg.body_text(0).map(|s| s.to_string()).unwrap_or_else(|| {
+            msg.body_html(0)
+                .map(|h| Self::strip_html(h.as_ref()))
+                .unwrap_or_default()
+        })
     }
 
     /// Naive HTML tag stripper (no external dep required).
@@ -258,9 +256,7 @@ impl EmailChannel {
     #[cfg(feature = "channel-email")]
     async fn process_unseen(
         &self,
-        session: &mut async_imap::Session<
-            tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-        >,
+        session: &mut async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     ) -> std::result::Result<(), ZeptoError> {
         use futures::TryStreamExt;
         use mail_parser::MessageParser;
@@ -347,9 +343,7 @@ impl EmailChannel {
 
         // Mark fetched messages as \Seen.
         if !raw_messages.is_empty() {
-            let _ = session
-                .uid_store(&uid_set, "+FLAGS (\\Seen)")
-                .await;
+            let _ = session.uid_store(&uid_set, "+FLAGS (\\Seen)").await;
         }
 
         Ok(())
@@ -447,10 +441,8 @@ impl Channel for EmailChannel {
         {
             // Fix 1: use async SMTP transport so we don't block the Tokio thread.
             use lettre::{
-                message::SinglePart,
-                transport::smtp::authentication::Credentials,
-                AsyncSmtpTransport, AsyncTransport, Message as LettreMessage,
-                Tokio1Executor,
+                message::SinglePart, transport::smtp::authentication::Credentials,
+                AsyncSmtpTransport, AsyncTransport, Message as LettreMessage, Tokio1Executor,
             };
 
             let (subject, body) = if msg.content.starts_with("Subject: ") {
@@ -465,10 +457,7 @@ impl Channel for EmailChannel {
                         msg.content[pos + 1..].to_string(),
                     )
                 } else {
-                    (
-                        "ZeptoClaw Message".to_string(),
-                        msg.content.clone(),
-                    )
+                    ("ZeptoClaw Message".to_string(), msg.content.clone())
                 }
             } else {
                 ("ZeptoClaw Message".to_string(), msg.content.clone())
@@ -497,13 +486,12 @@ impl Channel for EmailChannel {
             let creds =
                 Credentials::new(self.config.username.clone(), self.config.password.clone());
 
-            let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
-                &self.config.smtp_host,
-            )
-            .map_err(|e| ZeptoError::Channel(format!("SMTP relay error: {e}")))?
-            .port(self.config.smtp_port)
-            .credentials(creds)
-            .build();
+            let transport =
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.smtp_host)
+                    .map_err(|e| ZeptoError::Channel(format!("SMTP relay error: {e}")))?
+                    .port(self.config.smtp_port)
+                    .credentials(creds)
+                    .build();
 
             transport
                 .send(email)

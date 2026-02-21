@@ -304,10 +304,7 @@ impl GeminiProvider {
         }
 
         // Fallback: at least return thought text if nothing else is available.
-        let thought_parts: Vec<&str> = parts
-            .iter()
-            .filter_map(|p| p["text"].as_str())
-            .collect();
+        let thought_parts: Vec<&str> = parts.iter().filter_map(|p| p["text"].as_str()).collect();
 
         if !thought_parts.is_empty() {
             Some(thought_parts.join(""))
@@ -440,11 +437,7 @@ mod tests {
     #[test]
     fn test_auth_resolution_explicit_key_beats_oauth() {
         // explicit key takes priority even when oauth token is provided
-        let auth = GeminiAuth::resolve(
-            Some("config-key"),
-            None,
-            Some("oauth-token".to_string()),
-        );
+        let auth = GeminiAuth::resolve(Some("config-key"), None, Some("oauth-token".to_string()));
         assert!(matches!(auth, Some(GeminiAuth::ApiKey(k)) if k == "config-key"));
     }
 
@@ -540,8 +533,7 @@ mod tests {
     #[test]
     fn test_build_request_body_includes_system_instruction() {
         let provider = GeminiProvider::new_with_key("test-key", "gemini-2.0-flash");
-        let body =
-            provider.build_request_body_from_parts("user", "Hi", Some("You are helpful"));
+        let body = provider.build_request_body_from_parts("user", "Hi", Some("You are helpful"));
         assert_eq!(
             body["systemInstruction"]["parts"][0]["text"],
             "You are helpful"
@@ -599,10 +591,7 @@ mod tests {
     #[test]
     fn test_build_messages_body_filters_system_role() {
         let provider = GeminiProvider::new_with_key("key", DEFAULT_GEMINI_MODEL);
-        let messages = vec![
-            Message::system("Be helpful"),
-            Message::user("Hello"),
-        ];
+        let messages = vec![Message::system("Be helpful"), Message::user("Hello")];
         let body = provider.build_messages_body(&messages, &ChatOptions::default());
         // System message should NOT appear in contents — only the user message.
         let contents = body["contents"].as_array().unwrap();
@@ -676,7 +665,10 @@ mod tests {
             "expires_at": "2020-06-15T12:00:00+00:00"
         });
         let result = GeminiAuth::token_from_json_if_valid(&json);
-        assert!(result.is_none(), "Expected None when expires_at is in the past");
+        assert!(
+            result.is_none(),
+            "Expected None when expires_at is in the past"
+        );
     }
 
     #[test]

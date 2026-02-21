@@ -655,7 +655,6 @@ pub struct FeishuConfig {
     pub deny_by_default: bool,
 }
 
-
 /// Lark (international) / Feishu (China) channel configuration.
 ///
 /// Uses the Lark WS long-connection (pbbp2) for receiving events —
@@ -1784,10 +1783,18 @@ mod tests {
 // EmailConfig  (used by channels::EmailChannel, feature-gated: channel-email)
 // ---------------------------------------------------------------------------
 
-fn default_email_imap_port() -> u16 { 993 }
-fn default_email_smtp_port() -> u16 { 587 }
-fn default_email_imap_folder() -> String { "INBOX".into() }
-fn default_email_idle_timeout_secs() -> u64 { 1740 }
+fn default_email_imap_port() -> u16 {
+    993
+}
+fn default_email_smtp_port() -> u16 {
+    587
+}
+fn default_email_imap_folder() -> String {
+    "INBOX".into()
+}
+fn default_email_idle_timeout_secs() -> u64 {
+    1740
+}
 
 /// Email channel configuration (IMAP IDLE inbound + SMTP outbound).
 ///

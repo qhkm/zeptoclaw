@@ -158,7 +158,10 @@ struct CachedToken {
 fn extract_token_ttl(body: &serde_json::Value) -> u64 {
     body.get("expire")
         .or_else(|| body.get("expires_in"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+        })
         .unwrap_or(DEFAULT_TOKEN_TTL.as_secs())
         .max(1)
 }
@@ -244,7 +247,11 @@ fn parse_post_content(content: &str) -> Option<String> {
     }
 
     let result = text.trim().to_string();
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Remove `@_user_N` placeholder tokens injected by Feishu in group chats.
@@ -339,7 +346,10 @@ async fn fetch_tenant_token_cached(
 
     {
         let mut guard = cache.write().await;
-        *guard = Some(CachedToken { value: token.clone(), refresh_after });
+        *guard = Some(CachedToken {
+            value: token.clone(),
+            refresh_after,
+        });
     }
 
     Ok(token)
@@ -387,7 +397,11 @@ impl LarkChannel {
     /// Creates a new `LarkChannel` from the given config and message bus.
     pub fn new(config: LarkConfig, bus: Arc<MessageBus>) -> Self {
         let base_config = BaseChannelConfig {
-            name: if config.feishu { "feishu".to_string() } else { "lark".to_string() },
+            name: if config.feishu {
+                "feishu".to_string()
+            } else {
+                "lark".to_string()
+            },
             allowlist: config.allowed_senders.clone(),
             deny_by_default: config.deny_by_default,
         };
@@ -407,12 +421,20 @@ impl LarkChannel {
 
     /// REST API base URL based on the `feishu` flag.
     pub fn api_base(&self) -> &'static str {
-        if self.config.feishu { FEISHU_API_BASE } else { LARK_API_BASE }
+        if self.config.feishu {
+            FEISHU_API_BASE
+        } else {
+            LARK_API_BASE
+        }
     }
 
     /// WS endpoint base URL based on the `feishu` flag.
     pub fn ws_base(&self) -> &'static str {
-        if self.config.feishu { FEISHU_WS_BASE } else { LARK_WS_BASE }
+        if self.config.feishu {
+            FEISHU_WS_BASE
+        } else {
+            LARK_WS_BASE
+        }
     }
 
     // ------------------------------------------------------------------
@@ -557,7 +579,10 @@ impl LarkChannel {
             log_id: 0,
             service: service_id,
             method: 0,
-            headers: vec![PbHeader { key: "type".into(), value: "ping".into() }],
+            headers: vec![PbHeader {
+                key: "type".into(),
+                value: "ping".into(),
+            }],
             payload: None,
         };
         if write
@@ -906,7 +931,10 @@ impl Channel for LarkChannel {
 
     async fn start(&mut self) -> Result<()> {
         self.running.store(true, Ordering::SeqCst);
-        info!("Lark channel starting (WS long-connection, feishu={})", self.config.feishu);
+        info!(
+            "Lark channel starting (WS long-connection, feishu={})",
+            self.config.feishu
+        );
 
         let running = Arc::clone(&self.running);
         let tenant_token = Arc::clone(&self.tenant_token);
@@ -918,7 +946,11 @@ impl Channel for LarkChannel {
         tokio::spawn(async move {
             // Build a temporary channel clone for the async task
             let base_config = BaseChannelConfig {
-                name: if config.feishu { "feishu".to_string() } else { "lark".to_string() },
+                name: if config.feishu {
+                    "feishu".to_string()
+                } else {
+                    "lark".to_string()
+                },
                 allowlist: config.allowed_senders.clone(),
                 deny_by_default: config.deny_by_default,
             };
@@ -960,9 +992,10 @@ impl Channel for LarkChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        let mut token = self.get_tenant_token().await.map_err(|e| {
-            ZeptoError::Channel(format!("Lark: failed to get tenant token: {e}"))
-        })?;
+        let mut token = self
+            .get_tenant_token()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Lark: failed to get tenant token: {e}")))?;
 
         let url = format!("{}/im/v1/messages?receive_id_type=open_id", self.api_base());
         let content = serde_json::json!({ "text": msg.content }).to_string();
@@ -980,9 +1013,10 @@ impl Channel for LarkChannel {
         if should_refresh_token(status, &response) {
             // Token expired — invalidate and retry once
             self.invalidate_token().await;
-            token = self.get_tenant_token().await.map_err(|e| {
-                ZeptoError::Channel(format!("Lark: token refresh failed: {e}"))
-            })?;
+            token = self
+                .get_tenant_token()
+                .await
+                .map_err(|e| ZeptoError::Channel(format!("Lark: token refresh failed: {e}")))?;
             let (retry_status, retry_body) = self
                 .send_text_once(&url, &token, &body)
                 .await
@@ -1066,7 +1100,13 @@ mod tests {
     #[test]
     fn test_api_base_feishu() {
         let bus = Arc::new(MessageBus::new());
-        let ch = LarkChannel::new(LarkConfig { feishu: true, ..lark_config() }, bus);
+        let ch = LarkChannel::new(
+            LarkConfig {
+                feishu: true,
+                ..lark_config()
+            },
+            bus,
+        );
         assert_eq!(ch.api_base(), "https://open.feishu.cn/open-apis");
     }
 
@@ -1079,7 +1119,13 @@ mod tests {
     #[test]
     fn test_ws_base_feishu() {
         let bus = Arc::new(MessageBus::new());
-        let ch = LarkChannel::new(LarkConfig { feishu: true, ..lark_config() }, bus);
+        let ch = LarkChannel::new(
+            LarkConfig {
+                feishu: true,
+                ..lark_config()
+            },
+            bus,
+        );
         assert_eq!(ch.ws_base(), "https://open.feishu.cn");
     }
 
@@ -1124,7 +1170,10 @@ mod tests {
     fn test_deny_by_default_empty_allowlist() {
         let bus = Arc::new(MessageBus::new());
         let ch = LarkChannel::new(
-            LarkConfig { deny_by_default: true, ..lark_config() },
+            LarkConfig {
+                deny_by_default: true,
+                ..lark_config()
+            },
             bus,
         );
         // Strict mode: empty allowlist rejects all
@@ -1185,7 +1234,13 @@ mod tests {
     #[test]
     fn test_channel_name_feishu() {
         let bus = Arc::new(MessageBus::new());
-        let ch = LarkChannel::new(LarkConfig { feishu: true, ..lark_config() }, bus);
+        let ch = LarkChannel::new(
+            LarkConfig {
+                feishu: true,
+                ..lark_config()
+            },
+            bus,
+        );
         assert_eq!(ch.name(), "feishu");
     }
 
@@ -1212,7 +1267,10 @@ mod tests {
     #[test]
     fn test_should_refresh_token_on_401() {
         let body = serde_json::json!({ "code": 0 });
-        assert!(should_refresh_token(reqwest::StatusCode::UNAUTHORIZED, &body));
+        assert!(should_refresh_token(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &body
+        ));
     }
 
     #[test]
