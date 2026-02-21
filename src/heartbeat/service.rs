@@ -1,9 +1,11 @@
 //! Heartbeat service implementation.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -15,6 +17,52 @@ pub const HEARTBEAT_PROMPT: &str = r#"Read HEARTBEAT.md in your workspace (if it
 Follow any actionable items listed there.
 If nothing needs attention, reply with: HEARTBEAT_OK"#;
 
+/// Structured result from a heartbeat tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatResult {
+    /// Unix timestamp of the tick.
+    pub timestamp: u64,
+    /// Whether the heartbeat file was found.
+    pub file_found: bool,
+    /// Whether actionable content was present.
+    pub actionable: bool,
+    /// Whether the message was successfully published.
+    pub delivered: bool,
+    /// Error message if the tick failed.
+    pub error: Option<String>,
+}
+
+impl HeartbeatResult {
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Construct a successful result.
+    pub fn ok(file_found: bool, actionable: bool, delivered: bool) -> Self {
+        Self {
+            timestamp: Self::now(),
+            file_found,
+            actionable,
+            delivered,
+            error: None,
+        }
+    }
+
+    /// Construct an error result.
+    pub fn err(msg: &str) -> Self {
+        Self {
+            timestamp: Self::now(),
+            file_found: false,
+            actionable: false,
+            delivered: false,
+            error: Some(msg.to_string()),
+        }
+    }
+}
+
 /// Background service that periodically enqueues heartbeat prompts.
 pub struct HeartbeatService {
     file_path: PathBuf,
@@ -22,6 +70,10 @@ pub struct HeartbeatService {
     bus: Arc<MessageBus>,
     running: Arc<RwLock<bool>>,
     chat_id: String,
+    /// Count of consecutive failed ticks.
+    pub(crate) consecutive_failures: Arc<AtomicU32>,
+    /// Threshold before warning about missed heartbeats.
+    failure_alert_threshold: u32,
 }
 
 impl HeartbeatService {
@@ -38,6 +90,8 @@ impl HeartbeatService {
             bus,
             running: Arc::new(RwLock::new(false)),
             chat_id: chat_id.to_string(),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            failure_alert_threshold: 3,
         }
     }
 
@@ -57,6 +111,8 @@ impl HeartbeatService {
         let bus = Arc::clone(&self.bus);
         let running = Arc::clone(&self.running);
         let chat_id = self.chat_id.clone();
+        let consecutive_failures = Arc::clone(&self.consecutive_failures);
+        let failure_threshold = self.failure_alert_threshold;
 
         info!(
             "Heartbeat service started (interval={}s, file={:?})",
@@ -76,8 +132,18 @@ impl HeartbeatService {
                     break;
                 }
 
-                if let Err(e) = Self::tick(&file_path, &bus, &chat_id).await {
-                    error!("Heartbeat tick failed: {}", e);
+                let result = Self::tick(&file_path, &bus, &chat_id).await;
+
+                if result.error.is_some() {
+                    let count = consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count >= failure_threshold {
+                        warn!(
+                            consecutive_failures = count,
+                            "Heartbeat: {} consecutive failures, service may be degraded", count
+                        );
+                    }
+                } else {
+                    consecutive_failures.store(0, Ordering::Relaxed);
                 }
             }
         });
@@ -91,14 +157,24 @@ impl HeartbeatService {
         *running = false;
     }
 
-    /// Trigger heartbeat immediately.
-    pub async fn trigger_now(&self) -> Result<()> {
+    /// Trigger heartbeat immediately, returning a structured result.
+    pub async fn trigger_now(&self) -> HeartbeatResult {
         Self::tick(&self.file_path, &self.bus, &self.chat_id).await
     }
 
     /// Returns whether service is running.
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
+    }
+
+    /// Returns the current count of consecutive failed ticks.
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    /// Returns true if the service is healthy (fewer failures than the alert threshold).
+    pub fn is_healthy(&self) -> bool {
+        self.consecutive_failures() < self.failure_alert_threshold
     }
 
     /// Whether heartbeat content is actionable.
@@ -116,27 +192,35 @@ impl HeartbeatService {
         true
     }
 
-    async fn tick(file_path: &PathBuf, bus: &MessageBus, chat_id: &str) -> Result<()> {
+    async fn tick(file_path: &PathBuf, bus: &MessageBus, chat_id: &str) -> HeartbeatResult {
         let content = match tokio::fs::read_to_string(file_path).await {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!("Heartbeat file missing at {:?}, skipping tick", file_path);
-                return Ok(());
+                return HeartbeatResult::ok(false, false, false);
             }
             Err(e) => {
                 warn!("Failed to read heartbeat file {:?}: {}", file_path, e);
-                return Ok(());
+                return HeartbeatResult::err(&format!("Failed to read file: {e}"));
             }
         };
 
         if Self::is_empty(&content) {
             debug!("Heartbeat file has no actionable content");
-            return Ok(());
+            return HeartbeatResult::ok(true, false, false);
         }
 
         let message = InboundMessage::new("heartbeat", "system", chat_id, HEARTBEAT_PROMPT);
-        bus.publish_inbound(message).await?;
-        Ok(())
+        match bus.publish_inbound(message).await {
+            Ok(_) => {
+                info!("Heartbeat delivered to bus");
+                HeartbeatResult::ok(true, true, true)
+            }
+            Err(e) => {
+                error!("Failed to publish heartbeat: {}", e);
+                HeartbeatResult::err(&format!("Delivery failed: {e}"))
+            }
+        }
     }
 }
 
@@ -156,5 +240,88 @@ mod tests {
         assert!(!HeartbeatService::is_empty("Check orders"));
         assert!(!HeartbeatService::is_empty("- [x] Done"));
         assert!(!HeartbeatService::is_empty("# Header\n- Send alert"));
+    }
+
+    #[test]
+    fn test_heartbeat_result_ok() {
+        let result = HeartbeatResult::ok(true, true, true);
+        assert!(result.file_found);
+        assert!(result.actionable);
+        assert!(result.delivered);
+        assert!(result.error.is_none());
+        assert!(result.timestamp > 0);
+    }
+
+    #[test]
+    fn test_heartbeat_result_err() {
+        let result = HeartbeatResult::err("test error");
+        assert!(!result.file_found);
+        assert!(!result.delivered);
+        assert_eq!(result.error, Some("test error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_tick_missing_file() {
+        let bus = Arc::new(MessageBus::new());
+        let result = HeartbeatService::tick(
+            &PathBuf::from("/nonexistent/heartbeat.md"),
+            &bus,
+            "test-chat",
+        )
+        .await;
+        assert!(!result.file_found);
+        assert!(!result.actionable);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_tick_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("HEARTBEAT.md");
+        tokio::fs::write(&file, "# Tasks\n\n").await.unwrap();
+
+        let bus = Arc::new(MessageBus::new());
+        let result = HeartbeatService::tick(&file, &bus, "test-chat").await;
+        assert!(result.file_found);
+        assert!(!result.actionable);
+        assert!(!result.delivered);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_tick_actionable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("HEARTBEAT.md");
+        tokio::fs::write(&file, "# Tasks\n- Check orders\n")
+            .await
+            .unwrap();
+
+        // MessageBus holds the inbound_rx internally, so publish_inbound succeeds
+        // as long as the bus is alive (MPSC sender succeeds when receiver exists).
+        let bus = Arc::new(MessageBus::new());
+        let result = HeartbeatService::tick(&file, &bus, "test-chat").await;
+        assert!(result.file_found);
+        assert!(result.actionable);
+        assert!(result.delivered);
+    }
+
+    #[test]
+    fn test_heartbeat_health_tracking() {
+        let bus = Arc::new(MessageBus::new());
+        let service = HeartbeatService::new(PathBuf::from("/tmp/hb.md"), 60, bus, "test");
+        assert_eq!(service.consecutive_failures(), 0);
+        assert!(service.is_healthy());
+
+        // Simulate accumulated failures (threshold is 3)
+        service.consecutive_failures.store(3, Ordering::Relaxed);
+        assert!(!service.is_healthy());
+    }
+
+    #[test]
+    fn test_heartbeat_result_json_serialization() {
+        let result = HeartbeatResult::ok(true, true, true);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"delivered\":true"));
+        let parsed: HeartbeatResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.delivered);
     }
 }

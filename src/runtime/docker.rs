@@ -22,6 +22,10 @@ pub struct DockerRuntime {
     network: String,
     /// Extra volume mounts from config (host:container or host:container:ro format)
     extra_mounts: Vec<String>,
+    /// PID limit (--pids-limit flag)
+    pids_limit: Option<u32>,
+    /// Stop timeout in seconds (--stop-timeout flag)
+    stop_timeout_secs: u64,
 }
 
 impl DockerRuntime {
@@ -33,6 +37,8 @@ impl DockerRuntime {
             cpu_limit: Some("1.0".to_string()),
             network: "none".to_string(),
             extra_mounts: Vec::new(),
+            pids_limit: Some(100),
+            stop_timeout_secs: 300,
         }
     }
 
@@ -60,10 +66,23 @@ impl DockerRuntime {
         self
     }
 
+    /// Set PID limit to prevent fork bombs
+    pub fn with_pids_limit(mut self, limit: u32) -> Self {
+        self.pids_limit = Some(limit);
+        self
+    }
+
+    /// Set container stop timeout in seconds
+    pub fn with_stop_timeout(mut self, secs: u64) -> Self {
+        self.stop_timeout_secs = secs;
+        self
+    }
+
     /// Disable resource limits
     pub fn without_limits(mut self) -> Self {
         self.memory_limit = None;
         self.cpu_limit = None;
+        self.pids_limit = None;
         self
     }
 }
@@ -113,6 +132,12 @@ impl ContainerRuntime for DockerRuntime {
             args.push("--cpus".to_string());
             args.push(cpu.clone());
         }
+        if let Some(pids) = self.pids_limit {
+            args.push("--pids-limit".to_string());
+            args.push(pids.to_string());
+        }
+        args.push("--stop-timeout".to_string());
+        args.push(self.stop_timeout_secs.to_string());
 
         // Add working directory
         if let Some(ref workdir) = config.workdir {
@@ -209,6 +234,33 @@ mod tests {
         assert_eq!(runtime.memory_limit, Some("512m".to_string()));
         assert_eq!(runtime.cpu_limit, Some("1.0".to_string()));
         assert_eq!(runtime.network, "none");
+    }
+
+    #[test]
+    fn test_docker_runtime_pids_limit() {
+        let runtime = DockerRuntime::new("alpine:latest").with_pids_limit(50);
+        assert_eq!(runtime.pids_limit, Some(50));
+    }
+
+    #[test]
+    fn test_docker_runtime_stop_timeout() {
+        let runtime = DockerRuntime::new("alpine:latest").with_stop_timeout(120);
+        assert_eq!(runtime.stop_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_docker_runtime_default_pids_limit() {
+        let runtime = DockerRuntime::default();
+        assert_eq!(runtime.pids_limit, Some(100));
+        assert_eq!(runtime.stop_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_docker_runtime_without_limits_clears_pids() {
+        let runtime = DockerRuntime::new("alpine:latest").without_limits();
+        assert!(runtime.pids_limit.is_none());
+        assert!(runtime.memory_limit.is_none());
+        assert!(runtime.cpu_limit.is_none());
     }
 
     // Integration tests (only run if Docker is available)

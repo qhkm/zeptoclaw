@@ -1153,6 +1153,17 @@ pub struct DockerConfig {
     pub cpu_limit: Option<String>,
     /// Network mode (default: none for security)
     pub network: String,
+    /// PID limit to prevent fork bombs (e.g., 100). None = no limit.
+    #[serde(default)]
+    pub pids_limit: Option<u32>,
+    /// Container stop timeout in seconds (matches agent timeout).
+    /// Docker sends SIGTERM, waits this long, then SIGKILL.
+    #[serde(default = "default_stop_timeout")]
+    pub stop_timeout_secs: u64,
+}
+
+fn default_stop_timeout() -> u64 {
+    300 // match agent default timeout
 }
 
 impl Default for DockerConfig {
@@ -1163,6 +1174,8 @@ impl Default for DockerConfig {
             memory_limit: Some("512m".to_string()),
             cpu_limit: Some("1.0".to_string()),
             network: "none".to_string(),
+            pids_limit: Some(100),
+            stop_timeout_secs: default_stop_timeout(),
         }
     }
 }
@@ -1606,5 +1619,33 @@ mod tests {
         assert!(config.embedding_model.is_none());
         assert!(config.hnsw_index_path.is_none());
         assert!(config.tantivy_index_path.is_none());
+    }
+
+    #[test]
+    fn test_docker_config_defaults() {
+        let config = DockerConfig::default();
+        assert_eq!(config.pids_limit, Some(100));
+        assert_eq!(config.stop_timeout_secs, 300);
+        assert_eq!(config.memory_limit, Some("512m".to_string()));
+        assert_eq!(config.cpu_limit, Some("1.0".to_string()));
+        assert_eq!(config.network, "none");
+    }
+
+    #[test]
+    fn test_docker_config_deserialize_new_fields() {
+        let json = r#"{"pids_limit": 50, "stop_timeout_secs": 120}"#;
+        let config: DockerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pids_limit, Some(50));
+        assert_eq!(config.stop_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_docker_config_deserialize_no_pids_limit() {
+        let json = r#"{}"#;
+        let config: DockerConfig = serde_json::from_str(json).unwrap();
+        // Field-level #[serde(default)] on Option<u32> yields None when the key is absent.
+        // The struct-level #[serde(default)] only applies when the whole struct key is missing.
+        assert_eq!(config.pids_limit, None);
+        assert_eq!(config.stop_timeout_secs, 300);
     }
 }
