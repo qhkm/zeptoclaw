@@ -28,9 +28,10 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool,
-    WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, ProjectTool,
+    R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
+use zeptoclaw::config::ProjectBackend;
 
 /// Read a line from stdin, trimming whitespace.
 pub(crate) fn read_line() -> Result<String> {
@@ -730,6 +731,38 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     if tool_enabled("r8r") {
         agent.register_tool(Box::new(R8rTool::default())).await;
     }
+
+    // Register project management tool.
+    if tool_enabled("project") {
+        let project_config = config.project.clone();
+        let has_token = match project_config.backend {
+            ProjectBackend::Github => project_config
+                .github_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .is_some(),
+            ProjectBackend::Jira => project_config
+                .jira_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .is_some(),
+            ProjectBackend::Linear => project_config
+                .linear_api_key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .is_some(),
+        };
+        if has_token {
+            agent
+                .register_tool(Box::new(ProjectTool::new(project_config)))
+                .await;
+            info!(
+                "Registered project tool ({:?} backend)",
+                config.project.backend
+            );
+        }
+    }
+
     if tool_enabled("reminder") {
         match zeptoclaw::tools::reminder::ReminderTool::new(Some(cron_service.clone())) {
             Ok(tool) => {
