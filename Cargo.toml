@@ -26,6 +26,7 @@ tokio = { version = "1.35", features = ["full"] }
 # JSON handling for LLM API requests/responses and config files
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 # JSON5 parsing for OpenClaw config migration (comments, trailing commas, unquoted keys)
 json5 = "0.4"
 
@@ -36,7 +37,7 @@ json5 = "0.4"
 # - json: Automatic JSON serialization in requests
 # - rustls-tls: Pure Rust TLS implementation (smaller than native-tls)
 # - default-features = false: Excludes unnecessary features
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
 
 # =============================================================================
 # CLI
