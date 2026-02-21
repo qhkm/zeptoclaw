@@ -964,7 +964,7 @@ impl ProviderConfig {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderPluginConfig {
-    /// Unique provider name (used in `providers.primary` / `providers.fallback.provider`)
+    /// Unique provider name. Plugin providers activate when no built-in provider (Anthropic/OpenAI) is configured.
     pub name: String,
     /// Path to the provider binary
     pub command: String,
