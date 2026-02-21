@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_absolute_path_unchanged() {
+    fn test_absolute_path_not_resolved() {
         let abs = "/tmp/audio.ogg";
         let resolved = if std::path::Path::new(abs).is_absolute() {
             abs.to_string()
