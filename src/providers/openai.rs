@@ -862,9 +862,7 @@ impl LLMProvider for OpenAIProvider {
         let data = resp_body
             .get("data")
             .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                ZeptoError::Provider("Missing 'data' in embedding response".into())
-            })?;
+            .ok_or_else(|| ZeptoError::Provider("Missing 'data' in embedding response".into()))?;
 
         let mut vectors = Vec::new();
         for item in data {
@@ -1458,8 +1456,7 @@ mod tests {
     /// Same check for a custom base URL (e.g., OpenRouter).
     #[test]
     fn test_openai_embed_url_with_custom_base() {
-        let provider =
-            OpenAIProvider::with_base_url("key", "https://openrouter.ai/api/v1");
+        let provider = OpenAIProvider::with_base_url("key", "https://openrouter.ai/api/v1");
         let url = format!("{}/embeddings", provider.api_base);
         assert_eq!(url, "https://openrouter.ai/api/v1/embeddings");
     }
@@ -1541,7 +1538,10 @@ mod tests {
         }
 
         assert_eq!(vectors.len(), 1);
-        assert!(vectors[0].is_empty(), "empty embedding should yield empty Vec<f32>");
+        assert!(
+            vectors[0].is_empty(),
+            "empty embedding should yield empty Vec<f32>"
+        );
     }
 
     /// Missing 'data' key in response should surface the right error message.

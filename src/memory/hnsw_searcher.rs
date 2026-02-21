@@ -164,10 +164,7 @@ fn build_hnsw_index(store: &VectorStore) -> Option<HnswMap<EmbeddingPoint, Strin
         .map(|(_, v)| EmbeddingPoint((*v).clone()))
         .collect();
 
-    let values: Vec<String> = entries
-        .iter()
-        .map(|(k, _)| (*k).clone())
-        .collect();
+    let values: Vec<String> = entries.iter().map(|(k, _)| (*k).clone()).collect();
 
     Some(Builder::default().build(points, values))
 }
@@ -377,11 +374,11 @@ mod tests {
     // Fake provider for tests
     // ------------------------------------------------------------------
 
-    use std::sync::Arc;
-    use async_trait::async_trait;
-    use crate::providers::{LLMProvider, ChatOptions, LLMResponse, ToolDefinition};
-    use crate::session::Message;
     use crate::error::Result as ZResult;
+    use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
+    use crate::session::Message;
+    use async_trait::async_trait;
+    use std::sync::Arc;
 
     /// Fake provider that returns fixed-dimension unit vectors.
     ///
@@ -395,8 +392,12 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for FakeHnswProvider {
-        fn name(&self) -> &str { "fake-hnsw" }
-        fn default_model(&self) -> &str { "fake-model" }
+        fn name(&self) -> &str {
+            "fake-hnsw"
+        }
+        fn default_model(&self) -> &str {
+            "fake-model"
+        }
         async fn chat(
             &self,
             _messages: Vec<Message>,
@@ -407,13 +408,17 @@ mod tests {
             Ok(LLMResponse::text("ok"))
         }
         async fn embed(&self, texts: &[String]) -> ZResult<Vec<Vec<f32>>> {
-            Ok(texts.iter().enumerate().map(|(i, _)| {
-                let mut v = vec![0.0f32; self.dim];
-                if !v.is_empty() {
-                    v[i % self.dim] = 1.0;
-                }
-                v
-            }).collect())
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let mut v = vec![0.0f32; self.dim];
+                    if !v.is_empty() {
+                        v[i % self.dim] = 1.0;
+                    }
+                    v
+                })
+                .collect())
         }
     }
 
@@ -493,7 +498,10 @@ mod tests {
         searcher.remove("key:a").await.unwrap();
 
         let store = load_vector_store(&path);
-        assert!(!store.vectors.contains_key("key:a"), "key:a should be removed");
+        assert!(
+            !store.vectors.contains_key("key:a"),
+            "key:a should be removed"
+        );
         assert!(store.vectors.contains_key("key:b"), "key:b should remain");
     }
 

@@ -169,16 +169,20 @@ mod tests {
 
     #[test]
     fn test_create_searcher_with_provider_builtin_ignores_provider() {
-        use std::sync::Arc;
-        use async_trait::async_trait;
         use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
         use crate::session::Message;
+        use async_trait::async_trait;
+        use std::sync::Arc;
 
         struct NoopProvider;
         #[async_trait]
         impl LLMProvider for NoopProvider {
-            fn name(&self) -> &str { "noop" }
-            fn default_model(&self) -> &str { "noop" }
+            fn name(&self) -> &str {
+                "noop"
+            }
+            fn default_model(&self) -> &str {
+                "noop"
+            }
             async fn chat(
                 &self,
                 _messages: Vec<Message>,
@@ -199,16 +203,20 @@ mod tests {
     #[cfg(feature = "memory-embedding")]
     #[test]
     fn test_create_searcher_with_provider_embedding_with_provider() {
-        use std::sync::Arc;
-        use async_trait::async_trait;
         use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
         use crate::session::Message;
+        use async_trait::async_trait;
+        use std::sync::Arc;
 
         struct FakeProvider;
         #[async_trait]
         impl LLMProvider for FakeProvider {
-            fn name(&self) -> &str { "fake" }
-            fn default_model(&self) -> &str { "fake" }
+            fn name(&self) -> &str {
+                "fake"
+            }
+            fn default_model(&self) -> &str {
+                "fake"
+            }
             async fn chat(
                 &self,
                 _messages: Vec<Message>,
@@ -233,16 +241,20 @@ mod tests {
     #[cfg(feature = "memory-hnsw")]
     #[test]
     fn test_create_searcher_with_provider_hnsw_with_provider() {
-        use std::sync::Arc;
-        use async_trait::async_trait;
         use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
         use crate::session::Message;
+        use async_trait::async_trait;
+        use std::sync::Arc;
 
         struct FakeProvider;
         #[async_trait]
         impl LLMProvider for FakeProvider {
-            fn name(&self) -> &str { "fake" }
-            fn default_model(&self) -> &str { "fake" }
+            fn name(&self) -> &str {
+                "fake"
+            }
+            fn default_model(&self) -> &str {
+                "fake"
+            }
             async fn chat(
                 &self,
                 _messages: Vec<Message>,

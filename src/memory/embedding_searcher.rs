@@ -69,7 +69,11 @@ impl EmbeddingSearcher {
 fn load_vector_store(path: &PathBuf) -> VectorStore {
     match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-            warn!("Failed to parse embeddings store at {}: {}", path.display(), e);
+            warn!(
+                "Failed to parse embeddings store at {}: {}",
+                path.display(),
+                e
+            );
             VectorStore::default()
         }),
         Err(_) => VectorStore::default(),
@@ -90,7 +94,11 @@ fn save_vector_store(path: &PathBuf, store: &VectorStore) {
     match serde_json::to_string_pretty(store) {
         Ok(json) => {
             if let Err(e) = std::fs::write(path, json) {
-                warn!("Failed to write embeddings store to {}: {}", path.display(), e);
+                warn!(
+                    "Failed to write embeddings store to {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
         Err(e) => warn!("Failed to serialize embeddings store: {}", e),
@@ -143,7 +151,10 @@ impl MemorySearcher for EmbeddingSearcher {
         let embeddings = match self.provider.embed(&inputs).await {
             Ok(vecs) => vecs,
             Err(e) => {
-                warn!("Embedding failed in score_batch: {}; returning zero scores", e);
+                warn!(
+                    "Embedding failed in score_batch: {}; returning zero scores",
+                    e
+                );
                 return vec![0.0; chunks.len()];
             }
         };
@@ -168,10 +179,7 @@ impl MemorySearcher for EmbeddingSearcher {
     async fn index(&self, key: &str, text: &str) -> Result<()> {
         let embeddings = self.provider.embed(&[text.to_string()]).await?;
 
-        let vector = embeddings
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let vector = embeddings.into_iter().next().unwrap_or_default();
 
         {
             let mut store = self.store.write().await;
@@ -249,7 +257,11 @@ mod tests {
         let a = vec![1.0f32, 0.0];
         let b = vec![-1.0f32, 0.0];
         let score = cosine_similarity(&a, &b);
-        assert_eq!(score, 0.0, "Opposite vectors should clamp to 0.0, got {}", score);
+        assert_eq!(
+            score, 0.0,
+            "Opposite vectors should clamp to 0.0, got {}",
+            score
+        );
     }
 
     #[test]
@@ -273,11 +285,11 @@ mod tests {
     // EmbeddingSearcher — feature-gated tests
     // ------------------------------------------------------------------
 
-    use std::sync::Arc;
-    use async_trait::async_trait;
-    use crate::providers::{LLMProvider, ChatOptions, LLMResponse, ToolDefinition};
-    use crate::session::Message;
     use crate::error::Result as ZResult;
+    use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
+    use crate::session::Message;
+    use async_trait::async_trait;
+    use std::sync::Arc;
 
     /// Fake provider that returns fixed-dimension embeddings.
     struct FakeEmbeddingProvider {
@@ -287,8 +299,12 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for FakeEmbeddingProvider {
-        fn name(&self) -> &str { "fake-embedding" }
-        fn default_model(&self) -> &str { "fake-model" }
+        fn name(&self) -> &str {
+            "fake-embedding"
+        }
+        fn default_model(&self) -> &str {
+            "fake-model"
+        }
         async fn chat(
             &self,
             _messages: Vec<Message>,
@@ -302,13 +318,17 @@ mod tests {
             // Return a normalised unit vector in dimension 0 for each text.
             // Each text gets a unique vector based on its position index so
             // that cosine similarity between different texts is computable.
-            Ok(texts.iter().enumerate().map(|(i, _)| {
-                let mut v = vec![0.0f32; self.dim];
-                if !v.is_empty() {
-                    v[i % self.dim] = 1.0;
-                }
-                v
-            }).collect())
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let mut v = vec![0.0f32; self.dim];
+                    if !v.is_empty() {
+                        v[i % self.dim] = 1.0;
+                    }
+                    v
+                })
+                .collect())
         }
     }
 
@@ -386,7 +406,10 @@ mod tests {
         searcher.remove("key:a").await.unwrap();
 
         let store = load_vector_store(&path);
-        assert!(!store.vectors.contains_key("key:a"), "key:a should be removed");
+        assert!(
+            !store.vectors.contains_key("key:a"),
+            "key:a should be removed"
+        );
         assert!(store.vectors.contains_key("key:b"), "key:b should remain");
     }
 
@@ -403,7 +426,11 @@ mod tests {
 
         assert_eq!(scores.len(), 3, "Should return one score per chunk");
         for score in &scores {
-            assert!(*score >= 0.0 && *score <= 1.0, "Score out of range: {}", score);
+            assert!(
+                *score >= 0.0 && *score <= 1.0,
+                "Score out of range: {}",
+                score
+            );
         }
     }
 

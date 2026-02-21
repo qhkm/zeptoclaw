@@ -493,8 +493,7 @@ pub(crate) async fn create_agent_with_template(
     // can call embed() without going through the agent loop.
     let embedding_provider: Option<std::sync::Arc<dyn zeptoclaw::providers::LLMProvider>> =
         if matches!(config.memory.backend, MemoryBackend::Embedding) {
-            build_runtime_provider_chain(&config)
-                .map(|(chain, _names)| std::sync::Arc::from(chain))
+            build_runtime_provider_chain(&config).map(|(chain, _names)| std::sync::Arc::from(chain))
         } else {
             None
         };
