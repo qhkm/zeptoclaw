@@ -257,7 +257,7 @@ fn strip_at_placeholders(text: &str) -> String {
             if let Some(after) = rest.strip_prefix("_user_") {
                 let skip =
                     "_user_".len() + after.chars().take_while(|c| c.is_ascii_digit()).count();
-                for _ in 0..=skip {
+                for _ in 0..skip {
                     chars.next();
                 }
                 if chars.peek().map(|(_, c)| *c == ' ').unwrap_or(false) {
@@ -274,6 +274,75 @@ fn strip_at_placeholders(text: &str) -> String {
 /// In group chats only respond when the bot is @-mentioned.
 fn should_respond_in_group(mentions: &[serde_json::Value]) -> bool {
     !mentions.is_empty()
+}
+
+/// Fetch and cache a Lark tenant access token.
+///
+/// Checks the cache first; only hits the network when the token is missing
+/// or within `TOKEN_REFRESH_SKEW` of expiry.  Both `get_tenant_token` and
+/// the fire-and-forget reaction task share this helper so the token-fetch
+/// logic lives in exactly one place.
+async fn fetch_tenant_token_cached(
+    api_base: &'static str,
+    app_id: &str,
+    app_secret: &str,
+    cache: &Arc<RwLock<Option<CachedToken>>>,
+) -> anyhow::Result<String> {
+    // Fast path: cached and still fresh
+    {
+        let guard = cache.read().await;
+        if let Some(ref tok) = *guard {
+            if Instant::now() < tok.refresh_after {
+                return Ok(tok.value.clone());
+            }
+        }
+    }
+
+    // Fetch a new token
+    let url = format!("{}/auth/v3/tenant_access_token/internal", api_base);
+    let resp = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+        .post(&url)
+        .json(&serde_json::json!({
+            "app_id": app_id,
+            "app_secret": app_secret,
+        }))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("Lark token request failed: status={status}, body={body}");
+    }
+
+    let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let msg = body
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!("Lark tenant_access_token error: {msg}");
+    }
+
+    let token = body
+        .get("tenant_access_token")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token in response"))?
+        .to_string();
+
+    let ttl = extract_token_ttl(&body);
+    let refresh_after = token_refresh_deadline(Instant::now(), ttl);
+
+    {
+        let mut guard = cache.write().await;
+        *guard = Some(CachedToken { value: token.clone(), refresh_after });
+    }
+
+    Ok(token)
 }
 
 // ---------------------------------------------------------------------------
@@ -370,58 +439,13 @@ impl LarkChannel {
 
     /// Returns a valid tenant access token, refreshing from the API if needed.
     async fn get_tenant_token(&self) -> anyhow::Result<String> {
-        // Fast path: cached and still fresh
-        {
-            let guard = self.tenant_token.read().await;
-            if let Some(ref tok) = *guard {
-                if Instant::now() < tok.refresh_after {
-                    return Ok(tok.value.clone());
-                }
-            }
-        }
-
-        // Fetch a new token
-        let url = format!("{}/auth/v3/tenant_access_token/internal", self.api_base());
-        let resp = reqwest::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({
-                "app_id": self.config.app_id,
-                "app_secret": self.config.app_secret,
-            }))
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Lark token request failed: status={status}, body={body}");
-        }
-
-        let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-        if code != 0 {
-            let msg = body
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            anyhow::bail!("Lark tenant_access_token error: {msg}");
-        }
-
-        let token = body
-            .get("tenant_access_token")
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token in response"))?
-            .to_string();
-
-        let ttl = extract_token_ttl(&body);
-        let refresh_after = token_refresh_deadline(Instant::now(), ttl);
-
-        {
-            let mut guard = self.tenant_token.write().await;
-            *guard = Some(CachedToken { value: token.clone(), refresh_after });
-        }
-
-        Ok(token)
+        fetch_tenant_token_cached(
+            self.api_base(),
+            &self.config.app_id,
+            &self.config.app_secret,
+            &self.tenant_token,
+        )
+        .await
     }
 
     /// Invalidate the cached tenant token (called on 401 / business code 99991663).
@@ -440,7 +464,10 @@ impl LarkChannel {
         token: &str,
         body: &serde_json::Value,
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
-        let resp = reqwest::Client::new()
+        let resp = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default()
             .post(url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json; charset=utf-8")
@@ -461,7 +488,10 @@ impl LarkChannel {
     /// Obtain the WSS URL from Lark's `/callback/ws/endpoint` API.
     async fn get_ws_endpoint(&self) -> anyhow::Result<(String, WsClientConfig)> {
         let url = format!("{}/callback/ws/endpoint", self.ws_base());
-        let resp = reqwest::Client::new()
+        let resp = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default()
             .post(&url)
             .header("locale", if self.config.feishu { "zh" } else { "en" })
             .json(&serde_json::json!({
@@ -787,53 +817,24 @@ impl LarkChannel {
                         let app_id = self.config.app_id.clone();
                         let app_secret = self.config.app_secret.clone();
                         let msg_id = message_id.clone();
-                        tokio::spawn(async move {
-                            // Build a minimal ephemeral channel just for the token fetch
-                            let ephemeral_token: anyhow::Result<String> = async {
-                                {
-                                    let guard = token_cache.read().await;
-                                    if let Some(ref tok) = *guard {
-                                        if Instant::now() < tok.refresh_after {
-                                            return Ok(tok.value.clone());
-                                        }
-                                    }
-                                }
-                                // Re-fetch token
-                                let url = format!("{}/auth/v3/tenant_access_token/internal", api_base_str);
-                                let resp = reqwest::Client::new()
-                                    .post(&url)
-                                    .json(&serde_json::json!({
-                                        "app_id": app_id,
-                                        "app_secret": app_secret,
-                                    }))
-                                    .send()
-                                    .await?;
-                                let status = resp.status();
-                                let body: serde_json::Value = resp.json().await?;
-                                if !status.is_success() {
-                                    anyhow::bail!("token request failed: {status}");
-                                }
-                                let token = body
-                                    .get("tenant_access_token")
-                                    .and_then(|t| t.as_str())
-                                    .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token"))?
-                                    .to_string();
-                                let ttl = extract_token_ttl(&body);
-                                let refresh_after = token_refresh_deadline(Instant::now(), ttl);
-                                {
-                                    let mut guard = token_cache.write().await;
-                                    *guard = Some(CachedToken { value: token.clone(), refresh_after });
-                                }
-                                Ok(token)
-                            }.await;
-
-                            match ephemeral_token {
+                        let _reaction = tokio::spawn(async move {
+                            match fetch_tenant_token_cached(
+                                api_base_str,
+                                &app_id,
+                                &app_secret,
+                                &token_cache,
+                            )
+                            .await
+                            {
                                 Ok(token) => {
                                     let url = format!(
                                         "{}/im/v1/messages/{}/reactions",
                                         api_base_str, msg_id
                                     );
-                                    match reqwest::Client::new()
+                                    match reqwest::Client::builder()
+                                        .timeout(Duration::from_secs(30))
+                                        .build()
+                                        .unwrap_or_default()
                                         .post(&url)
                                         .bearer_auth(&token)
                                         .json(&serde_json::json!({
