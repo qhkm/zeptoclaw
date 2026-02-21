@@ -18,7 +18,7 @@ use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
-    LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
+    GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
 };
 use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
@@ -137,6 +137,16 @@ fn provider_from_runtime_selection(
             }
         }
         "openai" => {
+            // When the provider is Gemini and the credential is a bearer token
+            // (e.g., from Gemini CLI OAuth), use the native Gemini provider which
+            // speaks the Gemini REST API directly and handles thinking model output.
+            if selection.name == "gemini" && selection.credential.is_bearer() {
+                let token = selection.credential.value();
+                return Some(Box::new(GeminiProvider::new_with_token(
+                    token,
+                    "gemini-2.0-flash",
+                )));
+            }
             let provider = if let Some(base_url) = selection.api_base.as_deref() {
                 OpenAIProvider::with_base_url(&selection.api_key, base_url)
             } else {
