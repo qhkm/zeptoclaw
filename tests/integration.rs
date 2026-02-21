@@ -1031,7 +1031,12 @@ async fn test_heartbeat_trigger_now_enqueues_message() {
 
     let bus = Arc::new(MessageBus::new());
     let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
-    service.trigger_now().await.unwrap();
+    let result = service.trigger_now().await;
+    assert!(
+        result.error.is_none(),
+        "trigger_now failed: {:?}",
+        result.error
+    );
 
     let inbound = timeout(Duration::from_secs(1), bus.consume_inbound())
         .await
@@ -1054,7 +1059,12 @@ async fn test_heartbeat_trigger_now_skips_non_actionable_content() {
 
     let bus = Arc::new(MessageBus::new());
     let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
-    service.trigger_now().await.unwrap();
+    let result = service.trigger_now().await;
+    assert!(
+        result.error.is_none(),
+        "trigger_now failed: {:?}",
+        result.error
+    );
 
     let receive_result = timeout(Duration::from_millis(300), bus.consume_inbound()).await;
     assert!(receive_result.is_err(), "expected no heartbeat message");
