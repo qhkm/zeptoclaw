@@ -830,7 +830,7 @@ impl LarkChannel {
                             match ephemeral_token {
                                 Ok(token) => {
                                     let url = format!(
-                                        "{}/open-apis/im/v1/messages/{}/reactions",
+                                        "{}/im/v1/messages/{}/reactions",
                                         api_base_str, msg_id
                                     );
                                     match reqwest::Client::new()
