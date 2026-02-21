@@ -23,7 +23,8 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
 
             let runtime = DockerRuntime::new(&config.docker.image)
                 .with_network(&config.docker.network)
-                .with_extra_mounts(extra_mounts);
+                .with_extra_mounts(extra_mounts)
+                .with_stop_timeout(config.docker.stop_timeout_secs);
 
             let runtime = if let Some(ref mem) = config.docker.memory_limit {
                 runtime.with_memory_limit(mem)
@@ -33,6 +34,12 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
 
             let runtime = if let Some(ref cpu) = config.docker.cpu_limit {
                 runtime.with_cpu_limit(cpu)
+            } else {
+                runtime
+            };
+
+            let runtime = if let Some(pids) = config.docker.pids_limit {
+                runtime.with_pids_limit(pids)
             } else {
                 runtime
             };

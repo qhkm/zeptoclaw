@@ -452,6 +452,18 @@ impl Config {
                 self.runtime.apple.allow_experimental = v;
             }
         }
+
+        // Runtime: Docker
+        if let Ok(v) = std::env::var("ZEPTOCLAW_RUNTIME_DOCKER_PIDS_LIMIT") {
+            if let Ok(n) = v.parse::<u32>() {
+                self.runtime.docker.pids_limit = Some(n);
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_RUNTIME_DOCKER_STOP_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.runtime.docker.stop_timeout_secs = n;
+            }
+        }
     }
 
     /// Apply tool-specific environment variable overrides
