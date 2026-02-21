@@ -13,6 +13,10 @@ pub mod store;
 
 use serde::{Deserialize, Serialize};
 
+/// Claude Code's OAuth client ID, used when importing subscription tokens
+/// obtained via `claude auth token`.
+pub const CLAUDE_CODE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
 // ============================================================================
 // Auth Method
 // ============================================================================

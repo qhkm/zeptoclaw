@@ -262,6 +262,8 @@ pub enum AuthAction {
         /// Provider to refresh tokens for
         provider: String,
     },
+    /// Set up a Claude Code subscription token for API access
+    SetupToken,
 }
 
 #[derive(Subcommand)]

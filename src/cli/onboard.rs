@@ -472,36 +472,119 @@ async fn configure_anthropic(config: &mut Config) -> Result<()> {
     println!();
     println!("Anthropic (Claude) Setup");
     println!("------------------------");
-    println!("Get your API key from: https://console.anthropic.com/");
+    println!("How would you like to authenticate?");
+    println!("  1. API key (from https://console.anthropic.com/)");
+    println!("  2. Claude Code subscription token (Pro/Max plan)");
+    println!("  3. Skip");
     println!();
-    print!("Enter Anthropic API key (or press Enter to skip): ");
+    print!("Choice [1]: ");
     io::stdout().flush()?;
 
-    let api_key = read_secret()?;
+    let choice = read_line()?;
+    let choice = if choice.is_empty() {
+        "1"
+    } else {
+        choice.trim()
+    };
 
-    if !api_key.is_empty() {
-        print!("  Validating API key...");
-        io::stdout().flush()?;
-        match super::common::validate_api_key("anthropic", &api_key, None).await {
-            Ok(()) => println!(" valid!"),
-            Err(e) => {
-                println!(" failed.");
-                println!("  Warning: {}", e);
-                println!("  Saving anyway -- you can fix this later.");
+    match choice {
+        "1" => {
+            print!("Enter Anthropic API key: ");
+            io::stdout().flush()?;
+            let api_key = read_secret()?;
+            if !api_key.is_empty() {
+                print!("  Validating API key...");
+                io::stdout().flush()?;
+                match super::common::validate_api_key("anthropic", &api_key, None).await {
+                    Ok(()) => println!(" valid!"),
+                    Err(e) => {
+                        println!(" failed.");
+                        println!("  Warning: {}", e);
+                        println!("  Saving anyway -- you can fix this later.");
+                    }
+                }
+                let provider_config = config
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(Default::default);
+                provider_config.api_key = Some(api_key);
+                config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+                println!("  Anthropic API key configured.");
+                println!("  Default model set to: claude-sonnet-4-5-20250929");
+            } else {
+                println!("  No key entered. Skipped Anthropic configuration.");
             }
         }
-        let provider_config = config
-            .providers
-            .anthropic
-            .get_or_insert_with(Default::default);
-        provider_config.api_key = Some(api_key);
-        // Set Claude model as default when Anthropic is configured
-        config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
-        println!("  Anthropic API key configured.");
-        println!("  Default model set to: claude-sonnet-4-5-20250929");
-    } else {
-        println!("  Skipped Anthropic configuration.");
+        "2" => {
+            configure_anthropic_subscription_token(config)?;
+        }
+        "3" | "" => {
+            println!("  Skipped Anthropic configuration.");
+        }
+        _ => {
+            println!("  Invalid choice. Skipped Anthropic configuration.");
+        }
     }
+
+    Ok(())
+}
+
+/// Paste Claude Code subscription tokens during onboard.
+fn configure_anthropic_subscription_token(config: &mut Config) -> Result<()> {
+    println!();
+    println!("In Claude Code CLI, run: claude auth token");
+    println!("Then paste the tokens below.");
+    println!();
+    println!("WARNING: Using subscription tokens for API access may violate");
+    println!("Anthropic's Terms of Service. Tokens may be revoked at any time.");
+    println!();
+
+    print!("Access token: ");
+    io::stdout().flush()?;
+    let access_token = read_secret()?;
+    if access_token.is_empty() {
+        println!("  No access token provided. Skipped.");
+        return Ok(());
+    }
+
+    print!("Refresh token (optional, press Enter to skip): ");
+    io::stdout().flush()?;
+    let refresh_token = read_secret()?;
+    let refresh_token = if refresh_token.is_empty() {
+        None
+    } else {
+        Some(refresh_token)
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let tokens = zeptoclaw::auth::OAuthTokenSet {
+        provider: "anthropic".to_string(),
+        access_token,
+        refresh_token,
+        expires_at: None,
+        token_type: "Bearer".to_string(),
+        scope: None,
+        obtained_at: now,
+        client_id: Some(zeptoclaw::auth::CLAUDE_CODE_CLIENT_ID.to_string()),
+    };
+
+    let encryption = zeptoclaw::security::encryption::resolve_master_key(true)
+        .map_err(|e| anyhow::anyhow!("Cannot store tokens without encryption key: {}", e))?;
+    let store = zeptoclaw::auth::store::TokenStore::new(encryption);
+    store
+        .save(&tokens)
+        .map_err(|e| anyhow::anyhow!("Failed to save tokens: {}", e))?;
+
+    let provider_config = config
+        .providers
+        .anthropic
+        .get_or_insert_with(Default::default);
+    provider_config.auth_method = Some("auto".to_string());
+    config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+
+    println!("  Subscription token stored and encrypted.");
+    println!("  Auth method set to \"auto\" (OAuth first, API key fallback).");
+    println!("  Default model set to: claude-sonnet-4-5-20250929");
 
     Ok(())
 }
