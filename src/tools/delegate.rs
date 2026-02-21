@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
-use crate::agent::{AgentLoop, ContextBuilder};
+use crate::agent::{AgentLoop, ContextBuilder, SwarmScratchpad};
 use crate::bus::{InboundMessage, MessageBus};
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
@@ -46,6 +46,8 @@ pub struct DelegateTool {
     bus: Arc<MessageBus>,
     /// Semaphore limiting concurrent sub-agent executions.
     semaphore: Arc<Semaphore>,
+    /// Shared scratchpad for passing context between sub-agents in a swarm session.
+    scratchpad: SwarmScratchpad,
 }
 
 impl DelegateTool {
@@ -69,6 +71,7 @@ impl DelegateTool {
             provider,
             bus,
             semaphore,
+            scratchpad: SwarmScratchpad::new(),
         }
     }
 
@@ -87,7 +90,15 @@ impl DelegateTool {
             provider,
             bus,
             semaphore,
+            scratchpad: SwarmScratchpad::new(),
         }
+    }
+
+    /// Return a reference to the shared swarm scratchpad.
+    ///
+    /// Primarily useful in tests to inspect scratchpad state after delegating.
+    pub fn scratchpad(&self) -> &SwarmScratchpad {
+        &self.scratchpad
     }
 
     /// Create a standard set of tools for a sub-agent.
@@ -143,7 +154,7 @@ impl DelegateTool {
         let role_config = self.config.swarm.roles.get(&role_lower);
 
         // Build system prompt from role config or generate a default
-        let system_prompt = match role_config {
+        let mut system_prompt = match role_config {
             Some(rc) if !rc.system_prompt.is_empty() => rc.system_prompt.clone(),
             _ => format!(
                 "You are a specialist with the role: {}. \
@@ -152,6 +163,12 @@ impl DelegateTool {
                 role
             ),
         };
+
+        // Inject previous agent outputs from the scratchpad so this sub-agent
+        // can build on what earlier agents produced.
+        if let Some(context) = self.scratchpad.format_for_prompt().await {
+            system_prompt = format!("{}\n\n{}", system_prompt, context);
+        }
 
         // Determine allowed tools: explicit override > role config > all
         let allowed_tool_names: Option<Vec<String>> = tools.map(|t| t.to_vec()).or_else(|| {
@@ -330,6 +347,9 @@ impl Tool for DelegateTool {
                 let result = self
                     .run_single_delegate(role, task, tool_override.as_deref(), ctx)
                     .await?;
+                // Write the result to the scratchpad so subsequent sub-agents can
+                // see what this agent produced.
+                self.scratchpad.write(role, &result).await;
                 // Preserve the original output format: "[role]: result"
                 Ok(format!("[{}]: {}", role, result))
             }
@@ -365,6 +385,9 @@ impl Tool for DelegateTool {
                     let result = self
                         .run_single_delegate(role, task_text, tools.as_deref(), ctx)
                         .await?;
+                    // Write each result to the scratchpad so subsequent sub-agents
+                    // in this aggregate batch can see prior outputs.
+                    self.scratchpad.write(role, &result).await;
                     results.push((role.to_string(), result));
                 }
 
@@ -770,6 +793,18 @@ mod tests {
             "Should not get unknown-action error when action is absent: {}",
             err_msg
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 17: SwarmScratchpad integration test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_delegate_has_scratchpad() {
+        let tool = test_delegate_tool(true);
+        // Scratchpad starts empty
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(tool.scratchpad().is_empty()));
     }
 
     /// An unrecognised action value must produce an error containing the bad value.

@@ -47,6 +47,14 @@ pub enum RotationStrategy {
     Priority,
     /// Round-robin across healthy providers.
     RoundRobin,
+    /// Pick the cheapest healthy provider based on input cost per million tokens
+    /// from [`crate::utils::cost::default_pricing`].
+    ///
+    /// Ties are broken by priority order (first in list wins). Providers whose
+    /// model has no pricing data are treated as having infinite cost and are
+    /// only selected when all cheaper alternatives are unhealthy. When all
+    /// providers are unhealthy, falls back to [`RotationProvider::oldest_unhealthy_index`].
+    CostAware,
 }
 
 // ============================================================================
@@ -234,6 +242,31 @@ impl RotationProvider {
                 }
                 // All unhealthy: use the one with the oldest last_failure.
                 self.oldest_unhealthy_index()
+            }
+            RotationStrategy::CostAware => {
+                let pricing = crate::utils::cost::default_pricing();
+
+                let mut best_index: Option<usize> = None;
+                let mut best_cost = f64::MAX;
+
+                for (i, (provider, health)) in self.providers.iter().enumerate() {
+                    if !health.is_healthy() {
+                        continue;
+                    }
+                    let model = provider.default_model();
+                    let cost = pricing
+                        .get(model)
+                        .map(|p| p.input_cost_per_million)
+                        .unwrap_or(f64::MAX);
+
+                    // Strict less-than: ties keep the earlier (priority-order) provider.
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best_index = Some(i);
+                    }
+                }
+
+                best_index.unwrap_or_else(|| self.oldest_unhealthy_index())
             }
         }
     }
@@ -926,6 +959,252 @@ mod tests {
 
         let parsed: RotationStrategy = serde_json::from_str("\"priority\"").unwrap();
         assert_eq!(parsed, RotationStrategy::Priority);
+    }
+
+    // ---------------------------------------------------------------
+    // Task 18: Cost-aware rotation tests
+    // ---------------------------------------------------------------
+
+    /// A provider with a specific `default_model` for cost lookup.
+    struct ModelProvider {
+        name_str: &'static str,
+        model_str: &'static str,
+        call_count: Arc<AtomicU32>,
+    }
+
+    impl fmt::Debug for ModelProvider {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ModelProvider")
+                .field("name", &self.name_str)
+                .field("model", &self.model_str)
+                .finish()
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for ModelProvider {
+        fn name(&self) -> &str {
+            self.name_str
+        }
+
+        fn default_model(&self) -> &str {
+            self.model_str
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(LLMResponse::text(&format!("from {}", self.name_str)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cost_aware_picks_cheapest() {
+        let calls_haiku = Arc::new(AtomicU32::new(0));
+        let calls_sonnet = Arc::new(AtomicU32::new(0));
+        let calls_opus = Arc::new(AtomicU32::new(0));
+
+        let provider = RotationProvider::new(
+            vec![
+                // Opus: $15/M input (most expensive, listed first)
+                Box::new(ModelProvider {
+                    name_str: "opus",
+                    model_str: "claude-opus-4-6",
+                    call_count: Arc::clone(&calls_opus),
+                }),
+                // Sonnet: $3/M input (mid-range)
+                Box::new(ModelProvider {
+                    name_str: "sonnet",
+                    model_str: "claude-sonnet-4-5-20250929",
+                    call_count: Arc::clone(&calls_sonnet),
+                }),
+                // Haiku: $0.25/M input (cheapest)
+                Box::new(ModelProvider {
+                    name_str: "haiku",
+                    model_str: "claude-3-haiku-20240307",
+                    call_count: Arc::clone(&calls_haiku),
+                }),
+            ],
+            RotationStrategy::CostAware,
+            3,
+            30,
+        );
+
+        let response = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await
+            .expect("should succeed");
+
+        // Should pick haiku (cheapest)
+        assert_eq!(response.content, "from haiku");
+        assert_eq!(calls_haiku.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_sonnet.load(Ordering::SeqCst), 0);
+        assert_eq!(calls_opus.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cost_aware_skips_unhealthy_cheap() {
+        let calls_sonnet = Arc::new(AtomicU32::new(0));
+        let calls_haiku = Arc::new(AtomicU32::new(0));
+
+        let provider = RotationProvider::new(
+            vec![
+                Box::new(ModelProvider {
+                    name_str: "haiku",
+                    model_str: "claude-3-haiku-20240307",
+                    call_count: Arc::clone(&calls_haiku),
+                }),
+                Box::new(ModelProvider {
+                    name_str: "sonnet",
+                    model_str: "claude-sonnet-4-5-20250929",
+                    call_count: Arc::clone(&calls_sonnet),
+                }),
+            ],
+            RotationStrategy::CostAware,
+            1, // threshold=1: one failure marks unhealthy
+            30,
+        );
+
+        // Mark haiku as unhealthy by storing failure_count >= threshold and a recent timestamp.
+        provider.providers[0].1.failure_count.store(1, Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        provider.providers[0].1.last_failure_epoch.store(now, Ordering::Relaxed);
+
+        let response = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await
+            .expect("should succeed");
+
+        // Should skip haiku (unhealthy) and pick sonnet
+        assert_eq!(response.content, "from sonnet");
+        assert_eq!(calls_haiku.load(Ordering::SeqCst), 0);
+        assert_eq!(calls_sonnet.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cost_aware_unknown_model_treated_expensive() {
+        let calls_known = Arc::new(AtomicU32::new(0));
+        let calls_unknown = Arc::new(AtomicU32::new(0));
+
+        let provider = RotationProvider::new(
+            vec![
+                // Unknown model (no pricing data) — listed first
+                Box::new(ModelProvider {
+                    name_str: "unknown",
+                    model_str: "some-obscure-model-v99",
+                    call_count: Arc::clone(&calls_unknown),
+                }),
+                // Known model with pricing
+                Box::new(ModelProvider {
+                    name_str: "haiku",
+                    model_str: "claude-3-haiku-20240307",
+                    call_count: Arc::clone(&calls_known),
+                }),
+            ],
+            RotationStrategy::CostAware,
+            3,
+            30,
+        );
+
+        let response = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await
+            .expect("should succeed");
+
+        // Should prefer haiku (known pricing) over unknown (f64::MAX cost)
+        assert_eq!(response.content, "from haiku");
+        assert_eq!(calls_known.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_unknown.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cost_aware_equal_cost_uses_priority() {
+        let calls_a = Arc::new(AtomicU32::new(0));
+        let calls_b = Arc::new(AtomicU32::new(0));
+
+        // Both use the same model → identical input cost
+        let provider = RotationProvider::new(
+            vec![
+                Box::new(ModelProvider {
+                    name_str: "alpha",
+                    model_str: "claude-sonnet-4-5-20250929",
+                    call_count: Arc::clone(&calls_a),
+                }),
+                Box::new(ModelProvider {
+                    name_str: "beta",
+                    model_str: "claude-sonnet-4-5-20250929",
+                    call_count: Arc::clone(&calls_b),
+                }),
+            ],
+            RotationStrategy::CostAware,
+            3,
+            30,
+        );
+
+        let response = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await
+            .expect("should succeed");
+
+        // When costs are equal, first provider wins (priority order)
+        assert_eq!(response.content, "from alpha");
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cost_aware_all_unhealthy_uses_oldest() {
+        let provider = RotationProvider::new(
+            vec![
+                Box::new(ModelProvider {
+                    name_str: "expensive",
+                    model_str: "claude-opus-4-6",
+                    call_count: Arc::new(AtomicU32::new(0)),
+                }),
+                Box::new(ModelProvider {
+                    name_str: "cheap",
+                    model_str: "claude-3-haiku-20240307",
+                    call_count: Arc::new(AtomicU32::new(0)),
+                }),
+            ],
+            RotationStrategy::CostAware,
+            1,
+            30,
+        );
+
+        // Mark both as unhealthy; expensive failed longest ago (oldest).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        provider.providers[0].1.failure_count.store(1, Ordering::Relaxed);
+        provider.providers[0].1.last_failure_epoch.store(now - 100, Ordering::Relaxed);
+
+        provider.providers[1].1.failure_count.store(1, Ordering::Relaxed);
+        provider.providers[1].1.last_failure_epoch.store(now - 10, Ordering::Relaxed);
+
+        // When all unhealthy, should use oldest failure (index 0) regardless of cost.
+        let idx = provider.select_provider_index();
+        assert_eq!(idx, 0, "all unhealthy should use oldest-failure fallback");
+    }
+
+    #[test]
+    fn test_cost_aware_strategy_serialize() {
+        let strategy = RotationStrategy::CostAware;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, "\"cost_aware\"");
+
+        let parsed: RotationStrategy = serde_json::from_str("\"cost_aware\"").unwrap();
+        assert_eq!(parsed, RotationStrategy::CostAware);
     }
 
     #[tokio::test]
