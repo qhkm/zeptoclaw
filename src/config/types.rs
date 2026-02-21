@@ -895,6 +895,30 @@ pub struct ToolsConfig {
     pub whatsapp: WhatsAppToolConfig,
     /// Google Sheets tool configuration
     pub google_sheets: GoogleSheetsToolConfig,
+    /// HTTP request tool configuration
+    pub http_request: Option<HttpRequestConfig>,
+}
+
+/// Configuration for the HTTP request tool.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HttpRequestConfig {
+    /// Allowlist of domains the agent may call. Required — tool fails fast if empty.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Request timeout in seconds. Default: 30.
+    #[serde(default = "default_http_request_timeout")]
+    pub timeout_secs: u64,
+    /// Maximum response body size in bytes. Default: 512KB.
+    #[serde(default = "default_http_request_max_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_http_request_timeout() -> u64 {
+    30
+}
+
+fn default_http_request_max_bytes() -> usize {
+    512 * 1024
 }
 
 /// Web tools configuration

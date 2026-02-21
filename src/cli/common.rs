@@ -29,8 +29,8 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, ProjectTool,
-    R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
+    MessageTool, ProjectTool, R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -621,6 +621,22 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     if tool_enabled("web_fetch") {
         agent.register_tool(Box::new(WebFetchTool::new())).await;
         info!("Registered web_fetch tool");
+    }
+
+    // Register HTTP request tool (opt-in via allowed_domains config).
+    if tool_enabled("http_request") {
+        if let Some(http_cfg) = &config.tools.http_request {
+            if !http_cfg.allowed_domains.is_empty() {
+                agent
+                    .register_tool(Box::new(HttpRequestTool::new(
+                        http_cfg.allowed_domains.clone(),
+                        http_cfg.timeout_secs,
+                        http_cfg.max_response_bytes,
+                    )))
+                    .await;
+                info!("Registered http_request tool");
+            }
+        }
     }
 
     // Register proactive messaging tool.
