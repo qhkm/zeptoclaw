@@ -59,6 +59,8 @@ struct PluginChatOptions {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    // TODO: forward output_format (JSON mode) when structured output is a first-class feature
+    // TODO: forward stop sequences from ChatOptions.stop
 }
 
 #[derive(Deserialize)]
@@ -173,16 +175,31 @@ impl LLMProvider for ProviderPlugin {
         use tokio::process::Command;
 
         // Serialize messages and tools to generic JSON so the wire format
-        // is provider-agnostic.
+        // is provider-agnostic. Propagate serialization failures — a null element
+        // in the array would produce a structurally-valid but garbage request.
         let messages_json: Vec<Value> = messages
             .iter()
-            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
-            .collect();
+            .map(|m| {
+                serde_json::to_value(m).map_err(|e| {
+                    ZeptoError::Provider(format!(
+                        "Failed to serialize message for plugin '{}': {}",
+                        self.name, e
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let tools_json: Vec<Value> = tools
             .iter()
-            .map(|t| serde_json::to_value(t).unwrap_or(Value::Null))
-            .collect();
+            .map(|t| {
+                serde_json::to_value(t).map_err(|e| {
+                    ZeptoError::Provider(format!(
+                        "Failed to serialize tool definition for plugin '{}': {}",
+                        self.name, e
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let request = PluginChatRequest {
             jsonrpc: "2.0".to_string(),
@@ -246,6 +263,8 @@ impl LLMProvider for ProviderPlugin {
                 )));
             }
             Err(_) => {
+                // child was consumed by wait_with_output()'s future which is now
+                // dropped — Tokio's Child Drop impl sends SIGKILL automatically.
                 return Err(ZeptoError::Provider(format!(
                     "Provider plugin '{}' timed out after {}s",
                     self.name,
