@@ -82,7 +82,8 @@ pub fn discover_mcp_servers(workspace: Option<&Path>) -> Vec<DiscoveredMcpServer
     let mut servers = Vec::new();
 
     // 1. Global: ~/.mcp/servers.json
-    let global_path: Option<PathBuf> = dirs::home_dir().map(|h| h.join(".mcp").join("servers.json"));
+    let global_path: Option<PathBuf> =
+        dirs::home_dir().map(|h| h.join(".mcp").join("servers.json"));
     if let Some(ref path) = global_path {
         if let Some(discovered) = load_mcp_config(path, "global") {
             servers.extend(discovered);
@@ -151,10 +152,7 @@ pub(crate) fn load_mcp_config(path: &Path, source: &str) -> Option<Vec<Discovere
 /// 3. Direct `HashMap<String, McpServerEntry>` — bare map
 ///
 /// Returns `None` on JSON parse failure (caller emits the warning).
-fn parse_mcp_config_json(
-    content: &str,
-    path: &Path,
-) -> Option<HashMap<String, McpServerEntry>> {
+fn parse_mcp_config_json(content: &str, path: &Path) -> Option<HashMap<String, McpServerEntry>> {
     // Wrapper that accepts both "mcpServers" and "servers" via #[serde(alias)].
     #[derive(Deserialize)]
     struct McpConfigWrapper {
@@ -248,7 +246,11 @@ mod tests {
         .unwrap();
 
         let servers = load_mcp_config(&path, "test").unwrap();
-        assert_eq!(servers.len(), 1, "Only the server with url should be included");
+        assert_eq!(
+            servers.len(),
+            1,
+            "Only the server with url should be included"
+        );
         assert_eq!(servers[0].name, "github");
         assert_eq!(servers[0].url, "http://localhost:3000");
         assert_eq!(servers[0].source, "test");

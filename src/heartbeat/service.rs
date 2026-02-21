@@ -135,13 +135,11 @@ impl HeartbeatService {
                 let result = Self::tick(&file_path, &bus, &chat_id).await;
 
                 if result.error.is_some() {
-                    let count =
-                        consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    let count = consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= failure_threshold {
                         warn!(
                             consecutive_failures = count,
-                            "Heartbeat: {} consecutive failures, service may be degraded",
-                            count
+                            "Heartbeat: {} consecutive failures, service may be degraded", count
                         );
                     }
                 } else {
@@ -309,19 +307,12 @@ mod tests {
     #[test]
     fn test_heartbeat_health_tracking() {
         let bus = Arc::new(MessageBus::new());
-        let service = HeartbeatService::new(
-            PathBuf::from("/tmp/hb.md"),
-            60,
-            bus,
-            "test",
-        );
+        let service = HeartbeatService::new(PathBuf::from("/tmp/hb.md"), 60, bus, "test");
         assert_eq!(service.consecutive_failures(), 0);
         assert!(service.is_healthy());
 
         // Simulate accumulated failures (threshold is 3)
-        service
-            .consecutive_failures
-            .store(3, Ordering::Relaxed);
+        service.consecutive_failures.store(3, Ordering::Relaxed);
         assert!(!service.is_healthy());
     }
 

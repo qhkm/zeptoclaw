@@ -273,7 +273,11 @@ mod tests {
         fs::remove_dir_all(&plugin_dir).unwrap();
         let _ = watcher.scan(&[dir.path().to_path_buf()]);
 
-        assert_eq!(watcher.tracked_count(), 0, "Removed plugin should be evicted");
+        assert_eq!(
+            watcher.tracked_count(),
+            0,
+            "Removed plugin should be evicted"
+        );
     }
 
     #[test]
@@ -298,7 +302,10 @@ mod tests {
         // Clear all executable bits.
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
 
-        assert!(!check_binary_health(&file), "Non-executable file should fail health check");
+        assert!(
+            !check_binary_health(&file),
+            "Non-executable file should fail health check"
+        );
     }
 
     #[cfg(unix)]
@@ -310,7 +317,10 @@ mod tests {
         fs::write(&file, "#!/bin/sh\necho ok").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(check_binary_health(&file), "Executable file should pass health check");
+        assert!(
+            check_binary_health(&file),
+            "Executable file should pass health check"
+        );
     }
 
     #[test]
@@ -338,7 +348,11 @@ mod tests {
         let mut watcher = PluginWatcher::new();
         let changed = watcher.scan(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()]);
 
-        assert_eq!(changed.len(), 2, "Should detect plugins in both directories");
+        assert_eq!(
+            changed.len(),
+            2,
+            "Should detect plugins in both directories"
+        );
         assert_eq!(watcher.tracked_count(), 2);
     }
 }
