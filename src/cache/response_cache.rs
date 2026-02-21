@@ -92,7 +92,7 @@ impl ResponseCache {
             Some(true) => {
                 debug!(key = %&key[..8.min(key.len())], "Cache entry expired, removing");
                 self.store.entries.remove(key);
-                self.save_to_disk();
+                // Deferred disk write — flushed on next put() or clear()
                 None
             }
             Some(false) => {

@@ -13,6 +13,7 @@ pub mod history;
 pub mod memory;
 pub mod migrate;
 pub mod onboard;
+pub mod pair;
 pub mod secrets;
 pub mod skills;
 pub mod status;
@@ -159,6 +160,11 @@ enum Commands {
         /// Channel to notify on changes (telegram, slack, discord). Omit for stdout only.
         #[arg(long)]
         notify: Option<String>,
+    },
+    /// Manage device pairing (bearer token auth)
+    Pair {
+        #[command(subcommand)]
+        action: PairAction,
     },
     /// Migrate config and skills from an OpenClaw installation
     Migrate {
@@ -333,6 +339,19 @@ pub enum SecretsAction {
     Rotate,
 }
 
+#[derive(Subcommand)]
+pub enum PairAction {
+    /// Generate a new 6-digit pairing code
+    New,
+    /// List all paired devices
+    List,
+    /// Revoke a paired device
+    Revoke {
+        /// Device name to revoke
+        device: String,
+    },
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum BatchFormat {
     Text,
@@ -438,6 +457,9 @@ pub async fn run() -> Result<()> {
             notify,
         }) => {
             watch::cmd_watch(url, interval, notify).await?;
+        }
+        Some(Commands::Pair { action }) => {
+            pair::cmd_pair(action).await?;
         }
         Some(Commands::Migrate { from, yes, dry_run }) => {
             migrate::cmd_migrate(from, yes, dry_run).await?;

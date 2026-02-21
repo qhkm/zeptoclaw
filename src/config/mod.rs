@@ -177,6 +177,9 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_AGENT_MODE") {
             self.agent_mode.mode = val;
         }
+
+        // Device pairing
+        self.apply_pairing_env_overrides();
     }
 
     /// Apply provider-specific environment variable overrides
@@ -785,6 +788,23 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_MAX_ENTRIES") {
             if let Ok(n) = val.parse::<usize>() {
                 self.cache.max_entries = n;
+            }
+        }
+    }
+
+    /// Apply device pairing environment variable overrides.
+    fn apply_pairing_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_ENABLED") {
+            self.pairing.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_MAX_ATTEMPTS") {
+            if let Ok(n) = val.parse::<u32>() {
+                self.pairing.max_attempts = n.clamp(1, 100);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_LOCKOUT_SECS") {
+            if let Ok(n) = val.parse::<u64>() {
+                self.pairing.lockout_secs = n.clamp(10, 86400);
             }
         }
     }

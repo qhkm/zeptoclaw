@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex, RwLock};
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
@@ -138,6 +138,9 @@ pub struct AgentLoop {
     tool_feedback_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ToolFeedback>>>>,
     /// Optional LLM response cache (SHA-256 keyed, TTL + LRU).
     cache: Option<Arc<std::sync::Mutex<ResponseCache>>>,
+    /// Optional pairing manager for device token validation.
+    /// Present only when `config.pairing.enabled` is true.
+    pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
 }
 
 impl AgentLoop {
@@ -148,6 +151,22 @@ impl AgentLoop {
                 config.cache.ttl_secs,
                 config.cache.max_entries,
             ))))
+        } else {
+            None
+        }
+    }
+
+    /// Build an optional pairing manager from config.
+    fn build_pairing(
+        config: &Config,
+    ) -> Option<Arc<std::sync::Mutex<crate::security::PairingManager>>> {
+        if config.pairing.enabled {
+            Some(Arc::new(std::sync::Mutex::new(
+                crate::security::PairingManager::new(
+                    config.pairing.max_attempts,
+                    config.pairing.lockout_secs,
+                ),
+            )))
         } else {
             None
         }
@@ -193,6 +212,7 @@ impl AgentLoop {
             None
         };
         let cache = Self::build_cache(&config);
+        let pairing = Self::build_pairing(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -215,6 +235,7 @@ impl AgentLoop {
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
+            pairing,
         }
     }
 
@@ -249,6 +270,7 @@ impl AgentLoop {
             None
         };
         let cache = Self::build_cache(&config);
+        let pairing = Self::build_pairing(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -271,6 +293,7 @@ impl AgentLoop {
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
+            pairing,
         }
     }
 
@@ -1461,6 +1484,37 @@ impl AgentLoop {
                 // Wait for inbound messages
                 msg = self.bus.consume_inbound() => {
                     if let Some(msg) = msg {
+                        // Device pairing check: if enabled, validate bearer token
+                        if let Some(ref pairing) = self.pairing {
+                            let identifier = msg.sender_id.clone();
+                            let token = msg.metadata.get("auth_token").cloned();
+                            let valid = match token {
+                                Some(raw_token) => {
+                                    match pairing.lock() {
+                                        Ok(mut mgr) => mgr.validate_token(&raw_token, &identifier).is_some(),
+                                        Err(_) => false,
+                                    }
+                                }
+                                None => false,
+                            };
+                            if !valid {
+                                warn!(
+                                    sender = %msg.sender_id,
+                                    channel = %msg.channel,
+                                    "Rejected unpaired device (pairing enabled)"
+                                );
+                                let rejection = OutboundMessage::new(
+                                    &msg.channel,
+                                    &msg.chat_id,
+                                    "Access denied: device not paired. Use `zeptoclaw pair new` to generate a pairing code.",
+                                );
+                                if let Err(e) = self.bus.publish_outbound(rejection).await {
+                                    error!("Failed to publish pairing rejection: {}", e);
+                                }
+                                continue;
+                            }
+                        }
+
                         let tenant_id = msg
                             .metadata
                             .get("tenant_id")

@@ -72,6 +72,8 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 # SHA-256 digest for binary plugin integrity verification
 sha2 = "0.10"
+# Constant-time comparison for security-sensitive comparisons (token validation)
+subtle = "2.5"
 # Hex encoding/decoding for master key transport
 hex = "0.4"
 

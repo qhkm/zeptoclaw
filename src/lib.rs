@@ -65,7 +65,8 @@ pub use health::{health_port, start_health_server, start_periodic_usage_flush, U
 pub use runtime::AppleContainerRuntime;
 pub use security::{
     validate_extra_mounts, validate_path_in_workspace, AgentMode, AgentModeConfig,
-    CategoryPermission, ModePolicy, SafePath, ShellSecurityConfig,
+    CategoryPermission, DeviceInfo, ModePolicy, PairedDevice, PairingManager, SafePath,
+    ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 #[cfg(feature = "screenshot")]

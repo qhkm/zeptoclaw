@@ -105,6 +105,8 @@ pub struct Config {
     pub cache: CacheConfig,
     /// Agent mode configuration (observer/assistant/autonomous)
     pub agent_mode: crate::security::agent_mode::AgentModeConfig,
+    /// Device pairing configuration (bearer token auth for gateway)
+    pub pairing: PairingConfig,
     /// Custom CLI-defined tools (shell commands as agent tools).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolDef>,
@@ -142,6 +144,36 @@ impl Default for CacheConfig {
             enabled: false,
             ttl_secs: 3600,
             max_entries: 500,
+        }
+    }
+}
+
+// ============================================================================
+// Pairing Configuration
+// ============================================================================
+
+/// Device pairing configuration.
+///
+/// When enabled, the gateway requires a valid bearer token from paired devices.
+/// Devices are paired via a 6-digit one-time code exchanged for a bearer token.
+/// Tokens are stored as SHA-256 hashes for security.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PairingConfig {
+    /// Whether device pairing is required for gateway access.
+    pub enabled: bool,
+    /// Maximum failed pairing/validation attempts before lockout.
+    pub max_attempts: u32,
+    /// Duration in seconds to lock out after max_attempts is exceeded.
+    pub lockout_secs: u64,
+}
+
+impl Default for PairingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 5,
+            lockout_secs: 300,
         }
     }
 }
