@@ -541,6 +541,13 @@ impl Config {
         {
             self.tools.google_sheets.service_account_base64 = Some(val);
         }
+
+        if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_TRANSCRIBE_GROQ_API_KEY") {
+            self.tools.transcribe.groq_api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_TRANSCRIBE_ENABLED") {
+            self.tools.transcribe.enabled = v == "true" || v == "1";
+        }
     }
 
     /// Apply memory-specific environment variable overrides.

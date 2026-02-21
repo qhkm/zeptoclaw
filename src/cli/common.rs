@@ -30,7 +30,7 @@ use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
     EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, PdfReadTool, ProjectTool, R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    MessageTool, PdfReadTool, ProjectTool, R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -812,6 +812,22 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    if config.tools.transcribe.enabled {
+        if let Some(api_key) = &config.tools.transcribe.groq_api_key {
+            if tool_enabled("transcribe") {
+                agent
+                    .register_tool(Box::new(TranscribeTool::new(
+                        api_key,
+                        &config.tools.transcribe.model,
+                    )))
+                    .await;
+                info!(
+                    "Registered transcribe tool (model: {})",
+                    config.tools.transcribe.model
+                );
+            }
+        }
+    }
     if tool_enabled("reminder") {
         match zeptoclaw::tools::reminder::ReminderTool::new(Some(cron_service.clone())) {
             Ok(tool) => {

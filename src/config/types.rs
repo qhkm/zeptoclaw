@@ -1047,6 +1047,24 @@ impl Default for GatewayConfig {
 // Tools Configuration
 // ============================================================================
 
+/// Voice transcription tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TranscribeConfig {
+    /// Enable the transcribe tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// Groq API key for Whisper transcription
+    pub groq_api_key: Option<String>,
+    /// Whisper model to use
+    #[serde(default = "default_transcribe_model")]
+    pub model: String,
+}
+
+fn default_transcribe_model() -> String {
+    "whisper-large-v3-turbo".to_string()
+}
+
 /// Tools configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -1059,6 +1077,9 @@ pub struct ToolsConfig {
     pub google_sheets: GoogleSheetsToolConfig,
     /// HTTP request tool configuration
     pub http_request: Option<HttpRequestConfig>,
+    /// Voice transcription tool configuration
+    #[serde(default)]
+    pub transcribe: TranscribeConfig,
 }
 
 /// Configuration for the HTTP request tool.

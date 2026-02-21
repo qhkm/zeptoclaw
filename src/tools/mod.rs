@@ -79,6 +79,7 @@ pub mod screenshot;
 pub mod shell;
 pub mod spawn;
 pub mod stripe;
+pub mod transcribe;
 mod types;
 pub mod web;
 pub mod whatsapp;
@@ -101,6 +102,7 @@ pub use reminder::ReminderTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
 pub use stripe::StripeTool;
+pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
 pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;
