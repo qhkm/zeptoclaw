@@ -25,24 +25,6 @@ use crate::session::Message;
 
 use super::{ChatOptions, LLMProvider, LLMResponse, StreamEvent, ToolDefinition};
 
-/// Patterns in error messages that indicate a transient, retryable failure.
-const RETRYABLE_PATTERNS: &[&str] = &[
-    "429",
-    "500",
-    "502",
-    "503",
-    "504",
-    "rate limit",
-    "rate_limit",
-    "overloaded",
-    "too many requests",
-    "server error",
-    "internal server error",
-    "bad gateway",
-    "service unavailable",
-    "gateway timeout",
-];
-
 /// A decorator provider that retries transient LLM errors with exponential backoff.
 ///
 /// `RetryProvider` wraps an inner [`LLMProvider`] and intercepts errors from
@@ -150,7 +132,7 @@ fn is_auth_failure(msg: &str) -> bool {
         "forbidden",
         "permission denied",
         "access denied",
-        "invalid token",
+        "invalid_token",
     ];
     hints.iter().any(|h| lower.contains(h))
 }
@@ -180,12 +162,12 @@ pub fn is_retryable(err: &ZeptoError) -> bool {
                 return false;
             }
             // 401/403/400/404 status codes in message
-            let non_retryable_codes = ["HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404"];
-            if non_retryable_codes.iter().any(|c| msg.contains(c)) {
+            let non_retryable_codes = ["http 400", "http 401", "http 403", "http 404"];
+            if non_retryable_codes.iter().any(|c| lower.contains(c)) {
                 return false;
             }
             // Transient signals — always retry
-            lower.contains("rate")
+            (lower.contains("rate limit") || lower.contains("rate_limit"))
                 || lower.contains("429")
                 || lower.contains("500")
                 || lower.contains("overload")
@@ -914,5 +896,19 @@ mod tests {
     fn test_is_retryable_500_still_retryable_after_change() {
         let err = ZeptoError::Provider("HTTP 500 Internal Server Error".to_string());
         assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_retryable_timeout_regression() {
+        // "timeout" in message is retryable (transient network issue)
+        let err = ZeptoError::Provider("request timeout after 30s".to_string());
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_retryable_bare_403_forbidden() {
+        // "403 Forbidden" without "HTTP" prefix still caught by is_auth_failure → not retryable
+        let err = ZeptoError::Provider("403 Forbidden: quota exceeded".to_string());
+        assert!(!is_retryable(&err));
     }
 }
