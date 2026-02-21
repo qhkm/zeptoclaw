@@ -10,6 +10,7 @@ pub mod channels;
 pub mod config;
 pub mod cron;
 pub mod deps;
+pub mod devices;
 pub mod error;
 pub mod gateway;
 pub mod hardware;

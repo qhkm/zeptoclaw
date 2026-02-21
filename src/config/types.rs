@@ -121,6 +121,24 @@ pub struct Config {
     /// HTTP health server configuration.
     #[serde(default)]
     pub health: HealthConfig,
+    /// Device event system configuration (USB hotplug monitoring).
+    #[serde(default)]
+    pub devices: DevicesConfig,
+}
+
+// ============================================================================
+// Device Event System Configuration
+// ============================================================================
+
+/// Device event monitoring configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DevicesConfig {
+    /// Enable device event monitoring (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Monitor USB hotplug events (default: false).
+    #[serde(default)]
+    pub monitor_usb: bool,
 }
 
 // ============================================================================
