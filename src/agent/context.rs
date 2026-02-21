@@ -21,7 +21,12 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are ZeptoClaw, an ultra-lightweight p
 
 You have access to tools to help accomplish tasks. Use them when needed.
 
-Be concise but helpful. Focus on completing the user's request efficiently."#;
+Be concise but helpful. Focus on completing the user's request efficiently.
+
+You have a longterm_memory tool. Use it proactively to:
+- Save important facts, user preferences, and decisions for future recall
+- Recall relevant information from past conversations by calling longterm_memory with action "search"
+- Pin critical information that should always be available"#;
 
 /// Runtime context injected into the system prompt to make agents environment-aware.
 ///
@@ -943,5 +948,41 @@ mod tests {
         let runtime_pos = system.content.find("Runtime Context").unwrap();
         let memory_pos = system.content.find("## Memory").unwrap();
         assert!(runtime_pos < memory_pos);
+    }
+
+    // ---- Memory system prompt tests ----
+
+    #[test]
+    fn test_system_prompt_mentions_memory() {
+        // DEFAULT_SYSTEM_PROMPT must reference longterm_memory so the LLM
+        // knows the tool exists and uses it proactively.
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("longterm_memory"),
+            "DEFAULT_SYSTEM_PROMPT should mention longterm_memory tool"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_mentions_save_and_recall() {
+        // The prompt must tell the LLM to both save and recall information.
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("Save") || DEFAULT_SYSTEM_PROMPT.contains("save"),
+            "DEFAULT_SYSTEM_PROMPT should mention saving facts"
+        );
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("Recall") || DEFAULT_SYSTEM_PROMPT.contains("recall"),
+            "DEFAULT_SYSTEM_PROMPT should mention recalling information"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_memory_instructions_in_built_message() {
+        // Verify the memory instructions survive into the built system message.
+        let builder = ContextBuilder::new();
+        let system = builder.build_system_message();
+        assert!(
+            system.content.contains("longterm_memory"),
+            "Built system message should contain longterm_memory instructions"
+        );
     }
 }
