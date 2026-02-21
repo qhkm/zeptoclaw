@@ -12,6 +12,7 @@ use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, Chann
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
 use super::WhatsAppCloudChannel;
+use super::lark::LarkChannel;
 use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel};
 
 /// Register all configured channels that currently have implementations.
@@ -135,6 +136,20 @@ pub async fn register_configured_channels(
                     "Registered WhatsApp Cloud API channel on {}:{}",
                     wac_config.bind_address, wac_config.port
                 );
+            }
+        }
+    }
+    // Lark / Feishu (WS long-connection)
+    if let Some(ref lark_cfg) = config.channels.lark {
+        if lark_cfg.enabled {
+            if lark_cfg.app_id.is_empty() || lark_cfg.app_secret.is_empty() {
+                warn!("Lark channel enabled but app_id or app_secret is empty");
+            } else {
+                manager
+                    .register(Box::new(LarkChannel::new(lark_cfg.clone(), bus.clone())))
+                    .await;
+                let region = if lark_cfg.feishu { "Feishu" } else { "Lark" };
+                info!("Registered {} channel (WS long-connection)", region);
             }
         }
     }

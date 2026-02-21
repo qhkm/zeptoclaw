@@ -109,6 +109,7 @@
 //! ```
 
 pub mod discord;
+pub mod lark;
 mod factory;
 mod manager;
 pub mod plugin;
@@ -120,6 +121,7 @@ pub mod whatsapp;
 pub mod whatsapp_cloud;
 
 pub use discord::DiscordChannel;
+pub use lark::LarkChannel;
 pub use factory::register_configured_channels;
 pub use manager::ChannelManager;
 pub use plugin::ChannelPluginAdapter;

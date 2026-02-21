@@ -124,6 +124,8 @@ lopdf = { version = "0.34", optional = true }
 # =============================================================================
 # WebSocket support for future real-time channels
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+# Protobuf decoding for Lark/Feishu pbbp2 WS frames
+prost = "0.13"
 # Telegram bot SDK (minimal features to reduce bloat)
 teloxide = { version = "0.12", features = ["macros", "rustls"], default-features = false }
 # Integration helpers

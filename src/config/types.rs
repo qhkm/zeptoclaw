@@ -403,6 +403,8 @@ pub struct ChannelsConfig {
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
     pub feishu: Option<FeishuConfig>,
+    /// Lark/Feishu WS long-connection configuration
+    pub lark: Option<LarkConfig>,
     /// MaixCam configuration
     pub maixcam: Option<MaixCamConfig>,
     /// QQ configuration
@@ -647,6 +649,34 @@ pub struct FeishuConfig {
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+
+/// Lark (international) / Feishu (China) channel configuration.
+///
+/// Uses the Lark WS long-connection (pbbp2) for receiving events —
+/// no public HTTPS endpoint required.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LarkConfig {
+    /// Whether the channel is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lark / Feishu application ID
+    pub app_id: String,
+    /// Lark / Feishu application secret
+    pub app_secret: String,
+    /// When true, use Feishu (open.feishu.cn); when false, use Lark (open.larksuite.com)
+    #[serde(default)]
+    pub feishu: bool,
+    /// Allowlist of sender open_ids (empty = allow all unless deny_by_default)
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// Bot's own open_id — messages from the bot itself are silently dropped
+    #[serde(default)]
+    pub bot_open_id: Option<String>,
+    /// When true, empty allowed_senders rejects all senders (strict mode)
     #[serde(default)]
     pub deny_by_default: bool,
 }
