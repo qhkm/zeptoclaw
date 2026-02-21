@@ -137,15 +137,21 @@ fn provider_from_runtime_selection(
             }
         }
         "openai" => {
-            // When the provider is Gemini and the credential is a bearer token
-            // (e.g., from Gemini CLI OAuth), use the native Gemini provider which
-            // speaks the Gemini REST API directly and handles thinking model output.
-            if selection.name == "gemini" && selection.credential.is_bearer() {
-                let token = selection.credential.value();
-                return Some(Box::new(GeminiProvider::new_with_token(
-                    token,
-                    "gemini-2.0-flash",
-                )));
+            // Route ALL Gemini selections through the native GeminiProvider, which
+            // speaks the Gemini REST API directly and applies thinking-model filtering
+            // (extract_text skips parts tagged `thought: true`).  This applies to
+            // both OAuth bearer tokens (from Gemini CLI) and plain API keys.
+            if selection.name == "gemini" {
+                let model = GeminiProvider::default_gemini_model();
+                if selection.credential.is_bearer() {
+                    let token = selection.credential.value();
+                    return Some(Box::new(GeminiProvider::new_with_token(token, model)));
+                } else {
+                    return Some(Box::new(GeminiProvider::new_with_key(
+                        &selection.api_key,
+                        model,
+                    )));
+                }
             }
             let provider = if let Some(base_url) = selection.api_base.as_deref() {
                 OpenAIProvider::with_base_url(&selection.api_key, base_url)

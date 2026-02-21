@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::{Result, ZeptoError};
 use crate::session::{Message, Role};
@@ -62,11 +62,64 @@ impl GeminiAuth {
     ///
     /// The file is written by `gemini auth login`. It is a JSON object that may contain
     /// any of the fields `access_token`, `token`, or `oauth_token`.
+    ///
+    /// If the file contains an `expiry` or `expires_at` field (RFC 3339 string), the
+    /// token is validated against the current time. An expired token returns `None`
+    /// rather than causing a silent 401 failure downstream.
     pub fn load_cli_token() -> Option<String> {
         let home = dirs::home_dir()?;
         let path = home.join(GEMINI_CLI_CREDS_PATH);
         let data = std::fs::read_to_string(path).ok()?;
         let json: Value = serde_json::from_str(&data).ok()?;
+
+        // Validate the expiry timestamp when present.
+        if let Some(expiry_str) = json["expiry"]
+            .as_str()
+            .or_else(|| json["expires_at"].as_str())
+        {
+            match chrono::DateTime::parse_from_rfc3339(expiry_str) {
+                Ok(expiry) => {
+                    if expiry < chrono::Utc::now() {
+                        warn!(
+                            "Gemini CLI OAuth token has expired (expiry: {}). \
+                             Run `gemini auth login` to refresh.",
+                            expiry_str
+                        );
+                        return None;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not parse Gemini CLI token expiry '{}': {}. \
+                         Proceeding with potentially expired token.",
+                        expiry_str, e
+                    );
+                }
+            }
+        }
+
+        json["access_token"]
+            .as_str()
+            .or_else(|| json["token"].as_str())
+            .or_else(|| json["oauth_token"].as_str())
+            .map(String::from)
+    }
+
+    /// Parse a credential JSON blob and return the access token if it is not expired.
+    ///
+    /// Extracted for unit-testing the expiry logic without touching the filesystem.
+    #[cfg(test)]
+    pub(crate) fn token_from_json_if_valid(json: &Value) -> Option<String> {
+        if let Some(expiry_str) = json["expiry"]
+            .as_str()
+            .or_else(|| json["expires_at"].as_str())
+        {
+            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str) {
+                if expiry < chrono::Utc::now() {
+                    return None;
+                }
+            }
+        }
         json["access_token"]
             .as_str()
             .or_else(|| json["token"].as_str())
@@ -548,5 +601,73 @@ mod tests {
         // calling resolve directly.
         let auth = GeminiAuth::resolve(None, None, None);
         assert!(auth.is_none());
+    }
+
+    // ── Issue 1: API-key routing ──────────────────────────────────────────────
+
+    #[test]
+    fn test_new_with_key_provider_name_and_model() {
+        let p = GeminiProvider::new_with_key("test-key", "gemini-2.0-flash");
+        assert_eq!(p.name(), "gemini-native");
+        assert_eq!(p.default_model(), "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn test_new_with_key_custom_model() {
+        let p = GeminiProvider::new_with_key("test-key", "gemini-2.5-pro");
+        assert_eq!(p.default_model(), "gemini-2.5-pro");
+    }
+
+    // ── Issue 2: Expiry validation ────────────────────────────────────────────
+
+    #[test]
+    fn test_token_from_json_if_valid_returns_token_when_not_expired() {
+        // Use a far-future expiry so this test won't break before then.
+        let json = serde_json::json!({
+            "access_token": "valid-token",
+            "expiry": "2099-01-01T00:00:00Z"
+        });
+        let result = GeminiAuth::token_from_json_if_valid(&json);
+        assert_eq!(result.as_deref(), Some("valid-token"));
+    }
+
+    #[test]
+    fn test_token_from_json_if_valid_returns_none_when_expired() {
+        let json = serde_json::json!({
+            "access_token": "stale-token",
+            "expiry": "2020-01-01T00:00:00Z"
+        });
+        let result = GeminiAuth::token_from_json_if_valid(&json);
+        assert!(result.is_none(), "Expected None for expired token");
+    }
+
+    #[test]
+    fn test_token_from_json_if_valid_returns_token_when_no_expiry_field() {
+        // No expiry field → assume valid (backward-compat with older CLI versions).
+        let json = serde_json::json!({
+            "access_token": "no-expiry-token"
+        });
+        let result = GeminiAuth::token_from_json_if_valid(&json);
+        assert_eq!(result.as_deref(), Some("no-expiry-token"));
+    }
+
+    #[test]
+    fn test_token_from_json_if_valid_checks_expires_at_alias() {
+        let json = serde_json::json!({
+            "token": "alias-token",
+            "expires_at": "2020-06-15T12:00:00+00:00"
+        });
+        let result = GeminiAuth::token_from_json_if_valid(&json);
+        assert!(result.is_none(), "Expected None when expires_at is in the past");
+    }
+
+    #[test]
+    fn test_token_from_json_if_valid_falls_back_to_oauth_token_field() {
+        let json = serde_json::json!({
+            "oauth_token": "fallback-oauth",
+            "expiry": "2099-12-31T23:59:59Z"
+        });
+        let result = GeminiAuth::token_from_json_if_valid(&json);
+        assert_eq!(result.as_deref(), Some("fallback-oauth"));
     }
 }
