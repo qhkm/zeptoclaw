@@ -35,6 +35,15 @@ pub enum GeminiAuth {
     BearerToken(String),
 }
 
+impl std::fmt::Debug for GeminiAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.write_str("GeminiAuth::ApiKey([REDACTED])"),
+            Self::BearerToken(_) => f.write_str("GeminiAuth::BearerToken([REDACTED])"),
+        }
+    }
+}
+
 impl GeminiAuth {
     /// Resolve auth credentials in priority order.
     ///
@@ -139,6 +148,15 @@ pub struct GeminiProvider {
     auth: GeminiAuth,
     model: String,
     client: Client,
+}
+
+impl std::fmt::Debug for GeminiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("auth", &self.auth)
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl GeminiProvider {

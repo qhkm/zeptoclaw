@@ -124,6 +124,7 @@ pub(crate) fn resolve_template(name: &str) -> Result<AgentTemplate> {
 
 fn provider_from_runtime_selection(
     selection: &RuntimeProviderSelection,
+    configured_model: &str,
 ) -> Option<Box<dyn LLMProvider>> {
     match selection.backend {
         "anthropic" => {
@@ -142,16 +143,22 @@ fn provider_from_runtime_selection(
             // (extract_text skips parts tagged `thought: true`).  This applies to
             // both OAuth bearer tokens (from Gemini CLI) and plain API keys.
             if selection.name == "gemini" {
-                let model = GeminiProvider::default_gemini_model();
-                if selection.credential.is_bearer() {
-                    let token = selection.credential.value();
-                    return Some(Box::new(GeminiProvider::new_with_token(token, model)));
+                // Use the user-configured model, falling back to the built-in default.
+                // from_config handles the full auth priority chain:
+                //   config key → GEMINI_API_KEY → GOOGLE_API_KEY → Gemini CLI OAuth
+                let model = if configured_model.is_empty() {
+                    GeminiProvider::default_gemini_model()
                 } else {
-                    return Some(Box::new(GeminiProvider::new_with_key(
-                        &selection.api_key,
-                        model,
-                    )));
-                }
+                    configured_model
+                };
+                let api_key = if selection.credential.is_bearer() {
+                    None
+                } else {
+                    Some(selection.api_key.as_str())
+                };
+                let prefer_oauth = selection.credential.is_bearer();
+                return GeminiProvider::from_config(api_key, model, prefer_oauth)
+                    .map(|p| Box::new(p) as Box<dyn LLMProvider>);
             }
             let provider = if let Some(base_url) = selection.api_base.as_deref() {
                 OpenAIProvider::with_base_url(&selection.api_key, base_url)
@@ -216,9 +223,10 @@ fn build_runtime_provider_chain(
     config: &Config,
 ) -> Option<(Box<dyn LLMProvider>, Vec<&'static str>)> {
     let mut candidates: Vec<RuntimeProviderCandidate> = Vec::new();
+    let configured_model = &config.agents.defaults.model;
 
     for selection in resolve_runtime_providers(config) {
-        if let Some(provider) = provider_from_runtime_selection(&selection) {
+        if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
             candidates.push(RuntimeProviderCandidate {
                 name: selection.name,
                 provider,
