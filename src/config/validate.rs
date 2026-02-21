@@ -28,6 +28,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "routines",
     "stripe",
     "custom_tools",
+    "transcription",
     "tool_profiles",
     "project",
     "cache",

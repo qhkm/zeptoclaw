@@ -110,6 +110,8 @@ pub struct Config {
     /// Custom CLI-defined tools (shell commands as agent tools).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolDef>,
+    /// Audio transcription configuration.
+    pub transcription: TranscriptionConfig,
     /// Named tool profiles for per-channel/context tool filtering.
     /// Key = profile name, Value = None means all tools, Some(vec) means only those tools.
     #[serde(default)]
@@ -345,6 +347,29 @@ impl Default for TailscaleTunnelConfig {
 
 fn default_true() -> bool {
     true
+}
+
+// ============================================================================
+// Transcription Configuration
+// ============================================================================
+
+/// Configuration for audio transcription (voice messages).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranscriptionConfig {
+    /// Whether to transcribe audio messages (default: true).
+    pub enabled: bool,
+    /// Whisper-compatible model name (default: "whisper-1").
+    pub model: String,
+}
+
+impl Default for TranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "whisper-1".to_string(),
+        }
+    }
 }
 
 /// Agent configuration
@@ -1805,6 +1830,13 @@ mod tests {
         let json = r#"{"memory": {"backend": "tantivy"}}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.memory.backend, MemoryBackend::Tantivy);
+    }
+
+    #[test]
+    fn test_transcription_config_defaults() {
+        let config = Config::default();
+        assert_eq!(config.transcription.model, "whisper-1");
+        assert!(config.transcription.enabled);
     }
 
     #[test]
