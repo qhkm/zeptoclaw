@@ -36,7 +36,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Default r8r endpoint (local server)
 const DEFAULT_R8R_ENDPOINT: &str = "http://localhost:8080";
@@ -214,17 +214,17 @@ impl Tool for R8rTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
 
-        match action {
-            "list" => self.list_workflows().await,
+        let s = match action {
+            "list" => self.list_workflows().await?,
             "show" => {
                 let workflow = args
                     .get("workflow")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ZeptoError::Tool("Missing 'workflow' argument".into()))?;
-                self.show_workflow(workflow).await
+                self.show_workflow(workflow).await?
             }
             "run" => {
                 let workflow = args
@@ -235,14 +235,14 @@ impl Tool for R8rTool {
                 let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
                 let wait = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
-                self.run_workflow(workflow, inputs, wait).await
+                self.run_workflow(workflow, inputs, wait).await?
             }
             "status" => {
                 let execution_id = args
                     .get("execution_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ZeptoError::Tool("Missing 'execution_id' argument".into()))?;
-                self.get_execution_status(execution_id).await
+                self.get_execution_status(execution_id).await?
             }
             "emit" => {
                 let event = args
@@ -250,7 +250,7 @@ impl Tool for R8rTool {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ZeptoError::Tool("Missing 'event' argument".into()))?;
                 let data = args.get("data").cloned().unwrap_or(json!({}));
-                self.emit_event(event, data).await
+                self.emit_event(event, data).await?
             }
             "create" => {
                 let name = args
@@ -261,13 +261,16 @@ impl Tool for R8rTool {
                     .get("definition")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ZeptoError::Tool("Missing 'definition' argument".into()))?;
-                self.create_workflow(name, definition).await
+                self.create_workflow(name, definition).await?
             }
-            _ => Err(ZeptoError::Tool(format!(
-                "Invalid 'action': {}. Expected one of: run, list, show, status, emit, create",
-                action
-            ))),
-        }
+            _ => {
+                return Err(ZeptoError::Tool(format!(
+                    "Invalid 'action': {}. Expected one of: run, list, show, status, emit, create",
+                    action
+                )))
+            }
+        };
+        Ok(ToolOutput::user_visible(s))
     }
 }
 
@@ -778,7 +781,7 @@ mod tests {
 
         // If r8r is running and workflow exists, should succeed
         if result.is_ok() {
-            let output = result.unwrap();
+            let output = result.unwrap().for_llm;
             assert!(output.contains("completed") || output.contains("Execution ID"));
         }
     }

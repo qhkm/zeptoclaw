@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::cron::{CronPayload, CronSchedule, CronService};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -416,24 +416,27 @@ impl Tool for ReminderTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'action' argument".into()))?;
 
-        match action {
-            "add" => self.execute_add(&args, ctx).await,
-            "list" => self.execute_list(&args).await,
-            "complete" => self.execute_complete(&args).await,
-            "snooze" => self.execute_snooze(&args).await,
-            "remove" => self.execute_remove(&args).await,
-            "overdue" => self.execute_overdue().await,
-            other => Err(ZeptoError::Tool(format!(
-                "Unknown reminder action '{}'",
-                other
-            ))),
-        }
+        let s = match action {
+            "add" => self.execute_add(&args, ctx).await?,
+            "list" => self.execute_list(&args).await?,
+            "complete" => self.execute_complete(&args).await?,
+            "snooze" => self.execute_snooze(&args).await?,
+            "remove" => self.execute_remove(&args).await?,
+            "overdue" => self.execute_overdue().await?,
+            other => {
+                return Err(ZeptoError::Tool(format!(
+                    "Unknown reminder action '{}'",
+                    other
+                )))
+            }
+        };
+        Ok(ToolOutput::llm_only(s))
     }
 }
 
@@ -1034,7 +1037,8 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
 
         assert!(result.contains("Created reminder"));
         assert!(result.contains("Buy groceries"));
@@ -1046,7 +1050,11 @@ mod tests {
         let (tool, _dir) = temp_tool();
         let c = ctx();
 
-        let result = tool.execute(json!({"action": "list"}), &c).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "list"}), &c)
+            .await
+            .unwrap()
+            .for_llm;
         assert_eq!(result, "No reminders found");
     }
 
@@ -1060,16 +1068,22 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         tool.execute(
             json!({"action": "add", "title": "Task B", "category": "personal"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
-        let result = tool.execute(json!({"action": "list"}), &c).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "list"}), &c)
+            .await
+            .unwrap()
+            .for_llm;
         assert!(result.contains("2 reminders"));
         assert!(result.contains("Task A"));
         assert!(result.contains("Task B"));
@@ -1082,19 +1096,22 @@ mod tests {
 
         tool.execute(json!({"action": "add", "title": "Finish report"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
 
         let result = tool
             .execute(json!({"action": "complete", "id": "r1"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Completed reminder r1"));
 
         // Verify it shows as done in list.
         let list = tool
             .execute(json!({"action": "list", "status": "done"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(list.contains("Finish report"));
     }
 
@@ -1105,15 +1122,21 @@ mod tests {
 
         tool.execute(json!({"action": "add", "title": "Temp task"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
 
         let result = tool
             .execute(json!({"action": "remove", "id": "r1"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Removed reminder r1"));
 
-        let list = tool.execute(json!({"action": "list"}), &c).await.unwrap();
+        let list = tool
+            .execute(json!({"action": "list"}), &c)
+            .await
+            .unwrap()
+            .for_llm;
         assert_eq!(list, "No reminders found");
     }
 
@@ -1149,14 +1172,16 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
         let result = tool
             .execute(
                 json!({"action": "snooze", "id": "r1", "due_at": "2026-06-01T09:00:00Z"}),
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("snoozed") || result.contains("Snoozed"));
         assert!(result.contains("r1"));
     }
@@ -1176,7 +1201,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "overdue"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("overdue"));
         assert!(result.contains("Overdue task"));
     }
@@ -1189,7 +1215,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "overdue"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No overdue"));
     }
 
@@ -1204,7 +1231,8 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Timed task"));
         assert!(result.contains("r1"));
 

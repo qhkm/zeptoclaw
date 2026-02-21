@@ -12,7 +12,7 @@ use crate::error::{Result, ZeptoError};
 use crate::runtime::{ContainerConfig, ContainerRuntime, NativeRuntime};
 use crate::security::ShellSecurityConfig;
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for executing shell commands.
 ///
@@ -39,7 +39,7 @@ use super::{Tool, ToolCategory, ToolContext};
 /// let ctx = ToolContext::new();
 /// let result = tool.execute(json!({"command": "echo hello"}), &ctx).await;
 /// assert!(result.is_ok());
-/// assert_eq!(result.unwrap().trim(), "hello");
+/// assert_eq!(result.unwrap().for_llm.trim(), "hello");
 /// # });
 /// ```
 pub struct ShellTool {
@@ -141,7 +141,7 @@ impl Tool for ShellTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -170,7 +170,7 @@ impl Tool for ShellTool {
             .await
             .map_err(|e| ZeptoError::Tool(e.to_string()))?;
 
-        Ok(output.format())
+        Ok(ToolOutput::user_visible(output.format()))
     }
 }
 
@@ -186,7 +186,7 @@ mod tests {
 
         let result = tool.execute(json!({"command": "echo hello"}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "hello");
+        assert_eq!(result.unwrap().for_llm.trim(), "hello");
     }
 
     #[tokio::test]
@@ -198,7 +198,7 @@ mod tests {
             .execute(json!({"command": "echo first && echo second"}), &ctx)
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("first"));
         assert!(output.contains("second"));
     }
@@ -213,7 +213,7 @@ mod tests {
 
         let result = tool.execute(json!({"command": "cat test.txt"}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "workspace file");
+        assert_eq!(result.unwrap().for_llm.trim(), "workspace file");
     }
 
     #[tokio::test]
@@ -227,7 +227,7 @@ mod tests {
         assert!(result.is_ok());
 
         // The output should contain the temp directory path
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         // On macOS, /tmp is symlinked to /private/tmp, so we compare canonical paths
         let expected = dir.path().canonicalize().unwrap();
         let actual_path = std::path::Path::new(output.trim());
@@ -246,7 +246,7 @@ mod tests {
             .execute(json!({"command": "echo error >&2"}), &ctx)
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("error"));
     }
 
@@ -259,7 +259,7 @@ mod tests {
             .execute(json!({"command": "echo stdout && echo stderr >&2"}), &ctx)
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("stdout"));
         assert!(output.contains("stderr"));
         assert!(output.contains("--- stderr ---"));
@@ -272,7 +272,7 @@ mod tests {
 
         let result = tool.execute(json!({"command": "exit 42"}), &ctx).await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("[Exit code: 42]"));
     }
 
@@ -285,7 +285,7 @@ mod tests {
             .execute(json!({"command": "ls /nonexistent_picoclaw_path"}), &ctx)
             .await;
         assert!(result.is_ok()); // The tool returns Ok with error in output
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("Exit code:") || output.contains("No such file"));
     }
 
@@ -326,7 +326,7 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("done"));
+        assert!(result.unwrap().for_llm.contains("done"));
     }
 
     #[tokio::test]
@@ -338,7 +338,7 @@ mod tests {
             .execute(json!({"command": "MY_VAR=hello && echo $MY_VAR"}), &ctx)
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("hello"));
+        assert!(result.unwrap().for_llm.contains("hello"));
     }
 
     #[tokio::test]
@@ -350,7 +350,7 @@ mod tests {
             .execute(json!({"command": "echo 'hello world' | tr ' ' '-'"}), &ctx)
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "hello-world");
+        assert_eq!(result.unwrap().for_llm.trim(), "hello-world");
     }
 
     #[tokio::test]
@@ -362,7 +362,7 @@ mod tests {
             .execute(json!({"command": "echo \"hello 'world'\""}), &ctx)
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("hello 'world'"));
+        assert!(result.unwrap().for_llm.contains("hello 'world'"));
     }
 
     #[test]
@@ -447,7 +447,7 @@ mod tests {
 
         let result = tool.execute(json!({"command": "echo test"}), &ctx).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("test"));
+        assert!(result.unwrap().for_llm.contains("test"));
     }
 
     #[test]

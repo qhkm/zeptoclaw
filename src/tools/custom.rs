@@ -13,7 +13,7 @@ use crate::config::CustomToolDef;
 use crate::error::{Result, ZeptoError};
 use crate::security::ShellSecurityConfig;
 
-use super::types::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Maximum output bytes to capture from custom tool stdout (50KB).
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -94,7 +94,7 @@ impl Tool for CustomTool {
         }
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         // Extract string args from JSON for interpolation
         let string_args: HashMap<String, String> = if let Some(obj) = args.as_object() {
             obj.iter()
@@ -175,11 +175,11 @@ impl Tool for CustomTool {
                 stdout.truncate(end);
                 stdout.push_str("\n... (output truncated)");
             }
-            Ok(if stdout.is_empty() {
+            Ok(ToolOutput::llm_only(if stdout.is_empty() {
                 "(no output)".to_string()
             } else {
                 stdout
-            })
+            }))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -195,7 +195,7 @@ impl Tool for CustomTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::types::ToolContext;
+    use crate::tools::types::{ToolContext, ToolOutput};
 
     fn test_ctx() -> ToolContext {
         ToolContext {
@@ -307,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_simple_command() {
         let tool = CustomTool::new(simple_def("test", "echo hello"));
-        let result = tool.execute(json!({}), &test_ctx()).await.unwrap();
+        let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
         assert_eq!(result, "hello");
     }
 
@@ -321,7 +321,8 @@ mod tests {
         let result = tool
             .execute(json!({"msg": "hello world"}), &test_ctx())
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert_eq!(result, "hello world");
     }
 
@@ -336,7 +337,8 @@ mod tests {
         let result = tool
             .execute(json!({"msg": "$(whoami)"}), &test_ctx())
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert_eq!(result, "$(whoami)");
     }
 
@@ -370,7 +372,7 @@ mod tests {
         env.insert("TEST_VAR_CUSTOM".to_string(), "custom_value".to_string());
         def.env = Some(env);
         let tool = CustomTool::new(def);
-        let result = tool.execute(json!({}), &test_ctx()).await.unwrap();
+        let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
         assert_eq!(result, "custom_value");
     }
 
@@ -385,7 +387,7 @@ mod tests {
             timeout_secs: None,
             env: None,
         });
-        let result = tool.execute(json!({}), &test_ctx()).await.unwrap();
+        let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
         // On macOS /tmp is a symlink to /private/tmp
         assert!(result.contains("tmp"), "Got: {}", result);
     }
@@ -393,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_empty_stdout() {
         let tool = CustomTool::new(simple_def("test", "true"));
-        let result = tool.execute(json!({}), &test_ctx()).await.unwrap();
+        let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
         assert_eq!(result, "(no output)");
     }
 
@@ -418,7 +420,8 @@ mod tests {
         let result = tool
             .execute(json!({"extra": "stuff"}), &test_ctx())
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert_eq!(result, "fixed");
     }
 
@@ -428,7 +431,7 @@ mod tests {
         let repeat = MAX_OUTPUT_BYTES + 1000;
         let cmd = format!("printf '%0.s-' $(seq 1 {})", repeat);
         let tool = CustomTool::new(simple_def("test", &cmd));
-        let result = tool.execute(json!({}), &test_ctx()).await.unwrap();
+        let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
         assert!(result.contains("(output truncated)"));
         // Output should be capped near MAX_OUTPUT_BYTES
         assert!(result.len() <= MAX_OUTPUT_BYTES + 100);

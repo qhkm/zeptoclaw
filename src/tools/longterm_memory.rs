@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use crate::error::{Result, ZeptoError};
 use crate::memory::longterm::LongTermMemory;
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for storing and retrieving long-term memories across sessions.
 pub struct LongTermMemoryTool {
@@ -96,25 +96,26 @@ impl Tool for LongTermMemoryTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'action' parameter".to_string()))?;
 
-        match action {
-            "set" => self.execute_set(&args).await,
-            "get" => self.execute_get(&args).await,
-            "search" => self.execute_search(&args).await,
-            "delete" => self.execute_delete(&args).await,
-            "list" => self.execute_list(&args).await,
-            "categories" => self.execute_categories().await,
-            "pin" => self.execute_pin(&args).await,
-            other => Err(ZeptoError::Tool(format!(
+        let s = match action {
+            "set" => self.execute_set(&args).await?,
+            "get" => self.execute_get(&args).await?,
+            "search" => self.execute_search(&args).await?,
+            "delete" => self.execute_delete(&args).await?,
+            "list" => self.execute_list(&args).await?,
+            "categories" => self.execute_categories().await?,
+            "pin" => self.execute_pin(&args).await?,
+            other => return Err(ZeptoError::Tool(format!(
                 "Unknown longterm_memory action '{}'. Valid actions: set, get, search, delete, list, categories, pin",
                 other
             ))),
-        }
+        };
+        Ok(ToolOutput::llm_only(s))
     }
 }
 
@@ -414,14 +415,16 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Stored memory 'user:name'"));
         assert!(result.contains("category 'user'"));
 
         let result = tool
             .execute(json!({"action": "get", "key": "user:name"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Alice"));
         assert!(result.contains("user:name"));
     }
@@ -436,7 +439,8 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         let result = tool
             .execute(
@@ -444,7 +448,8 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Updated memory 'k1'"));
     }
 
@@ -456,7 +461,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "get", "key": "nope"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memory found for key 'nope'"));
     }
 
@@ -470,19 +476,20 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap().for_llm;
 
         tool.execute(
             json!({"action": "set", "key": "fact:db", "value": "PostgreSQL is reliable", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap().for_llm;
 
         let result = tool
             .execute(json!({"action": "search", "query": "Rust"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Found 1 matching memory"));
         assert!(result.contains("Rust is fast"));
     }
@@ -495,7 +502,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "search", "query": "nonexistent"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memories found matching 'nonexistent'"));
     }
 
@@ -509,18 +517,21 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         let result = tool
             .execute(json!({"action": "delete", "key": "k1"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Deleted memory 'k1'"));
 
         let result = tool
             .execute(json!({"action": "get", "key": "k1"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memory found"));
     }
 
@@ -532,7 +543,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "delete", "key": "nope"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memory found for key 'nope'"));
     }
 
@@ -546,16 +558,22 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "b"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
-        let result = tool.execute(json!({"action": "list"}), &c).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "list"}), &c)
+            .await
+            .unwrap()
+            .for_llm;
         assert!(result.contains("2 total memories"));
         assert!(result.contains("k1"));
         assert!(result.contains("k2"));
@@ -571,19 +589,22 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         let result = tool
             .execute(json!({"action": "list", "category": "user"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("1 memory in category 'user'"));
         assert!(result.contains("k1"));
         assert!(!result.contains("k2"));
@@ -594,7 +615,11 @@ mod tests {
         let (tool, _dir) = temp_tool();
         let c = ctx();
 
-        let result = tool.execute(json!({"action": "list"}), &c).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "list"}), &c)
+            .await
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memories stored yet"));
     }
 
@@ -606,7 +631,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "list", "category": "nope"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No memories in category 'nope'"));
     }
 
@@ -620,26 +646,30 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         tool.execute(
             json!({"action": "set", "key": "k3", "value": "v3", "category": "user"}),
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         let result = tool
             .execute(json!({"action": "categories"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("fact"));
         assert!(result.contains("user"));
         assert!(result.contains("3 entries"));
@@ -654,7 +684,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "categories"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("No categories yet"));
     }
 
@@ -774,12 +805,14 @@ mod tests {
             &c,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .for_llm;
 
         let result = tool
             .execute(json!({"action": "search", "query": "visual"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("dark mode"));
     }
 
@@ -799,13 +832,15 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Stored memory 'fact:color'"));
 
         let result = tool
             .execute(json!({"action": "get", "key": "fact:color"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("blue"));
     }
 
@@ -825,14 +860,16 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Pinned memory 'important:fact'"));
 
         // Verify it's in "pinned" category
         let result = tool
             .execute(json!({"action": "get", "key": "important:fact"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("This should never be forgotten"));
         assert!(result.contains("pinned"));
     }
@@ -892,14 +929,16 @@ mod tests {
                 &c,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Stored memory 'critical:data'"));
 
         // Verify it was stored
         let result = tool
             .execute(json!({"action": "get", "key": "critical:data"}), &c)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
         assert!(result.contains("Very important information"));
         assert!(result.contains("critical"));
     }

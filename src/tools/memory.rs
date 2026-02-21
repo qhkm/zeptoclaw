@@ -16,7 +16,7 @@ use crate::memory::builtin_searcher::BuiltinSearcher;
 use crate::memory::traits::MemorySearcher;
 use crate::memory::{read_workspace_memory, search_workspace_memory};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for searching workspace memory files.
 pub struct MemorySearchTool {
@@ -94,7 +94,7 @@ impl Tool for MemorySearchTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let query = args
             .get("query")
             .and_then(Value::as_str)
@@ -129,7 +129,10 @@ impl Tool for MemorySearchTool {
         .await?;
 
         if results.is_empty() {
-            return Ok(format!("No memory entries found for '{}'.", query));
+            return Ok(ToolOutput::llm_only(format!(
+                "No memory entries found for '{}'.",
+                query
+            )));
         }
 
         let mut output = format!(
@@ -149,7 +152,7 @@ impl Tool for MemorySearchTool {
             ));
         }
 
-        Ok(output.trim_end().to_string())
+        Ok(ToolOutput::llm_only(output.trim_end().to_string()))
     }
 }
 
@@ -192,7 +195,7 @@ impl Tool for MemoryGetTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path = args
             .get("path")
             .and_then(Value::as_str)
@@ -223,7 +226,7 @@ impl Tool for MemoryGetTool {
             output.push_str(&result.text);
         }
 
-        Ok(output)
+        Ok(ToolOutput::llm_only(output))
     }
 }
 
@@ -277,7 +280,8 @@ mod tests {
         let result = tool
             .execute(json!({"query": "concise preference"}), &ctx)
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
 
         assert!(result.contains("MEMORY.md"));
         assert!(result.contains("concise"));
@@ -301,7 +305,8 @@ mod tests {
                 &ctx,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .for_llm;
 
         assert!(result.contains("line2\nline3"));
         assert!(result.contains("Lines: 2-3"));

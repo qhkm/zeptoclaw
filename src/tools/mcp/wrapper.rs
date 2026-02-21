@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::client::McpClient;
-use crate::tools::{Tool, ToolCategory, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Wraps a single MCP tool as a ZeptoClaw `Tool` implementation.
 pub struct McpToolWrapper {
@@ -77,7 +77,7 @@ impl Tool for McpToolWrapper {
         &self,
         args: serde_json::Value,
         _context: &ToolContext,
-    ) -> Result<String, crate::error::ZeptoError> {
+    ) -> Result<ToolOutput, crate::error::ZeptoError> {
         let result = self
             .client
             .call_tool(&self.remote_name, args)
@@ -93,17 +93,17 @@ impl Tool for McpToolWrapper {
             .join("\n");
 
         if result.is_error {
-            Err(crate::error::ZeptoError::Mcp(if text.is_empty() {
+            Ok(ToolOutput::error(if text.is_empty() {
                 "MCP tool returned error".to_string()
             } else {
                 text
             }))
         } else {
-            Ok(if text.is_empty() {
+            Ok(ToolOutput::llm_only(if text.is_empty() {
                 "(no output)".to_string()
             } else {
                 text
-            })
+            }))
         }
     }
 }

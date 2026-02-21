@@ -649,6 +649,8 @@ impl AgentLoop {
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run;
                     let agent_mode = current_agent_mode;
+||||||| parent of 2b9da11 (feat(tools): add ToolOutput dual-audience split (ForLLM/ForUser/Silent/IsError/IsAsync))
+                    let bus_for_tools = Arc::clone(&self.bus);
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -725,18 +727,27 @@ impl AgentLoop {
                         let (result, success) = {
                             let tools_guard = tools.read().await;
                             match tools_guard.execute_with_context(&name, args, &ctx).await {
-                                Ok(r) => {
+                                Ok(output) => {
                                     let elapsed = tool_start.elapsed();
                                     let latency_ms = elapsed.as_millis() as u64;
                                     debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
-                                    hooks.after_tool(&name, &r, elapsed, channel_name, chat_id);
+                                    hooks.after_tool(&name, &output.for_llm, elapsed, channel_name, chat_id);
                                     if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
                                         let _ = tx.send(ToolFeedback {
                                             tool_name: name.clone(),
                                             phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
                                         });
                                     }
-                                    (r, true)
+                                    // Send to user if tool opted in
+                                    if let Some(ref user_msg) = output.for_user {
+                                        let outbound = crate::bus::OutboundMessage::new(
+                                            ctx.channel.as_deref().unwrap_or(""),
+                                            ctx.chat_id.as_deref().unwrap_or(""),
+                                            user_msg,
+                                        );
+                                        let _ = bus_for_tools.publish_outbound(outbound).await;
+                                    }
+                                    (output.for_llm, true)
                                 }
                                 Err(e) => {
                                     let elapsed = tool_start.elapsed();
@@ -981,6 +992,8 @@ impl AgentLoop {
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run_stream;
                     let agent_mode = current_agent_mode_stream;
+||||||| parent of 2b9da11 (feat(tools): add ToolOutput dual-audience split (ForLLM/ForUser/Silent/IsError/IsAsync))
+                    let bus_for_tools = Arc::clone(&self.bus);
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
@@ -1043,7 +1056,18 @@ impl AgentLoop {
                         let (result, success) = {
                             let tools_guard = tools.read().await;
                             match tools_guard.execute_with_context(&name, args, &ctx).await {
-                                Ok(r) => (r, true),
+                                Ok(output) => {
+                                    // Send to user if tool opted in
+                                    if let Some(ref user_msg) = output.for_user {
+                                        let outbound = crate::bus::OutboundMessage::new(
+                                            ctx.channel.as_deref().unwrap_or(""),
+                                            ctx.chat_id.as_deref().unwrap_or(""),
+                                            user_msg,
+                                        );
+                                        let _ = bus_for_tools.publish_outbound(outbound).await;
+                                    }
+                                    (output.for_llm, true)
+                                }
                                 Err(e) => (format!("Error: {}", e), false),
                             }
                         };

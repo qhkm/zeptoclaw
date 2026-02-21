@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::error::{Result, ZeptoError};
 use crate::plugins::types::PluginToolDef;
-use crate::tools::types::{Tool, ToolCategory, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 // ---- JSON-RPC 2.0 types (local, not coupled to MCP) ----
 
@@ -127,7 +127,7 @@ impl Tool for BinaryPluginTool {
         self.def.parameters.clone()
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
@@ -265,7 +265,7 @@ impl Tool for BinaryPluginTool {
 
         // Extract result
         match response.result {
-            Some(result) => Ok(result.output),
+            Some(result) => Ok(ToolOutput::llm_only(result.output)),
             None => Err(ZeptoError::Tool(format!(
                 "Binary plugin '{}' returned neither result nor error",
                 self.plugin_name
@@ -417,7 +417,7 @@ echo '{"jsonrpc":"2.0","result":{"output":"hello world"},"id":1}'"#,
         let ctx = ToolContext::new();
         let result = tool.execute(json!({"x": "test"}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert_eq!(result.unwrap(), "hello world");
+        assert_eq!(result.unwrap().for_llm, "hello world");
     }
 
     #[cfg(unix)]
@@ -520,7 +520,7 @@ fi"#,
         let ctx = ToolContext::new();
         let result = tool.execute(json!({"x": "hello"}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert_eq!(result.unwrap(), "args received");
+        assert_eq!(result.unwrap().for_llm, "args received");
     }
 
     #[cfg(unix)]
@@ -536,7 +536,7 @@ echo "{\"jsonrpc\":\"2.0\",\"result\":{\"output\":\"cwd: $cwd\"},\"id\":1}""#,
         let ctx = ToolContext::new().with_workspace(workspace.path().to_str().unwrap());
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("cwd:"), "output was: {}", output);
     }
 
@@ -558,7 +558,7 @@ echo "{\"jsonrpc\":\"2.0\",\"result\":{\"output\":\"FOO=$MY_TEST_VAR\"},\"id\":1
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert_eq!(result.unwrap(), "FOO=bar_value");
+        assert_eq!(result.unwrap().for_llm, "FOO=bar_value");
     }
 
     #[cfg(unix)]
@@ -607,7 +607,7 @@ echo "{\"jsonrpc\":\"2.0\",\"result\":{\"output\":\"$large\"},\"id\":1}""#,
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert!(result.unwrap().len() >= 10000);
+        assert!(result.unwrap().for_llm.len() >= 10000);
     }
 
     #[cfg(unix)]
@@ -623,6 +623,6 @@ echo '{"jsonrpc":"2.0","result":{"output":"final answer"},"id":1}'"#,
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert_eq!(result.unwrap(), "final answer");
+        assert_eq!(result.unwrap().for_llm, "final answer");
     }
 }

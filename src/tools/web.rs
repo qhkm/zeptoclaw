@@ -16,7 +16,7 @@ use tokio::net::lookup_host;
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const BRAVE_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const WEB_USER_AGENT: &str = "zeptoclaw/0.1 (+https://github.com/zeptoclaw/zeptoclaw)";
@@ -111,7 +111,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -168,7 +168,10 @@ impl Tool for WebSearchTool {
             .collect::<Vec<_>>();
 
         if results.is_empty() {
-            return Ok(format!("No web search results found for '{}'.", query));
+            return Ok(ToolOutput::user_visible(format!(
+                "No web search results found for '{}'.",
+                query
+            )));
         }
 
         let mut output = format!("Web search results for '{}':\n\n", query);
@@ -183,7 +186,7 @@ impl Tool for WebSearchTool {
             output.push('\n');
         }
 
-        Ok(output.trim_end().to_string())
+        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
     }
 }
 
@@ -284,7 +287,7 @@ impl Tool for WebFetchTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
@@ -395,16 +398,18 @@ impl Tool for WebFetchTool {
             text.truncate(end);
         }
 
-        Ok(json!({
-            "url": url,
-            "final_url": final_url,
-            "status": status.as_u16(),
-            "extractor": extractor,
-            "truncated": truncated,
-            "length": text.len(),
-            "text": text,
-        })
-        .to_string())
+        Ok(ToolOutput::llm_only(
+            json!({
+                "url": url,
+                "final_url": final_url,
+                "status": status.as_u16(),
+                "extractor": extractor,
+                "truncated": truncated,
+                "length": text.len(),
+                "text": text,
+            })
+            .to_string(),
+        ))
     }
 }
 

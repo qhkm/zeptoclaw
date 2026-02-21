@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Channels that the message tool is allowed to target.
 const ALLOWED_CHANNELS: &[&str] = &[
@@ -110,7 +110,7 @@ impl Tool for MessageTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
@@ -225,7 +225,7 @@ impl Tool for MessageTool {
                     .map_err(|e| {
                         ZeptoError::Tool(format!("Failed to publish message: {}", e))
                     })?;
-                Ok(format!("Message sent to {}:{}", channel, chat_id))
+                Ok(ToolOutput::llm_only(format!("Message sent to {}:{}", channel, chat_id)))
             }
 
             "react" => {
@@ -261,10 +261,10 @@ impl Tool for MessageTool {
                     .map_err(|e| {
                         ZeptoError::Tool(format!("Failed to publish react: {}", e))
                     })?;
-                Ok(format!(
+                Ok(ToolOutput::llm_only(format!(
                     "Reaction '{}' sent to {}:{}",
                     emoji, channel, chat_id
-                ))
+                )))
             }
 
             "rich_message" => {
@@ -294,7 +294,7 @@ impl Tool for MessageTool {
                     .map_err(|e| {
                         ZeptoError::Tool(format!("Failed to publish rich message: {}", e))
                     })?;
-                Ok(format!("Rich message sent to {}:{}", channel, chat_id))
+                Ok(ToolOutput::llm_only(format!("Rich message sent to {}:{}", channel, chat_id)))
             }
 
             "inline_keyboard" => {
@@ -326,10 +326,10 @@ impl Tool for MessageTool {
                     .map_err(|e| {
                         ZeptoError::Tool(format!("Failed to publish inline keyboard: {}", e))
                     })?;
-                Ok(format!(
+                Ok(ToolOutput::llm_only(format!(
                     "Inline keyboard sent to {}:{}",
                     channel, chat_id
-                ))
+                )))
             }
 
             unknown => Err(ZeptoError::Tool(format!(
@@ -481,7 +481,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let msg = result.unwrap();
+        let msg = result.unwrap().for_llm;
         assert!(msg.contains("Message sent"));
         let outbound = bus.consume_outbound().await.expect("outbound message");
         assert_eq!(outbound.content, "No action field");
@@ -634,7 +634,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let msg = result.unwrap();
+        let msg = result.unwrap().for_llm;
         assert!(msg.contains("Reaction"));
         assert!(msg.contains("thumbsup"));
 
@@ -726,7 +726,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let msg = result.unwrap();
+        let msg = result.unwrap().for_llm;
         assert!(msg.contains("Rich message sent"));
 
         let outbound = bus.consume_outbound().await.expect("outbound message");
@@ -817,7 +817,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let msg = result.unwrap();
+        let msg = result.unwrap().for_llm;
         assert!(msg.contains("Inline keyboard sent"));
 
         let outbound = bus.consume_outbound().await.expect("outbound message");

@@ -41,7 +41,7 @@ use std::time::Duration;
 use crate::error::{Result, ZeptoError};
 use crate::plugins::PluginToolDef;
 
-use super::types::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Shell-escape a string by wrapping it in single quotes.
 ///
@@ -123,7 +123,7 @@ impl Tool for PluginTool {
         self.def.parameters.clone()
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let command = Self::interpolate(&self.def.command, &args);
         let timeout = Duration::from_secs(self.def.effective_timeout());
 
@@ -170,7 +170,9 @@ impl Tool for PluginTool {
             })?;
 
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            Ok(ToolOutput::llm_only(
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            ))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -287,7 +289,7 @@ mod tests {
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "hello world");
+        assert_eq!(result.unwrap().for_llm.trim(), "hello world");
     }
 
     #[tokio::test]
@@ -299,7 +301,7 @@ mod tests {
         let ctx = ToolContext::new();
         let result = tool.execute(json!({"msg": "greetings"}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "greetings");
+        assert_eq!(result.unwrap().for_llm.trim(), "greetings");
     }
 
     #[tokio::test]
@@ -312,7 +314,7 @@ mod tests {
             .execute(json!({"input": "$(echo INJECTED)"}), &ctx)
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(
             output.contains("$(echo INJECTED)"),
             "Should contain literal $() not executed result: {}",
@@ -350,6 +352,6 @@ mod tests {
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().trim(), "test_value");
+        assert_eq!(result.unwrap().for_llm.trim(), "test_value");
     }
 }

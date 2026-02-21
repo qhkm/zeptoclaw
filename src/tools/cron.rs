@@ -10,7 +10,7 @@ use crate::cron::{
 };
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for creating and managing scheduled jobs.
 pub struct CronTool {
@@ -88,18 +88,19 @@ impl Tool for CronTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'action' argument".into()))?;
 
-        match action {
-            "add" => self.execute_add(args, ctx).await,
-            "list" => self.execute_list(args).await,
-            "remove" => self.execute_remove(args).await,
-            other => Err(ZeptoError::Tool(format!("Unknown cron action '{}'", other))),
-        }
+        let s = match action {
+            "add" => self.execute_add(args, ctx).await?,
+            "list" => self.execute_list(args).await?,
+            "remove" => self.execute_remove(args).await?,
+            other => return Err(ZeptoError::Tool(format!("Unknown cron action '{}'", other))),
+        };
+        Ok(ToolOutput::llm_only(s))
     }
 }
 
@@ -425,7 +426,7 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("Created cron job"));
         assert!(output.contains("heartbeat"));
     }
@@ -437,7 +438,7 @@ mod tests {
 
         let result = tool.execute(json!({"action": "list"}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "No scheduled jobs");
+        assert_eq!(result.unwrap().for_llm, "No scheduled jobs");
     }
 
     #[tokio::test]
@@ -460,7 +461,7 @@ mod tests {
             .execute(json!({"action": "remove", "job_id": "no_such_id"}), &ctx)
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("not found"));
+        assert!(result.unwrap().for_llm.contains("not found"));
     }
 
     #[tokio::test]

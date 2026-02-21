@@ -10,7 +10,7 @@ use crate::agent::AgentLoop;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool to spawn a background delegated task.
 pub struct SpawnTool {
@@ -60,7 +60,7 @@ impl Tool for SpawnTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         // Prevent recursive spawning (fork bomb protection)
         if ctx.channel.as_deref() == Some("subagent") {
             return Err(ZeptoError::Tool(
@@ -125,10 +125,10 @@ impl Tool for SpawnTool {
             }
         });
 
-        Ok(format!(
+        Ok(ToolOutput::async_task(format!(
             "Spawned background task '{}' (id: {}). I will notify you when it completes.",
             label, task_id
-        ))
+        )))
     }
 }
 
@@ -235,7 +235,7 @@ mod tests {
 
         let result = tool.execute(json!({"task": "analyze logs"}), &ctx).await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("Spawned background task"));
         assert!(output.contains("analyze logs"));
         assert!(output.contains("id:"));
@@ -253,7 +253,7 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("log-check"));
     }
 
@@ -265,7 +265,7 @@ mod tests {
         let long_task = "a]".repeat(40); // 80 chars, exceeds 30-char threshold
         let result = tool.execute(json!({"task": long_task}), &ctx).await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         // The auto-label should be truncated with "..."
         assert!(output.contains("..."));
     }

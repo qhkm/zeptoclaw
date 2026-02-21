@@ -25,7 +25,7 @@ use crate::tools::shell::ShellTool;
 use crate::tools::web::WebFetchTool;
 use crate::tools::EchoTool;
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool to delegate a task to a specialist sub-agent.
 ///
@@ -317,7 +317,7 @@ impl Tool for DelegateTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         // Block recursion: sub-agents cannot delegate further
         if ctx.channel.as_deref() == Some("delegate") {
             return Err(ZeptoError::Tool(
@@ -359,7 +359,7 @@ impl Tool for DelegateTool {
                 // see what this agent produced.
                 self.scratchpad.write(role, &result).await;
                 // Preserve the original output format: "[role]: result"
-                Ok(format!("[{}]: {}", role, result))
+                Ok(ToolOutput::user_visible(format!("[{}]: {}", role, result)))
             }
 
             "aggregate" => {
@@ -403,7 +403,7 @@ impl Tool for DelegateTool {
                     .get("merge_strategy")
                     .and_then(Value::as_str)
                     .unwrap_or("concatenate");
-                Ok(format_results(&results, merge))
+                Ok(ToolOutput::user_visible(format_results(&results, merge)))
             }
 
             other => Err(ZeptoError::Tool(format!(

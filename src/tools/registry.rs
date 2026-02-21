@@ -9,10 +9,10 @@ use std::time::Instant;
 use serde_json::Value;
 use tracing::{error, info};
 
-use crate::error::{Result, ZeptoError};
+use crate::error::Result;
 use crate::providers::ToolDefinition;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolOutput};
 
 /// A registry that holds and manages tools.
 ///
@@ -106,8 +106,8 @@ impl ToolRegistry {
     /// * `args` - The JSON arguments for the tool
     ///
     /// # Returns
-    /// The tool's output as a string, or an error if the tool is not found
-    /// or execution fails.
+    /// A `ToolOutput` with dual-audience content, or an error if execution fails.
+    /// Tool-not-found returns `Ok(ToolOutput::error(...))`.
     ///
     /// # Example
     /// ```
@@ -120,10 +120,10 @@ impl ToolRegistry {
     ///
     /// let result = registry.execute("echo", json!({"message": "hello"})).await;
     /// assert!(result.is_ok());
-    /// assert_eq!(result.unwrap(), "hello");
+    /// assert_eq!(result.unwrap().for_llm, "hello");
     /// # });
     /// ```
-    pub async fn execute(&self, name: &str, args: Value) -> Result<String> {
+    pub async fn execute(&self, name: &str, args: Value) -> Result<ToolOutput> {
         self.execute_with_context(name, args, &ToolContext::default())
             .await
     }
@@ -136,8 +136,8 @@ impl ToolRegistry {
     /// * `ctx` - The execution context
     ///
     /// # Returns
-    /// The tool's output as a string, or an error if the tool is not found
-    /// or execution fails.
+    /// A `ToolOutput` with dual-audience content, or an error if execution fails.
+    /// Tool-not-found returns `Ok(ToolOutput::error(...))`.
     ///
     /// # Example
     /// ```
@@ -158,22 +158,24 @@ impl ToolRegistry {
         name: &str,
         args: Value,
         ctx: &ToolContext,
-    ) -> Result<String> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| ZeptoError::NotFound(format!("Tool not found: {}", name)))?;
+    ) -> Result<ToolOutput> {
+        let tool = match self.tools.get(name) {
+            Some(t) => t,
+            None => {
+                return Ok(ToolOutput::error(format!("Tool not found: {}", name)));
+            }
+        };
 
         let start = Instant::now();
 
         match tool.execute(args, ctx).await {
-            Ok(result) => {
+            Ok(output) => {
                 info!(
                     tool = name,
                     duration_ms = start.elapsed().as_millis() as u64,
                     "Tool executed successfully"
                 );
-                Ok(result)
+                Ok(output)
             }
             Err(e) => {
                 error!(
@@ -410,7 +412,7 @@ mod tests {
 
         let result = registry.execute("echo", json!({"message": "hello"})).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "hello");
+        assert_eq!(result.unwrap().for_llm, "hello");
     }
 
     #[tokio::test]
@@ -427,7 +429,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "world");
+        assert_eq!(result.unwrap().for_llm, "world");
     }
 
     #[test]
@@ -460,10 +462,11 @@ mod tests {
         let registry = ToolRegistry::new();
         let result = registry.execute("nonexistent", json!({})).await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ZeptoError::NotFound(_)));
-        assert!(err.to_string().contains("Tool not found: nonexistent"));
+        // Tool-not-found returns Ok(ToolOutput::error(...))
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.is_error);
+        assert!(output.for_llm.contains("Tool not found: nonexistent"));
     }
 
     #[tokio::test]
@@ -474,7 +477,7 @@ mod tests {
         // Execute without message argument - should return default
         let result = registry.execute("echo", json!({})).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "(no message)");
+        assert_eq!(result.unwrap().for_llm, "(no message)");
     }
 
     #[tokio::test]
@@ -485,7 +488,7 @@ mod tests {
         // Execute with null message - should return default
         let result = registry.execute("echo", json!({"message": null})).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "(no message)");
+        assert_eq!(result.unwrap().for_llm, "(no message)");
     }
 
     #[test]

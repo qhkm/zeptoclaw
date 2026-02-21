@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::error::{Result, ZeptoError};
 use crate::security::validate_path_in_workspace;
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Resolve and validate a path relative to the workspace.
 ///
@@ -81,7 +81,7 @@ impl Tool for ReadFileTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -89,9 +89,10 @@ impl Tool for ReadFileTool {
 
         let full_path = resolve_path(path, ctx)?;
 
-        tokio::fs::read_to_string(&full_path)
+        let content = tokio::fs::read_to_string(&full_path)
             .await
-            .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))
+            .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
+        Ok(ToolOutput::llm_only(content))
     }
 }
 
@@ -153,7 +154,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -179,11 +180,11 @@ impl Tool for WriteFileTool {
             ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
         })?;
 
-        Ok(format!(
+        Ok(ToolOutput::llm_only(format!(
             "Successfully wrote {} bytes to {}",
             content.len(),
             full_path
-        ))
+        )))
     }
 }
 
@@ -239,7 +240,7 @@ impl Tool for ListDirTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -271,7 +272,7 @@ impl Tool for ListDirTool {
         }
 
         items.sort();
-        Ok(items.join("\n"))
+        Ok(ToolOutput::llm_only(items.join("\n")))
     }
 }
 
@@ -342,7 +343,7 @@ impl Tool for EditFileTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -385,10 +386,10 @@ impl Tool for EditFileTool {
             })?;
 
         let replacements = content.matches(old_text).count();
-        Ok(format!(
+        Ok(ToolOutput::llm_only(format!(
             "Successfully replaced {} occurrence(s) in {}",
             replacements, full_path
-        ))
+        )))
     }
 }
 
@@ -411,7 +412,7 @@ mod tests {
             .execute(json!({"path": "zeptoclaw_test_read.txt"}), &ctx)
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "test content");
+        assert_eq!(result.unwrap().for_llm, "test content");
     }
 
     #[tokio::test]
@@ -466,7 +467,7 @@ mod tests {
 
         let result = tool.execute(json!({"path": "test.txt"}), &ctx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "workspace content");
+        assert_eq!(result.unwrap().for_llm, "workspace content");
     }
 
     #[tokio::test]
@@ -485,7 +486,7 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("Successfully wrote"));
+        assert!(result.unwrap().for_llm.contains("Successfully wrote"));
 
         // Verify
         assert_eq!(
@@ -539,7 +540,7 @@ mod tests {
         let result = tool.execute(json!({"path": "."}), &ctx).await;
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.unwrap().for_llm;
         assert!(output.contains("file1.txt"));
         assert!(output.contains("file2.txt"));
         assert!(output.contains("subdir/"));
@@ -574,7 +575,7 @@ mod tests {
 
         let result = tool.execute(json!({"path": "mydir"}), &ctx).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("inner.txt"));
+        assert!(result.unwrap().for_llm.contains("inner.txt"));
     }
 
     #[tokio::test]
@@ -600,6 +601,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(result
             .unwrap()
+            .for_llm
             .contains("Successfully replaced 1 occurrence"));
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "Hello Rust");
     }
@@ -625,7 +627,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("3 occurrence"));
+        assert!(result.unwrap().for_llm.contains("3 occurrence"));
         assert_eq!(
             fs::read_to_string(&file_path).unwrap(),
             "qux bar qux baz qux"

@@ -19,7 +19,7 @@ use tokio::time::timeout;
 use crate::error::{Result, ZeptoError};
 
 use super::web::{is_blocked_host, resolve_and_check_host};
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Default page-load timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -113,7 +113,7 @@ impl Tool for WebScreenshotTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         // ---- Parse and validate URL ----
         let url_str = args
             .get("url")
@@ -252,7 +252,7 @@ impl Tool for WebScreenshotTool {
             .to_string()
         };
 
-        Ok(result)
+        Ok(ToolOutput::llm_only(result))
     }
 }
 

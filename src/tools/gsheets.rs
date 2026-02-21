@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 
@@ -295,7 +295,7 @@ impl Tool for GoogleSheetsTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let spreadsheet_id = args
             .get("spreadsheet_id")
             .and_then(Value::as_str)
@@ -310,18 +310,19 @@ impl Tool for GoogleSheetsTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ZeptoError::Tool("Missing 'range'".to_string()))?;
 
-        match action {
-            "read" => self.execute_read(spreadsheet_id, range).await,
+        let s = match action {
+            "read" => self.execute_read(spreadsheet_id, range).await?,
             "append" => {
                 let values = Self::extract_values(&args)?;
-                self.execute_append(spreadsheet_id, range, values).await
+                self.execute_append(spreadsheet_id, range, values).await?
             }
             "update" => {
                 let values = Self::extract_values(&args)?;
-                self.execute_update(spreadsheet_id, range, values).await
+                self.execute_update(spreadsheet_id, range, values).await?
             }
-            other => Err(ZeptoError::Tool(format!("Unknown action '{}'", other))),
-        }
+            other => return Err(ZeptoError::Tool(format!("Unknown action '{}'", other))),
+        };
+        Ok(ToolOutput::llm_only(s))
     }
 }
 

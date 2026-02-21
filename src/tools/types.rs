@@ -71,6 +71,75 @@ impl std::fmt::Display for ToolCategory {
     }
 }
 
+/// Dual-audience tool result.
+///
+/// Separates what the LLM sees (`for_llm`) from what the user sees (`for_user`).
+/// Tools that should be silent to the user (file reads, memory ops) set `for_user: None`.
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    /// Content sent to the LLM as the tool result. Always required.
+    pub for_llm: String,
+    /// Content sent to the user. `None` = silent (user sees nothing).
+    pub for_user: Option<String>,
+    /// Whether this result represents an error condition.
+    pub is_error: bool,
+    /// Whether the tool is running asynchronously (result will arrive later).
+    pub is_async: bool,
+}
+
+impl ToolOutput {
+    /// LLM-only result. User sees nothing.
+    pub fn llm_only(content: impl Into<String>) -> Self {
+        Self {
+            for_llm: content.into(),
+            for_user: None,
+            is_error: false,
+            is_async: false,
+        }
+    }
+
+    /// Both LLM and user see the same content.
+    pub fn user_visible(content: impl Into<String>) -> Self {
+        let s = content.into();
+        Self {
+            for_llm: s.clone(),
+            for_user: Some(s),
+            is_error: false,
+            is_async: false,
+        }
+    }
+
+    /// Error result. LLM sees the error; user sees nothing by default.
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            for_llm: content.into(),
+            for_user: None,
+            is_error: true,
+            is_async: false,
+        }
+    }
+
+    /// Async task launched. LLM is informed; user sees nothing until callback.
+    pub fn async_task(content: impl Into<String>) -> Self {
+        Self {
+            for_llm: content.into(),
+            for_user: None,
+            is_error: false,
+            is_async: true,
+        }
+    }
+
+    /// Different content for LLM vs user.
+    pub fn split(for_llm: impl Into<String>, for_user: impl Into<String>) -> Self {
+        Self {
+            for_llm: for_llm.into(),
+            for_user: Some(for_user.into()),
+            is_error: false,
+            is_async: false,
+        }
+    }
+}
+
 /// Trait that all tools must implement.
 ///
 /// Tools are executable functions that the LLM can call to perform actions
@@ -81,7 +150,7 @@ impl std::fmt::Display for ToolCategory {
 /// ```rust
 /// use async_trait::async_trait;
 /// use serde_json::Value;
-/// use zeptoclaw::tools::{Tool, ToolContext};
+/// use zeptoclaw::tools::{Tool, ToolContext, ToolOutput};
 /// use zeptoclaw::error::Result;
 ///
 /// struct MyTool;
@@ -97,8 +166,8 @@ impl std::fmt::Display for ToolCategory {
 ///             "required": []
 ///         })
 ///     }
-///     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<String> {
-///         Ok("Done!".to_string())
+///     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+///         Ok(ToolOutput::llm_only("Done!"))
 ///     }
 /// }
 /// ```
@@ -129,8 +198,8 @@ pub trait Tool: Send + Sync {
     /// * `ctx` - The execution context (channel, chat_id, workspace, etc.)
     ///
     /// # Returns
-    /// A string result that will be sent back to the LLM.
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String>;
+    /// A `ToolOutput` with dual-audience content (LLM vs user).
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput>;
 
     /// Get a compact (shorter) description for token-constrained environments.
     ///
@@ -329,5 +398,42 @@ mod tests {
         // EchoTool uses the default category() implementation (fail-closed: Shell)
         let tool = super::super::EchoTool;
         assert_eq!(tool.category(), ToolCategory::Shell);
+    }
+
+    #[test]
+    fn test_tool_output_llm_only() {
+        let out = ToolOutput::llm_only("internal");
+        assert_eq!(out.for_llm, "internal");
+        assert!(out.for_user.is_none());
+        assert!(!out.is_error);
+        assert!(!out.is_async);
+    }
+
+    #[test]
+    fn test_tool_output_user_visible() {
+        let out = ToolOutput::user_visible("hello");
+        assert_eq!(out.for_llm, "hello");
+        assert_eq!(out.for_user.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_tool_output_error() {
+        let out = ToolOutput::error("something broke");
+        assert!(out.is_error);
+        assert!(out.for_user.is_none());
+    }
+
+    #[test]
+    fn test_tool_output_async_task() {
+        let out = ToolOutput::async_task("running in background");
+        assert!(out.is_async);
+        assert!(!out.is_error);
+    }
+
+    #[test]
+    fn test_tool_output_split() {
+        let out = ToolOutput::split("llm sees this", "user sees that");
+        assert_eq!(out.for_llm, "llm sees this");
+        assert_eq!(out.for_user.as_deref(), Some("user sees that"));
     }
 }

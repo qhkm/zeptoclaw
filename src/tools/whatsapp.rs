@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolCategory, ToolContext};
+use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const WHATSAPP_API_BASE: &str = "https://graph.facebook.com/v18.0";
 
@@ -92,7 +92,7 @@ impl Tool for WhatsAppTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let to = args
             .get("to")
             .and_then(Value::as_str)
@@ -199,10 +199,10 @@ impl Tool for WhatsAppTool {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
 
-        Ok(format!(
+        Ok(ToolOutput::llm_only(format!(
             "WhatsApp message sent to {} (id: {})",
             to, message_id
-        ))
+        )))
     }
 }
 
