@@ -44,28 +44,47 @@ impl PdfReadTool {
     /// - The file does not exist.
     pub fn resolve_path(&self, path: &str) -> Result<PathBuf> {
         let safe = validate_path_in_workspace(path, &self.workspace)?;
-        let p = safe.as_path();
-        if p.extension().and_then(|e| e.to_str()) != Some("pdf") {
+        if safe.as_path().extension().and_then(|e| e.to_str()) != Some("pdf") {
             return Err(ZeptoError::Tool(
                 "Only .pdf files are supported".to_string(),
             ));
         }
-        if !p.exists() {
+        if !safe.as_path().exists() {
             return Err(ZeptoError::Tool(format!("File not found: {path}")));
         }
-        Ok(p.to_path_buf())
+        Ok(safe.into_path_buf())
     }
 
     /// Truncate `text` to at most `max_chars` characters.
     ///
-    /// Appends a `[TRUNCATED]` marker when truncation occurs.
+    /// Uses char-aware slicing to avoid panicking on multi-byte UTF-8
+    /// (e.g., Arabic, CJK, emoji). Appends a `[TRUNCATED]` marker when
+    /// truncation occurs.
     pub fn truncate_output(text: String, max_chars: usize) -> String {
+        // Fast path: byte length ≤ max_chars guarantees char count ≤ max_chars,
+        // because every char is at least 1 byte.
         if text.len() <= max_chars {
             return text;
         }
-        let mut s = text[..max_chars].to_string();
-        s.push_str("\n[TRUNCATED] — output exceeded max_chars");
-        s
+
+        let mut byte_end = text.len();
+        let mut truncated = false;
+
+        for (char_count, (byte_idx, _ch)) in text.char_indices().enumerate() {
+            if char_count == max_chars {
+                byte_end = byte_idx;
+                truncated = true;
+                break;
+            }
+        }
+
+        if truncated {
+            let mut s = text[..byte_end].to_string();
+            s.push_str("\n[TRUNCATED] — output exceeded max_chars");
+            s
+        } else {
+            text
+        }
     }
 
     /// Extract text from the PDF at `path` using lopdf.
@@ -251,5 +270,17 @@ mod tests {
         let short = "hello world".to_string();
         let result = PdfReadTool::truncate_output(short.clone(), 50_000);
         assert_eq!(result, short, "short strings should be returned unchanged");
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte() {
+        // Each '日' is 3 bytes. Slicing by byte index would panic at the char boundary.
+        let long = "日".repeat(100_000);
+        let result = PdfReadTool::truncate_output(long, 50_000);
+        assert!(result.contains("[TRUNCATED]"), "should contain TRUNCATED marker");
+        // The body before the marker must be exactly 50_000 chars.
+        let marker_pos = result.find('\n').expect("should have newline before marker");
+        let body = &result[..marker_pos];
+        assert_eq!(body.chars().count(), 50_000, "body should be exactly max_chars wide");
     }
 }
