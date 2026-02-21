@@ -292,53 +292,13 @@ fn escape_xml(input: &str) -> String {
 }
 
 fn parse_frontmatter_metadata(frontmatter: &str) -> SkillMetadata {
-    let mut metadata = SkillMetadata::default();
-
-    for raw_line in frontmatter.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim();
-            match key {
-                "name" => metadata.name = unquote(value),
-                "description" => metadata.description = unquote(value),
-                "version" => {
-                    let parsed = unquote(value);
-                    if !parsed.is_empty() {
-                        metadata.version = Some(parsed);
-                    }
-                }
-                "homepage" => {
-                    let parsed = unquote(value);
-                    if !parsed.is_empty() {
-                        metadata.homepage = Some(parsed);
-                    }
-                }
-                "metadata" => {
-                    let parsed = unquote(value);
-                    if !parsed.is_empty() {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&parsed) {
-                            metadata.metadata = Some(json);
-                        }
-                    }
-                }
-                _ => {}
-            }
+    match serde_yaml::from_str::<SkillMetadata>(frontmatter) {
+        Ok(meta) => meta,
+        Err(e) => {
+            tracing::warn!("Failed to parse skill frontmatter: {}", e);
+            SkillMetadata::default()
         }
     }
-
-    metadata
-}
-
-fn unquote(input: &str) -> String {
-    input
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string()
 }
 
 /// Map `cfg!(target_os)` to OpenClaw's platform strings.
