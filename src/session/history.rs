@@ -338,7 +338,9 @@ mod tests {
         );
         assert!(title.ends_with("..."), "Long title should end with '...'");
         // The first 80 chars should be preserved
-        assert_eq!(&title[..80], &long_msg[..80]);
+        let title_prefix: String = title.chars().take(80).collect();
+        let long_msg_prefix: String = long_msg.chars().take(80).collect();
+        assert_eq!(title_prefix, long_msg_prefix);
     }
 
     #[test]

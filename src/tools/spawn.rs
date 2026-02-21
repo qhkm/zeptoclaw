@@ -74,13 +74,7 @@ impl Tool for SpawnTool {
             .get("label")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(|| {
-                if task_text.len() > 30 {
-                    format!("{}...", &task_text[..30])
-                } else {
-                    task_text.clone()
-                }
-            });
+            .unwrap_or_else(|| crate::utils::string::preview(&task_text, 30));
 
         let channel = ctx
             .channel
@@ -91,7 +85,11 @@ impl Tool for SpawnTool {
             .clone()
             .ok_or_else(|| ZeptoError::Tool("No chat_id available in tool context".into()))?;
 
-        let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let task_id = uuid::Uuid::new_v4()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
         let worker_task_id = task_id.clone();
         let agent = self.agent.clone();
         let bus = Arc::clone(&self.bus);

@@ -302,7 +302,7 @@ impl CronService {
     ) -> Result<CronJob> {
         let now = now_ms();
         let job = CronJob {
-            id: Uuid::new_v4().to_string()[..8].to_string(),
+            id: Uuid::new_v4().to_string().chars().take(8).collect(),
             name,
             enabled: true,
             schedule: schedule.clone(),

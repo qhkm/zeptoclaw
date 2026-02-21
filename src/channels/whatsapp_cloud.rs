@@ -300,12 +300,13 @@ fn extract_text_messages(
 
 /// Truncate a message to the WhatsApp character limit.
 fn truncate_message(content: &str) -> String {
-    if content.len() <= MAX_MESSAGE_LENGTH {
+    if content.chars().count() <= MAX_MESSAGE_LENGTH {
         content.to_string()
     } else {
         let suffix = "...(truncated)";
-        let cut = MAX_MESSAGE_LENGTH - suffix.len();
-        format!("{}{}", &content[..cut], suffix)
+        let cut_chars = MAX_MESSAGE_LENGTH.saturating_sub(suffix.len());
+        let prefix: String = content.chars().take(cut_chars).collect();
+        format!("{}{}", prefix, suffix)
     }
 }
 

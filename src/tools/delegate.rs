@@ -202,7 +202,11 @@ impl Tool for DelegateTool {
         }
 
         // Create the inbound message for the sub-agent
-        let delegate_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let delegate_id = uuid::Uuid::new_v4()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
         let inbound = InboundMessage::new(
             "delegate",
             &format!("delegate:{}", delegate_id),

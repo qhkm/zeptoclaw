@@ -303,14 +303,17 @@ impl DiscordChannel {
             ));
         }
 
-        // Truncate content to Discord's 2000-character limit.
-        let content = if msg.content.len() > DISCORD_MAX_MESSAGE_LENGTH {
-            format!(
-                "{}...",
-                &msg.content[..DISCORD_MAX_MESSAGE_LENGTH.saturating_sub(3)]
+        // Truncate content to Discord's max length using UTF-8-safe preview.
+        // Append an ellipsis only when the original content actually exceeds
+        // `DISCORD_MAX_MESSAGE_LENGTH` characters. This preserves messages
+        // that are exactly at the limit (they should not end with "...").
+        let content = if msg.content.chars().count() > DISCORD_MAX_MESSAGE_LENGTH {
+            crate::utils::string::preview(
+                &msg.content,
+                DISCORD_MAX_MESSAGE_LENGTH.saturating_sub(3),
             )
         } else {
-            msg.content.clone()
+            msg.content.to_string()
         };
 
         let mut payload = json!({ "content": content });

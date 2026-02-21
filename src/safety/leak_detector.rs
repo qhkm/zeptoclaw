@@ -221,11 +221,14 @@ impl Default for LeakDetector {
 /// with `***` since there are not enough characters to preserve meaningful
 /// prefix/suffix context.
 fn redact_string(s: &str) -> String {
-    if s.len() <= 8 {
+    // Work on characters to avoid slicing inside multibyte UTF-8 characters.
+    let char_count = s.chars().count();
+    if char_count <= 8 {
         return "***".to_string();
     }
-    let prefix = &s[..4];
-    let suffix = &s[s.len() - 4..];
+    let prefix: String = s.chars().take(4).collect();
+    let suffix_rev: String = s.chars().rev().take(4).collect();
+    let suffix: String = suffix_rev.chars().rev().collect();
     format!("{prefix}***{suffix}")
 }
 

@@ -353,11 +353,7 @@ impl Tool for EditFileTool {
         if !content.contains(old_text) {
             return Err(ZeptoError::Tool(format!(
                 "Text '{}' not found in file '{}'",
-                if old_text.len() > 50 {
-                    format!("{}...", &old_text[..50])
-                } else {
-                    old_text.to_string()
-                },
+                crate::utils::string::preview(old_text, 50),
                 full_path
             )));
         }
