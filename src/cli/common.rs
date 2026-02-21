@@ -815,16 +815,16 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     if config.tools.transcribe.enabled {
         if let Some(api_key) = &config.tools.transcribe.groq_api_key {
             if tool_enabled("transcribe") {
-                agent
-                    .register_tool(Box::new(TranscribeTool::new(
-                        api_key,
-                        &config.tools.transcribe.model,
-                    )))
-                    .await;
-                info!(
-                    "Registered transcribe tool (model: {})",
-                    config.tools.transcribe.model
-                );
+                match TranscribeTool::new(api_key, &config.tools.transcribe.model) {
+                    Ok(tool) => {
+                        agent.register_tool(Box::new(tool)).await;
+                        info!(
+                            "Registered transcribe tool (model: {})",
+                            config.tools.transcribe.model
+                        );
+                    }
+                    Err(e) => warn!("Failed to initialize transcribe tool: {}", e),
+                }
             }
         }
     }
