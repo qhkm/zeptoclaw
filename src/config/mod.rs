@@ -169,7 +169,9 @@ impl Config {
 
         // Project management tool
         self.apply_project_env_overrides();
-    }
+
+        // Cache
+        self.apply_cache_env_overrides();    }
 
     /// Apply provider-specific environment variable overrides
     fn apply_provider_env_overrides(&mut self) {
@@ -761,6 +763,23 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_STRIPE_WEBHOOK_SECRET") {
             let val = val.trim().to_string();
             self.stripe.webhook_secret = if val.is_empty() { None } else { Some(val) };
+        }
+    }
+
+    /// Apply cache environment variable overrides.
+    fn apply_cache_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_ENABLED") {
+            self.cache.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_TTL_SECS") {
+            if let Ok(n) = val.parse::<u64>() {
+                self.cache.ttl_secs = n;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_MAX_ENTRIES") {
+            if let Ok(n) = val.parse::<usize>() {
+                self.cache.max_entries = n;
+            }
         }
     }
 

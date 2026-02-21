@@ -12,6 +12,7 @@ use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
 use crate::health::UsageMetrics;
@@ -133,9 +134,23 @@ pub struct AgentLoop {
     context_monitor: Option<ContextMonitor>,
     /// Optional channel for tool execution feedback (tool name + duration).
     tool_feedback_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ToolFeedback>>>>,
+    /// Optional LLM response cache (SHA-256 keyed, TTL + LRU).
+    cache: Option<Arc<std::sync::Mutex<ResponseCache>>>,
 }
 
 impl AgentLoop {
+    /// Build an optional cache from config.
+    fn build_cache(config: &Config) -> Option<Arc<std::sync::Mutex<ResponseCache>>> {
+        if config.cache.enabled {
+            Some(Arc::new(std::sync::Mutex::new(ResponseCache::new(
+                config.cache.ttl_secs,
+                config.cache.max_entries,
+            ))))
+        } else {
+            None
+        }
+    }
+
     /// Create a new agent loop.
     ///
     /// # Arguments
@@ -174,6 +189,7 @@ impl AgentLoop {
         } else {
             None
         };
+        let cache = Self::build_cache(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -194,6 +210,7 @@ impl AgentLoop {
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
+            cache,
         }
     }
 
@@ -226,6 +243,7 @@ impl AgentLoop {
         } else {
             None
         };
+        let cache = Self::build_cache(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -246,6 +264,7 @@ impl AgentLoop {
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
+            cache,
         }
     }
 
@@ -409,6 +428,36 @@ impl AgentLoop {
             )));
         }
 
+        // Build cache key from (model, system_prompt, user_prompt) for the
+        // initial LLM call only. Tool follow-up calls are never cached.
+        let cache_key = self.cache.as_ref().map(|_| {
+            let system_prompt = messages
+                .first()
+                .filter(|m| m.role == Role::System)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            ResponseCache::cache_key(
+                self.config.agents.defaults.model.as_str(),
+                system_prompt,
+                &msg.content,
+            )
+        });
+
+        // Check response cache before calling the provider.
+        // The MutexGuard must be dropped before any .await to remain Send.
+        let cached_hit = if let (Some(ref cache_mutex), Some(ref key)) = (&self.cache, &cache_key) {
+            cache_mutex.lock().ok().and_then(|mut c| c.get(key))
+        } else {
+            None
+        };
+        if let Some(cached_response) = cached_hit {
+            debug!("Cache hit for initial prompt");
+            session.add_message(Message::user(&msg.content));
+            session.add_message(Message::assistant(&cached_response));
+            self.session_manager.save(&session).await?;
+            return Ok(cached_response);
+        }
+
         // Call LLM -- provider lock is NOT held during this await
         let mut response = provider
             .chat(messages, tool_definitions, model, options.clone())
@@ -421,6 +470,22 @@ impl AgentLoop {
                 .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
             self.token_budget
                 .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+        }
+
+        // Cache the response if it has no tool calls (pure text reply).
+        // Responses with tool calls depend on tool execution and are not cacheable.
+        if !response.has_tool_calls() {
+            if let (Some(ref cache_mutex), Some(key)) = (&self.cache, cache_key) {
+                let token_count = response
+                    .usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0);
+                if let Ok(mut cache) = cache_mutex.lock() {
+                    cache.put(key, response.content.clone(), token_count);
+                    debug!("Cached initial LLM response");
+                }
+            }
         }
 
         // Add user message to session

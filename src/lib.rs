@@ -5,6 +5,7 @@ pub mod audit;
 pub mod auth;
 pub mod batch;
 pub mod bus;
+pub mod cache;
 pub mod channels;
 pub mod config;
 pub mod cron;
