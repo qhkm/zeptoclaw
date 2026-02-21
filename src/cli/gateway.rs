@@ -11,7 +11,8 @@ use zeptoclaw::channels::{register_configured_channels, ChannelManager, WhatsApp
 use zeptoclaw::config::{Config, ContainerAgentBackend};
 use zeptoclaw::deps::{fetcher::RealFetcher, DepManager, HasDependencies};
 use zeptoclaw::health::{
-    health_port, start_health_server, start_periodic_usage_flush, UsageMetrics,
+    health_port, start_health_server, start_health_server_legacy, start_periodic_usage_flush,
+    HealthRegistry, UsageMetrics,
 };
 use zeptoclaw::heartbeat::{ensure_heartbeat_file, HeartbeatService};
 use zeptoclaw::providers::{
@@ -78,9 +79,9 @@ pub(crate) async fn cmd_gateway(
     // Create usage metrics tracker
     let metrics = Arc::new(UsageMetrics::new());
 
-    // Start health check server (liveness + readiness)
+    // Start legacy health check server (liveness + readiness via UsageMetrics)
     let hp = health_port();
-    let health_handle = match start_health_server(hp, Arc::clone(&metrics)).await {
+    let health_handle = match start_health_server_legacy(hp, Arc::clone(&metrics)).await {
         Ok(handle) => {
             info!(
                 port = hp,
@@ -93,6 +94,32 @@ pub(crate) async fn cmd_gateway(
             None
         }
     };
+
+    // Start HealthRegistry-based server if config.health.enabled
+    if config.health.enabled {
+        let registry = HealthRegistry::new();
+        let host = config.health.host.clone();
+        let port = config.health.port;
+        tokio::spawn(async move {
+            match start_health_server(&host, port, registry).await {
+                Ok(handle) => {
+                    info!(
+                        host = %host,
+                        port = port,
+                        "Named-check health server listening on /health and /ready"
+                    );
+                    let _ = handle.await;
+                }
+                Err(e) => {
+                    tracing::error!("Named-check health server error: {}", e);
+                }
+            }
+        });
+        info!(
+            "Health server enabled on {}:{}",
+            config.health.host, config.health.port
+        );
+    }
 
     // Create shutdown watch channel for periodic usage flush
     let (usage_shutdown_tx, usage_shutdown_rx) = tokio::sync::watch::channel(false);

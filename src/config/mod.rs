@@ -763,6 +763,17 @@ impl Config {
                 _ => {}
             }
         }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_HEALTH_ENABLED") {
+            self.health.enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_HEALTH_HOST") {
+            self.health.host = v;
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_HEALTH_PORT") {
+            if let Ok(port) = v.parse::<u16>() {
+                self.health.port = port;
+            }
+        }
     }
 
     /// Apply Stripe environment variable overrides.

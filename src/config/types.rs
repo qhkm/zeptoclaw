@@ -118,6 +118,9 @@ pub struct Config {
     pub tool_profiles: HashMap<String, Option<Vec<String>>>,
     /// Project management tool configuration (GitHub Issues, Jira, Linear).
     pub project: ProjectConfig,
+    /// HTTP health server configuration.
+    #[serde(default)]
+    pub health: HealthConfig,
 }
 
 // ============================================================================
@@ -178,6 +181,43 @@ impl Default for PairingConfig {
             lockout_secs: 300,
         }
     }
+
+// ============================================================================
+// Health Server Configuration
+// ============================================================================
+
+fn default_health_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_health_port() -> u16 {
+    9090
+}
+
+/// HTTP health server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthConfig {
+    /// Whether the health HTTP server is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Host/IP to bind the health server (default: 127.0.0.1).
+    #[serde(default = "default_health_host")]
+    pub host: String,
+    /// Port to bind the health server (default: 9090).
+    #[serde(default = "default_health_port")]
+    pub port: u16,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_health_host(),
+            port: default_health_port(),
+        }
+    }
+}
+
 }
 
 // ============================================================================

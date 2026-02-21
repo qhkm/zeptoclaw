@@ -62,7 +62,10 @@ pub use gateway::{
     parse_marked_response, resolve_backend, AgentRequest, AgentResponse, AgentResult,
     ContainerAgentProxy, ResolvedBackend, RESPONSE_END_MARKER, RESPONSE_START_MARKER,
 };
-pub use health::{health_port, start_health_server, start_periodic_usage_flush, UsageMetrics};
+pub use health::{
+    health_port, start_health_server, start_health_server_legacy, start_periodic_usage_flush,
+    HealthCheck, HealthRegistry, HealthStatus, UsageMetrics,
+};
 
 #[cfg(target_os = "macos")]
 pub use runtime::AppleContainerRuntime;

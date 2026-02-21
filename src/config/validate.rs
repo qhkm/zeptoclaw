@@ -34,6 +34,8 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "cache",
     "agent_mode",
     "pairing",
+||||||| parent of 438eb07 (feat: add /health + /ready HTTP server for Docker/K8s/IoT healthchecks)
+    "health",
 ];
 
 /// Known fields for each section. Nested as section.field.
