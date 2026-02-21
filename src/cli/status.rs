@@ -1,5 +1,7 @@
 //! Status and auth command handlers.
 
+use std::io::{self, Write};
+
 use anyhow::{Context, Result};
 
 use zeptoclaw::auth;
@@ -27,6 +29,9 @@ pub(crate) async fn cmd_auth(action: AuthAction) -> Result<()> {
         }
         AuthAction::Refresh { provider } => {
             cmd_auth_refresh(&provider).await?;
+        }
+        AuthAction::SetupToken => {
+            cmd_auth_setup_token().await?;
         }
     }
     Ok(())
@@ -191,6 +196,84 @@ async fn cmd_auth_refresh(provider: &str) -> Result<()> {
             println!("Try logging in again: zeptoclaw auth login {}", provider);
         }
     }
+
+    Ok(())
+}
+
+/// Set up a Claude Code subscription token for API access.
+///
+/// Prompts the user to paste access and refresh tokens from `claude auth token`,
+/// validates the prefix, stores them encrypted, and sets auth_method to auto.
+pub(crate) async fn cmd_auth_setup_token() -> Result<()> {
+    println!("Claude Code Subscription Token Setup");
+    println!("====================================");
+    println!();
+    println!("This imports tokens from your Claude Pro/Max subscription.");
+    println!("In Claude Code CLI, run: claude auth token");
+    println!("Then paste the tokens below.");
+    println!();
+    println!("WARNING: Using subscription tokens for API access may violate");
+    println!("Anthropic's Terms of Service. Tokens may be revoked at any time.");
+    println!("If revoked, ZeptoClaw will fall back to your API key.");
+    println!();
+
+    // Read access token
+    print!("Access token: ");
+    io::stdout().flush()?;
+    let access_token = super::common::read_secret()?;
+    if access_token.is_empty() {
+        println!("No access token provided. Aborting.");
+        return Ok(());
+    }
+
+    // Read refresh token
+    print!("Refresh token (optional, press Enter to skip): ");
+    io::stdout().flush()?;
+    let refresh_token = super::common::read_secret()?;
+    let refresh_token = if refresh_token.is_empty() {
+        None
+    } else {
+        Some(refresh_token)
+    };
+
+    // Build the token set
+    let now = chrono::Utc::now().timestamp();
+    let tokens = auth::OAuthTokenSet {
+        provider: "anthropic".to_string(),
+        access_token,
+        refresh_token,
+        expires_at: None, // subscription tokens have no fixed expiry
+        token_type: "Bearer".to_string(),
+        scope: None,
+        obtained_at: now,
+        client_id: Some(auth::CLAUDE_CODE_CLIENT_ID.to_string()),
+    };
+
+    // Store encrypted
+    let encryption = zeptoclaw::security::encryption::resolve_master_key(true)
+        .map_err(|e| anyhow::anyhow!("Cannot store tokens without encryption key: {}", e))?;
+    let store = auth::store::TokenStore::new(encryption);
+    store
+        .save(&tokens)
+        .map_err(|e| anyhow::anyhow!("Failed to save tokens: {}", e))?;
+
+    // Set auth_method to auto in config
+    let mut config = Config::load().unwrap_or_default();
+    let provider_config = config
+        .providers
+        .anthropic
+        .get_or_insert_with(Default::default);
+    provider_config.auth_method = Some("auto".to_string());
+    config.save().with_context(|| "Failed to save config")?;
+
+    println!();
+    println!("Subscription token stored and encrypted.");
+    println!("Auth method set to \"auto\" (OAuth first, API key fallback).");
+    if tokens.refresh_token.is_some() {
+        println!("Refresh token: stored (will auto-refresh before expiry).");
+    }
+    println!();
+    println!("Test with: zeptoclaw agent -m \"Hello\"");
 
     Ok(())
 }
