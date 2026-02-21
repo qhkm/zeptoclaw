@@ -58,6 +58,9 @@ async fn send_request(port: &mut SerialStream, cmd: &str, args: Value) -> Result
         .await
         .map_err(|e| ZeptoError::Tool(format!("Serial flush failed: {e}")))?;
 
+    /// Maximum serial response size (64 KB) to prevent unbounded buffer growth.
+    const MAX_RESPONSE_SIZE: usize = 64 * 1024;
+
     let mut buf = Vec::new();
     let mut b = [0u8; 1];
     while port.read_exact(&mut b).await.is_ok() {
@@ -65,6 +68,12 @@ async fn send_request(port: &mut SerialStream, cmd: &str, args: Value) -> Result
             break;
         }
         buf.push(b[0]);
+        if buf.len() > MAX_RESPONSE_SIZE {
+            return Err(ZeptoError::Tool(format!(
+                "Serial response exceeded max size ({} bytes)",
+                MAX_RESPONSE_SIZE
+            )));
+        }
     }
 
     let line_str = String::from_utf8_lossy(&buf);

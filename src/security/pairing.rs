@@ -141,7 +141,14 @@ impl PairingManager {
         let valid = self
             .pending_code
             .as_ref()
-            .map(|pc| pc.code == code && Instant::now() < pc.expires_at)
+            .map(|pc| {
+                let code_bytes = pc.code.as_bytes();
+                let input_bytes = code.as_bytes();
+                // Constant-time comparison to prevent timing attacks on pairing codes
+                let codes_match = code_bytes.len() == input_bytes.len()
+                    && bool::from(code_bytes.ct_eq(input_bytes));
+                codes_match && Instant::now() < pc.expires_at
+            })
             .unwrap_or(false);
 
         if !valid {
