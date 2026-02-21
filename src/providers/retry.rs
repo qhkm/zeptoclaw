@@ -125,34 +125,77 @@ impl RetryProvider {
     }
 }
 
+fn is_context_window_exceeded(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    let hints = [
+        "exceeds the context window",
+        "context window of this model",
+        "maximum context length",
+        "context length exceeded",
+        "max_tokens is too large",
+    ];
+    hints.iter().any(|h| lower.contains(h))
+}
+
+fn is_auth_failure(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    let hints = [
+        "invalid api key",
+        "incorrect api key",
+        "missing api key",
+        "api key not set",
+        "authentication failed",
+        "auth failed",
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "access denied",
+        "invalid token",
+    ];
+    hints.iter().any(|h| lower.contains(h))
+}
+
+fn is_model_not_found(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("model")
+        && (lower.contains("not found")
+            || lower.contains("does not exist")
+            || lower.contains("unknown model")
+            || lower.contains("unsupported model"))
+}
+
 /// Check whether a [`ZeptoError`] represents a transient failure that should be retried.
 ///
 /// For structured [`ProviderError`](crate::error::ProviderError) errors, delegates
 /// to [`ProviderError::is_retryable`]. For legacy `Provider(String)` errors, falls
-/// back to substring matching against known retryable patterns.
+/// back to keyword-based classification covering auth failures, context-window errors,
+/// model-not-found, and explicit HTTP status codes before checking retryable patterns.
 pub fn is_retryable(err: &ZeptoError) -> bool {
     match err {
         ZeptoError::ProviderTyped(pe) => pe.is_retryable(),
-        _ => {
-            // Fallback: keep old string matching for backward compatibility
-            let msg = err.to_string().to_lowercase();
-
-            // Explicitly exclude non-retryable client errors
-            let non_retryable = ["400", "401", "403", "404"];
-            for pattern in &non_retryable {
-                if msg.contains(pattern) {
-                    return false;
-                }
+        ZeptoError::Provider(msg) => {
+            let lower = msg.to_lowercase();
+            // Permanent failures — abort immediately
+            if is_context_window_exceeded(msg) || is_auth_failure(msg) || is_model_not_found(msg) {
+                return false;
             }
-
-            for pattern in RETRYABLE_PATTERNS {
-                if msg.contains(pattern) {
-                    return true;
-                }
+            // 401/403/400/404 status codes in message
+            let non_retryable_codes = ["HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404"];
+            if non_retryable_codes.iter().any(|c| msg.contains(c)) {
+                return false;
             }
-
-            false
+            // Transient signals — always retry
+            lower.contains("rate")
+                || lower.contains("429")
+                || lower.contains("500")
+                || lower.contains("overload")
+                || lower.contains("server error")
+                || lower.contains("502")
+                || lower.contains("503")
+                || lower.contains("504")
+                || lower.contains("timeout")
         }
+        _ => false,
     }
 }
 
@@ -806,5 +849,70 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "recovered");
+    }
+
+    // ====================================================================
+    // New error-classification tests (Step 1)
+    // ====================================================================
+
+    #[test]
+    fn test_is_retryable_auth_failure_keywords() {
+        let cases = [
+            "invalid api key provided",
+            "Incorrect API key: sk-xxx",
+            "authentication failed: bad token",
+            "401 Unauthorized - access denied",
+            "permission denied for model",
+        ];
+        for msg in cases {
+            let err = ZeptoError::Provider(msg.to_string());
+            assert!(!is_retryable(&err), "should not retry auth failure: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_is_retryable_context_window_exceeded() {
+        let cases = [
+            "This model's maximum context length is 128000 tokens",
+            "exceeds the context window of this model",
+            "maximum context length exceeded",
+            "context length exceeded for gpt-4",
+        ];
+        for msg in cases {
+            let err = ZeptoError::Provider(msg.to_string());
+            assert!(
+                !is_retryable(&err),
+                "should not retry context window error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_retryable_model_not_found() {
+        let cases = [
+            "model 'gpt-99' not found",
+            "Unknown model: claude-99",
+            "model does not exist: llama-999",
+            "unsupported model specified",
+        ];
+        for msg in cases {
+            let err = ZeptoError::Provider(msg.to_string());
+            assert!(
+                !is_retryable(&err),
+                "should not retry model-not-found: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_retryable_429_still_retryable_after_change() {
+        let err = ZeptoError::Provider("HTTP 429 Too Many Requests".to_string());
+        assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn test_is_retryable_500_still_retryable_after_change() {
+        let err = ZeptoError::Provider("HTTP 500 Internal Server Error".to_string());
+        assert!(is_retryable(&err));
     }
 }
