@@ -125,6 +125,8 @@ rpassword = "7.3"
 default = []
 # BM25 keyword scoring memory backend (adds ~0 extra deps for now)
 memory-bm25 = []
+# Embedding-based memory backend using LLM provider's embed() method
+memory-embedding = []
 # Web screenshot tool via headless Chromium (Chrome DevTools Protocol)
 screenshot = ["chromiumoxide"]
 

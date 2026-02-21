@@ -14,7 +14,7 @@ use zeptoclaw::bus::MessageBus;
 use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
-use zeptoclaw::memory::factory::create_searcher;
+use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
     LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
@@ -488,8 +488,17 @@ pub(crate) async fn create_agent_with_template(
         context_builder = context_builder.with_skills(&skills_prompt);
     }
 
-    // Create memory searcher from config (reused for injection + tool registration)
-    let memory_searcher = create_searcher(&config.memory);
+    // Create memory searcher from config (reused for injection + tool registration).
+    // For the embedding backend, supply an Arc<dyn LLMProvider> so the searcher
+    // can call embed() without going through the agent loop.
+    let embedding_provider: Option<std::sync::Arc<dyn zeptoclaw::providers::LLMProvider>> =
+        if matches!(config.memory.backend, MemoryBackend::Embedding) {
+            build_runtime_provider_chain(&config)
+                .map(|(chain, _names)| std::sync::Arc::from(chain))
+        } else {
+            None
+        };
+    let memory_searcher = create_searcher_with_provider(&config.memory, embedding_provider);
 
     // Inject pinned memories into system prompt
     if !matches!(config.memory.backend, MemoryBackend::Disabled) {
