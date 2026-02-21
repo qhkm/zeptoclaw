@@ -73,8 +73,24 @@ pub fn create_searcher_with_provider(
             }
         }
         MemoryBackend::Hnsw => {
-            warn!("memory-hnsw feature not yet implemented; falling back to builtin");
-            Arc::new(BuiltinSearcher)
+            #[cfg(feature = "memory-hnsw")]
+            {
+                if let Some(p) = provider {
+                    let path = crate::config::Config::dir()
+                        .join("memory")
+                        .join("hnsw_vectors.json");
+                    Arc::new(super::hnsw_searcher::HnswSearcher::new(p, path))
+                } else {
+                    warn!("memory-hnsw backend requires a provider; falling back to builtin. Pass a provider via create_searcher_with_provider()");
+                    Arc::new(BuiltinSearcher)
+                }
+            }
+            #[cfg(not(feature = "memory-hnsw"))]
+            {
+                let _ = provider; // suppress unused warning
+                warn!("memory-hnsw feature not compiled; falling back to builtin. Rebuild with: cargo build --features memory-hnsw");
+                Arc::new(BuiltinSearcher)
+            }
         }
         MemoryBackend::Tantivy => {
             warn!("memory-tantivy feature not yet implemented; falling back to builtin");
@@ -212,5 +228,49 @@ mod tests {
         let provider: Option<Arc<dyn LLMProvider>> = Some(Arc::new(FakeProvider));
         let searcher = create_searcher_with_provider(&config, provider);
         assert_eq!(searcher.name(), "embedding");
+    }
+
+    #[cfg(feature = "memory-hnsw")]
+    #[test]
+    fn test_create_searcher_with_provider_hnsw_with_provider() {
+        use std::sync::Arc;
+        use async_trait::async_trait;
+        use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition};
+        use crate::session::Message;
+
+        struct FakeProvider;
+        #[async_trait]
+        impl LLMProvider for FakeProvider {
+            fn name(&self) -> &str { "fake" }
+            fn default_model(&self) -> &str { "fake" }
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+                _model: Option<&str>,
+                _options: ChatOptions,
+            ) -> crate::error::Result<LLMResponse> {
+                Ok(LLMResponse::text("ok"))
+            }
+            async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![1.0f32, 0.0]).collect())
+            }
+        }
+
+        let mut config = MemoryConfig::default();
+        config.backend = MemoryBackend::Hnsw;
+        let provider: Option<Arc<dyn LLMProvider>> = Some(Arc::new(FakeProvider));
+        let searcher = create_searcher_with_provider(&config, provider);
+        assert_eq!(searcher.name(), "hnsw");
+    }
+
+    #[test]
+    fn test_create_searcher_hnsw_without_provider_falls_back() {
+        // Without a provider, HNSW backend must fall back to builtin
+        // regardless of whether the feature flag is enabled.
+        let mut config = MemoryConfig::default();
+        config.backend = MemoryBackend::Hnsw;
+        let searcher = create_searcher_with_provider(&config, None);
+        assert_eq!(searcher.name(), "builtin");
     }
 }

@@ -108,6 +108,12 @@ chrono = { version = "0.4", features = ["serde"] }
 chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
 
 # =============================================================================
+# MEMORY BACKENDS (optional — feature-gated)
+# =============================================================================
+# HNSW approximate nearest-neighbor search (memory-hnsw feature)
+instant-distance = { version = "0.6.1", optional = true }
+
+# =============================================================================
 # CHANNELS
 # =============================================================================
 # WebSocket support for future real-time channels
@@ -127,6 +133,8 @@ default = []
 memory-bm25 = []
 # Embedding-based memory backend using LLM provider's embed() method
 memory-embedding = []
+# HNSW approximate nearest-neighbor memory backend (instant-distance)
+memory-hnsw = ["dep:instant-distance"]
 # Web screenshot tool via headless Chromium (Chrome DevTools Protocol)
 screenshot = ["chromiumoxide"]
 

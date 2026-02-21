@@ -6,6 +6,8 @@ pub mod builtin_searcher;
 #[cfg(feature = "memory-embedding")]
 pub mod embedding_searcher;
 pub mod factory;
+#[cfg(feature = "memory-hnsw")]
+pub mod hnsw_searcher;
 pub mod longterm;
 pub mod traits;
 
