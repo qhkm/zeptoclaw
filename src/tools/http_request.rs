@@ -129,18 +129,32 @@ impl Tool for HttpRequestTool {
 
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
         let url_str = args["url"].as_str().unwrap_or("").to_string();
-        let method_str = args["method"].as_str().unwrap_or("GET").to_uppercase();
+        let method_str = args["method"]
+            .as_str()
+            .ok_or_else(|| ZeptoError::Tool("Missing required parameter: method".into()))?
+            .to_uppercase();
 
         let parsed = self.validate_url(&url_str)?;
 
-        // DNS-level SSRF check: block hostnames that resolve to private IPs.
-        let _ = resolve_and_check_host(&parsed).await?;
+        // DNS-level SSRF check: resolve the hostname and verify it is not
+        // private/local.  We keep the returned pinned address so the HTTP
+        // client can be told to connect to that exact IP, eliminating the
+        // DNS rebinding window between this check and the actual connection.
+        let pinned = resolve_and_check_host(&parsed).await?;
 
         let method = Method::from_bytes(method_str.as_bytes())
             .map_err(|_| ZeptoError::Tool(format!("Unknown HTTP method: {method_str}")))?;
 
-        let client = Client::builder()
+        // Build a client that pins the DNS resolution to the IP we already
+        // validated and caps redirects so intermediate hops cannot escape to
+        // a private address undetected.
+        let mut builder = Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
+            .redirect(reqwest::redirect::Policy::limited(5));
+        if let Some((host, addr)) = pinned {
+            builder = builder.resolve(&host, addr);
+        }
+        let client = builder
             .build()
             .map_err(|e| ZeptoError::Tool(format!("HTTP client error: {e}")))?;
 
@@ -157,6 +171,21 @@ impl Tool for HttpRequestTool {
         }
 
         if let Some(body) = args["body"].as_str() {
+            // Auto-set Content-Type to application/json when the body looks
+            // like JSON and the caller has not already provided a content-type
+            // header (prevents silent broken POSTs where the server rejects an
+            // untyped JSON payload).
+            let caller_set_ct = args["headers"]
+                .as_object()
+                .map(|h| {
+                    h.keys()
+                        .any(|k| k.to_lowercase() == "content-type")
+                })
+                .unwrap_or(false);
+            let trimmed = body.trim_start();
+            if !caller_set_ct && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                req = req.header("Content-Type", "application/json");
+            }
             req = req.body(body.to_string());
         }
 
@@ -246,6 +275,22 @@ mod tests {
     fn test_empty_allowed_domains_always_rejects() {
         let t = HttpRequestTool::new(vec![], 30, 512 * 1024);
         assert!(t.validate_url("https://api.example.com/v1").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_wildcard_does_not_match_same_suffix_non_subdomain() {
+        // "evilmyco.com" ends with "myco.com" as a raw string but is NOT a
+        // real subdomain — the pattern "*.myco.com" must not match it.
+        let t = HttpRequestTool::new(vec!["*.myco.com".to_string()], 30, 512 * 1024);
+        assert!(t.validate_url("https://evilmyco.com/steal").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_wildcard_matches_apex_domain() {
+        // "*.myco.com" should also match the apex domain "myco.com" itself,
+        // because host_matches() has a `host == suffix` branch.
+        let t = HttpRequestTool::new(vec!["*.myco.com".to_string()], 30, 512 * 1024);
+        assert!(t.validate_url("https://myco.com/v1").is_ok());
     }
 
     #[test]
