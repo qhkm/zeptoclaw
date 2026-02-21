@@ -413,6 +413,8 @@ pub struct ChannelsConfig {
     pub dingtalk: Option<DingTalkConfig>,
     /// Webhook inbound channel configuration
     pub webhook: Option<WebhookConfig>,
+    /// Email channel configuration (IMAP IDLE + SMTP). Feature-gated behind channel-email.
+    pub email: Option<EmailConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -1775,5 +1777,69 @@ mod tests {
         // The struct-level #[serde(default)] only applies when the whole struct key is missing.
         assert_eq!(config.pids_limit, None);
         assert_eq!(config.stop_timeout_secs, 300);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmailConfig  (used by channels::EmailChannel, feature-gated: channel-email)
+// ---------------------------------------------------------------------------
+
+fn default_email_imap_port() -> u16 { 993 }
+fn default_email_smtp_port() -> u16 { 587 }
+fn default_email_imap_folder() -> String { "INBOX".into() }
+fn default_email_idle_timeout_secs() -> u64 { 1740 }
+
+/// Email channel configuration (IMAP IDLE inbound + SMTP outbound).
+///
+/// Stored under `channels.email` in `config.json`.
+/// The channel is only functional when built with `--features channel-email`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    /// IMAP server hostname (e.g. `imap.gmail.com`)
+    pub imap_host: String,
+    /// IMAP server port. Default: 993 (implicit TLS).
+    #[serde(default = "default_email_imap_port")]
+    pub imap_port: u16,
+    /// SMTP server hostname (e.g. `smtp.gmail.com`)
+    pub smtp_host: String,
+    /// SMTP server port. Default: 587 (STARTTLS).
+    #[serde(default = "default_email_smtp_port")]
+    pub smtp_port: u16,
+    /// IMAP/SMTP login username.
+    pub username: String,
+    /// IMAP/SMTP login password (or app-password).
+    pub password: String,
+    /// IMAP mailbox folder to watch. Default: `INBOX`.
+    #[serde(default = "default_email_imap_folder")]
+    pub imap_folder: String,
+    /// Optional display name used as "From" header in outgoing mail.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Allowlist of sender email addresses or domains.
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// When `true` and `allowed_senders` is empty, all senders are denied.
+    #[serde(default)]
+    pub deny_by_default: bool,
+    /// Seconds before restarting IDLE (RFC 2177 recommends < 30 min). Default: 1740.
+    #[serde(default = "default_email_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            imap_host: String::new(),
+            imap_port: default_email_imap_port(),
+            smtp_host: String::new(),
+            smtp_port: default_email_smtp_port(),
+            username: String::new(),
+            password: String::new(),
+            imap_folder: default_email_imap_folder(),
+            display_name: None,
+            allowed_senders: Vec::new(),
+            deny_by_default: false,
+            idle_timeout_secs: default_email_idle_timeout_secs(),
+        }
     }
 }

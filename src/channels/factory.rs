@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::bus::MessageBus;
 use crate::config::Config;
 
+use super::email_channel::EmailChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
@@ -188,6 +189,21 @@ pub async fn register_configured_channels(
         .unwrap_or(false)
     {
         warn!("DingTalk channel is enabled but not implemented");
+    }
+
+    // Email (IMAP IDLE + SMTP) — requires channel-email feature
+    if let Some(ref email_cfg) = config.channels.email {
+        if !email_cfg.username.is_empty() {
+            manager
+                .register(Box::new(EmailChannel::new(email_cfg.clone(), bus.clone())))
+                .await;
+            info!(
+                "Registered Email channel (IMAP IDLE on {})",
+                email_cfg.imap_host
+            );
+        } else {
+            warn!("Email channel configured but username is empty");
+        }
     }
 
     // Channel plugins

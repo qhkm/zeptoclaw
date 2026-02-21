@@ -135,6 +135,22 @@ tempfile = "3.10"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
 
+# =============================================================================
+# EMAIL CHANNEL (optional — feature-gated behind "channel-email")
+# =============================================================================
+# IMAP IDLE client for real-time inbound email
+async-imap   = { version = "0.10", optional = true, default-features = false, features = ["runtime-tokio"] }
+# SMTP client for outbound email (STARTTLS, builder API)
+lettre       = { version = "0.11", optional = true, default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }
+# Fast RFC 5322 / MIME parser (zero-copy)
+mail-parser  = { version = "0.9",  optional = true }
+# TLS adapter for Tokio async streams (IMAP over TLS)
+tokio-rustls = { version = "0.26", optional = true }
+# Pure-Rust TLS implementation (shared with reqwest, but needs explicit dep for rustls API)
+rustls       = { version = "0.23", optional = true }
+# Mozilla TLS root certificates for rustls
+webpki-roots = { version = "0.26", optional = true }
+
 [features]
 default = []
 # BM25 keyword scoring memory backend (adds ~0 extra deps for now)
@@ -147,6 +163,8 @@ memory-hnsw = ["dep:instant-distance"]
 screenshot = ["chromiumoxide"]
 # PDF text extraction tool via lopdf
 tool-pdf = ["lopdf"]
+# Email channel: IMAP IDLE (inbound) + SMTP (outbound) via TLS
+channel-email = ["async-imap", "lettre", "mail-parser", "tokio-rustls", "rustls", "webpki-roots"]
 
 [dev-dependencies]
 tokio-test = "0.4"
