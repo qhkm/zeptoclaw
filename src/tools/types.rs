@@ -75,7 +75,7 @@ impl std::fmt::Display for ToolCategory {
 ///
 /// Separates what the LLM sees (`for_llm`) from what the user sees (`for_user`).
 /// Tools that should be silent to the user (file reads, memory ops) set `for_user: None`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     /// Content sent to the LLM as the tool result. Always required.
     pub for_llm: String,
@@ -84,6 +84,7 @@ pub struct ToolOutput {
     /// Whether this result represents an error condition.
     pub is_error: bool,
     /// Whether the tool is running asynchronously (result will arrive later).
+    /// TODO: wire into agent loop to skip hooks and metrics for background tasks.
     pub is_async: bool,
 }
 
@@ -130,6 +131,10 @@ impl ToolOutput {
     }
 
     /// Different content for LLM vs user.
+    ///
+    /// Use when the LLM needs verbose context (JSON blob, raw data) but the user
+    /// should see a concise summary. Currently unused — wire up in WebFetchTool
+    /// to give LLM full HTML and user a short excerpt.
     pub fn split(for_llm: impl Into<String>, for_user: impl Into<String>) -> Self {
         Self {
             for_llm: for_llm.into(),

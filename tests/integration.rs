@@ -161,7 +161,7 @@ async fn test_tool_execution() {
         .execute("echo", serde_json::json!({"message": "test"}))
         .await;
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "test");
+    assert_eq!(result.unwrap().for_llm, "test");
 }
 
 #[tokio::test]
@@ -178,11 +178,11 @@ async fn test_tool_registry_multiple_tools() {
         .execute("echo", serde_json::json!({"message": "Hello, World!"}))
         .await;
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Hello, World!");
+    assert_eq!(result.unwrap().for_llm, "Hello, World!");
 
-    // Verify non-existent tool returns error
+    // Verify non-existent tool returns Ok(ToolOutput::error(...)) — not found is a soft error
     let missing = registry.execute("nonexistent", serde_json::json!({})).await;
-    assert!(missing.is_err());
+    assert!(missing.unwrap().is_error);
 }
 
 #[tokio::test]
@@ -199,7 +199,7 @@ async fn test_tool_execution_with_context() {
         .await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Context test");
+    assert_eq!(result.unwrap().for_llm, "Context test");
 }
 
 // ============================================================================
@@ -851,10 +851,10 @@ async fn test_tool_call_flow() {
     // Execute the tool
     let args: serde_json::Value = tool_call.parse_arguments().unwrap();
     let tool_result = tool_registry.execute("echo", args).await.unwrap();
-    assert_eq!(tool_result, "Test message");
+    assert_eq!(tool_result.for_llm, "Test message");
 
     // Add tool result to session
-    session.add_message(Message::tool_result(&tool_call.id, &tool_result));
+    session.add_message(Message::tool_result(&tool_call.id, &tool_result.for_llm));
 
     // Final response
     session.add_message(Message::assistant("I echoed your message: Test message"));
@@ -1140,7 +1140,7 @@ async fn test_shell_tool_with_native_runtime() {
         .await;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().contains("hello"));
+    assert!(result.unwrap().for_llm.contains("hello"));
 }
 
 #[tokio::test]
@@ -1163,7 +1163,7 @@ async fn test_shell_tool_runtime_with_workspace() {
         .await;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().contains("content"));
+    assert!(result.unwrap().for_llm.contains("content"));
 }
 
 #[tokio::test]

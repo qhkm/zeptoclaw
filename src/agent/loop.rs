@@ -747,7 +747,7 @@ impl AgentLoop {
                                         );
                                         let _ = bus_for_tools.publish_outbound(outbound).await;
                                     }
-                                    (output.for_llm, true)
+                                    (output.for_llm, !output.is_error)
                                 }
                                 Err(e) => {
                                     let elapsed = tool_start.elapsed();
@@ -1066,7 +1066,7 @@ impl AgentLoop {
                                         );
                                         let _ = bus_for_tools.publish_outbound(outbound).await;
                                     }
-                                    (output.for_llm, true)
+                                    (output.for_llm, !output.is_error)
                                 }
                                 Err(e) => (format!("Error: {}", e), false),
                             }
