@@ -71,5 +71,6 @@ pub use tools::screenshot::WebScreenshotTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
     EchoTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool,
-    ReminderTool, Tool, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    ReminderTool, StripeTool, Tool, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool,
+    WhatsAppTool,
 };

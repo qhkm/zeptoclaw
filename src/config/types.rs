@@ -55,6 +55,8 @@ pub struct Config {
     pub routines: RoutinesConfig,
     /// Tunnel configuration for exposing local ports publicly
     pub tunnel: TunnelConfig,
+    /// Stripe payment integration configuration.
+    pub stripe: StripeConfig,
     /// Custom CLI-defined tools (shell commands as agent tools).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolDef>,
@@ -148,6 +150,32 @@ impl Default for RoutinesConfig {
             max_concurrent: 3,
             jitter_ms: 0,
             on_miss: crate::cron::OnMiss::Skip,
+        }
+    }
+}
+
+// ============================================================================
+// Stripe Configuration
+// ============================================================================
+
+/// Stripe payment integration configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StripeConfig {
+    /// Stripe secret key (sk_live_... or sk_test_...). Supports ENC[...] encryption.
+    pub secret_key: Option<String>,
+    /// Default currency code for payment intents (e.g., "usd", "myr", "sgd").
+    pub default_currency: String,
+    /// Webhook signing secret for signature verification. Optional.
+    pub webhook_secret: Option<String>,
+}
+
+impl Default for StripeConfig {
+    fn default() -> Self {
+        Self {
+            secret_key: None,
+            default_currency: "usd".to_string(),
+            webhook_secret: None,
         }
     }
 }

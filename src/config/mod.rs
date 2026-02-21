@@ -163,6 +163,9 @@ impl Config {
 
         // Routines
         self.apply_routines_env_overrides();
+
+        // Stripe
+        self.apply_stripe_env_overrides();
     }
 
     /// Apply provider-specific environment variable overrides
@@ -695,6 +698,24 @@ impl Config {
                 "run_once" => self.routines.on_miss = crate::cron::OnMiss::RunOnce,
                 _ => {}
             }
+        }
+    }
+
+    /// Apply Stripe environment variable overrides.
+    fn apply_stripe_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_STRIPE_SECRET_KEY") {
+            let val = val.trim().to_string();
+            self.stripe.secret_key = if val.is_empty() { None } else { Some(val) };
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_STRIPE_DEFAULT_CURRENCY") {
+            let val = val.trim().to_ascii_lowercase();
+            if !val.is_empty() {
+                self.stripe.default_currency = val;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_STRIPE_WEBHOOK_SECRET") {
+            let val = val.trim().to_string();
+            self.stripe.webhook_secret = if val.is_empty() { None } else { Some(val) };
         }
     }
 

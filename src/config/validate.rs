@@ -26,6 +26,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "compaction",
     "mcp",
     "routines",
+    "stripe",
     "custom_tools",
     "tool_profiles",
 ];

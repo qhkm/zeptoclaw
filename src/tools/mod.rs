@@ -72,6 +72,7 @@ pub mod reminder;
 pub mod screenshot;
 pub mod shell;
 pub mod spawn;
+pub mod stripe;
 mod types;
 pub mod web;
 pub mod whatsapp;
@@ -86,6 +87,7 @@ pub use message::MessageTool;
 pub use r8r::R8rTool;
 pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;
+pub use stripe::StripeTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
 pub use types::{Tool, ToolContext};
