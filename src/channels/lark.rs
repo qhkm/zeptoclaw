@@ -779,6 +779,87 @@ impl LarkChannel {
                         warn!("Lark: message bus closed — stopping WS loop");
                         break;
                     }
+
+                    // Fire-and-forget emoji reaction ack (spec requirement)
+                    if !message_id.is_empty() {
+                        let api_base_str: &'static str = self.api_base();
+                        let token_cache = Arc::clone(&self.tenant_token);
+                        let app_id = self.config.app_id.clone();
+                        let app_secret = self.config.app_secret.clone();
+                        let msg_id = message_id.clone();
+                        tokio::spawn(async move {
+                            // Build a minimal ephemeral channel just for the token fetch
+                            let ephemeral_token: anyhow::Result<String> = async {
+                                {
+                                    let guard = token_cache.read().await;
+                                    if let Some(ref tok) = *guard {
+                                        if Instant::now() < tok.refresh_after {
+                                            return Ok(tok.value.clone());
+                                        }
+                                    }
+                                }
+                                // Re-fetch token
+                                let url = format!("{}/auth/v3/tenant_access_token/internal", api_base_str);
+                                let resp = reqwest::Client::new()
+                                    .post(&url)
+                                    .json(&serde_json::json!({
+                                        "app_id": app_id,
+                                        "app_secret": app_secret,
+                                    }))
+                                    .send()
+                                    .await?;
+                                let status = resp.status();
+                                let body: serde_json::Value = resp.json().await?;
+                                if !status.is_success() {
+                                    anyhow::bail!("token request failed: {status}");
+                                }
+                                let token = body
+                                    .get("tenant_access_token")
+                                    .and_then(|t| t.as_str())
+                                    .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token"))?
+                                    .to_string();
+                                let ttl = extract_token_ttl(&body);
+                                let refresh_after = token_refresh_deadline(Instant::now(), ttl);
+                                {
+                                    let mut guard = token_cache.write().await;
+                                    *guard = Some(CachedToken { value: token.clone(), refresh_after });
+                                }
+                                Ok(token)
+                            }.await;
+
+                            match ephemeral_token {
+                                Ok(token) => {
+                                    let url = format!(
+                                        "{}/open-apis/im/v1/messages/{}/reactions",
+                                        api_base_str, msg_id
+                                    );
+                                    match reqwest::Client::new()
+                                        .post(&url)
+                                        .bearer_auth(&token)
+                                        .json(&serde_json::json!({
+                                            "reaction_type": { "emoji_type": "OK" }
+                                        }))
+                                        .send()
+                                        .await
+                                    {
+                                        Ok(resp) if resp.status().is_success() => {
+                                            debug!("Lark: reaction ack sent for {msg_id}");
+                                        }
+                                        Ok(resp) => {
+                                            let body = resp.text().await.unwrap_or_default();
+                                            warn!("Failed to send Lark reaction: {body}");
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to send Lark reaction: {e}");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to send Lark reaction (token error): {e}");
+                                }
+                            }
+                        });
+                    }
                 }
             }
         }
