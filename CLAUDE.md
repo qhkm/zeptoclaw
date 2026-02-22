@@ -17,6 +17,9 @@ cargo clippy -- -D warnings
 # Format
 cargo fmt
 
+# Test counts (cargo test)
+# lib: 1791, main: 59, cli_smoke: 23, e2e: 13, integration: 70, doc: 141 (116 passed, 25 ignored)
+
 # Version
 ./target/release/zeptoclaw --version
 
@@ -28,6 +31,12 @@ cargo fmt
 
 # Run gateway (Telegram bot)
 ./target/release/zeptoclaw gateway
+
+# Telegram model switching (in chat)
+/model
+/model list
+/model reset
+/model <provider:model>
 
 # Run gateway with container isolation
 ./target/release/zeptoclaw gateway --containerized          # auto-detect
@@ -162,6 +171,7 @@ src/
 ├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.)
 │   ├── factory.rs  # Channel factory/registry
 │   ├── manager.rs  # Channel lifecycle management
+│   ├── model_switch.rs # /model command parsing + model registry + persistence
 │   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support)
 │   ├── slack.rs    # Slack outbound channel
 │   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)

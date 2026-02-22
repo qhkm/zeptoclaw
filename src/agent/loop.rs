@@ -104,6 +104,10 @@ pub struct AgentLoop {
     bus: Arc<MessageBus>,
     /// The LLM provider to use (Arc<dyn ..> allows cheap cloning without holding the lock)
     provider: Arc<RwLock<Option<Arc<dyn LLMProvider>>>>,
+    /// Registry of all configured providers for runtime model switching.
+    /// TODO(#63): When adding /model to more channels, migrate to CommandInterceptor
+    /// (Approach B). See docs/plans/2026-02-18-llm-switching-design.md
+    provider_registry: Arc<RwLock<HashMap<String, Arc<dyn LLMProvider>>>>,
     /// Registered tools
     tools: Arc<RwLock<ToolRegistry>>,
     /// Whether the loop is currently running
@@ -218,6 +222,7 @@ impl AgentLoop {
             session_manager: Arc::new(session_manager),
             bus,
             provider: Arc::new(RwLock::new(None)),
+            provider_registry: Arc::new(RwLock::new(HashMap::new())),
             tools: Arc::new(RwLock::new(ToolRegistry::new())),
             running: AtomicBool::new(false),
             context_builder: ContextBuilder::new(),
@@ -276,6 +281,7 @@ impl AgentLoop {
             session_manager: Arc::new(session_manager),
             bus,
             provider: Arc::new(RwLock::new(None)),
+            provider_registry: Arc::new(RwLock::new(HashMap::new())),
             tools: Arc::new(RwLock::new(ToolRegistry::new())),
             running: AtomicBool::new(false),
             context_builder,
@@ -320,6 +326,63 @@ impl AgentLoop {
     pub async fn set_provider(&self, provider: Box<dyn LLMProvider>) {
         let mut p = self.provider.write().await;
         *p = Some(Arc::from(provider));
+    }
+
+    /// Register a named provider in the runtime registry (for /model switching).
+    pub async fn set_provider_in_registry(&self, name: &str, provider: Box<dyn LLMProvider>) {
+        let mut reg = self.provider_registry.write().await;
+        reg.insert(name.to_string(), Arc::from(provider));
+    }
+
+    /// Look up a provider by name from the registry.
+    pub async fn get_provider_by_name(&self, name: &str) -> Option<Arc<dyn LLMProvider>> {
+        let reg = self.provider_registry.read().await;
+        reg.get(name).cloned()
+    }
+
+    /// Get all registered provider names.
+    pub async fn registered_provider_names(&self) -> Vec<String> {
+        let reg = self.provider_registry.read().await;
+        reg.keys().cloned().collect()
+    }
+
+    /// Resolve the model for a given inbound message.
+    ///
+    /// Checks `metadata[\"model_override\"]` first, falls back to config default.
+    /// TODO(#63): Migrate to CommandInterceptor (Approach B) when adding /model
+    /// to more channels. See docs/plans/2026-02-18-llm-switching-design.md
+    pub fn resolve_model_for_message(&self, msg: &InboundMessage) -> String {
+        msg.metadata
+            .get("model_override")
+            .filter(|m| !m.is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.config.agents.defaults.model.clone())
+    }
+
+    /// Resolve the provider for a given inbound message.
+    ///
+    /// Checks `metadata[\"provider_override\"]` and looks up in provider registry.
+    /// Falls back to the default provider.
+    pub async fn resolve_provider_for_message(
+        &self,
+        msg: &InboundMessage,
+    ) -> Option<Arc<dyn LLMProvider>> {
+        if let Some(provider_name) = msg
+            .metadata
+            .get("provider_override")
+            .filter(|p| !p.is_empty())
+        {
+            if let Some(provider) = self.get_provider_by_name(provider_name).await {
+                return Some(provider);
+            }
+            warn!(
+                provider = %provider_name,
+                "Provider override '{}' not found in registry, falling back to default",
+                provider_name
+            );
+        }
+        let p = self.provider.read().await;
+        p.clone()
     }
 
     /// Enable usage metrics collection for this agent loop.
@@ -388,17 +451,12 @@ impl AgentLoop {
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
 
-        // Clone the provider Arc early and release the RwLock immediately.
-        // This avoids holding the provider read lock across multi-second LLM
+        // Resolve the provider early and avoid holding the RwLock across multi-second LLM
         // calls and tool executions, which would block set_provider() writes.
-        let provider = {
-            let guard = self.provider.read().await;
-            Arc::clone(
-                guard
-                    .as_ref()
-                    .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?,
-            )
-        };
+        let provider = self
+            .resolve_provider_for_message(msg)
+            .await
+            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
         let usage_metrics = {
             let metrics = self.usage_metrics.read().await;
             metrics.clone()
@@ -447,7 +505,8 @@ impl AgentLoop {
             .with_max_tokens(self.config.agents.defaults.max_tokens)
             .with_temperature(self.config.agents.defaults.temperature);
 
-        let model = Some(self.config.agents.defaults.model.as_str());
+        let model_string = self.resolve_model_for_message(msg);
+        let model = Some(model_string.as_str());
 
         // Check token budget before first LLM call
         if self.token_budget.is_exceeded() {
@@ -799,14 +858,10 @@ impl AgentLoop {
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
 
-        let provider = {
-            let guard = self.provider.read().await;
-            Arc::clone(
-                guard
-                    .as_ref()
-                    .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?,
-            )
-        };
+        let provider = self
+            .resolve_provider_for_message(msg)
+            .await
+            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
         let metrics_collector = Arc::clone(&self.metrics_collector);
 
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
@@ -846,7 +901,8 @@ impl AgentLoop {
         let options = ChatOptions::new()
             .with_max_tokens(self.config.agents.defaults.max_tokens)
             .with_temperature(self.config.agents.defaults.temperature);
-        let model = Some(self.config.agents.defaults.model.as_str());
+        let model_string = self.resolve_model_for_message(msg);
+        let model = Some(model_string.as_str());
 
         // Check token budget before first LLM call
         if self.token_budget.is_exceeded() {
@@ -1655,6 +1711,35 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{LLMResponse, ToolDefinition};
+    use async_trait::async_trait;
+
+    #[derive(Debug)]
+    struct TestProvider {
+        name: &'static str,
+        model: &'static str,
+    }
+
+    #[async_trait]
+    impl LLMProvider for TestProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn default_model(&self) -> &str {
+            self.model
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            Ok(LLMResponse::text("ok"))
+        }
+    }
 
     #[tokio::test]
     async fn test_agent_loop_creation() {
@@ -1664,6 +1749,63 @@ mod tests {
         let agent = AgentLoop::new(config, session_manager, bus);
 
         assert!(!agent.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_provider_registry_lookup() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        assert!(agent.get_provider_by_name("openai").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_provider_registry_set_and_get() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        agent
+            .set_provider_in_registry(
+                "openai",
+                Box::new(TestProvider {
+                    name: "openai",
+                    model: "gpt-5.1",
+                }),
+            )
+            .await;
+        let p = agent.get_provider_by_name("openai").await;
+        assert!(p.is_some());
+        assert_eq!(p.unwrap().name(), "openai");
+    }
+
+    #[tokio::test]
+    async fn test_process_message_uses_model_override_metadata() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let msg = InboundMessage::new("telegram", "user1", "chat1", "hello")
+            .with_metadata("model_override", "gpt-5.1");
+        let model = agent.resolve_model_for_message(&msg);
+        assert_eq!(model, "gpt-5.1");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_falls_back_to_config_default() {
+        let mut config = Config::default();
+        config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let msg = InboundMessage::new("telegram", "user1", "chat1", "hello");
+        let model = agent.resolve_model_for_message(&msg);
+        assert_eq!(model, "claude-sonnet-4-5-20250929");
     }
 
     #[tokio::test]

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::bus::MessageBus;
-use crate::config::Config;
+use crate::config::{Config, MemoryBackend};
+use crate::providers::configured_provider_names;
 
 use super::email_channel::EmailChannel;
 use super::lark::LarkChannel;
@@ -34,6 +35,12 @@ pub async fn register_configured_channels(
                     .register(Box::new(TelegramChannel::new(
                         telegram_config.clone(),
                         bus.clone(),
+                        config.agents.defaults.model.clone(),
+                        configured_provider_names(config)
+                            .into_iter()
+                            .map(|name| name.to_string())
+                            .collect(),
+                        !matches!(config.memory.backend, MemoryBackend::Disabled),
                     )))
                     .await;
                 info!("Registered Telegram channel");

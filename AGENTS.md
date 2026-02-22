@@ -18,7 +18,8 @@ Project-level guidance for coding agents working in this repository.
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
-- Tests: 1791 lib + 59 main + 23 cli_smoke + 13 e2e + 68 integration + 141 doc (116 passed, 25 ignored)
+- Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
+- Tests: 1791 lib + 59 main + 23 cli_smoke + 13 e2e + 70 integration + 141 doc (116 passed, 25 ignored)
 
 ## Task Tracking Protocol
 

@@ -32,7 +32,7 @@
 //!     allow_from: vec![],
 //! };
 //! let bus = Arc::new(MessageBus::new());
-//! let channel = TelegramChannel::new(config, bus);
+//! let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 //! ```
 
 use async_trait::async_trait;
@@ -40,12 +40,15 @@ use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::config::Config;
 use crate::config::TelegramConfig;
 use crate::error::{Result, ZeptoError};
+use crate::memory::builtin_searcher::BuiltinSearcher;
+use crate::memory::longterm::LongTermMemory;
 
 /// Maximum number of startup connectivity retries before giving up.
 const MAX_STARTUP_RETRIES: u32 = 10;
@@ -54,6 +57,10 @@ const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum delay (in seconds) for exponential backoff on startup retries.
 const MAX_RETRY_DELAY_SECS: u64 = 120;
 
+use super::model_switch::{
+    format_current_model, format_model_list, hydrate_overrides, new_override_store,
+    parse_model_command, persist_single, remove_single, ModelCommand, ModelOverrideStore,
+};
 use super::{BaseChannelConfig, Channel};
 
 fn render_telegram_html(content: &str) -> String {
@@ -116,6 +123,14 @@ pub struct TelegramChannel {
     shutdown_tx: Option<mpsc::Sender<()>>,
     /// Cached bot instance for sending messages (avoids rebuilding HTTP client)
     bot: Option<teloxide::Bot>,
+    /// Per-chat model overrides (in-memory)
+    model_overrides: ModelOverrideStore,
+    /// Default model name for /model status output
+    default_model: String,
+    /// Configured providers (for /model list)
+    configured_providers: Vec<String>,
+    /// Long-term memory backing store for model overrides (optional)
+    longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
 }
 
 impl TelegramChannel {
@@ -140,16 +155,39 @@ impl TelegramChannel {
     ///     allow_from: vec!["user123".to_string()],
     /// };
     /// let bus = Arc::new(MessageBus::new());
-    /// let channel = TelegramChannel::new(config, bus);
+    /// let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
     ///
     /// assert_eq!(channel.name(), "telegram");
     /// assert!(!channel.is_running());
     /// ```
-    pub fn new(config: TelegramConfig, bus: Arc<MessageBus>) -> Self {
+    pub fn new(
+        config: TelegramConfig,
+        bus: Arc<MessageBus>,
+        default_model: String,
+        configured_providers: Vec<String>,
+        memory_enabled: bool,
+    ) -> Self {
         let base_config = BaseChannelConfig {
             name: "telegram".to_string(),
             allowlist: config.allow_from.clone(),
             deny_by_default: config.deny_by_default,
+        };
+        let longterm_memory = if memory_enabled {
+            // Use a dedicated file to avoid conflicts with the agent loop's longterm.json.
+            // Two LongTermMemory instances writing to the same file can cause data loss.
+            let ltm_path = Config::dir().join("memory").join("model_prefs.json");
+            match LongTermMemory::with_path_and_searcher(ltm_path, Arc::new(BuiltinSearcher)) {
+                Ok(ltm) => Some(Arc::new(Mutex::new(ltm))),
+                Err(e) => {
+                    warn!(
+                        "Failed to initialize long-term memory for Telegram model switching: {}",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
         Self {
             config,
@@ -158,6 +196,10 @@ impl TelegramChannel {
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             bot: None,
+            model_overrides: new_override_store(),
+            default_model,
+            configured_providers,
+            longterm_memory,
         }
     }
 
@@ -243,6 +285,10 @@ impl Channel for TelegramChannel {
         let bus = self.bus.clone();
         let allowlist = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
+        let model_overrides = self.model_overrides.clone();
+        let default_model = self.default_model.clone();
+        let configured_providers = self.configured_providers.clone();
+        let longterm_memory = self.longterm_memory.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
 
@@ -256,6 +302,10 @@ impl Channel for TelegramChannel {
 
         // Cache the bot for send() calls
         self.bot = Some(bot.clone());
+
+        if let Some(ltm) = self.longterm_memory.as_ref() {
+            hydrate_overrides(&self.model_overrides, ltm).await;
+        }
 
         // Spawn the bot polling task
         tokio::spawn(async move {
@@ -317,11 +367,15 @@ impl Channel for TelegramChannel {
                 // Note: dptree injects dependencies separately, not as tuples
                 let handler =
                     Update::filter_message().endpoint(
-                        |_bot: Bot,
+                        |bot: Bot,
                          msg: Message,
                          bus: Arc<MessageBus>,
                          allowlist: Vec<String>,
-                         deny_by_default: bool| async move {
+                         deny_by_default: bool,
+                         model_overrides: ModelOverrideStore,
+                         default_model: String,
+                         configured_providers: Vec<String>,
+                         longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
                             // Extract user ID
                             let user_id = msg
                                 .from()
@@ -345,6 +399,7 @@ impl Channel for TelegramChannel {
                             // Only process text messages
                             if let Some(text) = msg.text() {
                                 let chat_id = msg.chat.id.0.to_string();
+                                let chat_id_num = msg.chat.id.0;
 
                                 info!(
                                     "Telegram: Received message from user {} in chat {}: {}",
@@ -353,9 +408,95 @@ impl Channel for TelegramChannel {
                                     crate::utils::string::preview(text, 50)
                                 );
 
+                                // Intercept /model commands
+                                // TODO(#63): Migrate to CommandInterceptor (Approach B) when adding /model
+                                // to more channels. See docs/plans/2026-02-18-llm-switching-design.md
+                                if let Some(cmd) = parse_model_command(text) {
+                                    match cmd {
+                                        ModelCommand::Show => {
+                                            let current = {
+                                                let overrides = model_overrides.read().await;
+                                                overrides.get(&chat_id).cloned()
+                                            };
+                                            let reply =
+                                                format_current_model(current.as_ref(), &default_model);
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        ModelCommand::Set(ov) => {
+                                            let reply = format!(
+                                                "Switched to {}:{}",
+                                                ov.provider.as_deref().unwrap_or("auto"),
+                                                ov.model
+                                            );
+                                            {
+                                                let mut overrides = model_overrides.write().await;
+                                                overrides.insert(chat_id.clone(), ov.clone());
+                                            }
+                                            if let Some(ref ltm) = longterm_memory {
+                                                persist_single(&chat_id, &ov, ltm).await;
+                                            }
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        ModelCommand::Reset => {
+                                            {
+                                                let mut overrides = model_overrides.write().await;
+                                                overrides.remove(&chat_id);
+                                            }
+                                            if let Some(ref ltm) = longterm_memory {
+                                                remove_single(&chat_id, ltm).await;
+                                            }
+                                            let reply = format!("Reset to default: {}", default_model);
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        ModelCommand::List => {
+                                            let current = {
+                                                let overrides = model_overrides.read().await;
+                                                overrides.get(&chat_id).cloned()
+                                            };
+                                            let reply = format_model_list(
+                                                &configured_providers,
+                                                current.as_ref(),
+                                            );
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+
                                 // Create and publish the inbound message
-                                let inbound =
+                                let mut inbound =
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
+                                let override_entry = {
+                                    let overrides = model_overrides.read().await;
+                                    overrides.get(&chat_id).cloned()
+                                };
+                                if let Some(ov) = override_entry {
+                                    inbound = inbound.with_metadata("model_override", &ov.model);
+                                    if let Some(provider) = ov.provider {
+                                        inbound =
+                                            inbound.with_metadata("provider_override", &provider);
+                                    }
+                                }
 
                                 if let Err(e) = bus.publish_inbound(inbound).await {
                                     error!("Failed to publish inbound message to bus: {}", e);
@@ -369,7 +510,15 @@ impl Channel for TelegramChannel {
 
                 // Build the dispatcher with dependencies
                 let mut dispatcher = Dispatcher::builder(bot, handler)
-                    .dependencies(dptree::deps![bus, allowlist, deny_by_default])
+                    .dependencies(dptree::deps![
+                        bus,
+                        allowlist,
+                        deny_by_default,
+                        model_overrides,
+                        default_model,
+                        configured_providers,
+                        longterm_memory
+                    ])
                     .build();
 
                 info!("Telegram bot dispatcher started, waiting for messages...");
@@ -495,7 +644,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         assert_eq!(channel.name(), "telegram");
         assert!(!channel.is_running());
@@ -512,7 +661,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Empty allowlist should allow anyone
         assert!(channel.is_allowed("anyone"));
@@ -529,7 +678,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         assert!(channel.is_enabled());
         assert_eq!(channel.telegram_config().token, "my-bot-token");
@@ -545,7 +694,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         assert!(!channel.is_enabled());
     }
@@ -563,7 +712,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         assert!(channel.is_allowed("user1"));
         assert!(channel.is_allowed("user2"));
@@ -599,7 +748,8 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel = TelegramChannel::new(config, bus);
+        let mut channel =
+            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Should fail with empty token
         let result = channel.start().await;
@@ -616,7 +766,8 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel = TelegramChannel::new(config, bus);
+        let mut channel =
+            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Should return Ok but not actually start
         let result = channel.start().await;
@@ -633,7 +784,8 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel = TelegramChannel::new(config, bus);
+        let mut channel =
+            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Should be ok to stop when not running
         let result = channel.stop().await;
@@ -649,7 +801,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Should fail when not running
         let msg = OutboundMessage::new("telegram", "12345", "Hello");
@@ -666,7 +818,7 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus);
+        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
 
         // Verify base config is set correctly
         assert_eq!(channel.base_config.name, "telegram");
