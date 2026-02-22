@@ -8,6 +8,8 @@ use tracing::{info, warn};
 use crate::bus::MessageBus;
 use crate::config::Config;
 
+use super::email_channel::EmailChannel;
+use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppChannel;
@@ -138,6 +140,20 @@ pub async fn register_configured_channels(
             }
         }
     }
+    // Lark / Feishu (WS long-connection)
+    if let Some(ref lark_cfg) = config.channels.lark {
+        if lark_cfg.enabled {
+            if lark_cfg.app_id.is_empty() || lark_cfg.app_secret.is_empty() {
+                warn!("Lark channel enabled but app_id or app_secret is empty");
+            } else {
+                manager
+                    .register(Box::new(LarkChannel::new(lark_cfg.clone(), bus.clone())))
+                    .await;
+                let region = if lark_cfg.feishu { "Feishu" } else { "Lark" };
+                info!("Registered {} channel (WS long-connection)", region);
+            }
+        }
+    }
     if config
         .channels
         .feishu
@@ -173,6 +189,23 @@ pub async fn register_configured_channels(
         .unwrap_or(false)
     {
         warn!("DingTalk channel is enabled but not implemented");
+    }
+
+    // Email (IMAP IDLE + SMTP) — requires channel-email feature
+    if let Some(ref email_cfg) = config.channels.email {
+        if email_cfg.enabled && !email_cfg.username.is_empty() {
+            manager
+                .register(Box::new(EmailChannel::new(email_cfg.clone(), bus.clone())))
+                .await;
+            info!(
+                "Registered Email channel (IMAP IDLE on {})",
+                email_cfg.imap_host
+            );
+        } else if !email_cfg.enabled {
+            // Channel is present in config but not enabled — skip silently.
+        } else {
+            warn!("Email channel configured but username is empty");
+        }
     }
 
     // Channel plugins

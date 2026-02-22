@@ -18,7 +18,7 @@ use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
-    LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
+    GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
 };
 use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
@@ -29,8 +29,8 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, ProjectTool,
-    R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
+    MessageTool, PdfReadTool, ProjectTool, R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -124,6 +124,7 @@ pub(crate) fn resolve_template(name: &str) -> Result<AgentTemplate> {
 
 fn provider_from_runtime_selection(
     selection: &RuntimeProviderSelection,
+    configured_model: &str,
 ) -> Option<Box<dyn LLMProvider>> {
     match selection.backend {
         "anthropic" => {
@@ -137,6 +138,28 @@ fn provider_from_runtime_selection(
             }
         }
         "openai" => {
+            // Route ALL Gemini selections through the native GeminiProvider, which
+            // speaks the Gemini REST API directly and applies thinking-model filtering
+            // (extract_text skips parts tagged `thought: true`).  This applies to
+            // both OAuth bearer tokens (from Gemini CLI) and plain API keys.
+            if selection.name == "gemini" {
+                // Use the user-configured model, falling back to the built-in default.
+                // from_config handles the full auth priority chain:
+                //   config key → GEMINI_API_KEY → GOOGLE_API_KEY → Gemini CLI OAuth
+                let model = if configured_model.is_empty() {
+                    GeminiProvider::default_gemini_model()
+                } else {
+                    configured_model
+                };
+                let api_key = if selection.credential.is_bearer() {
+                    None
+                } else {
+                    Some(selection.api_key.as_str())
+                };
+                let prefer_oauth = selection.credential.is_bearer();
+                return GeminiProvider::from_config(api_key, model, prefer_oauth)
+                    .map(|p| Box::new(p) as Box<dyn LLMProvider>);
+            }
             let provider = if let Some(base_url) = selection.api_base.as_deref() {
                 OpenAIProvider::with_base_url(&selection.api_key, base_url)
             } else {
@@ -200,9 +223,10 @@ fn build_runtime_provider_chain(
     config: &Config,
 ) -> Option<(Box<dyn LLMProvider>, Vec<&'static str>)> {
     let mut candidates: Vec<RuntimeProviderCandidate> = Vec::new();
+    let configured_model = &config.agents.defaults.model;
 
     for selection in resolve_runtime_providers(config) {
-        if let Some(provider) = provider_from_runtime_selection(&selection) {
+        if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
             candidates.push(RuntimeProviderCandidate {
                 name: selection.name,
                 provider,
@@ -621,6 +645,31 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     if tool_enabled("web_fetch") {
         agent.register_tool(Box::new(WebFetchTool::new())).await;
         info!("Registered web_fetch tool");
+    }
+
+    // Register HTTP request tool (opt-in via allowed_domains config).
+    if tool_enabled("http_request") {
+        if let Some(http_cfg) = &config.tools.http_request {
+            if !http_cfg.allowed_domains.is_empty() {
+                agent
+                    .register_tool(Box::new(HttpRequestTool::new(
+                        http_cfg.allowed_domains.clone(),
+                        http_cfg.timeout_secs,
+                        http_cfg.max_response_bytes,
+                    )))
+                    .await;
+                info!("Registered http_request tool");
+            }
+        }
+    }
+
+    // Register PDF read tool — always available; extraction requires --features tool-pdf.
+    if tool_enabled("pdf_read") {
+        let workspace_str = config.workspace_path().to_string_lossy().into_owned();
+        agent
+            .register_tool(Box::new(PdfReadTool::new(workspace_str)))
+            .await;
+        info!("Registered pdf_read tool");
     }
 
     // Register proactive messaging tool.

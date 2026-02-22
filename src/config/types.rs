@@ -403,6 +403,8 @@ pub struct ChannelsConfig {
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
     pub feishu: Option<FeishuConfig>,
+    /// Lark/Feishu WS long-connection configuration
+    pub lark: Option<LarkConfig>,
     /// MaixCam configuration
     pub maixcam: Option<MaixCamConfig>,
     /// QQ configuration
@@ -411,6 +413,8 @@ pub struct ChannelsConfig {
     pub dingtalk: Option<DingTalkConfig>,
     /// Webhook inbound channel configuration
     pub webhook: Option<WebhookConfig>,
+    /// Email channel configuration (IMAP IDLE + SMTP). Feature-gated behind channel-email.
+    pub email: Option<EmailConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -647,6 +651,33 @@ pub struct FeishuConfig {
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+/// Lark (international) / Feishu (China) channel configuration.
+///
+/// Uses the Lark WS long-connection (pbbp2) for receiving events —
+/// no public HTTPS endpoint required.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LarkConfig {
+    /// Whether the channel is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lark / Feishu application ID
+    pub app_id: String,
+    /// Lark / Feishu application secret
+    pub app_secret: String,
+    /// When true, use Feishu (open.feishu.cn); when false, use Lark (open.larksuite.com)
+    #[serde(default)]
+    pub feishu: bool,
+    /// Allowlist of sender open_ids (empty = allow all unless deny_by_default)
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// Bot's own open_id — messages from the bot itself are silently dropped
+    #[serde(default)]
+    pub bot_open_id: Option<String>,
+    /// When true, empty allowed_senders rejects all senders (strict mode)
     #[serde(default)]
     pub deny_by_default: bool,
 }
@@ -895,6 +926,30 @@ pub struct ToolsConfig {
     pub whatsapp: WhatsAppToolConfig,
     /// Google Sheets tool configuration
     pub google_sheets: GoogleSheetsToolConfig,
+    /// HTTP request tool configuration
+    pub http_request: Option<HttpRequestConfig>,
+}
+
+/// Configuration for the HTTP request tool.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HttpRequestConfig {
+    /// Allowlist of domains the agent may call. Required — tool fails fast if empty.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Request timeout in seconds. Default: 30.
+    #[serde(default = "default_http_request_timeout")]
+    pub timeout_secs: u64,
+    /// Maximum response body size in bytes. Default: 512KB.
+    #[serde(default = "default_http_request_max_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_http_request_timeout() -> u64 {
+    30
+}
+
+fn default_http_request_max_bytes() -> usize {
+    512 * 1024
 }
 
 /// Web tools configuration
@@ -1721,5 +1776,100 @@ mod tests {
         // The struct-level #[serde(default)] only applies when the whole struct key is missing.
         assert_eq!(config.pids_limit, None);
         assert_eq!(config.stop_timeout_secs, 300);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmailConfig  (used by channels::EmailChannel, feature-gated: channel-email)
+// ---------------------------------------------------------------------------
+
+fn default_email_imap_port() -> u16 {
+    993
+}
+fn default_email_smtp_port() -> u16 {
+    587
+}
+fn default_email_imap_folder() -> String {
+    "INBOX".into()
+}
+fn default_email_idle_timeout_secs() -> u64 {
+    1740
+}
+
+/// Email channel configuration (IMAP IDLE inbound + SMTP outbound).
+///
+/// Stored under `channels.email` in `config.json`.
+/// The channel is only functional when built with `--features channel-email`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    /// IMAP server hostname (e.g. `imap.gmail.com`)
+    pub imap_host: String,
+    /// IMAP server port. Default: 993 (implicit TLS).
+    #[serde(default = "default_email_imap_port")]
+    pub imap_port: u16,
+    /// SMTP server hostname (e.g. `smtp.gmail.com`)
+    pub smtp_host: String,
+    /// SMTP server port. Default: 587 (STARTTLS).
+    #[serde(default = "default_email_smtp_port")]
+    pub smtp_port: u16,
+    /// IMAP/SMTP login username.
+    pub username: String,
+    /// IMAP/SMTP login password (or app-password).
+    pub password: String,
+    /// IMAP mailbox folder to watch. Default: `INBOX`.
+    #[serde(default = "default_email_imap_folder")]
+    pub imap_folder: String,
+    /// Optional display name used as "From" header in outgoing mail.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Allowlist of sender email addresses or domains.
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// When `true` and `allowed_senders` is empty, all senders are denied.
+    #[serde(default)]
+    pub deny_by_default: bool,
+    /// Seconds before restarting IDLE (RFC 2177 recommends < 30 min). Default: 1740.
+    #[serde(default = "default_email_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// When `true`, the channel is active. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            imap_host: String::new(),
+            imap_port: default_email_imap_port(),
+            smtp_host: String::new(),
+            smtp_port: default_email_smtp_port(),
+            username: String::new(),
+            password: String::new(),
+            imap_folder: default_email_imap_folder(),
+            display_name: None,
+            allowed_senders: Vec::new(),
+            deny_by_default: false,
+            idle_timeout_secs: default_email_idle_timeout_secs(),
+            enabled: false,
+        }
+    }
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("imap_folder", &self.imap_folder)
+            .field("display_name", &self.display_name)
+            .field("allowed_senders", &self.allowed_senders)
+            .field("deny_by_default", &self.deny_by_default)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("enabled", &self.enabled)
+            .finish()
     }
 }

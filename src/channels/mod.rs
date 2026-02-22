@@ -109,7 +109,9 @@
 //! ```
 
 pub mod discord;
+pub mod email_channel;
 mod factory;
+pub mod lark;
 mod manager;
 pub mod plugin;
 pub mod slack;
@@ -120,7 +122,9 @@ pub mod whatsapp;
 pub mod whatsapp_cloud;
 
 pub use discord::DiscordChannel;
+pub use email_channel::EmailChannel;
 pub use factory::register_configured_channels;
+pub use lark::LarkChannel;
 pub use manager::ChannelManager;
 pub use plugin::ChannelPluginAdapter;
 pub use slack::SlackChannel;
