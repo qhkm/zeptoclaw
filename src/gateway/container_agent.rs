@@ -24,7 +24,9 @@ use crate::security::mount::validate_mount_not_blocked;
 use crate::security::pairing::PairingManager;
 use crate::session::SessionManager;
 
+use super::idempotency::IdempotencyStore;
 use super::ipc::{parse_marked_response, AgentRequest, AgentResponse, AgentResult};
+use super::rate_limit::GatewayRateLimiter;
 
 const CONTAINER_WORKSPACE_DIR: &str = "/data/.zeptoclaw/workspace";
 const CONTAINER_SESSIONS_DIR: &str = "/data/.zeptoclaw/sessions";
@@ -79,6 +81,10 @@ pub struct ContainerAgentProxy {
     /// Optional pairing manager for device token validation.
     /// Present only when `config.pairing.enabled` is true.
     pairing: Option<std::sync::Mutex<PairingManager>>,
+    /// Per-IP rate limiter (None when both limits are 0 = unlimited).
+    rate_limiter: Option<Arc<GatewayRateLimiter>>,
+    /// Idempotency store for deduplicating messages with a "message_id" metadata key.
+    idempotency: Arc<IdempotencyStore>,
 }
 
 impl ContainerAgentProxy {
@@ -107,6 +113,22 @@ impl ContainerAgentProxy {
             None
         };
 
+        let rl = &config.gateway.rate_limit;
+        let rate_limiter = if rl.pair_per_min > 0 || rl.webhook_per_min > 0 {
+            Some(Arc::new(GatewayRateLimiter::new(
+                rl.pair_per_min,
+                rl.webhook_per_min,
+                Duration::from_secs(60),
+            )))
+        } else {
+            None
+        };
+
+        let idempotency = Arc::new(IdempotencyStore::new(
+            Duration::from_secs(300), // 5-minute dedup window
+            10_000,                   // max tracked IDs
+        ));
+
         Self {
             config,
             container_config,
@@ -119,6 +141,8 @@ impl ContainerAgentProxy {
             resolved_backend: backend,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             pairing,
+            rate_limiter,
+            idempotency,
         }
     }
 
@@ -165,6 +189,43 @@ impl ContainerAgentProxy {
                 msg = self.bus.consume_inbound() => {
                     match msg {
                         Some(inbound) => {
+                            // Rate limit check (by source_ip metadata if present)
+                            if let Some(ref limiter) = self.rate_limiter {
+                                if let Some(ip_str) = inbound.metadata.get("source_ip") {
+                                    if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                        if !limiter.check_webhook(ip) {
+                                            warn!(
+                                                sender = %inbound.sender_id,
+                                                ip = %ip,
+                                                "Rate limited inbound message"
+                                            );
+                                            let rejection = OutboundMessage::new(
+                                                &inbound.channel,
+                                                &inbound.chat_id,
+                                                "Rate limit exceeded. Please wait before sending another message.",
+                                            );
+                                            if let Err(e) = self.bus.publish_outbound(rejection).await {
+                                                error!("Failed to publish rate limit rejection: {}", e);
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Idempotency check (by message_id metadata if present)
+                            if let Some(msg_id) = inbound.metadata.get("message_id") {
+                                let key = format!("{}:{}", inbound.channel, msg_id);
+                                if !self.idempotency.check_and_record(&key) {
+                                    debug!(
+                                        sender = %inbound.sender_id,
+                                        msg_id = %msg_id,
+                                        "Skipping duplicate message"
+                                    );
+                                    continue;
+                                }
+                            }
+
                             // Device pairing check: if enabled, validate bearer token
                             if let Some(ref pairing_mutex) = self.pairing {
                                 let identifier = inbound.sender_id.clone();
