@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use zeptoclaw::memory::longterm::LongTermMemory;
+use zeptoclaw::memory::snapshot;
 
 use super::MemoryAction;
 
@@ -18,6 +19,8 @@ pub(crate) async fn cmd_memory(action: MemoryAction) -> Result<()> {
         MemoryAction::Delete { key } => cmd_memory_delete(key).await,
         MemoryAction::Stats => cmd_memory_stats().await,
         MemoryAction::Cleanup { threshold } => cmd_memory_cleanup(threshold).await,
+        MemoryAction::Export { output } => cmd_memory_export(output).await,
+        MemoryAction::Import { path, overwrite } => cmd_memory_import(path, overwrite).await,
     }
 }
 
@@ -160,6 +163,36 @@ async fn cmd_memory_cleanup(threshold: f32) -> Result<()> {
     if removed > 0 {
         println!("Remaining: {} entries", mem.count());
     }
+    Ok(())
+}
+
+async fn cmd_memory_export(output: Option<std::path::PathBuf>) -> Result<()> {
+    let mem = LongTermMemory::new().with_context(|| "Failed to open long-term memory")?;
+    let path = output.unwrap_or_else(snapshot::default_snapshot_path);
+    let count = snapshot::export_snapshot(&mem, &path)
+        .with_context(|| format!("Failed to export snapshot to {:?}", path))?;
+    println!("Exported {} memory entries to {:?}", count, path);
+    Ok(())
+}
+
+async fn cmd_memory_import(path: std::path::PathBuf, overwrite: bool) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Snapshot file not found: {:?}", path);
+    }
+    let mut mem = LongTermMemory::new().with_context(|| "Failed to open long-term memory")?;
+    let (imported, skipped) = snapshot::import_snapshot(&mut mem, &path, overwrite)
+        .await
+        .with_context(|| format!("Failed to import snapshot from {:?}", path))?;
+    println!(
+        "Import complete: {} imported, {} skipped{}",
+        imported,
+        skipped,
+        if skipped > 0 {
+            " (use --overwrite to replace existing)"
+        } else {
+            ""
+        }
+    );
     Ok(())
 }
 

@@ -223,6 +223,20 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = 0.1)]
         threshold: f32,
     },
+    /// Export longterm memory to a JSON snapshot file
+    Export {
+        /// Output file path (default: ~/.zeptoclaw/memory/snapshot.json)
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Import longterm memory from a JSON snapshot file
+    Import {
+        /// Path to snapshot file
+        path: std::path::PathBuf,
+        /// Overwrite existing keys (default: skip existing)
+        #[arg(long)]
+        overwrite: bool,
+    },
 }
 
 #[derive(Subcommand)]
