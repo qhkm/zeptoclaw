@@ -1346,6 +1346,9 @@ pub struct MemoryConfig {
     /// Tantivy index directory path override. Only used when backend is "tantivy".
     #[serde(default)]
     pub tantivy_index_path: Option<String>,
+    /// Memory hygiene scheduler configuration.
+    #[serde(default)]
+    pub hygiene: crate::memory::hygiene::HygieneConfig,
 }
 
 impl Default for MemoryConfig {
@@ -1362,6 +1365,7 @@ impl Default for MemoryConfig {
             embedding_model: None,
             hnsw_index_path: None,
             tantivy_index_path: None,
+            hygiene: crate::memory::hygiene::HygieneConfig::default(),
         }
     }
 }

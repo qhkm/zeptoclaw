@@ -618,6 +618,19 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_EMBEDDING_MODEL") {
             self.memory.embedding_model = Some(val);
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_HYGIENE_ENABLED") {
+            self.memory.hygiene.enabled = val.parse().unwrap_or(true);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_HYGIENE_INTERVAL_HOURS") {
+            if let Ok(n) = val.parse::<u64>() {
+                self.memory.hygiene.interval_hours = n;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_MEMORY_HYGIENE_MAX_ENTRIES") {
+            if let Ok(n) = val.parse::<usize>() {
+                self.memory.hygiene.max_entries = n;
+            }
+        }
     }
 
     /// Apply heartbeat-specific environment variable overrides.

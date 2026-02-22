@@ -8,7 +8,9 @@ pub mod embedding_searcher;
 pub mod factory;
 #[cfg(feature = "memory-hnsw")]
 pub mod hnsw_searcher;
+pub mod hygiene;
 pub mod longterm;
+pub mod snapshot;
 pub mod traits;
 
 use std::collections::HashSet;
