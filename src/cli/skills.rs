@@ -294,10 +294,7 @@ async fn cmd_skills_install_github(repo: &str) -> Result<()> {
     if !skill_md.exists() {
         // Clean up
         let _ = std::fs::remove_dir_all(&target_dir);
-        anyhow::bail!(
-            "Repository {} has no SKILL.md — not a valid skill",
-            repo
-        );
+        anyhow::bail!("Repository {} has no SKILL.md — not a valid skill", repo);
     }
 
     // Remove .git to save space

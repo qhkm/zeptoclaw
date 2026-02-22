@@ -103,11 +103,7 @@ pub fn compute_quality_score(repo: &GitHubRepo, has_skill_md: bool) -> f64 {
     }
 
     // Description quality: +0.1 if > 20 chars
-    if repo
-        .description
-        .as_ref()
-        .is_some_and(|d| d.len() > 20)
-    {
+    if repo.description.as_ref().is_some_and(|d| d.len() > 20) {
         score += 0.1;
     }
 
@@ -205,7 +201,11 @@ mod tests {
             topics: vec!["zeptoclaw-skill".into()],
         };
         let score = compute_quality_score(&result, true);
-        assert!(score > 0.5, "High-star repo should score > 0.5, got {}", score);
+        assert!(
+            score > 0.5,
+            "High-star repo should score > 0.5, got {}",
+            score
+        );
     }
 
     #[test]
@@ -245,10 +245,7 @@ mod tests {
         };
         let without = compute_quality_score(&repo, false);
         let with_skill = compute_quality_score(&repo, true);
-        assert!(
-            with_skill > without,
-            "SKILL.md bonus should increase score"
-        );
+        assert!(with_skill > without, "SKILL.md bonus should increase score");
     }
 
     #[test]
