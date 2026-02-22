@@ -8,6 +8,9 @@ Ultra-lightweight personal AI assistant. The best of OpenClaw's integrations, Na
 # Build
 cargo build --release
 
+# Build with Android device control
+cargo build --release --features android
+
 # Run tests
 cargo test
 
@@ -208,7 +211,14 @@ src/
 ├── tunnel/         # Tunnel providers (Cloudflare, ngrok, Tailscale)
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (18 tools + MCP + binary plugins)
+├── tools/          # Agent tools (18 tools + MCP + binary plugins + android)
+│   ├── android/     # Android device control via ADB (feature-gated: --features android)
+│   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
+│   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
+│   │   ├── adb.rs      # AdbExecutor: async subprocess, retry, device detection
+│   │   ├── screen.rs   # XML parser (quick-xml), scoring, dedup, compact JSON
+│   │   ├── actions.rs  # Action handlers, text escaping, coordinate sanitization
+│   │   └── stuck.rs    # Screen hash, repetition/drift detection, alerts
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── filesystem.rs  # Read, write, list, edit files
@@ -416,6 +426,15 @@ cargo build --release --features memory-bm25
 # cargo build --release --features memory-tantivy
 ```
 
+### Cargo Features
+
+- `android` — Enable Android device control tool (adds `quick-xml` dependency)
+
+```bash
+cargo build --release --features android
+cargo test --features android
+```
+
 ### Compile-time Configuration
 
 Default models can be set at compile time using environment variables:
@@ -517,3 +536,4 @@ Key crates:
 - `clap` - CLI argument parsing
 - `scraper` - HTML parsing for web_fetch
 - `aho-corasick` - Multi-pattern string matching for safety layer
+- `quick-xml` - XML parsing for Android uiautomator dumps (optional, `android` feature)
