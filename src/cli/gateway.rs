@@ -279,19 +279,17 @@ pub(crate) async fn cmd_gateway(
     };
 
     // Start device service if configured
-    {
-        let svc = zeptoclaw::devices::DeviceService::new(
-            config.devices.enabled,
-            config.devices.monitor_usb,
-        );
-        if let Some(mut rx) = svc.start() {
-            tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    tracing::info!("Device event: {}", event.format_message());
-                }
+    // TODO: publish to MessageBus for channel delivery once InboundMessage wrapping is settled
+    let _device_handle =
+        zeptoclaw::devices::DeviceService::new(config.devices.enabled, config.devices.monitor_usb)
+            .start()
+            .map(|mut rx| {
+                tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        tracing::info!("Device event: {}", event.format_message());
+                    }
+                })
             });
-        }
-    }
 
     // Start agent loop in background (only for in-process mode)
     let agent_handle = if let Some(ref agent) = agent {

@@ -23,7 +23,6 @@ pub mod watch;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "zeptoclaw")]
@@ -376,21 +375,13 @@ pub enum BatchFormat {
 
 /// Entry point for the CLI — called from main().
 pub async fn run() -> Result<()> {
-    // Initialize logging (JSON format when RUST_LOG_FORMAT=json)
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let use_json = std::env::var("RUST_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-    if use_json {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(env_filter)
-            .with_target(true)
-            .with_thread_ids(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
-    }
+    // Initialize logging from config (format, level, optional file output).
+    // Load config early so we can respect the logging settings; fall back to
+    // defaults if the config file is missing or unreadable.
+    let logging_cfg = zeptoclaw::config::Config::load()
+        .map(|c| c.logging)
+        .unwrap_or_default();
+    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
     let cli = Cli::parse();
 

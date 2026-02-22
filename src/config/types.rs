@@ -124,6 +124,57 @@ pub struct Config {
     /// Device event system configuration (USB hotplug monitoring).
     #[serde(default)]
     pub devices: DevicesConfig,
+    /// Logging configuration (format, level, optional file output).
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+// ============================================================================
+// Logging Configuration
+// ============================================================================
+
+/// Log output format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Default tracing pretty-print.
+    Pretty,
+    /// Component-tagged format — grep-friendly (`[component] message`).
+    Component,
+    /// Structured JSON lines for log aggregators.
+    Json,
+}
+
+fn default_log_format() -> LogFormat {
+    LogFormat::Component
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+/// Logging configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Log output format (default: component).
+    #[serde(default = "default_log_format")]
+    pub format: LogFormat,
+    /// Optional path to a log file. When set and format is `json`, logs are
+    /// written to this file in addition to (or instead of) stdout.
+    pub file: Option<String>,
+    /// Log level filter string (default: "info").
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            format: default_log_format(),
+            file: None,
+            level: default_log_level(),
+        }
+    }
 }
 
 // ============================================================================
