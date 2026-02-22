@@ -81,13 +81,13 @@ pub mod whatsapp;
 
 pub use binary_plugin::BinaryPluginTool;
 pub use custom::CustomTool;
-pub use git::GitTool;
 pub use delegate::DelegateTool;
+pub use git::GitTool;
 pub use gsheets::GoogleSheetsTool;
-pub use project::ProjectTool;
 pub use longterm_memory::LongTermMemoryTool;
 pub use memory::{MemoryGetTool, MemorySearchTool};
 pub use message::MessageTool;
+pub use project::ProjectTool;
 pub use r8r::R8rTool;
 pub use registry::ToolRegistry;
 pub use reminder::ReminderTool;

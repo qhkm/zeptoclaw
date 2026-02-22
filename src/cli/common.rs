@@ -12,6 +12,7 @@ use zeptoclaw::agent::{AgentLoop, ContextBuilder, RuntimeContext};
 use zeptoclaw::auth::{self, AuthMethod};
 use zeptoclaw::bus::MessageBus;
 use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
+use zeptoclaw::config::ProjectBackend;
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
@@ -31,7 +32,6 @@ use zeptoclaw::tools::{
     EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, ProjectTool,
     R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
-use zeptoclaw::config::ProjectBackend;
 
 /// Read a line from stdin, trimming whitespace.
 pub(crate) fn read_line() -> Result<String> {

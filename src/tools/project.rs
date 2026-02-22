@@ -315,10 +315,7 @@ impl ProjectTool {
             .header("Authorization", auth)
             .header("User-Agent", "zeptoclaw")
             .header("Accept", "application/vnd.github+json")
-            .query(&[
-                ("q", full_query.as_str()),
-                ("per_page", &limit.to_string()),
-            ])
+            .query(&[("q", full_query.as_str()), ("per_page", &limit.to_string())])
             .send()
             .await
             .map_err(|e| ZeptoError::Tool(format!("GitHub request failed: {}", e)))?;
@@ -1030,7 +1027,11 @@ mod tests {
             default_project: default_project.to_string(),
             jira_url: String::new(),
             jira_token: None,
-            github_token: if token.is_empty() { None } else { Some(token.to_string()) },
+            github_token: if token.is_empty() {
+                None
+            } else {
+                Some(token.to_string())
+            },
             linear_api_key: None,
         }
     }
@@ -1040,7 +1041,11 @@ mod tests {
             backend: ProjectBackend::Jira,
             default_project: default_project.to_string(),
             jira_url: jira_url.to_string(),
-            jira_token: if token.is_empty() { None } else { Some(token.to_string()) },
+            jira_token: if token.is_empty() {
+                None
+            } else {
+                Some(token.to_string())
+            },
             github_token: None,
             linear_api_key: None,
         }
@@ -1053,7 +1058,11 @@ mod tests {
             jira_url: String::new(),
             jira_token: None,
             github_token: None,
-            linear_api_key: if key.is_empty() { None } else { Some(key.to_string()) },
+            linear_api_key: if key.is_empty() {
+                None
+            } else {
+                Some(key.to_string())
+            },
         }
     }
 
