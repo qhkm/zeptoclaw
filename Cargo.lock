@@ -2887,6 +2887,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5211,6 +5220,7 @@ dependencies = [
  "once_cell",
  "probe-rs",
  "prost",
+ "quick-xml",
  "regex",
  "reqwest 0.12.28",
  "rpassword",

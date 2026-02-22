@@ -78,6 +78,8 @@ pub use security::{
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 #[cfg(feature = "screenshot")]
 pub use tools::screenshot::WebScreenshotTool;
+#[cfg(feature = "android")]
+pub use tools::AndroidTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
     EchoTool, GitTool, GoogleSheetsTool, HardwareTool, HttpRequestTool, MemoryGetTool,

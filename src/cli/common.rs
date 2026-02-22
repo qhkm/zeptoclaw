@@ -881,6 +881,15 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    // Register Android tool (feature-gated)
+    #[cfg(feature = "android")]
+    if tool_enabled("android") {
+        agent
+            .register_tool(Box::new(zeptoclaw::tools::android::AndroidTool::new()))
+            .await;
+        info!("Registered android tool");
+    }
+
     // Register plugin tools (command-mode and binary-mode)
     if config.plugins.enabled {
         let plugin_dirs: Vec<PathBuf> = config
