@@ -509,6 +509,31 @@ pub(crate) async fn cmd_status() -> Result<()> {
     println!("  Port: {}", config.gateway.port);
     println!();
 
+    // Daemon
+    println!("Daemon");
+    println!("------");
+    match super::daemon::read_state() {
+        Some(state) => {
+            println!("  Status:     {}", state.status);
+            println!("  Started at: {}", state.started_at);
+            println!("  Gateway:    {}", state.gateway);
+            for comp in &state.components {
+                let running = if comp.running { "running" } else { "stopped" };
+                println!(
+                    "  Component:  {} ({}, restarts: {})",
+                    comp.name, running, comp.restart_count
+                );
+                if let Some(ref err) = comp.last_error {
+                    println!("    Last error: {}", err);
+                }
+            }
+        }
+        None => {
+            println!("  Not running (no daemon state file)");
+        }
+    }
+    println!();
+
     // Container Agent
     println!("Container Agent");
     println!("---------------");
