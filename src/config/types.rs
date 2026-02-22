@@ -1121,6 +1121,16 @@ impl Default for RotationConfig {
 // Gateway Configuration
 // ============================================================================
 
+/// Rate limiting configuration for gateway endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Max pairing requests per minute per IP (0 = unlimited).
+    pub pair_per_min: u32,
+    /// Max webhook requests per minute per IP (0 = unlimited).
+    pub webhook_per_min: u32,
+}
+
 /// Gateway server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1129,6 +1139,9 @@ pub struct GatewayConfig {
     pub host: String,
     /// Port to listen on
     pub port: u16,
+    /// Per-IP rate limiting for gateway endpoints.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Default for GatewayConfig {
@@ -1136,6 +1149,7 @@ impl Default for GatewayConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 8080,
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }

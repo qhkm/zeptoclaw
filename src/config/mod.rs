@@ -131,6 +131,16 @@ impl Config {
                 self.gateway.port = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_RATE_LIMIT_PAIR_PER_MIN") {
+            if let Ok(n) = val.parse() {
+                self.gateway.rate_limit.pair_per_min = n;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_RATE_LIMIT_WEBHOOK_PER_MIN") {
+            if let Ok(n) = val.parse() {
+                self.gateway.rate_limit.webhook_per_min = n;
+            }
+        }
 
         // Provider API keys
         self.apply_provider_env_overrides();
