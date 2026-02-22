@@ -278,6 +278,21 @@ pub(crate) async fn cmd_gateway(
         None
     };
 
+    // Start memory hygiene scheduler
+    let _hygiene_handle = match zeptoclaw::memory::longterm::LongTermMemory::new() {
+        Ok(ltm) => {
+            let ltm = Arc::new(tokio::sync::Mutex::new(ltm));
+            Some(zeptoclaw::memory::hygiene::start_hygiene_scheduler(
+                ltm,
+                config.memory.hygiene.clone(),
+            ))
+        }
+        Err(e) => {
+            warn!("Memory hygiene scheduler not started: {}", e);
+            None
+        }
+    };
+
     // Start device service if configured
     // TODO: publish to MessageBus for channel delivery once InboundMessage wrapping is settled
     let _device_handle =
