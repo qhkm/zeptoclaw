@@ -36,7 +36,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Default r8r endpoint (local server)
 const DEFAULT_R8R_ENDPOINT: &str = "http://localhost:8080";
@@ -162,6 +162,10 @@ impl Tool for R8rTool {
 
     fn compact_description(&self) -> &str {
         "R8r workflow"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkWrite
     }
 
     fn parameters(&self) -> Value {

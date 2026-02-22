@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex, RwLock};
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
 use crate::health::UsageMetrics;
@@ -127,15 +128,50 @@ pub struct AgentLoop {
     token_budget: Arc<TokenBudget>,
     /// Tool approval gate for policy-based tool gating.
     approval_gate: Arc<ApprovalGate>,
+    /// Agent mode for category-based tool enforcement.
+    agent_mode: crate::security::AgentMode,
     /// Optional safety layer for tool output sanitization.
     safety_layer: Option<Arc<SafetyLayer>>,
     /// Optional context monitor for compaction.
     context_monitor: Option<ContextMonitor>,
     /// Optional channel for tool execution feedback (tool name + duration).
     tool_feedback_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ToolFeedback>>>>,
+    /// Optional LLM response cache (SHA-256 keyed, TTL + LRU).
+    cache: Option<Arc<std::sync::Mutex<ResponseCache>>>,
+    /// Optional pairing manager for device token validation.
+    /// Present only when `config.pairing.enabled` is true.
+    pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
 }
 
 impl AgentLoop {
+    /// Build an optional cache from config.
+    fn build_cache(config: &Config) -> Option<Arc<std::sync::Mutex<ResponseCache>>> {
+        if config.cache.enabled {
+            Some(Arc::new(std::sync::Mutex::new(ResponseCache::new(
+                config.cache.ttl_secs,
+                config.cache.max_entries,
+            ))))
+        } else {
+            None
+        }
+    }
+
+    /// Build an optional pairing manager from config.
+    fn build_pairing(
+        config: &Config,
+    ) -> Option<Arc<std::sync::Mutex<crate::security::PairingManager>>> {
+        if config.pairing.enabled {
+            Some(Arc::new(std::sync::Mutex::new(
+                crate::security::PairingManager::new(
+                    config.pairing.max_attempts,
+                    config.pairing.lockout_secs,
+                ),
+            )))
+        } else {
+            None
+        }
+    }
+
     /// Create a new agent loop.
     ///
     /// # Arguments
@@ -161,6 +197,7 @@ impl AgentLoop {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
+        let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
             Some(Arc::new(SafetyLayer::new(config.safety.clone())))
         } else {
@@ -174,6 +211,8 @@ impl AgentLoop {
         } else {
             None
         };
+        let cache = Self::build_cache(&config);
+        let pairing = Self::build_pairing(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -191,9 +230,12 @@ impl AgentLoop {
             dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
+            agent_mode,
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
+            cache,
+            pairing,
         }
     }
 
@@ -213,6 +255,7 @@ impl AgentLoop {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
+        let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
             Some(Arc::new(SafetyLayer::new(config.safety.clone())))
         } else {
@@ -226,6 +269,8 @@ impl AgentLoop {
         } else {
             None
         };
+        let cache = Self::build_cache(&config);
+        let pairing = Self::build_pairing(&config);
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -243,9 +288,12 @@ impl AgentLoop {
             dry_run: AtomicBool::new(false),
             token_budget,
             approval_gate,
+            agent_mode,
             safety_layer,
             context_monitor,
             tool_feedback_tx: Arc::new(RwLock::new(None)),
+            cache,
+            pairing,
         }
     }
 
@@ -409,6 +457,36 @@ impl AgentLoop {
             )));
         }
 
+        // Build cache key from (model, system_prompt, user_prompt) for the
+        // initial LLM call only. Tool follow-up calls are never cached.
+        let cache_key = self.cache.as_ref().map(|_| {
+            let system_prompt = messages
+                .first()
+                .filter(|m| m.role == Role::System)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            ResponseCache::cache_key(
+                self.config.agents.defaults.model.as_str(),
+                system_prompt,
+                &msg.content,
+            )
+        });
+
+        // Check response cache before calling the provider.
+        // The MutexGuard must be dropped before any .await to remain Send.
+        let cached_hit = if let (Some(ref cache_mutex), Some(ref key)) = (&self.cache, &cache_key) {
+            cache_mutex.lock().ok().and_then(|mut c| c.get(key))
+        } else {
+            None
+        };
+        if let Some(cached_response) = cached_hit {
+            debug!("Cache hit for initial prompt");
+            session.add_message(Message::user(&msg.content));
+            session.add_message(Message::assistant(&cached_response));
+            self.session_manager.save(&session).await?;
+            return Ok(cached_response);
+        }
+
         // Call LLM -- provider lock is NOT held during this await
         let mut response = provider
             .chat(messages, tool_definitions, model, options.clone())
@@ -421,6 +499,22 @@ impl AgentLoop {
                 .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
             self.token_budget
                 .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+        }
+
+        // Cache the response if it has no tool calls (pure text reply).
+        // Responses with tool calls depend on tool execution and are not cacheable.
+        if !response.has_tool_calls() {
+            if let (Some(ref cache_mutex), Some(key)) = (&self.cache, cache_key) {
+                let token_count = response
+                    .usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0);
+                if let Ok(mut cache) = cache_mutex.lock() {
+                    cache.put(key, response.content.clone(), token_count);
+                    debug!("Cached initial LLM response");
+                }
+            }
         }
 
         // Add user message to session
@@ -477,6 +571,7 @@ impl AgentLoop {
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
             let is_dry_run = self.dry_run.load(Ordering::SeqCst);
+            let current_agent_mode = self.agent_mode;
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -494,6 +589,7 @@ impl AgentLoop {
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run;
+                    let agent_mode = current_agent_mode;
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -511,6 +607,40 @@ impl AgentLoop {
                             hooks.before_tool(&name, &args, channel_name, chat_id)
                         {
                             return (id, format!("Tool '{}' blocked by hook: {}", name, msg));
+                        }
+
+                        // Agent mode enforcement (before approval gate).
+                        // RequiresApproval: blocks the tool unless ApprovalGate is
+                        // already configured to gate this tool name. In practice, this
+                        // means Assistant mode blocks Shell/Hardware/Destructive tools
+                        // unless the operator has explicitly listed them in
+                        // `approval.require_approval_for`. This is "fail-closed" by design.
+                        {
+                            let mode_policy = crate::security::ModePolicy::new(agent_mode);
+                            let tools_guard = tools.read().await;
+                            if let Some(tool) = tools_guard.get(&name) {
+                                let tool_category = tool.category();
+                                match mode_policy.check(tool_category) {
+                                    crate::security::CategoryPermission::Blocked => {
+                                        info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool blocked by agent mode");
+                                        return (id, format!(
+                                            "Tool '{}' is blocked in {} mode (category: {})",
+                                            name, agent_mode, tool_category
+                                        ));
+                                    }
+                                    crate::security::CategoryPermission::RequiresApproval => {
+                                        if !gate.requires_approval(&name) {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
+                                            return (id, format!(
+                                                "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
+                                                name, agent_mode, tool_category
+                                            ));
+                                        }
+                                        // Fall through to approval gate — it will prompt for approval
+                                    }
+                                    crate::security::CategoryPermission::Allowed => {}
+                                }
+                            }
                         }
 
                         // Check approval gate before executing
@@ -778,6 +908,7 @@ impl AgentLoop {
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
             let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
+            let current_agent_mode_stream = self.agent_mode;
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -793,10 +924,39 @@ impl AgentLoop {
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run_stream;
+                    let agent_mode = current_agent_mode_stream;
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
                             .unwrap_or_else(|_| serde_json::json!({}));
+
+                        // Agent mode enforcement — same fail-closed logic as non-streaming path.
+                        {
+                            let mode_policy = crate::security::ModePolicy::new(agent_mode);
+                            let tools_guard = tools.read().await;
+                            if let Some(tool) = tools_guard.get(&name) {
+                                let tool_category = tool.category();
+                                match mode_policy.check(tool_category) {
+                                    crate::security::CategoryPermission::Blocked => {
+                                        info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool blocked by agent mode");
+                                        return (id, format!(
+                                            "Tool '{}' is blocked in {} mode (category: {})",
+                                            name, agent_mode, tool_category
+                                        ));
+                                    }
+                                    crate::security::CategoryPermission::RequiresApproval => {
+                                        if !gate.requires_approval(&name) {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
+                                            return (id, format!(
+                                                "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
+                                                name, agent_mode, tool_category
+                                            ));
+                                        }
+                                    }
+                                    crate::security::CategoryPermission::Allowed => {}
+                                }
+                            }
+                        }
 
                         // Check approval gate before executing
                         if gate.requires_approval(&name) {
@@ -1324,6 +1484,37 @@ impl AgentLoop {
                 // Wait for inbound messages
                 msg = self.bus.consume_inbound() => {
                     if let Some(msg) = msg {
+                        // Device pairing check: if enabled, validate bearer token
+                        if let Some(ref pairing) = self.pairing {
+                            let identifier = msg.sender_id.clone();
+                            let token = msg.metadata.get("auth_token").cloned();
+                            let valid = match token {
+                                Some(raw_token) => {
+                                    match pairing.lock() {
+                                        Ok(mut mgr) => mgr.validate_token(&raw_token, &identifier).is_some(),
+                                        Err(_) => false,
+                                    }
+                                }
+                                None => false,
+                            };
+                            if !valid {
+                                warn!(
+                                    sender = %msg.sender_id,
+                                    channel = %msg.channel,
+                                    "Rejected unpaired device (pairing enabled)"
+                                );
+                                let rejection = OutboundMessage::new(
+                                    &msg.channel,
+                                    &msg.chat_id,
+                                    "Access denied: device not paired. Use `zeptoclaw pair new` to generate a pairing code.",
+                                );
+                                if let Err(e) = self.bus.publish_outbound(rejection).await {
+                                    error!("Failed to publish pairing rejection: {}", e);
+                                }
+                                continue;
+                            }
+                        }
+
                         let tenant_id = msg
                             .metadata
                             .get("tenant_id")

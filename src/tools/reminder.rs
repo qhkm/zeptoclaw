@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::cron::{CronPayload, CronSchedule, CronService};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -363,6 +363,14 @@ impl Tool for ReminderTool {
 
     fn description(&self) -> &str {
         "Manage persistent reminders. Actions: add, list, complete, snooze, remove, overdue."
+    }
+
+    fn compact_description(&self) -> &str {
+        "Reminders"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
 
     fn parameters(&self) -> Value {

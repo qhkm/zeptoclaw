@@ -21,6 +21,7 @@ use crate::config::{Config, ContainerAgentBackend, ContainerAgentConfig};
 use crate::error::{Result, ZeptoError};
 use crate::health::UsageMetrics;
 use crate::security::mount::validate_mount_not_blocked;
+use crate::security::pairing::PairingManager;
 use crate::session::SessionManager;
 
 use super::ipc::{parse_marked_response, AgentRequest, AgentResponse, AgentResult};
@@ -75,6 +76,9 @@ pub struct ContainerAgentProxy {
     usage_metrics: RwLock<Option<Arc<UsageMetrics>>>,
     resolved_backend: ResolvedBackend,
     semaphore: Arc<Semaphore>,
+    /// Optional pairing manager for device token validation.
+    /// Present only when `config.pairing.enabled` is true.
+    pairing: Option<std::sync::Mutex<PairingManager>>,
 }
 
 impl ContainerAgentProxy {
@@ -94,6 +98,15 @@ impl ContainerAgentProxy {
             }
         };
 
+        let pairing = if config.pairing.enabled {
+            Some(std::sync::Mutex::new(PairingManager::new(
+                config.pairing.max_attempts,
+                config.pairing.lockout_secs,
+            )))
+        } else {
+            None
+        };
+
         Self {
             config,
             container_config,
@@ -105,6 +118,7 @@ impl ContainerAgentProxy {
             usage_metrics: RwLock::new(None),
             resolved_backend: backend,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            pairing,
         }
     }
 
@@ -151,6 +165,37 @@ impl ContainerAgentProxy {
                 msg = self.bus.consume_inbound() => {
                     match msg {
                         Some(inbound) => {
+                            // Device pairing check: if enabled, validate bearer token
+                            if let Some(ref pairing_mutex) = self.pairing {
+                                let identifier = inbound.sender_id.clone();
+                                let token = inbound.metadata.get("auth_token").cloned();
+                                let valid = match token {
+                                    Some(raw_token) => {
+                                        match pairing_mutex.lock() {
+                                            Ok(mut mgr) => mgr.validate_token(&raw_token, &identifier).is_some(),
+                                            Err(_) => false,
+                                        }
+                                    }
+                                    None => false,
+                                };
+                                if !valid {
+                                    warn!(
+                                        sender = %inbound.sender_id,
+                                        channel = %inbound.channel,
+                                        "Rejected unpaired device (pairing enabled)"
+                                    );
+                                    let rejection = OutboundMessage::new(
+                                        &inbound.channel,
+                                        &inbound.chat_id,
+                                        "Access denied: device not paired. Use `zeptoclaw pair new` to generate a pairing code.",
+                                    );
+                                    if let Err(e) = self.bus.publish_outbound(rejection).await {
+                                        error!("Failed to publish pairing rejection: {}", e);
+                                    }
+                                    continue;
+                                }
+                            }
+
                             let permit = self.semaphore.clone().acquire_owned().await;
                             match permit {
                                 Ok(permit) => {

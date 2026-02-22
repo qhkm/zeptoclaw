@@ -169,6 +169,17 @@ impl Config {
 
         // Project management tool
         self.apply_project_env_overrides();
+
+        // Cache
+        self.apply_cache_env_overrides();
+
+        // Agent mode
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_AGENT_MODE") {
+            self.agent_mode.mode = val;
+        }
+
+        // Device pairing
+        self.apply_pairing_env_overrides();
     }
 
     /// Apply provider-specific environment variable overrides
@@ -761,6 +772,40 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_STRIPE_WEBHOOK_SECRET") {
             let val = val.trim().to_string();
             self.stripe.webhook_secret = if val.is_empty() { None } else { Some(val) };
+        }
+    }
+
+    /// Apply cache environment variable overrides.
+    fn apply_cache_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_ENABLED") {
+            self.cache.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_TTL_SECS") {
+            if let Ok(n) = val.parse::<u64>() {
+                self.cache.ttl_secs = n;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CACHE_MAX_ENTRIES") {
+            if let Ok(n) = val.parse::<usize>() {
+                self.cache.max_entries = n;
+            }
+        }
+    }
+
+    /// Apply device pairing environment variable overrides.
+    fn apply_pairing_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_ENABLED") {
+            self.pairing.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_MAX_ATTEMPTS") {
+            if let Ok(n) = val.parse::<u32>() {
+                self.pairing.max_attempts = n.clamp(1, 100);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SECURITY_PAIRING_LOCKOUT_SECS") {
+            if let Ok(n) = val.parse::<u64>() {
+                self.pairing.lockout_secs = n.clamp(10, 86400);
+            }
         }
     }
 

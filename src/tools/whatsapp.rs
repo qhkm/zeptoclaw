@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 const WHATSAPP_API_BASE: &str = "https://graph.facebook.com/v18.0";
 
@@ -56,6 +56,10 @@ impl Tool for WhatsAppTool {
 
     fn compact_description(&self) -> &str {
         "Send WhatsApp"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Messaging
     }
 
     fn parameters(&self) -> Value {

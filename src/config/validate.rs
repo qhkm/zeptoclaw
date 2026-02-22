@@ -30,6 +30,9 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "custom_tools",
     "tool_profiles",
     "project",
+    "cache",
+    "agent_mode",
+    "pairing",
 ];
 
 /// Known fields for each section. Nested as section.field.

@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::error::{Result, ZeptoError};
 use crate::security::validate_path_in_workspace;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Resolve and validate a path relative to the workspace.
 ///
@@ -62,6 +62,10 @@ impl Tool for ReadFileTool {
 
     fn compact_description(&self) -> &str {
         "Read file"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FilesystemRead
     }
 
     fn parameters(&self) -> Value {
@@ -126,6 +130,10 @@ impl Tool for WriteFileTool {
 
     fn compact_description(&self) -> &str {
         "Write file"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FilesystemWrite
     }
 
     fn parameters(&self) -> Value {
@@ -212,6 +220,10 @@ impl Tool for ListDirTool {
 
     fn compact_description(&self) -> &str {
         "List directory"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FilesystemRead
     }
 
     fn parameters(&self) -> Value {
@@ -303,6 +315,10 @@ impl Tool for EditFileTool {
 
     fn compact_description(&self) -> &str {
         "Edit file"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FilesystemWrite
     }
 
     fn parameters(&self) -> Value {

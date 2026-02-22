@@ -61,6 +61,7 @@ pub mod delegate;
 pub mod filesystem;
 pub mod git;
 pub mod gsheets;
+pub mod hardware;
 pub mod http_request;
 pub mod longterm_memory;
 pub mod mcp;
@@ -86,6 +87,7 @@ pub use custom::CustomTool;
 pub use delegate::DelegateTool;
 pub use git::GitTool;
 pub use gsheets::GoogleSheetsTool;
+pub use hardware::HardwareTool;
 pub use http_request::HttpRequestTool;
 pub use longterm_memory::LongTermMemoryTool;
 pub use memory::{MemoryGetTool, MemorySearchTool};
@@ -98,7 +100,7 @@ pub use reminder::ReminderTool;
 #[cfg(feature = "screenshot")]
 pub use screenshot::WebScreenshotTool;
 pub use stripe::StripeTool;
-pub use types::{Tool, ToolContext};
+pub use types::{Tool, ToolCategory, ToolContext};
 pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
 pub use whatsapp::WhatsAppTool;
 

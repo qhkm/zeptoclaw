@@ -19,7 +19,6 @@ pub fn preview(s: &str, n: usize) -> String {
     prefix
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

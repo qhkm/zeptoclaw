@@ -10,7 +10,7 @@ use crate::agent::AgentLoop;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool to spawn a background delegated task.
 pub struct SpawnTool {
@@ -37,6 +37,10 @@ impl Tool for SpawnTool {
 
     fn compact_description(&self) -> &str {
         "Background task"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

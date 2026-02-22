@@ -5,17 +5,20 @@ pub mod audit;
 pub mod auth;
 pub mod batch;
 pub mod bus;
+pub mod cache;
 pub mod channels;
 pub mod config;
 pub mod cron;
 pub mod deps;
 pub mod error;
 pub mod gateway;
+pub mod hardware;
 pub mod health;
 pub mod heartbeat;
 pub mod hooks;
 pub mod memory;
 pub mod migrate;
+pub mod peripherals;
 pub mod plugins;
 pub mod providers;
 pub mod routines;
@@ -63,14 +66,16 @@ pub use health::{health_port, start_health_server, start_periodic_usage_flush, U
 #[cfg(target_os = "macos")]
 pub use runtime::AppleContainerRuntime;
 pub use security::{
-    validate_extra_mounts, validate_path_in_workspace, SafePath, ShellSecurityConfig,
+    validate_extra_mounts, validate_path_in_workspace, AgentMode, AgentModeConfig,
+    CategoryPermission, DeviceInfo, ModePolicy, PairedDevice, PairingManager, SafePath,
+    ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 #[cfg(feature = "screenshot")]
 pub use tools::screenshot::WebScreenshotTool;
 pub use tools::{
     cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
-    EchoTool, GitTool, GoogleSheetsTool, HttpRequestTool, MemoryGetTool, MemorySearchTool,
-    MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolContext,
-    ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, HardwareTool, HttpRequestTool, MemoryGetTool,
+    MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool,
+    Tool, ToolCategory, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
 };

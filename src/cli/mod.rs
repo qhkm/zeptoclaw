@@ -13,6 +13,7 @@ pub mod history;
 pub mod memory;
 pub mod migrate;
 pub mod onboard;
+pub mod pair;
 pub mod secrets;
 pub mod skills;
 pub mod status;
@@ -55,6 +56,9 @@ enum Commands {
         /// Show what tools would be called without executing them
         #[arg(long)]
         dry_run: bool,
+        /// Agent mode: observer (read-only), assistant (read/write + approval), autonomous (full access)
+        #[arg(long)]
+        mode: Option<String>,
     },
     /// Process prompts from a file
     Batch {
@@ -157,6 +161,11 @@ enum Commands {
         #[arg(long)]
         notify: Option<String>,
     },
+    /// Manage device pairing (bearer token auth)
+    Pair {
+        #[command(subcommand)]
+        action: PairAction,
+    },
     /// Migrate config and skills from an OpenClaw installation
     Migrate {
         /// Path to OpenClaw directory (auto-detected if omitted)
@@ -168,6 +177,11 @@ enum Commands {
         /// Preview what would be migrated without making changes
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Hardware device management (USB discovery, peripherals)
+    Hardware {
+        #[command(subcommand)]
+        action: HardwareAction,
     },
 }
 
@@ -330,6 +344,30 @@ pub enum SecretsAction {
     Rotate,
 }
 
+#[derive(Subcommand)]
+pub enum PairAction {
+    /// Generate a new 6-digit pairing code
+    New,
+    /// List all paired devices
+    List,
+    /// Revoke a paired device
+    Revoke {
+        /// Device name to revoke
+        device: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum HardwareAction {
+    /// List discovered USB devices
+    List,
+    /// Show info about a specific device
+    Info {
+        /// Device name or VID:PID (e.g., "nucleo-f401re" or "0483:374b")
+        device: String,
+    },
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum BatchFormat {
     Text,
@@ -373,8 +411,9 @@ pub async fn run() -> Result<()> {
             template,
             stream,
             dry_run,
+            mode,
         }) => {
-            agent::cmd_agent(message, template, stream, dry_run).await?;
+            agent::cmd_agent(message, template, stream, dry_run, mode).await?;
         }
         Some(Commands::Batch {
             input,
@@ -435,8 +474,14 @@ pub async fn run() -> Result<()> {
         }) => {
             watch::cmd_watch(url, interval, notify).await?;
         }
+        Some(Commands::Pair { action }) => {
+            pair::cmd_pair(action).await?;
+        }
         Some(Commands::Migrate { from, yes, dry_run }) => {
             migrate::cmd_migrate(from, yes, dry_run).await?;
+        }
+        Some(Commands::Hardware { action }) => {
+            cmd_hardware(action);
         }
     }
 
@@ -449,4 +494,66 @@ fn cmd_version() {
     println!();
     println!("Ultra-lightweight personal AI assistant");
     println!("https://github.com/qhkm/zeptoclaw");
+}
+
+/// Handle hardware subcommands (list, info).
+fn cmd_hardware(action: HardwareAction) {
+    use zeptoclaw::hardware::HardwareManager;
+
+    let mgr = HardwareManager::new();
+
+    match action {
+        HardwareAction::List => {
+            let devices = mgr.discover_devices();
+            if devices.is_empty() {
+                println!("No hardware devices found.");
+                println!();
+                #[cfg(not(feature = "hardware"))]
+                {
+                    println!("Hardware discovery requires the 'hardware' feature.");
+                    println!("Build with: cargo build --features hardware");
+                }
+                #[cfg(feature = "hardware")]
+                {
+                    println!(
+                        "Connect a board (e.g., Nucleo-F401RE, Arduino) via USB and try again."
+                    );
+                }
+            } else {
+                println!("Discovered devices:");
+                println!();
+                for d in &devices {
+                    let arch = d.architecture.as_deref().unwrap_or("--");
+                    let detail = d.detail.as_deref().unwrap_or("--");
+                    println!(
+                        "  {:04x}:{:04x}  {:<20} {:<20} {}",
+                        d.vid, d.pid, d.name, arch, detail
+                    );
+                }
+                println!();
+                println!("{} device(s) found.", devices.len());
+            }
+        }
+        HardwareAction::Info { device } => match mgr.device_info(&device) {
+            Some(info) => {
+                println!("Device: {}", info.name);
+                println!("  VID:PID       {:04x}:{:04x}", info.vid, info.pid);
+                if let Some(arch) = &info.architecture {
+                    println!("  Architecture  {}", arch);
+                }
+                if let Some(detail) = &info.detail {
+                    println!("  Description   {}", detail);
+                }
+                if let Some(path) = &info.device_path {
+                    println!("  Serial path   {}", path);
+                }
+            }
+            None => {
+                println!("Device '{}' not found.", device);
+                println!();
+                println!("Try: zeptoclaw hardware list");
+                println!("Or use a VID:PID format (e.g., 0483:374b)");
+            }
+        },
+    }
 }

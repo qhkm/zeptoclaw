@@ -25,7 +25,7 @@ use crate::tools::shell::ShellTool;
 use crate::tools::web::WebFetchTool;
 use crate::tools::EchoTool;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Tool to delegate a task to a specialist sub-agent.
 ///
@@ -257,6 +257,10 @@ impl Tool for DelegateTool {
 
     fn compact_description(&self) -> &str {
         "Delegate agent"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

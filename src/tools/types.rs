@@ -5,9 +5,71 @@
 //! execution context to tools.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
+
+/// Category for agent mode enforcement.
+///
+/// Each tool is assigned a category that determines whether it is allowed,
+/// requires approval, or is blocked under a given agent mode (Observer,
+/// Assistant, Autonomous).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategory {
+    /// Read-only filesystem operations (read, list, glob).
+    FilesystemRead,
+    /// Write/modify filesystem operations (write, edit, delete).
+    FilesystemWrite,
+    /// Read-only network operations (web search, fetch).
+    NetworkRead,
+    /// Network operations that modify external state (HTTP POST, API calls).
+    NetworkWrite,
+    /// Shell command execution and process spawning.
+    Shell,
+    /// Hardware/peripheral operations (USB, serial, GPIO).
+    Hardware,
+    /// Memory read/write operations (workspace memory, long-term memory).
+    Memory,
+    /// Messaging operations (send messages via channels).
+    Messaging,
+    /// Destructive or high-risk operations (cron delete, etc.).
+    Destructive,
+}
+
+impl ToolCategory {
+    /// Return an array of all category variants.
+    pub fn all() -> [ToolCategory; 9] {
+        [
+            ToolCategory::FilesystemRead,
+            ToolCategory::FilesystemWrite,
+            ToolCategory::NetworkRead,
+            ToolCategory::NetworkWrite,
+            ToolCategory::Shell,
+            ToolCategory::Hardware,
+            ToolCategory::Memory,
+            ToolCategory::Messaging,
+            ToolCategory::Destructive,
+        ]
+    }
+}
+
+impl std::fmt::Display for ToolCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FilesystemRead => write!(f, "filesystem_read"),
+            Self::FilesystemWrite => write!(f, "filesystem_write"),
+            Self::NetworkRead => write!(f, "network_read"),
+            Self::NetworkWrite => write!(f, "network_write"),
+            Self::Shell => write!(f, "shell"),
+            Self::Hardware => write!(f, "hardware"),
+            Self::Memory => write!(f, "memory"),
+            Self::Messaging => write!(f, "messaging"),
+            Self::Destructive => write!(f, "destructive"),
+        }
+    }
+}
 
 /// Trait that all tools must implement.
 ///
@@ -76,6 +138,19 @@ pub trait Tool: Send + Sync {
     /// shorter versions (~40% token savings).
     fn compact_description(&self) -> &str {
         self.description()
+    }
+
+    /// Tool category for agent mode enforcement.
+    ///
+    /// The agent mode system uses this to determine whether a tool is allowed,
+    /// requires approval, or is blocked under the current mode. **Every tool
+    /// implementation MUST override this** to return the correct category.
+    ///
+    /// Defaults to `ToolCategory::Shell` (fail-closed). If a tool forgets to
+    /// override this, it will require approval in Assistant mode and be blocked
+    /// in Observer mode — a safe default that prevents accidental over-permission.
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 }
 
@@ -212,5 +287,47 @@ mod tests {
         assert_eq!(ctx1.channel, ctx2.channel);
         assert_eq!(ctx1.chat_id, ctx2.chat_id);
         assert_eq!(ctx1.workspace, ctx2.workspace);
+    }
+
+    #[test]
+    fn test_tool_category_display() {
+        assert_eq!(ToolCategory::FilesystemRead.to_string(), "filesystem_read");
+        assert_eq!(ToolCategory::Shell.to_string(), "shell");
+        assert_eq!(ToolCategory::Hardware.to_string(), "hardware");
+        assert_eq!(ToolCategory::Destructive.to_string(), "destructive");
+    }
+
+    #[test]
+    fn test_tool_category_serde_roundtrip() {
+        let cat = ToolCategory::NetworkWrite;
+        let json = serde_json::to_string(&cat).unwrap();
+        assert_eq!(json, "\"network_write\"");
+        let back: ToolCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cat);
+    }
+
+    #[test]
+    fn test_tool_category_all_variants() {
+        use std::collections::HashSet;
+        let all = vec![
+            ToolCategory::FilesystemRead,
+            ToolCategory::FilesystemWrite,
+            ToolCategory::NetworkRead,
+            ToolCategory::NetworkWrite,
+            ToolCategory::Shell,
+            ToolCategory::Hardware,
+            ToolCategory::Memory,
+            ToolCategory::Messaging,
+            ToolCategory::Destructive,
+        ];
+        let set: HashSet<_> = all.iter().collect();
+        assert_eq!(set.len(), 9);
+    }
+
+    #[test]
+    fn test_tool_default_category() {
+        // EchoTool uses the default category() implementation (fail-closed: Shell)
+        let tool = super::super::EchoTool;
+        assert_eq!(tool.category(), ToolCategory::Shell);
     }
 }

@@ -41,7 +41,7 @@ use std::time::Duration;
 use crate::error::{Result, ZeptoError};
 use crate::plugins::PluginToolDef;
 
-use super::types::{Tool, ToolContext};
+use super::types::{Tool, ToolCategory, ToolContext};
 
 /// Shell-escape a string by wrapping it in single quotes.
 ///
@@ -113,6 +113,10 @@ impl Tool for PluginTool {
 
     fn compact_description(&self) -> &str {
         self.description()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
     }
 
     fn parameters(&self) -> Value {

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Channels that the message tool is allowed to target.
 const ALLOWED_CHANNELS: &[&str] = &[
@@ -58,6 +58,10 @@ impl Tool for MessageTool {
 
     fn compact_description(&self) -> &str {
         "Send message or channel action"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Messaging
     }
 
     fn parameters(&self) -> Value {

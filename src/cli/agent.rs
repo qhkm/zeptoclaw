@@ -19,9 +19,15 @@ pub(crate) async fn cmd_agent(
     template_name: Option<String>,
     stream: bool,
     dry_run: bool,
+    mode: Option<String>,
 ) -> Result<()> {
     // Load configuration
-    let config = Config::load().with_context(|| "Failed to load configuration")?;
+    let mut config = Config::load().with_context(|| "Failed to load configuration")?;
+
+    // Override agent mode from CLI flag if provided
+    if let Some(ref mode_str) = mode {
+        config.agent_mode.mode = mode_str.clone();
+    }
 
     // Create message bus
     let bus = Arc::new(MessageBus::new());

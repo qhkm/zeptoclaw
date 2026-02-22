@@ -19,7 +19,7 @@ use tokio::time::timeout;
 use crate::error::{Result, ZeptoError};
 
 use super::web::{is_blocked_host, resolve_and_check_host};
-use super::{Tool, ToolContext};
+use super::{Tool, ToolCategory, ToolContext};
 
 /// Default page-load timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -71,6 +71,11 @@ impl Tool for WebScreenshotTool {
 
     fn compact_description(&self) -> &str {
         "Screenshot URL"
+    }
+
+    fn category(&self) -> ToolCategory {
+        // Fetches URL (NetworkRead) AND writes file to disk — use more restrictive category.
+        ToolCategory::FilesystemWrite
     }
 
     fn parameters(&self) -> Value {
