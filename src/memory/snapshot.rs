@@ -164,8 +164,7 @@ mod tests {
             .unwrap();
 
         let temp_path = std::env::temp_dir().join("zc_snap_test_overwrite.json");
-        let snap =
-            serde_json::json!([{"key": "k1", "value": "updated", "category": "user"}]);
+        let snap = serde_json::json!([{"key": "k1", "value": "updated", "category": "user"}]);
         std::fs::write(&temp_path, snap.to_string()).unwrap();
 
         let (imported, skipped) = import_snapshot(&mut mem, &temp_path, true).await.unwrap();
