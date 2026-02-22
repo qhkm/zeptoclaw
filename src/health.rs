@@ -65,6 +65,22 @@ pub struct HealthCheck {
     pub status: HealthStatus,
     /// Optional human-readable status message.
     pub message: Option<String>,
+    /// Number of times this component has been restarted.
+    pub restart_count: u64,
+    /// Last error message, if any.
+    pub last_error: Option<String>,
+}
+
+impl Default for HealthCheck {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            status: HealthStatus::Ok,
+            message: None,
+            restart_count: 0,
+            last_error: None,
+        }
+    }
 }
 
 // ============================================================================
@@ -80,7 +96,7 @@ pub struct HealthCheck {
 /// ```
 /// use zeptoclaw::health::{HealthRegistry, HealthCheck, HealthStatus};
 /// let registry = HealthRegistry::new();
-/// registry.register(HealthCheck { name: "provider".into(), status: HealthStatus::Ok, message: None });
+/// registry.register(HealthCheck { name: "provider".into(), status: HealthStatus::Ok, ..Default::default() });
 /// assert!(registry.is_ready());
 /// ```
 #[derive(Clone)]
@@ -123,6 +139,32 @@ impl HealthRegistry {
     pub fn is_ready(&self) -> bool {
         let checks = self.checks.read().unwrap();
         checks.values().all(|c| c.status != HealthStatus::Down)
+    }
+
+    /// Increment the restart counter for a named component.
+    ///
+    /// No-op if no check with that name is registered.
+    pub fn bump_restart(&self, name: &str) {
+        let mut checks = self.checks.write().unwrap();
+        if let Some(check) = checks.get_mut(name) {
+            check.restart_count += 1;
+        }
+    }
+
+    /// Mark a component as Down with an error message, and record the last error.
+    ///
+    /// No-op if no check with that name is registered.
+    pub fn set_error(&self, name: &str, error: &str) {
+        let mut checks = self.checks.write().unwrap();
+        if let Some(check) = checks.get_mut(name) {
+            check.status = HealthStatus::Down;
+            check.last_error = Some(error.to_string());
+        }
+    }
+
+    /// Return a snapshot of all registered checks.
+    pub fn all_checks(&self) -> Vec<HealthCheck> {
+        self.checks.read().unwrap().values().cloned().collect()
     }
 
     /// Elapsed time since the registry was created (proxy for process uptime).
@@ -473,6 +515,7 @@ mod tests {
             name: "telegram".into(),
             status: HealthStatus::Down,
             message: None,
+            ..Default::default()
         });
         assert!(!reg.is_ready());
     }
@@ -484,11 +527,13 @@ mod tests {
             name: "telegram".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
         reg.register(HealthCheck {
             name: "provider".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
         assert!(reg.is_ready());
     }
@@ -500,6 +545,7 @@ mod tests {
             name: "web".into(),
             status: HealthStatus::Degraded,
             message: None,
+            ..Default::default()
         });
         assert!(reg.is_ready()); // Degraded is not Down
     }
@@ -511,6 +557,7 @@ mod tests {
             name: "db".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
         reg.update("db", HealthStatus::Down, Some("connection refused".into()));
         assert!(!reg.is_ready());
@@ -544,6 +591,7 @@ mod tests {
             name: "db".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
         let json = reg.render_checks_json();
         assert!(json.contains("\"db\""));
@@ -557,6 +605,7 @@ mod tests {
             name: "db".into(),
             status: HealthStatus::Down,
             message: Some("timeout".into()),
+            ..Default::default()
         });
         let json = reg.render_checks_json();
         assert!(json.contains("\"message\":\"timeout\""));
@@ -569,6 +618,7 @@ mod tests {
             name: "x".into(),
             status: HealthStatus::Ok,
             message: Some("say \"hi\"".into()),
+            ..Default::default()
         });
         let json = reg.render_checks_json();
         assert!(json.contains("\\\"hi\\\""));
@@ -630,11 +680,13 @@ mod tests {
             name: "svc".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
         reg.register(HealthCheck {
             name: "svc".into(),
             status: HealthStatus::Down,
             message: Some("crashed".into()),
+            ..Default::default()
         });
         assert!(!reg.is_ready());
     }
@@ -648,6 +700,7 @@ mod tests {
             name: "provider".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -690,6 +743,7 @@ mod tests {
             name: "svc".into(),
             status: HealthStatus::Ok,
             message: None,
+            ..Default::default()
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -728,6 +782,7 @@ mod tests {
             name: "svc".into(),
             status: HealthStatus::Down,
             message: Some("unreachable".into()),
+            ..Default::default()
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -858,5 +913,80 @@ mod tests {
         assert!(response.contains("\"status\":\"ok\""));
 
         handle.abort();
+    }
+
+    // --- Health registry enhancement tests ---
+
+    #[test]
+    fn test_bump_restart_increments_count() {
+        let reg = HealthRegistry::new();
+        reg.register(HealthCheck {
+            name: "gw".into(),
+            status: HealthStatus::Ok,
+            ..Default::default()
+        });
+        reg.bump_restart("gw");
+        reg.bump_restart("gw");
+        let checks = reg.all_checks();
+        let check = checks.iter().find(|c| c.name == "gw").unwrap();
+        assert_eq!(check.restart_count, 2);
+    }
+
+    #[test]
+    fn test_bump_restart_noop_on_unknown() {
+        let reg = HealthRegistry::new();
+        // Should not panic
+        reg.bump_restart("nonexistent");
+        assert!(reg.is_ready());
+    }
+
+    #[test]
+    fn test_set_error_marks_down_and_records_error() {
+        let reg = HealthRegistry::new();
+        reg.register(HealthCheck {
+            name: "db".into(),
+            status: HealthStatus::Ok,
+            ..Default::default()
+        });
+        reg.set_error("db", "connection timeout");
+        let checks = reg.all_checks();
+        let check = checks.iter().find(|c| c.name == "db").unwrap();
+        assert_eq!(check.status, HealthStatus::Down);
+        assert_eq!(check.last_error.as_deref(), Some("connection timeout"));
+        assert!(!reg.is_ready());
+    }
+
+    #[test]
+    fn test_set_error_noop_on_unknown() {
+        let reg = HealthRegistry::new();
+        // Should not panic
+        reg.set_error("ghost", "some error");
+        assert!(reg.is_ready());
+    }
+
+    #[test]
+    fn test_all_checks_returns_snapshot() {
+        let reg = HealthRegistry::new();
+        reg.register(HealthCheck {
+            name: "a".into(),
+            status: HealthStatus::Ok,
+            ..Default::default()
+        });
+        reg.register(HealthCheck {
+            name: "b".into(),
+            status: HealthStatus::Degraded,
+            ..Default::default()
+        });
+        let checks = reg.all_checks();
+        assert_eq!(checks.len(), 2);
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+    }
+
+    #[test]
+    fn test_all_checks_empty_registry() {
+        let reg = HealthRegistry::new();
+        assert!(reg.all_checks().is_empty());
     }
 }
