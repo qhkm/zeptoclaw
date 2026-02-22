@@ -649,7 +649,6 @@ impl AgentLoop {
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run;
                     let agent_mode = current_agent_mode;
-||||||| parent of 2b9da11 (feat(tools): add ToolOutput dual-audience split (ForLLM/ForUser/Silent/IsError/IsAsync))
                     let bus_for_tools = Arc::clone(&self.bus);
 
                     async move {
@@ -992,7 +991,6 @@ impl AgentLoop {
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     let dry_run = is_dry_run_stream;
                     let agent_mode = current_agent_mode_stream;
-||||||| parent of 2b9da11 (feat(tools): add ToolOutput dual-audience split (ForLLM/ForUser/Silent/IsError/IsAsync))
                     let bus_for_tools = Arc::clone(&self.bus);
 
                     async move {

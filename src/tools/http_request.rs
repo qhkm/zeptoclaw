@@ -3,7 +3,7 @@
 
 use crate::error::{Result, ZeptoError};
 use crate::tools::web::{is_blocked_host, resolve_and_check_host};
-use crate::tools::{Tool, ToolContext};
+use crate::tools::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
@@ -126,7 +126,7 @@ impl Tool for HttpRequestTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let url_str = args["url"].as_str().unwrap_or("").to_string();
         let method_str = args["method"]
             .as_str()
@@ -214,7 +214,9 @@ impl Tool for HttpRequestTool {
             String::from_utf8_lossy(&body_bytes).into_owned()
         };
 
-        Ok(format!("Status: {status}\n\n{body_str}"))
+        Ok(ToolOutput::llm_only(format!(
+            "Status: {status}\n\n{body_str}"
+        )))
     }
 }
 

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::error::{Result, ZeptoError};
 use crate::security::validate_path_in_workspace;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolOutput};
 
 /// Maximum PDF file size accepted before extraction (50 MB).
 const MAX_PDF_BYTES: u64 = 50 * 1024 * 1024;
@@ -150,7 +150,7 @@ impl Tool for PdfReadTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = args["path"].as_str().unwrap_or("");
         if path_str.is_empty() {
             return Err(ZeptoError::Tool(
@@ -184,12 +184,12 @@ impl Tool for PdfReadTool {
             .map_err(|e| ZeptoError::Tool(format!("Task panicked: {e}")))??;
 
         if text.trim().is_empty() {
-            return Ok(
-                "No text content found. The PDF may be image-only or encrypted.".to_string(),
-            );
+            return Ok(ToolOutput::llm_only(
+                "No text content found. The PDF may be image-only or encrypted.",
+            ));
         }
 
-        Ok(Self::truncate_output(text, max_chars))
+        Ok(ToolOutput::llm_only(Self::truncate_output(text, max_chars)))
     }
 }
 

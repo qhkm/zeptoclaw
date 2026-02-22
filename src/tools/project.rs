@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use crate::config::{ProjectBackend, ProjectConfig};
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolOutput};
 
 const DEFAULT_LIMIT: u64 = 10;
 
@@ -817,7 +817,7 @@ impl Tool for ProjectTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -846,7 +846,10 @@ impl Tool for ProjectTool {
                 .ok_or_else(|| {
                     ZeptoError::Tool("'issue_id' is required for transitions".to_string())
                 })?;
-            return self.jira_transitions(issue_id).await;
+            return self
+                .jira_transitions(issue_id)
+                .await
+                .map(ToolOutput::llm_only);
         }
 
         match self.config.backend {
@@ -854,6 +857,7 @@ impl Tool for ProjectTool {
             ProjectBackend::Jira => self.execute_jira(action, &args, limit).await,
             ProjectBackend::Linear => self.execute_linear(action, &args, limit).await,
         }
+        .map(ToolOutput::llm_only)
     }
 }
 

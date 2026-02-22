@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{Result, ZeptoError};
-use crate::tools::{Tool, ToolCategory, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 // ============================================================================
 // Feature-gated implementation (with hardware feature)
@@ -93,7 +93,7 @@ impl Tool for HardwareTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
@@ -103,9 +103,10 @@ impl Tool for HardwareTool {
             "list_devices" => {
                 let devices = self.manager.discover_devices();
                 if devices.is_empty() {
-                    Ok("No hardware devices found. Connect a board (e.g., Nucleo, Arduino) via USB and try again.".to_string())
+                    Ok(ToolOutput::llm_only("No hardware devices found. Connect a board (e.g., Nucleo, Arduino) via USB and try again.".to_string()))
                 } else {
                     serde_json::to_string_pretty(&devices)
+                        .map(ToolOutput::llm_only)
                         .map_err(|e| ZeptoError::Tool(format!("JSON serialize error: {e}")))
                 }
             }
@@ -120,11 +121,12 @@ impl Tool for HardwareTool {
                     })?;
                 match self.manager.device_info(device) {
                     Some(info) => serde_json::to_string_pretty(&info)
+                        .map(ToolOutput::llm_only)
                         .map_err(|e| ZeptoError::Tool(format!("JSON serialize error: {e}"))),
-                    None => Ok(format!(
+                    None => Ok(ToolOutput::llm_only(format!(
                         "Device '{}' not found in registry or connected devices.",
                         device
-                    )),
+                    ))),
                 }
             }
             "connect" => {
@@ -135,21 +137,21 @@ impl Tool for HardwareTool {
                         ZeptoError::Tool("Missing 'device' parameter for connect action".into())
                     })?;
                 // TODO: Implement peripheral connection management
-                Ok(format!(
+                Ok(ToolOutput::llm_only(format!(
                     "Connect to '{}' is not yet implemented. Use the peripheral-specific tools directly.",
                     device
-                ))
+                )))
             }
             "send_command" => {
                 let _device = args.get("device").and_then(|v| v.as_str());
                 let _command = args.get("command").and_then(|v| v.as_str());
                 // TODO: Implement command dispatch to connected peripherals
-                Ok("send_command is not yet implemented. Connect a peripheral first.".to_string())
+                Ok(ToolOutput::llm_only("send_command is not yet implemented. Connect a peripheral first.".to_string()))
             }
             "read_data" => {
                 let _device = args.get("device").and_then(|v| v.as_str());
                 // TODO: Implement data reading from connected peripherals
-                Ok("read_data is not yet implemented. Connect a peripheral first.".to_string())
+                Ok(ToolOutput::llm_only("read_data is not yet implemented. Connect a peripheral first.".to_string()))
             }
             "disconnect" => {
                 let device = args
@@ -161,10 +163,10 @@ impl Tool for HardwareTool {
                         )
                     })?;
                 // TODO: Implement peripheral disconnection
-                Ok(format!(
+                Ok(ToolOutput::llm_only(format!(
                     "Disconnect from '{}' is not yet implemented.",
                     device
-                ))
+                )))
             }
             other => Err(ZeptoError::Tool(format!(
                 "Unknown hardware action: '{}'. Valid actions: list_devices, device_info, connect, send_command, read_data, disconnect",
@@ -232,7 +234,7 @@ impl Tool for HardwareTool {
         })
     }
 
-    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         Err(ZeptoError::Tool(
             "Hardware tool requires 'hardware' build feature. \
              Rebuild with: cargo build --features hardware"

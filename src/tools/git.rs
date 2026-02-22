@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolOutput};
 
 const DEFAULT_LOG_COUNT: u64 = 10;
 const MAX_LOG_COUNT: u64 = 200;
@@ -135,7 +135,7 @@ impl Tool for GitTool {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -157,9 +157,9 @@ impl Tool for GitTool {
             "status" => {
                 let out = Self::run(&["status", "--short", "--branch"], workspace)?;
                 if out.trim().is_empty() {
-                    Ok("Nothing to report (clean working tree).".to_string())
+                    Ok(ToolOutput::llm_only("Nothing to report (clean working tree).".to_string()))
                 } else {
-                    Ok(out)
+                    Ok(ToolOutput::llm_only(out))
                 }
             }
 
@@ -177,9 +177,9 @@ impl Tool for GitTool {
                     workspace,
                 )?;
                 if out.trim().is_empty() {
-                    Ok("No commits found.".to_string())
+                    Ok(ToolOutput::llm_only("No commits found.".to_string()))
                 } else {
-                    Ok(out)
+                    Ok(ToolOutput::llm_only(out))
                 }
             }
 
@@ -191,9 +191,9 @@ impl Tool for GitTool {
                     Self::run(&["diff"], workspace)?
                 };
                 if out.trim().is_empty() {
-                    Ok("No differences found.".to_string())
+                    Ok(ToolOutput::llm_only("No differences found.".to_string()))
                 } else {
-                    Ok(out)
+                    Ok(ToolOutput::llm_only(out))
                 }
             }
 
@@ -208,15 +208,15 @@ impl Tool for GitTool {
                             "Missing 'path' parameter; blame requires a file path".to_string(),
                         )
                     })?;
-                Self::run(&["blame", "--", path], workspace)
+                Self::run(&["blame", "--", path], workspace).map(ToolOutput::llm_only)
             }
 
             "branch_list" => {
                 let out = Self::run(&["branch", "--list", "--sort=-committerdate"], workspace)?;
                 if out.trim().is_empty() {
-                    Ok("No local branches found.".to_string())
+                    Ok(ToolOutput::llm_only("No local branches found.".to_string()))
                 } else {
-                    Ok(out)
+                    Ok(ToolOutput::llm_only(out))
                 }
             }
 
@@ -233,7 +233,7 @@ impl Tool for GitTool {
                         )
                     })?;
                 // Only commit tracked changes (no -A to avoid accidentally staging untracked files).
-                Self::run(&["commit", "-m", message], workspace)
+                Self::run(&["commit", "-m", message], workspace).map(ToolOutput::llm_only)
             }
 
             "add" => {
@@ -249,11 +249,11 @@ impl Tool for GitTool {
                         )
                     })?;
                 let out = Self::run(&["add", "--", path], workspace)?;
-                Ok(if out.trim().is_empty() {
+                Ok(ToolOutput::llm_only(if out.trim().is_empty() {
                     format!("Staged '{}'.", path)
                 } else {
                     out
-                })
+                }))
             }
 
             "checkout" => {
@@ -268,7 +268,7 @@ impl Tool for GitTool {
                                 .to_string(),
                         )
                     })?;
-                Self::run(&["checkout", branch], workspace)
+                Self::run(&["checkout", branch], workspace).map(ToolOutput::llm_only)
             }
 
             other => Err(ZeptoError::Tool(format!(
@@ -390,7 +390,7 @@ mod tests {
         assert!(result.is_ok(), "status failed: {:?}", result);
         // Output is either the short status format or the clean-tree message.
         let out = result.unwrap();
-        assert!(!out.is_empty());
+        assert!(!out.for_llm.is_empty());
     }
 
     // --- log ---
@@ -405,7 +405,7 @@ mod tests {
         assert!(result.is_ok(), "log failed: {:?}", result);
         let out = result.unwrap();
         // Each log line contains a short hash and a date.
-        assert!(!out.is_empty());
+        assert!(!out.for_llm.is_empty());
     }
 
     // --- branch_list ---
@@ -419,7 +419,7 @@ mod tests {
         let out = result.unwrap();
         // There must be at least one branch (we are on one right now).
         assert!(
-            !out.trim().is_empty(),
+            !out.for_llm.trim().is_empty(),
             "expected at least one branch, got empty output"
         );
     }

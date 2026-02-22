@@ -31,7 +31,7 @@ use sha2::Digest;
 
 use crate::error::{Result, ZeptoError};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolOutput};
 
 /// Monotonically-increasing counter for idempotency key disambiguation.
 static IDEM_KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -666,7 +666,7 @@ impl Tool for StripeTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -689,6 +689,7 @@ impl Tool for StripeTool {
                 other
             ))),
         }
+        .map(ToolOutput::llm_only)
     }
 }
 

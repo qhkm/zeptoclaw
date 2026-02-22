@@ -250,6 +250,7 @@ impl Default for PairingConfig {
             lockout_secs: 300,
         }
     }
+}
 
 // ============================================================================
 // Health Server Configuration
@@ -285,8 +286,6 @@ impl Default for HealthConfig {
             port: default_health_port(),
         }
     }
-}
-
 }
 
 // ============================================================================

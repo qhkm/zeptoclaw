@@ -19,7 +19,8 @@ use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
-    GeminiProvider, LLMProvider, OpenAIProvider, ProviderPlugin, RetryProvider, RuntimeProviderSelection,
+    GeminiProvider, LLMProvider, OpenAIProvider, ProviderPlugin, RetryProvider,
+    RuntimeProviderSelection,
 };
 use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
@@ -33,7 +34,6 @@ use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
     EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool, InstallSkillTool,
     MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool,
-    TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
     TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
