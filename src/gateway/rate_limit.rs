@@ -134,13 +134,17 @@ mod tests {
 
     #[test]
     fn test_expired_entries_freed() {
-        // Use 50ms window so the two quick checks don't cross the boundary in
-        // a debug build under load (1ms was too tight).
-        let limiter = SlidingWindowRateLimiter::new(1, Duration::from_millis(50));
+        // Use a large enough window that two consecutive calls are never in
+        // separate windows, even on a heavily-loaded debug build.
+        let limiter = SlidingWindowRateLimiter::new(1, Duration::from_secs(5));
         assert!(limiter.check(localhost()));
-        assert!(!limiter.check(localhost()));
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(limiter.check(localhost())); // window expired, should be allowed
+        assert!(!limiter.check(localhost())); // still within window, denied
+
+        // Now use a short-window limiter to verify expiry resets the counter.
+        let short = SlidingWindowRateLimiter::new(1, Duration::from_millis(50));
+        assert!(short.check(localhost()));
+        std::thread::sleep(Duration::from_millis(100)); // outlast the window
+        assert!(short.check(localhost())); // window expired, should be allowed
     }
 
     #[test]
