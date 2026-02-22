@@ -31,14 +31,14 @@ $ zeptoclaw agent --stream -m "Analyze our API for security issues"
 ✓ Analysis complete in 4.2s
 ```
 
-We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 17 tools, 5 channels, 8 providers, and container isolation.
+We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 17 tools, 5 channels, 9 providers, and container isolation.
 
 <p align="center">
   <img src="https://img.shields.io/badge/binary-~4MB-3b82f6" alt="~4MB binary">
   <img src="https://img.shields.io/badge/startup-~50ms-3b82f6" alt="~50ms startup">
   <img src="https://img.shields.io/badge/RAM-~6MB-3b82f6" alt="~6MB RAM">
   <img src="https://img.shields.io/badge/tests-1%2C300%2B-3b82f6" alt="1,300+ tests">
-  <img src="https://img.shields.io/badge/providers-8-3b82f6" alt="8 providers">
+  <img src="https://img.shields.io/badge/providers-9-3b82f6" alt="9 providers">
 </p>
 
 ## Why ZeptoClaw
@@ -151,7 +151,41 @@ Supports JSON and JSON5 config files (comments, trailing commas, unquoted keys).
 curl -fsSL https://zeptoclaw.com/setup.sh | bash
 ```
 
-Interactive setup guides you through provider keys and channel selection. Installs the binary, creates a systemd service, starts on boot.
+Installs the binary and prints next steps. Run `zeptoclaw onboard` to configure providers and channels.
+
+## Providers
+
+ZeptoClaw supports 9 LLM providers. All OpenAI-compatible endpoints work out of the box.
+
+| Provider | Config key | Setup |
+|----------|------------|-------|
+| **Anthropic** | `anthropic` | `api_key` |
+| **OpenAI** | `openai` | `api_key` |
+| **OpenRouter** | `openrouter` | `api_key` |
+| **Groq** | `groq` | `api_key` |
+| **Ollama** | `ollama` | `api_key` (any value) |
+| **VLLM** | `vllm` | `api_key` (any value) |
+| **Google Gemini** | `gemini` | `api_key` |
+| **NVIDIA NIM** | `nvidia` | `api_key` |
+| **Zhipu (GLM)** | `zhipu` | `api_key` |
+
+Configure in `~/.zeptoclaw/config.json` or via environment variables:
+
+```json
+{
+  "providers": {
+    "openrouter": { "api_key": "sk-or-..." },
+    "ollama": { "api_key": "ollama" }
+  },
+  "agents": { "defaults": { "model": "anthropic/claude-sonnet-4" } }
+}
+```
+
+```bash
+export ZEPTOCLAW_PROVIDERS_GROQ_API_KEY=gsk_...
+```
+
+Any provider's base URL can be overridden with `api_base` for proxies or self-hosted endpoints. See the [provider docs](https://zeptoclaw.com/docs/concepts/providers/) for full details.
 
 ## Features
 
@@ -159,7 +193,7 @@ Interactive setup guides you through provider keys and channel selection. Instal
 
 | Feature | What it does |
 |---------|-------------|
-| **Multi-Provider LLM** | Claude + OpenAI with SSE streaming, retry with backoff, auto-failover |
+| **Multi-Provider LLM** | 9 providers with SSE streaming, retry with backoff, auto-failover |
 | **17 Tools + Plugins** | Shell, filesystem, web, memory, cron, WhatsApp, Google Sheets, and more |
 | **Agent Swarms** | Delegate to sub-agents with role-specific prompts and tool whitelists |
 | **Batch Mode** | Process hundreds of prompts from text/JSONL files with template support |
