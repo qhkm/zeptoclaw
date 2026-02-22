@@ -30,7 +30,9 @@ pub mod screen;
 pub mod stuck;
 pub mod types;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -106,10 +108,7 @@ impl AndroidTool {
 
         // Run stuck detection on the processed elements
         let alerts = {
-            let mut detector = self
-                .stuck
-                .lock()
-                .map_err(|e| ZeptoError::Tool(format!("StuckDetector mutex poisoned: {}", e)))?;
+            let mut detector = self.stuck.lock().await;
             detector.observe_screen(&processed)
         };
 
@@ -141,10 +140,7 @@ impl AndroidTool {
     async fn dispatch_action(&self, action: &str, args: &Value) -> Result<String> {
         // Record action for stuck detection
         {
-            let mut detector = self
-                .stuck
-                .lock()
-                .map_err(|e| ZeptoError::Tool(format!("StuckDetector mutex poisoned: {}", e)))?;
+            let mut detector = self.stuck.lock().await;
             let alerts = detector.observe_action(action);
             if !alerts.is_empty() {
                 let alerts_json = serde_json::to_string(&alerts).unwrap_or_default();
@@ -175,8 +171,8 @@ impl AndroidTool {
                     actions::parse_coordinates(args.get("x"), args.get("y"), args.get("coords"))?;
                 let duration = args
                     .get("duration_ms")
-                    .and_then(|v| v.as_i64())
-                    .map(|v| v as i32);
+                    .map(actions::value_to_i32)
+                    .transpose()?;
                 actions::long_press(&self.adb, x, y, duration).await
             }
             "swipe" => {
@@ -198,8 +194,8 @@ impl AndroidTool {
                     })?)?;
                 let dur = args
                     .get("duration_ms")
-                    .and_then(|v| v.as_i64())
-                    .map(|v| v as i32);
+                    .map(actions::value_to_i32)
+                    .transpose()?;
                 actions::swipe(&self.adb, x1, y1, x2, y2, dur).await
             }
             "scroll" => {
@@ -281,9 +277,13 @@ impl Tool for AndroidTool {
     }
 
     fn description(&self) -> &str {
-        "Control an Android device via ADB. Use action='screen' to see UI elements, \
-         then 'tap', 'type', 'scroll' etc. to interact. The screen action returns \
-         interactive elements with coordinates for precise control."
+        "Control an Android device via ADB. Workflow: (1) ALWAYS call action='screen' \
+         first to see the current UI elements and their coordinates. (2) Use the \
+         returned element coordinates for 'tap', 'type', 'swipe', 'scroll'. (3) Call \
+         'screen' again after each interaction to verify the result. Never guess \
+         coordinates — always read them from the screen response. For text input, \
+         tap a field first, then use 'type'. Use 'scroll' with direction to reveal \
+         off-screen content."
     }
 
     fn compact_description(&self) -> &str {
@@ -385,6 +385,8 @@ mod tests {
     fn test_tool_description() {
         let tool = AndroidTool::new();
         assert!(tool.description().contains("ADB"));
+        assert!(tool.description().contains("screen"));
+        assert!(tool.description().contains("Never guess"));
     }
 
     #[test]

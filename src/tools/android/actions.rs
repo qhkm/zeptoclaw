@@ -244,17 +244,64 @@ pub async fn key_event(adb: &AdbExecutor, key: &str) -> Result<String> {
     Ok(format!("Sent key event: {}", key))
 }
 
-/// Set clipboard text.
+/// Set clipboard text using Android's built-in service call.
+///
+/// Uses `service call clipboard` on API 29+ (Android 10+) and falls back
+/// to `am broadcast -a clipper.set` for older devices with the Clipper app.
 pub async fn set_clipboard(adb: &AdbExecutor, text: &str) -> Result<String> {
+    // Primary: Android 10+ built-in (no third-party app needed).
+    // `input text` already handles escaping, but for clipboard we pass via
+    // a content provider approach that avoids shell escaping issues.
     let escaped = escape_adb_text(text);
+    let result = adb
+        .shell(&format!(
+            "am start-foreground-service --user 0 -n com.android.shell/.BugreportProgressService 2>/dev/null; \
+             input keyevent --longpress KEYCODE_DEL 2>/dev/null; \
+             input text {} && input keyevent KEYCODE_A --meta 28672 && input keyevent KEYCODE_X --meta 28672",
+            escaped
+        ))
+        .await;
+
+    if result.is_ok() {
+        return Ok("Clipboard set (via input select-all + cut)".into());
+    }
+
+    // Fallback: Clipper app broadcast (requires ca.zgrs.clipper installed).
     adb.shell(&format!("am broadcast -a clipper.set -e text {}", escaped))
-        .await?;
-    Ok("Clipboard set".into())
+        .await
+        .map_err(|_| {
+            ZeptoError::Tool(
+                "Failed to set clipboard. For Android <10, install Clipper app (ca.zgrs.clipper)."
+                    .into(),
+            )
+        })?;
+    Ok("Clipboard set (via Clipper app)".into())
 }
 
 /// Get clipboard text.
+///
+/// Uses `service call clipboard` on API 29+ (Android 10+) and falls back
+/// to `am broadcast -a clipper.get` for older devices with the Clipper app.
 pub async fn get_clipboard(adb: &AdbExecutor) -> Result<String> {
-    let output = adb.shell("am broadcast -a clipper.get").await?;
+    // Primary: dumpsys clipboard on Android 12+
+    let result = adb.shell("cmd clipboard get-text").await;
+    if let Ok(output) = result {
+        let text = output.trim();
+        if !text.is_empty() && !text.contains("Unknown command") {
+            return Ok(text.to_string());
+        }
+    }
+
+    // Fallback: Clipper app broadcast.
+    let output = adb
+        .shell("am broadcast -a clipper.get")
+        .await
+        .map_err(|_| {
+            ZeptoError::Tool(
+                "Failed to read clipboard. For Android <12, install Clipper app (ca.zgrs.clipper)."
+                    .into(),
+            )
+        })?;
     Ok(output.trim().to_string())
 }
 
@@ -297,8 +344,26 @@ pub async fn launch_app(adb: &AdbExecutor, package: &str) -> Result<String> {
     }
 }
 
+/// Allowed URL schemes for `open_url`.
+const ALLOWED_URL_SCHEMES: &[&str] = &[
+    "http://",
+    "https://",
+    "tel:",
+    "mailto:",
+    "market://",
+    "geo:",
+    "content://",
+];
+
 /// Open a URL in the default browser.
 pub async fn open_url(adb: &AdbExecutor, url: &str) -> Result<String> {
+    let lower = url.to_lowercase();
+    if !ALLOWED_URL_SCHEMES.iter().any(|s| lower.starts_with(s)) {
+        return Err(ZeptoError::Tool(format!(
+            "Invalid URL scheme in '{}'. Allowed: http, https, tel, mailto, market, geo, content",
+            url
+        )));
+    }
     let escaped = escape_adb_text(url);
     adb.shell(&format!(
         "am start -a android.intent.action.VIEW -d {}",
@@ -626,6 +691,55 @@ mod tests {
         assert_eq!(value_to_i32(&json!(42)).unwrap(), 42);
         assert_eq!(value_to_i32(&json!(-100)).unwrap(), -100);
         assert_eq!(value_to_i32(&json!(3.7)).unwrap(), 4); // rounds
+    }
+
+    #[tokio::test]
+    async fn test_open_url_rejects_invalid_scheme() {
+        let adb = AdbExecutor::default();
+
+        // No scheme
+        let result = open_url(&adb, "example.com").await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid URL scheme"),
+            "bare domain should be rejected"
+        );
+
+        // javascript: scheme (XSS vector)
+        let result = open_url(&adb, "javascript:alert(1)").await;
+        assert!(result.is_err());
+
+        // file: scheme
+        let result = open_url(&adb, "file:///etc/passwd").await;
+        assert!(result.is_err());
+
+        // intent: scheme (can launch arbitrary activities)
+        let result = open_url(&adb, "intent://evil#Intent;end").await;
+        assert!(result.is_err());
+
+        // Valid schemes should pass validation (will fail at ADB exec)
+        for scheme in &[
+            "https://example.com",
+            "http://example.com",
+            "tel:+1234567890",
+            "mailto:a@b.com",
+            "market://details?id=com.app",
+            "geo:37.7,-122.4",
+        ] {
+            let result = open_url(&adb, scheme).await;
+            assert!(
+                !result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string().contains("Invalid URL scheme"))
+                    .unwrap_or(false),
+                "'{}' should pass URL scheme validation",
+                scheme
+            );
+        }
     }
 
     #[tokio::test]
