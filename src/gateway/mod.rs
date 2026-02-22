@@ -16,5 +16,7 @@ pub use container_agent::{
 pub use ipc::{parse_marked_response, AgentRequest, AgentResponse, AgentResult};
 pub use ipc::{RESPONSE_END_MARKER, RESPONSE_START_MARKER};
 
+pub mod idempotency;
 pub mod rate_limit;
+pub use idempotency::IdempotencyStore;
 pub use rate_limit::{GatewayRateLimiter, SlidingWindowRateLimiter};
