@@ -44,7 +44,7 @@ deploy_zeptoclaw() {
     mkdir -p "$SCRIPT_DIR/zeptoclaw/_deploy/docs"
     cp "$SCRIPT_DIR/zeptoclaw/index.html" "$SCRIPT_DIR/zeptoclaw/_deploy/"
     cp "$SCRIPT_DIR/zeptoclaw/mascot-no-bg.png" "$SCRIPT_DIR/zeptoclaw/_deploy/"
-    cp "$SCRIPT_DIR/zeptoclaw/setup.sh" "$SCRIPT_DIR/zeptoclaw/_deploy/"
+    cp "$SCRIPT_DIR/../deploy/setup.sh" "$SCRIPT_DIR/zeptoclaw/_deploy/"
     [ -f "$SCRIPT_DIR/zeptoclaw/favicon.svg" ] && cp "$SCRIPT_DIR/zeptoclaw/favicon.svg" "$SCRIPT_DIR/zeptoclaw/_deploy/"
     cp -r "$SCRIPT_DIR/zeptoclaw/docs/dist/"* "$SCRIPT_DIR/zeptoclaw/_deploy/docs/"
 

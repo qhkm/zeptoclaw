@@ -60,37 +60,6 @@ need_sudo() {
   fi
 }
 
-prompt_value() {
-  # prompt_value "Prompt text" "default_value"
-  _prompt="$1"
-  _default="${2:-}"
-  if [ -n "$_default" ]; then
-    printf "%s [%s]: " "$_prompt" "$_default"
-  else
-    printf "%s: " "$_prompt"
-  fi
-  read -r _answer </dev/tty || _answer=""
-  if [ -z "$_answer" ]; then
-    _answer="$_default"
-  fi
-  printf '%s' "$_answer"
-}
-
-prompt_secret() {
-  # prompt_secret "Prompt text"
-  printf "%s: " "$1"
-  # Try to disable echo; fall back to normal read
-  if [ -t 0 ]; then
-    stty -echo 2>/dev/null || true
-    read -r _secret </dev/tty || _secret=""
-    stty echo 2>/dev/null || true
-    printf '\n'
-  else
-    read -r _secret || _secret=""
-  fi
-  printf '%s' "$_secret"
-}
-
 # ─── Usage ────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -107,18 +76,9 @@ Options:
   --uninstall   Remove ZeptoClaw from this system
   --help        Show this help message
 
-Environment variables (skip interactive prompts):
-  ANTHROPIC_KEY     Anthropic API key
-  OPENAI_KEY        OpenAI API key
-  TELEGRAM_TOKEN    Telegram bot token
-  DISCORD_TOKEN     Discord bot token
-  SLACK_BOT_TOKEN   Slack bot token
-  SLACK_APP_TOKEN   Slack app token
-
 Examples:
-  # Non-interactive binary install
-  ANTHROPIC_KEY=sk-ant-... TELEGRAM_TOKEN=123:ABC... \\
-    curl -fsSL https://zeptoclaw.com/setup.sh | sh
+  # Install binary
+  curl -fsSL https://zeptoclaw.com/setup.sh | sh
 
   # Docker mode
   curl -fsSL https://zeptoclaw.com/setup.sh | sh -s -- --docker
@@ -212,19 +172,10 @@ do_uninstall() {
     fi
   fi
 
-  # Ask about config directory
+  # Remove config directory
   if [ -d "$CONFIG_DIR" ]; then
-    printf "Remove config directory %s? [y/N]: " "$CONFIG_DIR"
-    read -r _remove </dev/tty 2>/dev/null || _remove="n"
-    case "$_remove" in
-      [yY]|[yY][eE][sS])
-        rm -rf "$CONFIG_DIR"
-        ok "Config directory removed"
-        ;;
-      *)
-        info "Config directory preserved at ${CONFIG_DIR}"
-        ;;
-    esac
+    info "Config directory preserved at ${CONFIG_DIR}"
+    info "Remove manually with: rm -rf ${CONFIG_DIR}"
   fi
 
   ok "ZeptoClaw has been uninstalled"
@@ -319,365 +270,6 @@ install_docker() {
   ok "Docker image pulled"
 }
 
-# ─── Interactive config wizard ───────────────────────────────────────────────
-
-config_wizard() {
-  # Results stored in these variables
-  PROVIDER_ANTHROPIC_KEY="${ANTHROPIC_KEY:-}"
-  PROVIDER_OPENAI_KEY="${OPENAI_KEY:-}"
-  CHANNEL_TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}"
-  CHANNEL_DISCORD_TOKEN="${DISCORD_TOKEN:-}"
-  CHANNEL_SLACK_BOT="${SLACK_BOT_TOKEN:-}"
-  CHANNEL_SLACK_APP="${SLACK_APP_TOKEN:-}"
-  CHOSEN_CHANNEL=""
-
-  # Skip wizard if all essential env vars are set
-  if [ -n "$PROVIDER_ANTHROPIC_KEY" ] || [ -n "$PROVIDER_OPENAI_KEY" ]; then
-    if [ -n "$CHANNEL_TELEGRAM_TOKEN" ] || [ -n "$CHANNEL_DISCORD_TOKEN" ] || \
-       [ -n "$CHANNEL_SLACK_BOT" ]; then
-      info "Configuration detected from environment variables. Skipping wizard."
-      # Determine channel from env
-      if [ -n "$CHANNEL_TELEGRAM_TOKEN" ]; then
-        CHOSEN_CHANNEL="telegram"
-      elif [ -n "$CHANNEL_DISCORD_TOKEN" ]; then
-        CHOSEN_CHANNEL="discord"
-      elif [ -n "$CHANNEL_SLACK_BOT" ]; then
-        CHOSEN_CHANNEL="slack"
-      fi
-      return 0
-    fi
-  fi
-
-  printf "\n${BOLD}=== ZeptoClaw Configuration Wizard ===${RESET}\n\n"
-
-  # ── LLM Provider ──
-  if [ -z "$PROVIDER_ANTHROPIC_KEY" ] && [ -z "$PROVIDER_OPENAI_KEY" ]; then
-    printf "Choose LLM provider:\n"
-    printf "  ${BOLD}1${RESET}) Anthropic (Claude) — ${GREEN}default${RESET}\n"
-    printf "  ${BOLD}2${RESET}) OpenAI (GPT)\n"
-    printf "  ${BOLD}3${RESET}) Both\n"
-    PROVIDER_CHOICE="$(prompt_value "Selection" "1")"
-
-    case "$PROVIDER_CHOICE" in
-      1|"")
-        PROVIDER_ANTHROPIC_KEY="$(prompt_secret "Enter Anthropic API key (sk-ant-...)")"
-        [ -z "$PROVIDER_ANTHROPIC_KEY" ] && die "Anthropic API key is required"
-        ;;
-      2)
-        PROVIDER_OPENAI_KEY="$(prompt_secret "Enter OpenAI API key (sk-...)")"
-        [ -z "$PROVIDER_OPENAI_KEY" ] && die "OpenAI API key is required"
-        ;;
-      3)
-        PROVIDER_ANTHROPIC_KEY="$(prompt_secret "Enter Anthropic API key (sk-ant-...)")"
-        [ -z "$PROVIDER_ANTHROPIC_KEY" ] && die "Anthropic API key is required"
-        PROVIDER_OPENAI_KEY="$(prompt_secret "Enter OpenAI API key (sk-...)")"
-        [ -z "$PROVIDER_OPENAI_KEY" ] && die "OpenAI API key is required"
-        ;;
-      *) die "Invalid selection: $PROVIDER_CHOICE" ;;
-    esac
-  else
-    info "LLM provider key(s) detected from environment"
-  fi
-  printf "\n"
-
-  # ── Channel ──
-  if [ -z "$CHANNEL_TELEGRAM_TOKEN" ] && [ -z "$CHANNEL_DISCORD_TOKEN" ] && \
-     [ -z "$CHANNEL_SLACK_BOT" ]; then
-    printf "Choose messaging channel:\n"
-    printf "  ${BOLD}1${RESET}) Telegram — ${GREEN}default${RESET}\n"
-    printf "  ${BOLD}2${RESET}) Discord\n"
-    printf "  ${BOLD}3${RESET}) Slack\n"
-    printf "  ${BOLD}4${RESET}) Webhook only (HTTP POST inbound)\n"
-    printf "  ${BOLD}5${RESET}) Skip (configure later)\n"
-    CHANNEL_CHOICE="$(prompt_value "Selection" "1")"
-
-    case "$CHANNEL_CHOICE" in
-      1|"")
-        CHOSEN_CHANNEL="telegram"
-        CHANNEL_TELEGRAM_TOKEN="$(prompt_secret "Enter Telegram bot token (from @BotFather)")"
-        [ -z "$CHANNEL_TELEGRAM_TOKEN" ] && die "Telegram bot token is required"
-        ;;
-      2)
-        CHOSEN_CHANNEL="discord"
-        CHANNEL_DISCORD_TOKEN="$(prompt_secret "Enter Discord bot token")"
-        [ -z "$CHANNEL_DISCORD_TOKEN" ] && die "Discord bot token is required"
-        ;;
-      3)
-        CHOSEN_CHANNEL="slack"
-        CHANNEL_SLACK_BOT="$(prompt_secret "Enter Slack bot token (xoxb-...)")"
-        [ -z "$CHANNEL_SLACK_BOT" ] && die "Slack bot token is required"
-        CHANNEL_SLACK_APP="$(prompt_secret "Enter Slack app token (xapp-...)")"
-        [ -z "$CHANNEL_SLACK_APP" ] && die "Slack app token is required"
-        ;;
-      4)
-        CHOSEN_CHANNEL="webhook"
-        ;;
-      5)
-        CHOSEN_CHANNEL=""
-        info "No channel configured. You can set one up later in ${CONFIG_DIR}/config.json"
-        ;;
-      *) die "Invalid selection: $CHANNEL_CHOICE" ;;
-    esac
-  else
-    info "Channel credentials detected from environment"
-    if [ -n "$CHANNEL_TELEGRAM_TOKEN" ]; then
-      CHOSEN_CHANNEL="telegram"
-    elif [ -n "$CHANNEL_DISCORD_TOKEN" ]; then
-      CHOSEN_CHANNEL="discord"
-    elif [ -n "$CHANNEL_SLACK_BOT" ]; then
-      CHOSEN_CHANNEL="slack"
-    fi
-  fi
-}
-
-# ─── Write config (binary mode) ─────────────────────────────────────────────
-
-write_config_json() {
-  mkdir -p "$CONFIG_DIR"
-
-  # Build providers JSON
-  PROVIDERS_JSON='{'
-  FIRST_PROVIDER=true
-
-  if [ -n "$PROVIDER_ANTHROPIC_KEY" ]; then
-    PROVIDERS_JSON="${PROVIDERS_JSON}"'
-    "anthropic": {
-      "api_key": "'"$PROVIDER_ANTHROPIC_KEY"'"
-    }'
-    FIRST_PROVIDER=false
-  fi
-
-  if [ -n "$PROVIDER_OPENAI_KEY" ]; then
-    if [ "$FIRST_PROVIDER" = false ]; then
-      PROVIDERS_JSON="${PROVIDERS_JSON},"
-    fi
-    PROVIDERS_JSON="${PROVIDERS_JSON}"'
-    "openai": {
-      "api_key": "'"$PROVIDER_OPENAI_KEY"'"
-    }'
-  fi
-
-  PROVIDERS_JSON="${PROVIDERS_JSON}"'
-  }'
-
-  # Build channels JSON
-  CHANNELS_JSON='{'
-  case "$CHOSEN_CHANNEL" in
-    telegram)
-      CHANNELS_JSON="${CHANNELS_JSON}"'
-    "telegram": {
-      "bot_token": "'"$CHANNEL_TELEGRAM_TOKEN"'"
-    }'
-      ;;
-    discord)
-      CHANNELS_JSON="${CHANNELS_JSON}"'
-    "discord": {
-      "bot_token": "'"$CHANNEL_DISCORD_TOKEN"'"
-    }'
-      ;;
-    slack)
-      CHANNELS_JSON="${CHANNELS_JSON}"'
-    "slack": {
-      "bot_token": "'"$CHANNEL_SLACK_BOT"'",
-      "app_token": "'"$CHANNEL_SLACK_APP"'"
-    }'
-      ;;
-    webhook)
-      CHANNELS_JSON="${CHANNELS_JSON}"'
-    "webhook": {
-      "enabled": true,
-      "port": 8080
-    }'
-      ;;
-  esac
-  CHANNELS_JSON="${CHANNELS_JSON}"'
-  }'
-
-  CONFIG_FILE="${CONFIG_DIR}/config.json"
-
-  # Preserve existing config if present
-  if [ -f "$CONFIG_FILE" ]; then
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-    warn "Existing config backed up to ${CONFIG_FILE}.bak"
-  fi
-
-  cat > "$CONFIG_FILE" <<CONFIGEOF
-{
-  "providers": ${PROVIDERS_JSON},
-  "channels": ${CHANNELS_JSON}
-}
-CONFIGEOF
-
-  # Secure permissions — config contains API keys
-  chmod 600 "$CONFIG_FILE"
-  ok "Config written to ${CONFIG_FILE} (mode 600)"
-}
-
-# ─── Write env file (Docker mode) ───────────────────────────────────────────
-
-write_deploy_env() {
-  mkdir -p "$CONFIG_DIR"
-  ENV_FILE="${CONFIG_DIR}/deploy.env"
-
-  # Preserve existing env file if present
-  if [ -f "$ENV_FILE" ]; then
-    cp "$ENV_FILE" "${ENV_FILE}.bak"
-    warn "Existing deploy.env backed up to ${ENV_FILE}.bak"
-  fi
-
-  cat > "$ENV_FILE" <<ENVEOF
-# ZeptoClaw Docker environment — generated by setup.sh
-RUST_LOG=zeptoclaw=info
-ENVEOF
-
-  if [ -n "$PROVIDER_ANTHROPIC_KEY" ]; then
-    printf 'ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=%s\n' "$PROVIDER_ANTHROPIC_KEY" >> "$ENV_FILE"
-  fi
-  if [ -n "$PROVIDER_OPENAI_KEY" ]; then
-    printf 'ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=%s\n' "$PROVIDER_OPENAI_KEY" >> "$ENV_FILE"
-  fi
-  if [ -n "$CHANNEL_TELEGRAM_TOKEN" ]; then
-    printf 'ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN=%s\n' "$CHANNEL_TELEGRAM_TOKEN" >> "$ENV_FILE"
-  fi
-  if [ -n "$CHANNEL_DISCORD_TOKEN" ]; then
-    printf 'ZEPTOCLAW_CHANNELS_DISCORD_BOT_TOKEN=%s\n' "$CHANNEL_DISCORD_TOKEN" >> "$ENV_FILE"
-  fi
-  if [ -n "$CHANNEL_SLACK_BOT" ]; then
-    printf 'ZEPTOCLAW_CHANNELS_SLACK_BOT_TOKEN=%s\n' "$CHANNEL_SLACK_BOT" >> "$ENV_FILE"
-  fi
-  if [ -n "$CHANNEL_SLACK_APP" ]; then
-    printf 'ZEPTOCLAW_CHANNELS_SLACK_APP_TOKEN=%s\n' "$CHANNEL_SLACK_APP" >> "$ENV_FILE"
-  fi
-
-  # Secure permissions — env file contains API keys
-  chmod 600 "$ENV_FILE"
-  ok "Environment written to ${ENV_FILE} (mode 600)"
-}
-
-# ─── Systemd service (binary mode) ──────────────────────────────────────────
-
-create_systemd_service() {
-  need_sudo
-
-  info "Creating systemd service..."
-
-  $SUDO tee "$SERVICE_FILE" >/dev/null <<SERVICEEOF
-[Unit]
-Description=ZeptoClaw AI Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$(whoami)
-ExecStart=${INSTALL_DIR}/${BINARY} gateway
-WorkingDirectory=${HOME}
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-Environment=RUST_LOG=zeptoclaw=info
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=${CONFIG_DIR}
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
-
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
-  $SUDO systemctl start "$SERVICE_NAME"
-  ok "Systemd service created and started"
-}
-
-# ─── Start Docker container ─────────────────────────────────────────────────
-
-start_docker_container() {
-  # Stop existing container if running
-  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
-    info "Stopping existing container..."
-    docker stop "$CONTAINER_NAME" 2>/dev/null || true
-    docker rm "$CONTAINER_NAME" 2>/dev/null || true
-  fi
-
-  ENV_FILE="${CONFIG_DIR}/deploy.env"
-
-  info "Starting Docker container..."
-  docker run -d \
-    --name "$CONTAINER_NAME" \
-    --restart unless-stopped \
-    --env-file "$ENV_FILE" \
-    -v "${CONFIG_DIR}:/data" \
-    -p 8080:8080 \
-    -p 9090:9090 \
-    --memory=128m \
-    --cpus=0.5 \
-    "$DOCKER_IMAGE" \
-    zeptoclaw gateway || die "Failed to start Docker container"
-
-  ok "Docker container started"
-}
-
-# ─── Verify ──────────────────────────────────────────────────────────────────
-
-verify_install() {
-  _mode="$1"  # "binary" or "docker"
-
-  info "Waiting for service to start..."
-  sleep 2
-
-  printf "\n${BOLD}=== Installation Complete ===${RESET}\n\n"
-
-  if [ "$_mode" = "binary" ]; then
-    if $SUDO systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-      ok "Service is running"
-    else
-      warn "Service may not be running yet. Check with: sudo systemctl status ${SERVICE_NAME}"
-    fi
-
-    VERSION="$(${INSTALL_DIR}/${BINARY} --version 2>/dev/null || echo 'installed')"
-    printf "\n"
-    info "Version:  ${VERSION}"
-    info "Binary:   ${INSTALL_DIR}/${BINARY}"
-    info "Config:   ${CONFIG_DIR}/config.json"
-    info "Service:  ${SERVICE_FILE}"
-    printf "\n${BOLD}Useful commands:${RESET}\n"
-    printf "  sudo systemctl status %s    # Check status\n" "$SERVICE_NAME"
-    printf "  sudo journalctl -u %s -f    # Follow logs\n" "$SERVICE_NAME"
-    printf "  sudo systemctl restart %s   # Restart\n" "$SERVICE_NAME"
-    printf "  sudo systemctl stop %s      # Stop\n" "$SERVICE_NAME"
-    printf "  %s agent -m 'Hello'         # Test agent\n" "$BINARY"
-    printf "  nano %s/config.json         # Edit config\n" "$CONFIG_DIR"
-
-  elif [ "$_mode" = "docker" ]; then
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
-      ok "Container is running"
-    else
-      warn "Container may not be running. Check with: docker logs ${CONTAINER_NAME}"
-    fi
-
-    printf "\n"
-    info "Image:    ${DOCKER_IMAGE}"
-    info "Config:   ${CONFIG_DIR}/deploy.env"
-    info "Data:     ${CONFIG_DIR} (mounted at /data)"
-    printf "\n${BOLD}Useful commands:${RESET}\n"
-    printf "  docker logs -f %s             # Follow logs\n" "$CONTAINER_NAME"
-    printf "  docker restart %s             # Restart\n" "$CONTAINER_NAME"
-    printf "  docker stop %s                # Stop\n" "$CONTAINER_NAME"
-    printf "  docker exec -it %s sh         # Shell into container\n" "$CONTAINER_NAME"
-    printf "  nano %s/deploy.env            # Edit config\n" "$CONFIG_DIR"
-    printf "  docker pull %s && \\\\\n" "$DOCKER_IMAGE"
-    printf "    docker stop %s && docker rm %s && \\\\\n" "$CONTAINER_NAME" "$CONTAINER_NAME"
-    printf "    bash deploy/setup.sh --docker  # Upgrade\n"
-  fi
-
-  printf "\n${BOLD}Docs:${RESET} https://github.com/${REPO}\n\n"
-}
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 main() {
@@ -704,7 +296,7 @@ main() {
     esac
   done
 
-  printf "\n${BOLD}ZeptoClaw VPS Setup${RESET} (%s mode)\n\n" "$MODE"
+  printf "\n${BOLD}ZeptoClaw Setup${RESET} (%s mode)\n\n" "$MODE"
 
   check_system
 
@@ -715,24 +307,20 @@ main() {
     install_binary
   fi
 
-  printf "\n"
+  # Print next step
+  printf "\n${BOLD}=== Installation Complete ===${RESET}\n\n"
 
-  # Configure
-  config_wizard
-
-  printf "\n"
-
-  # Write config and start
   if [ "$MODE" = "docker" ]; then
-    write_deploy_env
-    start_docker_container
+    VERSION="$(docker run --rm "$DOCKER_IMAGE" zeptoclaw --version 2>/dev/null || echo 'installed')"
+    ok "ZeptoClaw ${VERSION}"
+    printf "\n${BOLD}Next step:${RESET}\n"
+    printf "  docker run --rm -it -v %s:/data %s zeptoclaw onboard\n\n" "$CONFIG_DIR" "$DOCKER_IMAGE"
   else
-    write_config_json
-    create_systemd_service
+    VERSION="$(${INSTALL_DIR}/${BINARY} --version 2>/dev/null || echo 'installed')"
+    ok "ZeptoClaw ${VERSION}"
+    printf "\n${BOLD}Next step:${RESET}\n"
+    printf "  zeptoclaw onboard\n\n"
   fi
-
-  # Verify
-  verify_install "$MODE"
 }
 
 main "$@"
