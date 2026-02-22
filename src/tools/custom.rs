@@ -195,7 +195,7 @@ impl Tool for CustomTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::types::{ToolContext, ToolOutput};
+    use crate::tools::types::ToolContext;
 
     fn test_ctx() -> ToolContext {
         ToolContext {

@@ -72,7 +72,6 @@ macro_rules! log_component {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::{LogFormat, LoggingConfig};
 
     #[test]
