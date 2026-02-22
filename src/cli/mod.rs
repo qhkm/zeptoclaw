@@ -7,6 +7,8 @@ pub mod batch;
 pub mod channel;
 pub mod common;
 pub mod config;
+pub mod daemon;
+pub mod doctor;
 pub mod gateway;
 pub mod heartbeat;
 pub mod history;
@@ -165,6 +167,14 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
+    /// Run system diagnostics
+    Doctor {
+        /// Include online provider connectivity checks
+        #[arg(long)]
+        online: bool,
+    },
+    /// Start supervised daemon (auto-restarts gateway on failure)
+    Daemon,
     /// Migrate config and skills from an OpenClaw installation
     Migrate {
         /// Path to OpenClaw directory (auto-detected if omitted)
@@ -467,6 +477,12 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Pair { action }) => {
             pair::cmd_pair(action).await?;
+        }
+        Some(Commands::Doctor { online }) => {
+            doctor::cmd_doctor(online).await?;
+        }
+        Some(Commands::Daemon) => {
+            daemon::cmd_daemon().await?;
         }
         Some(Commands::Migrate { from, yes, dry_run }) => {
             migrate::cmd_migrate(from, yes, dry_run).await?;
