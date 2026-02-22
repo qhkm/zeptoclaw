@@ -29,6 +29,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "stripe",
     "custom_tools",
     "tool_profiles",
+    "project",
 ];
 
 /// Known fields for each section. Nested as section.field.

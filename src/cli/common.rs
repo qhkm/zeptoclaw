@@ -12,6 +12,7 @@ use zeptoclaw::agent::{AgentLoop, ContextBuilder, RuntimeContext};
 use zeptoclaw::auth::{self, AuthMethod};
 use zeptoclaw::bus::MessageBus;
 use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
+use zeptoclaw::config::ProjectBackend;
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
@@ -28,8 +29,8 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, R8rTool,
-    WebFetchTool, WebSearchTool, WhatsAppTool,
+    EchoTool, GitTool, GoogleSheetsTool, MemoryGetTool, MemorySearchTool, MessageTool, ProjectTool,
+    R8rTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -592,6 +593,16 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
             .await;
     }
 
+    // Register git tool.
+    if tool_enabled("git") {
+        if GitTool::is_available() {
+            agent.register_tool(Box::new(GitTool::new())).await;
+            info!("Registered git tool");
+        } else {
+            tracing::debug!("git binary not found, skipping git tool");
+        }
+    }
+
     // Register web tools.
     if tool_enabled("web_search") {
         if let Some(web_search_key) = config.tools.web.search.api_key.as_deref() {
@@ -720,6 +731,38 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
     if tool_enabled("r8r") {
         agent.register_tool(Box::new(R8rTool::default())).await;
     }
+
+    // Register project management tool.
+    if tool_enabled("project") {
+        let project_config = config.project.clone();
+        let has_token = match project_config.backend {
+            ProjectBackend::Github => project_config
+                .github_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .is_some(),
+            ProjectBackend::Jira => project_config
+                .jira_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .is_some(),
+            ProjectBackend::Linear => project_config
+                .linear_api_key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .is_some(),
+        };
+        if has_token {
+            agent
+                .register_tool(Box::new(ProjectTool::new(project_config)))
+                .await;
+            info!(
+                "Registered project tool ({:?} backend)",
+                config.project.backend
+            );
+        }
+    }
+
     if tool_enabled("reminder") {
         match zeptoclaw::tools::reminder::ReminderTool::new(Some(cron_service.clone())) {
             Ok(tool) => {
