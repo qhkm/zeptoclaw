@@ -383,13 +383,14 @@ async fn test_tool_registry_e2e_execution() {
         .await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "end-to-end echo");
+    assert_eq!(result.unwrap().for_llm, "end-to-end echo");
 
-    // Verify that a missing tool returns an error through the same path
+    // Verify that a missing tool returns an error ToolOutput through the same path
     let missing = registry
         .execute_with_context("nonexistent", serde_json::json!({}), &ctx)
         .await;
-    assert!(missing.is_err());
+    assert!(missing.is_ok());
+    assert!(missing.unwrap().is_error);
 }
 
 // ============================================================================
