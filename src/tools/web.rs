@@ -1030,7 +1030,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_ipv4_mapped_unspecified_blocked() {
         // ::ffff:0.0.0.0 — IPv4-mapped with embedded 0.0.0.0 must be blocked
         let addr: IpAddr = "::ffff:0.0.0.0".parse().unwrap();
@@ -1047,6 +1046,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_ipv6_transition_public_ipv4_allowed() {
         // Legitimate public IPv4 embedded in transition addresses should NOT be blocked
         // 8.8.8.8 via NAT64
