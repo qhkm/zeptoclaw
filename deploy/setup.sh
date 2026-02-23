@@ -311,10 +311,10 @@ main() {
   printf "\n${BOLD}=== Installation Complete ===${RESET}\n\n"
 
   if [ "$MODE" = "docker" ]; then
-    VERSION="$(docker run --rm "$DOCKER_IMAGE" zeptoclaw --version 2>/dev/null || echo 'installed')"
+    VERSION="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$DOCKER_IMAGE" 2>/dev/null || echo 'latest')"
     ok "ZeptoClaw ${VERSION}"
     printf "\n${BOLD}Next step:${RESET}\n"
-    printf "  docker run --rm -it -v %s:/data %s zeptoclaw onboard\n\n" "$CONFIG_DIR" "$DOCKER_IMAGE"
+    printf "  docker run --rm -it -v %s:/data/.zeptoclaw %s zeptoclaw onboard\n\n" "$CONFIG_DIR" "$DOCKER_IMAGE"
   else
     VERSION="$(${INSTALL_DIR}/${BINARY} --version 2>/dev/null || echo 'installed')"
     ok "ZeptoClaw ${VERSION}"
