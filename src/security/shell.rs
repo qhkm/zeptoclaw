@@ -221,7 +221,7 @@ impl ShellSecurityConfig {
                 .to_lowercase();
             // Strip path prefix (e.g. /usr/bin/git -> git)
             let executable = first_token.rsplit('/').next().unwrap_or(&first_token);
-            if !self.allowlist.contains(&executable.to_string()) {
+            if !self.allowlist.iter().any(|a| a == executable) {
                 match self.allowlist_mode {
                     ShellAllowlistMode::Strict => {
                         return Err(ZeptoError::SecurityViolation(format!(
@@ -544,5 +544,16 @@ mod tests {
         assert!(config.validate_command("rm -rf /").is_err());
         // rm of a specific file is fine (passes blocklist, in allowlist)
         assert!(config.validate_command("rm file.txt").is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_strips_path_prefix() {
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        // Path-prefixed executables should match against the bare name
+        assert!(config.validate_command("/usr/bin/git status").is_ok());
+        assert!(config.validate_command("/usr/local/bin/git log").is_ok());
+        // A different binary via full path is still blocked
+        assert!(config.validate_command("/usr/bin/ls -la").is_err());
     }
 }
