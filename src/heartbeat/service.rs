@@ -124,6 +124,7 @@ impl HeartbeatService {
             file_path
         );
 
+        let running_clone = Arc::clone(&running);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval_duration);
             ticker.tick().await;
@@ -150,6 +151,8 @@ impl HeartbeatService {
                     consecutive_failures.store(0, Ordering::Relaxed);
                 }
             }
+            let mut r = running_clone.write().await;
+            *r = false;
         });
 
         Ok(())

@@ -943,6 +943,7 @@ impl Channel for LarkChannel {
         let bus = Arc::clone(&self.bus);
 
         // Spawn the reconnect loop as a background task
+        let running_clone = Arc::clone(&running);
         tokio::spawn(async move {
             // Build a temporary channel clone for the async task
             let base_config = BaseChannelConfig {
@@ -979,6 +980,7 @@ impl Channel for LarkChannel {
                     }
                 }
             }
+            running_clone.store(false, Ordering::SeqCst);
             info!("Lark channel stopped");
         });
 

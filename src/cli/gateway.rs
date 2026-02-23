@@ -190,11 +190,12 @@ pub(crate) async fn cmd_gateway(
         proxy = Some(proxy_instance);
 
         Some(tokio::spawn(async move {
-            if let Err(e) = proxy_for_task.start().await {
-                error!("Container agent proxy error: {}", e);
-            }
+            let result = proxy_for_task.start().await;
             proxy_metrics.set_ready(false);
-            warn!("Container agent proxy stopped; readiness set to false");
+            match result {
+                Err(e) => error!("Container agent proxy error: {}", e),
+                Ok(()) => warn!("Container agent proxy stopped"),
+            }
         }))
     } else {
         // Validate provider for in-process mode
@@ -333,11 +334,12 @@ pub(crate) async fn cmd_gateway(
         let agent_clone = Arc::clone(agent);
         let agent_metrics = Arc::clone(&metrics);
         Some(tokio::spawn(async move {
-            if let Err(e) = agent_clone.start().await {
-                error!("Agent loop error: {}", e);
-            }
+            let result = agent_clone.start().await;
             agent_metrics.set_ready(false);
-            warn!("Agent loop stopped; readiness set to false");
+            match result {
+                Err(e) => error!("Agent loop error: {}", e),
+                Ok(()) => warn!("Agent loop stopped"),
+            }
         }))
     } else {
         None
