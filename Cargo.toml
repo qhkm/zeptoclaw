@@ -177,6 +177,8 @@ nusb = { version = "0.2", default-features = false, optional = true }
 # Raspberry Pi GPIO (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
 rppal = { version = "0.22", optional = true }
+# Linux Landlock LSM sandbox (kernel 5.13+)
+landlock = { version = "0.4.4", optional = true }
 
 [features]
 default = []
@@ -200,6 +202,10 @@ peripheral-rpi = ["rppal"]
 probe = ["probe-rs"]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)
 android = ["quick-xml"]
+# Linux sandbox runtimes (Linux-only, require respective binaries except landlock)
+sandbox-landlock   = ["dep:landlock"]
+sandbox-firejail   = []
+sandbox-bubblewrap = []
 
 
 [dev-dependencies]
