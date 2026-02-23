@@ -1581,6 +1581,15 @@ pub enum RuntimeType {
     /// Apple Container isolation (macOS only)
     #[serde(rename = "apple")]
     AppleContainer,
+    /// Landlock kernel LSM sandbox (Linux only, requires kernel 5.13+)
+    #[cfg(target_os = "linux")]
+    Landlock,
+    /// Firejail userspace sandbox (Linux only, requires firejail binary)
+    #[cfg(target_os = "linux")]
+    Firejail,
+    /// Bubblewrap OCI sandbox (Linux only, requires bwrap binary)
+    #[cfg(target_os = "linux")]
+    Bubblewrap,
 }
 
 /// Runtime configuration for shell execution
@@ -1598,6 +1607,12 @@ pub struct RuntimeConfig {
     pub docker: DockerConfig,
     /// Apple Container-specific configuration (macOS)
     pub apple: AppleContainerConfig,
+    /// Landlock sandbox configuration (Linux only).
+    pub landlock: LandlockConfig,
+    /// Firejail sandbox configuration (Linux only).
+    pub firejail: FirejailConfig,
+    /// Bubblewrap sandbox configuration (Linux only).
+    pub bubblewrap: BubblewrapConfig,
 }
 
 fn default_mount_allowlist_path() -> String {
@@ -1612,6 +1627,9 @@ impl Default for RuntimeConfig {
             mount_allowlist_path: default_mount_allowlist_path(),
             docker: DockerConfig::default(),
             apple: AppleContainerConfig::default(),
+            landlock: LandlockConfig::default(),
+            firejail: FirejailConfig::default(),
+            bubblewrap: BubblewrapConfig::default(),
         }
     }
 }
@@ -1668,6 +1686,95 @@ pub struct AppleContainerConfig {
     /// Allow use of Apple Container runtime (experimental).
     /// When false (default), requesting the Apple Container runtime returns an error.
     pub allow_experimental: bool,
+}
+
+// ============================================================================
+// Linux Sandbox Runtime Configuration
+// ============================================================================
+
+/// Landlock LSM sandbox configuration (Linux only).
+///
+/// Restricts filesystem access at the kernel level using the Linux Landlock LSM.
+/// Requires Linux kernel 5.13+. Degrades gracefully on older kernels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LandlockConfig {
+    /// Directories the sandboxed process may read (recursive).
+    pub fs_read_dirs: Vec<String>,
+    /// Directories the sandboxed process may write (recursive).
+    pub fs_write_dirs: Vec<String>,
+    /// Automatically add the agent workspace to the read allow list.
+    pub allow_read_workspace: bool,
+    /// Automatically add the agent workspace to the write allow list.
+    pub allow_write_workspace: bool,
+}
+
+impl Default for LandlockConfig {
+    fn default() -> Self {
+        Self {
+            fs_read_dirs: vec![
+                "/usr".to_string(),
+                "/lib".to_string(),
+                "/lib64".to_string(),
+                "/etc".to_string(),
+                "/bin".to_string(),
+                "/sbin".to_string(),
+                "/tmp".to_string(),
+            ],
+            fs_write_dirs: vec!["/tmp".to_string()],
+            allow_read_workspace: true,
+            allow_write_workspace: true,
+        }
+    }
+}
+
+/// Firejail sandbox configuration (Linux only).
+///
+/// Wraps commands with `firejail` using Linux namespaces + seccomp.
+/// Requires the `firejail` binary on PATH.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FirejailConfig {
+    /// Path to a custom firejail profile file.
+    /// When None, `--noprofile` is used.
+    pub profile: Option<String>,
+    /// Extra arguments passed verbatim to firejail before the command.
+    pub extra_args: Vec<String>,
+}
+
+/// Bubblewrap sandbox configuration (Linux only).
+///
+/// Wraps commands with `bwrap` (bubblewrap), a lightweight OCI-compatible sandbox.
+/// Requires the `bwrap` binary on PATH.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BubblewrapConfig {
+    /// Read-only bind mounts (each entry is a host path bound at the same container path).
+    pub ro_binds: Vec<String>,
+    /// Bind /dev into the sandbox (needed for most commands).
+    pub dev_bind: bool,
+    /// Bind /proc into the sandbox.
+    pub proc_bind: bool,
+    /// Extra arguments passed verbatim to bwrap before the command.
+    pub extra_args: Vec<String>,
+}
+
+impl Default for BubblewrapConfig {
+    fn default() -> Self {
+        Self {
+            ro_binds: vec![
+                "/usr".to_string(),
+                "/lib".to_string(),
+                "/lib64".to_string(),
+                "/etc".to_string(),
+                "/bin".to_string(),
+                "/sbin".to_string(),
+            ],
+            dev_bind: true,
+            proc_bind: true,
+            extra_args: vec![],
+        }
+    }
 }
 
 // ============================================================================
@@ -2131,6 +2238,37 @@ mod tests {
         // The struct-level #[serde(default)] only applies when the whole struct key is missing.
         assert_eq!(config.pids_limit, None);
         assert_eq!(config.stop_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_landlock_config_default_read_dirs() {
+        let cfg = LandlockConfig::default();
+        assert!(cfg.fs_read_dirs.iter().any(|d| d == "/usr"));
+        assert!(cfg.allow_read_workspace);
+        assert!(cfg.allow_write_workspace);
+    }
+
+    #[test]
+    fn test_firejail_config_default_no_profile() {
+        let cfg = FirejailConfig::default();
+        assert!(cfg.profile.is_none());
+        assert!(cfg.extra_args.is_empty());
+    }
+
+    #[test]
+    fn test_bubblewrap_config_default_ro_binds() {
+        let cfg = BubblewrapConfig::default();
+        assert!(cfg.ro_binds.iter().any(|d| d == "/usr"));
+        assert!(cfg.dev_bind);
+        assert!(cfg.proc_bind);
+    }
+
+    #[test]
+    fn test_runtime_config_has_sandbox_fields() {
+        let cfg = RuntimeConfig::default();
+        assert!(cfg.landlock.fs_read_dirs.contains(&"/usr".to_string()));
+        assert!(cfg.firejail.profile.is_none());
+        assert!(cfg.bubblewrap.dev_bind);
     }
 }
 
