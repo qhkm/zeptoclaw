@@ -389,10 +389,19 @@ impl Channel for TelegramChannel {
                                 allowlist.contains(&user_id)
                             };
                             if !allowed {
-                                info!(
-                                    "Telegram: User {} not in allowlist, ignoring message",
-                                    user_id
-                                );
+                                if allowlist.is_empty() {
+                                    info!(
+                                        "Telegram: User {} blocked — deny_by_default=true and allow_from is empty. \
+                                         Add their numeric user ID to channels.telegram.allow_from in config.json",
+                                        user_id
+                                    );
+                                } else {
+                                    info!(
+                                        "Telegram: User {} not in allow_from list, ignoring message. \
+                                         Configured IDs: {:?}",
+                                        user_id, allowlist
+                                    );
+                                }
                                 return Ok(());
                             }
 
