@@ -21,6 +21,7 @@ pub mod skills;
 pub mod status;
 pub mod template;
 pub mod tools;
+pub mod update;
 pub mod watch;
 
 use anyhow::Result;
@@ -186,6 +187,18 @@ enum Commands {
         /// Preview what would be migrated without making changes
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Check for updates or update to latest version
+    Update {
+        /// Only check, don't download
+        #[arg(long)]
+        check: bool,
+        /// Install specific version (e.g., "v0.5.2")
+        #[arg(long)]
+        version: Option<String>,
+        /// Force re-download even if already on latest
+        #[arg(long)]
+        force: bool,
     },
     /// Hardware device management (USB discovery, peripherals)
     Hardware {
@@ -516,6 +529,13 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Migrate { from, yes, dry_run }) => {
             migrate::cmd_migrate(from, yes, dry_run).await?;
+        }
+        Some(Commands::Update {
+            check,
+            version,
+            force,
+        }) => {
+            update::cmd_update(check, version, force).await?;
         }
         Some(Commands::Hardware { action }) => {
             cmd_hardware(action);

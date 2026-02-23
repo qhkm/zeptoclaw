@@ -107,6 +107,12 @@ cargo fmt
 cargo release patch          # preview bump 0.5.x → 0.5.x+1 (dry-run by default)
 cargo release minor          # preview bump 0.5.x → 0.6.0
 cargo release patch --execute  # actually bump, commit, tag, push, publish to crates.io
+
+# Self-update
+./target/release/zeptoclaw update              # update to latest
+./target/release/zeptoclaw update --check      # check without downloading
+./target/release/zeptoclaw update --version v0.5.2  # specific version
+./target/release/zeptoclaw update --force      # re-download even if current
 ```
 
 ## Agent Workflow — Task Tracking Protocol
