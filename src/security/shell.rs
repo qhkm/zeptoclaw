@@ -66,6 +66,18 @@ const LITERAL_BLOCKED_PATTERNS: &[&str] = &[
     ".kube/config",
 ];
 
+/// Controls allowlist enforcement behaviour.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ShellAllowlistMode {
+    /// Allowlist disabled — blocklist only (current behaviour, this is the default)
+    #[default]
+    Off,
+    /// Log a warning if the first token is not in the allowlist, but proceed
+    Warn,
+    /// Block execution if the first token is not in the allowlist
+    Strict,
+}
+
 /// Configuration for shell command security.
 #[derive(Debug, Clone)]
 pub struct ShellSecurityConfig {
@@ -75,6 +87,11 @@ pub struct ShellSecurityConfig {
     literal_patterns: Vec<String>,
     /// Whether to enable security checks (can be disabled for trusted environments)
     pub enabled: bool,
+    /// Commands that are explicitly allowed (first token / executable name).
+    /// Only used when `allowlist_mode` is `Warn` or `Strict`.
+    pub allowlist: Vec<String>,
+    /// Allowlist enforcement mode.
+    pub allowlist_mode: ShellAllowlistMode,
 }
 
 impl Default for ShellSecurityConfig {
@@ -104,6 +121,8 @@ impl ShellSecurityConfig {
             compiled_patterns,
             literal_patterns,
             enabled: true,
+            allowlist: Vec::new(),
+            allowlist_mode: ShellAllowlistMode::Off,
         }
     }
 
@@ -116,6 +135,8 @@ impl ShellSecurityConfig {
             compiled_patterns: Vec::new(),
             literal_patterns: Vec::new(),
             enabled: false,
+            allowlist: Vec::new(),
+            allowlist_mode: ShellAllowlistMode::Off,
         }
     }
 
@@ -130,6 +151,16 @@ impl ShellSecurityConfig {
     /// Add a custom blocked literal substring.
     pub fn block_literal(mut self, literal: &str) -> Self {
         self.literal_patterns.push(literal.to_lowercase());
+        self
+    }
+
+    /// Set the command allowlist and enforcement mode.
+    ///
+    /// The allowlist matches the first token (executable name) of the command.
+    /// Example: `with_allowlist(vec!["git", "cargo", "ls"], ShellAllowlistMode::Strict)`
+    pub fn with_allowlist(mut self, allowlist: Vec<&str>, mode: ShellAllowlistMode) -> Self {
+        self.allowlist = allowlist.into_iter().map(|s| s.to_lowercase()).collect();
+        self.allowlist_mode = mode;
         self
     }
 
@@ -178,6 +209,35 @@ impl ShellSecurityConfig {
                     "Command blocked: contains prohibited path '{}'",
                     literal
                 )));
+            }
+        }
+
+        // Allowlist check (runs after blocklist)
+        if self.allowlist_mode != ShellAllowlistMode::Off && !self.allowlist.is_empty() {
+            let first_token = command
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            // Strip path prefix (e.g. /usr/bin/git -> git)
+            let executable = first_token.rsplit('/').next().unwrap_or(&first_token);
+            if !self.allowlist.contains(&executable.to_string()) {
+                match self.allowlist_mode {
+                    ShellAllowlistMode::Strict => {
+                        return Err(ZeptoError::SecurityViolation(format!(
+                            "Command '{}' not in allowlist",
+                            executable
+                        )));
+                    }
+                    ShellAllowlistMode::Warn => {
+                        tracing::warn!(
+                            command = %command,
+                            executable = %executable,
+                            "Command not in allowlist"
+                        );
+                    }
+                    ShellAllowlistMode::Off => {} // unreachable
+                }
             }
         }
 
@@ -421,5 +481,68 @@ mod tests {
         assert!(config.validate_command("python script.py").is_ok());
         assert!(config.validate_command("node app.js").is_ok());
         assert!(config.validate_command("ruby script.rb").is_ok());
+    }
+
+    // ==================== ALLOWLIST TESTS ====================
+
+    #[test]
+    fn test_allowlist_off_passes_any_command() {
+        let config = ShellSecurityConfig::new(); // Off by default
+                                                 // Any safe command passes even without being in allowlist
+        assert!(config.validate_command("git status").is_ok());
+        assert!(config.validate_command("cargo build").is_ok());
+        assert!(config.validate_command("python script.py").is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_strict_blocks_unlisted_command() {
+        let config = ShellSecurityConfig::new()
+            .with_allowlist(vec!["git", "cargo"], ShellAllowlistMode::Strict);
+        assert!(config.validate_command("git status").is_ok());
+        assert!(config.validate_command("cargo build").is_ok());
+        assert!(config.validate_command("ls -la").is_err());
+        assert!(config.validate_command("python script.py").is_err());
+    }
+
+    #[test]
+    fn test_allowlist_warn_passes_unlisted_command() {
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Warn);
+        // Warn mode: unlisted commands still pass
+        assert!(config.validate_command("cargo build").is_ok());
+        assert!(config.validate_command("ls -la").is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_strict_empty_blocks_nothing() {
+        // Empty allowlist with strict mode: nothing is allowlisted, everything safe passes
+        // Wait — empty allowlist should NOT block because the check is:
+        // `!self.allowlist.is_empty()` — so empty allowlist = off effectively
+        let config = ShellSecurityConfig::new().with_allowlist(vec![], ShellAllowlistMode::Strict);
+        // Empty allowlist should not block anything (guard: !allowlist.is_empty())
+        assert!(config.validate_command("ls").is_ok());
+        assert!(config.validate_command("git status").is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_extracts_first_token() {
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        // First token is "git", even with flags and subcommands
+        assert!(config.validate_command("git log --oneline --all").is_ok());
+        assert!(config.validate_command("git commit -m 'msg'").is_ok());
+        // Not git
+        assert!(config.validate_command("cargo test").is_err());
+    }
+
+    #[test]
+    fn test_allowlist_strict_blocklist_still_applies() {
+        // Even with allowlist, blocklist still blocks dangerous commands
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["rm"], ShellAllowlistMode::Strict);
+        // rm is in allowlist, but "rm -rf /" is blocked by blocklist
+        assert!(config.validate_command("rm -rf /").is_err());
+        // rm of a specific file is fine (passes blocklist, in allowlist)
+        assert!(config.validate_command("rm file.txt").is_ok());
     }
 }
