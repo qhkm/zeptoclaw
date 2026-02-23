@@ -74,7 +74,7 @@ impl Tool for MessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Destination channel. Optional when context already has channel."
+                    "description": "Destination channel name (telegram, discord, slack, whatsapp, webhook). Omit when replying — the originating channel is used automatically."
                 },
                 "chat_id": {
                     "type": "string",
