@@ -258,6 +258,9 @@ Selectable container isolation for shell commands:
 - `NativeRuntime` - Direct execution (default)
 - `DockerRuntime` - Docker container isolation
 - `AppleContainerRuntime` - macOS 15+ native containers
+- `LandlockRuntime` - Linux kernel LSM (5.13+), pure-Rust, no binary dep (`--features sandbox-landlock`)
+- `FirejailRuntime` - Linux namespace + seccomp via `firejail` binary (`--features sandbox-firejail`)
+- `BubblewrapRuntime` - OCI-compatible `bwrap` sandbox (`--features sandbox-bubblewrap`)
 
 ### Gateway (`src/gateway/`)
 Containerized agent proxy for full request isolation:
@@ -353,7 +356,7 @@ Message input channels via `Channel` trait:
 - `validator.rs` - Input length (100KB max), null byte, whitespace ratio, repetition detection
 
 ### Security (`src/security/`)
-- `shell.rs` - Regex-based command blocklist
+- `shell.rs` - Regex-based command blocklist + optional allowlist (`ShellAllowlistMode`: Off/Warn/Strict)
 - `path.rs` - Workspace path validation, symlink escape detection
 - `mount.rs` - Mount allowlist validation, docker binary verification
 - `encryption.rs` - `SecretEncryption`: XChaCha20-Poly1305 AEAD + Argon2id KDF, `ENC[...]` ciphertext format, `resolve_master_key()` for env/file/prompt sources, transparent config decrypt on load
@@ -429,10 +432,18 @@ cargo build --release --features memory-bm25
 ### Cargo Features
 
 - `android` — Enable Android device control tool (adds `quick-xml` dependency)
+- `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
+- `sandbox-firejail` — Enable Firejail runtime (Linux only, requires `firejail` binary)
+- `sandbox-bubblewrap` — Enable Bubblewrap runtime (Linux only, requires `bwrap` binary)
 
 ```bash
 cargo build --release --features android
-cargo test --features android
+
+# Linux sandbox runtimes
+cargo build --release --features sandbox-landlock
+cargo build --release --features sandbox-firejail
+cargo build --release --features sandbox-bubblewrap
+cargo build --release --features sandbox-landlock,sandbox-firejail,sandbox-bubblewrap
 ```
 
 ### Compile-time Configuration

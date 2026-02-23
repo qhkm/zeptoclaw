@@ -73,7 +73,7 @@ pub use runtime::AppleContainerRuntime;
 pub use security::{
     validate_extra_mounts, validate_path_in_workspace, AgentMode, AgentModeConfig,
     CategoryPermission, DeviceInfo, ModePolicy, PairedDevice, PairingManager, SafePath,
-    ShellSecurityConfig,
+    ShellAllowlistMode, ShellSecurityConfig,
 };
 pub use session::{Message, Role, Session, SessionManager, ToolCall};
 #[cfg(feature = "screenshot")]
