@@ -858,14 +858,23 @@ impl Channel for DiscordChannel {
         self.shutdown_tx = Some(shutdown_tx);
 
         info!("Starting Discord channel with Gateway WebSocket");
-        tokio::spawn(Self::run_gateway_loop(
-            self.http_client.clone(),
-            token,
-            Arc::clone(&self.bus),
-            self.config.allow_from.clone(),
-            self.config.deny_by_default,
-            shutdown_rx,
-        ));
+        let running_clone = Arc::clone(&self.running);
+        let http_client = self.http_client.clone();
+        let bus = Arc::clone(&self.bus);
+        let allow_from = self.config.allow_from.clone();
+        let deny_by_default = self.config.deny_by_default;
+        tokio::spawn(async move {
+            Self::run_gateway_loop(
+                http_client,
+                token,
+                bus,
+                allow_from,
+                deny_by_default,
+                shutdown_rx,
+            )
+            .await;
+            running_clone.store(false, Ordering::SeqCst);
+        });
 
         Ok(())
     }

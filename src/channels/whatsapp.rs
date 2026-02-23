@@ -468,15 +468,24 @@ impl Channel for WhatsAppChannel {
         self.outbound_tx = Some(outbound_tx);
 
         info!("Starting WhatsApp channel with bridge at {}", bridge_url);
-        tokio::spawn(Self::run_bridge_loop(
-            bridge_url,
-            self.config.bridge_token.clone(),
-            Arc::clone(&self.bus),
-            self.config.allow_from.clone(),
-            self.config.deny_by_default,
-            shutdown_rx,
-            outbound_rx,
-        ));
+        let running_clone = Arc::clone(&self.running);
+        let bridge_token = self.config.bridge_token.clone();
+        let bus = Arc::clone(&self.bus);
+        let allow_from = self.config.allow_from.clone();
+        let deny_by_default = self.config.deny_by_default;
+        tokio::spawn(async move {
+            Self::run_bridge_loop(
+                bridge_url,
+                bridge_token,
+                bus,
+                allow_from,
+                deny_by_default,
+                shutdown_rx,
+                outbound_rx,
+            )
+            .await;
+            running_clone.store(false, Ordering::SeqCst);
+        });
 
         Ok(())
     }

@@ -403,14 +403,23 @@ impl Channel for SlackChannel {
         self.shutdown_tx = Some(shutdown_tx);
 
         info!("Starting Slack channel with Socket Mode inbound");
-        tokio::spawn(Self::run_socket_mode_loop(
-            self.client.clone(),
-            app_token,
-            Arc::clone(&self.bus),
-            self.config.allow_from.clone(),
-            self.config.deny_by_default,
-            shutdown_rx,
-        ));
+        let running_clone = Arc::clone(&self.running);
+        let client = self.client.clone();
+        let bus = Arc::clone(&self.bus);
+        let allow_from = self.config.allow_from.clone();
+        let deny_by_default = self.config.deny_by_default;
+        tokio::spawn(async move {
+            Self::run_socket_mode_loop(
+                client,
+                app_token,
+                bus,
+                allow_from,
+                deny_by_default,
+                shutdown_rx,
+            )
+            .await;
+            running_clone.store(false, Ordering::SeqCst);
+        });
 
         Ok(())
     }

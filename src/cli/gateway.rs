@@ -95,9 +95,12 @@ pub(crate) async fn cmd_gateway(
         }
     };
 
+    // Create HealthRegistry (shared between health server and channel supervisor)
+    let health_registry = HealthRegistry::new();
+
     // Start HealthRegistry-based server if config.health.enabled
     if config.health.enabled {
-        let registry = HealthRegistry::new();
+        let registry = health_registry.clone();
         let host = config.health.host.clone();
         let port = config.health.port;
         tokio::spawn(async move {
@@ -225,8 +228,9 @@ pub(crate) async fn cmd_gateway(
         None
     };
 
-    // Create channel manager
-    let channel_manager = ChannelManager::new(bus.clone(), config.clone());
+    // Create channel manager with health supervision
+    let mut channel_manager = ChannelManager::new(bus.clone(), config.clone());
+    channel_manager.set_health_registry(health_registry);
 
     // Install and start channel dependencies (if any)
     let deps_dir = DepManager::default_dir();

@@ -307,6 +307,8 @@ Message input channels via `Channel` trait:
 - CLI mode via direct agent invocation
 - All channels support `deny_by_default` config option for sender allowlists
 - `ChannelManager` stores channel handles as `Arc<Mutex<_>>`, so outbound dispatch does not hold the channel map lock across async `send()`
+- `ChannelManager` supervision: polling supervisor (15s) detects dead channels via `is_running()`, restarts with 60s cooldown, max 5 restarts, reports to `HealthRegistry`
+- All spawned channel tasks set `running = false` on exit to prevent stale `is_running()` flags
 
 ### Deps (`src/deps/`)
 - `HasDependencies` trait — components declare external dependencies
