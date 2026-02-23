@@ -291,6 +291,7 @@ impl CronService {
         let running = Arc::clone(&self.running);
         let jitter_ms = self.jitter_ms;
 
+        let running_clone = Arc::clone(&running);
         let handle = tokio::spawn(async move {
             info!("Cron service started");
             while running.load(Ordering::SeqCst) {
@@ -299,6 +300,7 @@ impl CronService {
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
+            running_clone.store(false, Ordering::SeqCst);
         });
 
         let mut h = self.handle.write().await;
