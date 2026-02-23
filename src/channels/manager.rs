@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::config::Config;
@@ -294,6 +294,11 @@ impl ChannelManager {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let health_registry = self.health_registry.clone();
 
+        info!(
+            "Channel supervisor starting (poll={}s, cooldown={}s, max_restarts={})",
+            SUPERVISOR_POLL_SECS, SUPERVISOR_COOLDOWN_SECS, SUPERVISOR_MAX_RESTARTS
+        );
+
         let handle = tokio::spawn(async move {
             // Build initial supervisor state
             let mut entries: HashMap<String, SupervisorEntry> = started_channels
@@ -326,6 +331,8 @@ impl ChannelManager {
                 if *shutdown_rx.borrow() {
                     return;
                 }
+
+                debug!("Supervisor polling {} channel(s)", entries.len());
 
                 // Check each supervised channel
                 let channel_snapshot = {
