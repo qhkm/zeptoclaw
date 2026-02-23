@@ -102,6 +102,11 @@ cargo fmt
 
 # Watch URLs for changes
 ./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
+
+# Release (requires cargo-release: cargo install cargo-release)
+cargo release patch          # preview bump 0.5.x → 0.5.x+1 (dry-run by default)
+cargo release minor          # preview bump 0.5.x → 0.6.0
+cargo release patch --execute  # actually bump, commit, tag, push, publish to crates.io
 ```
 
 ## Agent Workflow — Task Tracking Protocol
