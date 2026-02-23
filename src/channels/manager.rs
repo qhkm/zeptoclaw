@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::config::Config;
@@ -317,7 +317,11 @@ impl ChannelManager {
             let channel = channel.lock().await;
             channel.send(msg).await
         } else {
-            warn!("Channel not found: {}", channel_name);
+            // Pseudo-channels (e.g. "heartbeat") have no outbound handler — debug-level only
+            debug!(
+                "Channel not found: {} (may be a pseudo-channel like 'heartbeat')",
+                channel_name
+            );
             Ok(())
         }
     }
@@ -369,7 +373,8 @@ async fn dispatch_outbound(
                             error!("Failed to send message to {}: {}", channel_name, e);
                         }
                     } else {
-                        warn!("Unknown channel for outbound message: {}", channel_name);
+                        // Pseudo-channels (e.g. "heartbeat") have no outbound handler — debug-level only
+                        debug!("Unknown channel for outbound message: {} (may be a pseudo-channel like 'heartbeat')", channel_name);
                     }
                 } else {
                     // Channel closed

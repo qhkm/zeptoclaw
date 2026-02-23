@@ -1076,7 +1076,13 @@ async fn test_heartbeat_trigger_now_enqueues_message() {
     .unwrap();
 
     let bus = Arc::new(MessageBus::new());
-    let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
+    let service = HeartbeatService::new(
+        heartbeat_path,
+        60,
+        Arc::clone(&bus),
+        "heartbeat",
+        "ops-chat",
+    );
     let result = service.trigger_now().await;
     assert!(
         result.error.is_none(),
@@ -1104,7 +1110,13 @@ async fn test_heartbeat_trigger_now_skips_non_actionable_content() {
     std::fs::write(&heartbeat_path, "# Heartbeat\n<!-- no tasks -->\n- [ ]").unwrap();
 
     let bus = Arc::new(MessageBus::new());
-    let service = HeartbeatService::new(heartbeat_path, 60, Arc::clone(&bus), "ops-chat");
+    let service = HeartbeatService::new(
+        heartbeat_path,
+        60,
+        Arc::clone(&bus),
+        "heartbeat",
+        "ops-chat",
+    );
     let result = service.trigger_now().await;
     assert!(
         result.error.is_none(),

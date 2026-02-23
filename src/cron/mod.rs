@@ -500,10 +500,11 @@ async fn tick(
         }
         // Remove one-shot jobs marked for delete-after-run only after success.
         store_guard.jobs.retain(|job| {
-            !(matches!(job.schedule, CronSchedule::At { .. })
+            let should_remove = matches!(job.schedule, CronSchedule::At { .. })
                 && job.delete_after_run
-                && !job.enabled)
-                || job.state.last_status.as_deref() != Some("ok")
+                && !job.enabled
+                && job.state.last_status.as_deref() == Some("ok");
+            !should_remove
         });
     }
 
@@ -846,6 +847,46 @@ mod tests {
         assert!(
             job.state.next_run_at_ms.is_none(),
             "one-shot should not be rescheduled after error"
+        );
+    }
+    #[tokio::test]
+    async fn test_one_shot_job_removed_after_success() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store = Arc::new(RwLock::new(CronStore {
+            version: 1,
+            jobs: vec![CronJob {
+                id: "oneshot-ok".to_string(),
+                name: "one-shot success".to_string(),
+                enabled: true,
+                schedule: CronSchedule::At {
+                    at_ms: now_ms() - 1,
+                },
+                payload: CronPayload {
+                    message: "hello".to_string(),
+                    channel: "cli".to_string(),
+                    chat_id: "cli".to_string(),
+                },
+                state: CronJobState {
+                    next_run_at_ms: Some(now_ms() - 1),
+                    ..Default::default()
+                },
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                delete_after_run: true,
+            }],
+        }));
+        let store_path = temp.path().join("jobs.json");
+
+        // Confirm job exists before tick
+        assert_eq!(store.read().await.jobs.len(), 1);
+
+        tick(&store, &store_path, &bus, 0).await.unwrap();
+
+        let store_guard = store.read().await;
+        assert!(
+            store_guard.jobs.is_empty(),
+            "one-shot job with delete_after_run=true should be removed after successful dispatch"
         );
     }
 }

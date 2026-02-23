@@ -70,6 +70,7 @@ pub struct HeartbeatService {
     bus: Arc<MessageBus>,
     running: Arc<RwLock<bool>>,
     chat_id: String,
+    channel: String,
     /// Count of consecutive failed ticks.
     pub(crate) consecutive_failures: Arc<AtomicU32>,
     /// Threshold before warning about missed heartbeats.
@@ -82,6 +83,7 @@ impl HeartbeatService {
         file_path: PathBuf,
         interval_secs: u64,
         bus: Arc<MessageBus>,
+        channel: &str,
         chat_id: &str,
     ) -> Self {
         Self {
@@ -90,6 +92,7 @@ impl HeartbeatService {
             bus,
             running: Arc::new(RwLock::new(false)),
             chat_id: chat_id.to_string(),
+            channel: channel.to_string(),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             failure_alert_threshold: 3,
         }
@@ -111,6 +114,7 @@ impl HeartbeatService {
         let bus = Arc::clone(&self.bus);
         let running = Arc::clone(&self.running);
         let chat_id = self.chat_id.clone();
+        let channel = self.channel.clone();
         let consecutive_failures = Arc::clone(&self.consecutive_failures);
         let failure_threshold = self.failure_alert_threshold;
 
@@ -132,7 +136,7 @@ impl HeartbeatService {
                     break;
                 }
 
-                let result = Self::tick(&file_path, &bus, &chat_id).await;
+                let result = Self::tick(&file_path, &bus, &channel, &chat_id).await;
 
                 if result.error.is_some() {
                     let count = consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -159,7 +163,7 @@ impl HeartbeatService {
 
     /// Trigger heartbeat immediately, returning a structured result.
     pub async fn trigger_now(&self) -> HeartbeatResult {
-        Self::tick(&self.file_path, &self.bus, &self.chat_id).await
+        Self::tick(&self.file_path, &self.bus, &self.channel, &self.chat_id).await
     }
 
     /// Returns whether service is running.
@@ -192,7 +196,12 @@ impl HeartbeatService {
         true
     }
 
-    async fn tick(file_path: &PathBuf, bus: &MessageBus, chat_id: &str) -> HeartbeatResult {
+    async fn tick(
+        file_path: &PathBuf,
+        bus: &MessageBus,
+        channel: &str,
+        chat_id: &str,
+    ) -> HeartbeatResult {
         let content = match tokio::fs::read_to_string(file_path).await {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -210,7 +219,7 @@ impl HeartbeatService {
             return HeartbeatResult::ok(true, false, false);
         }
 
-        let message = InboundMessage::new("heartbeat", "system", chat_id, HEARTBEAT_PROMPT);
+        let message = InboundMessage::new(channel, "system", chat_id, HEARTBEAT_PROMPT);
         match bus.publish_inbound(message).await {
             Ok(_) => {
                 info!("Heartbeat delivered to bus");
@@ -266,6 +275,7 @@ mod tests {
         let result = HeartbeatService::tick(
             &PathBuf::from("/nonexistent/heartbeat.md"),
             &bus,
+            "heartbeat",
             "test-chat",
         )
         .await;
@@ -281,7 +291,7 @@ mod tests {
         tokio::fs::write(&file, "# Tasks\n\n").await.unwrap();
 
         let bus = Arc::new(MessageBus::new());
-        let result = HeartbeatService::tick(&file, &bus, "test-chat").await;
+        let result = HeartbeatService::tick(&file, &bus, "heartbeat", "test-chat").await;
         assert!(result.file_found);
         assert!(!result.actionable);
         assert!(!result.delivered);
@@ -298,7 +308,7 @@ mod tests {
         // MessageBus holds the inbound_rx internally, so publish_inbound succeeds
         // as long as the bus is alive (MPSC sender succeeds when receiver exists).
         let bus = Arc::new(MessageBus::new());
-        let result = HeartbeatService::tick(&file, &bus, "test-chat").await;
+        let result = HeartbeatService::tick(&file, &bus, "heartbeat", "test-chat").await;
         assert!(result.file_found);
         assert!(result.actionable);
         assert!(result.delivered);
@@ -307,7 +317,8 @@ mod tests {
     #[test]
     fn test_heartbeat_health_tracking() {
         let bus = Arc::new(MessageBus::new());
-        let service = HeartbeatService::new(PathBuf::from("/tmp/hb.md"), 60, bus, "test");
+        let service =
+            HeartbeatService::new(PathBuf::from("/tmp/hb.md"), 60, bus, "heartbeat", "test");
         assert_eq!(service.consecutive_failures(), 0);
         assert!(service.is_healthy());
 
@@ -323,5 +334,14 @@ mod tests {
         assert!(json.contains("\"delivered\":true"));
         let parsed: HeartbeatResult = serde_json::from_str(&json).unwrap();
         assert!(parsed.delivered);
+    }
+
+    #[test]
+    fn test_heartbeat_service_stores_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = Arc::new(crate::bus::MessageBus::new());
+        let svc = HeartbeatService::new(dir.path().join("hb.md"), 60, bus, "telegram", "chat_99");
+        assert_eq!(svc.channel, "telegram");
+        assert_eq!(svc.chat_id, "chat_99");
     }
 }

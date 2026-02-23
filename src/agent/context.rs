@@ -26,7 +26,13 @@ Be concise but helpful. Focus on completing the user's request efficiently.
 You have a longterm_memory tool. Use it proactively to:
 - Save important facts, user preferences, and decisions for future recall
 - Recall relevant information from past conversations by calling longterm_memory with action "search"
-- Pin critical information that should always be available"#;
+- Pin critical information that should always be available
+
+## Scheduled & Background Messages
+
+When a message begins with `Reminder:`, it was delivered by the scheduler on behalf of the user — not typed by them now. Respond with a friendly, concise notification of the reminder content, as if you're the reminder itself notifying the user.
+
+When a message is the heartbeat prompt (checking workspace tasks), reply with `HEARTBEAT_OK` if there is nothing actionable to do, or take the requested action if there is."#;
 
 /// Runtime context injected into the system prompt to make agents environment-aware.
 ///
@@ -983,6 +989,22 @@ mod tests {
         assert!(
             system.content.contains("longterm_memory"),
             "Built system message should contain longterm_memory instructions"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_contains_reminder_guidance() {
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("Reminder:"),
+            "System prompt must instruct how to handle cron-delivered 'Reminder:' messages"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_contains_heartbeat_guidance() {
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("HEARTBEAT_OK"),
+            "System prompt must instruct how to handle heartbeat messages"
         );
     }
 }

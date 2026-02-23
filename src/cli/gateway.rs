@@ -266,11 +266,29 @@ pub(crate) async fn cmd_gateway(
             Err(e) => warn!("Failed to initialize heartbeat file {:?}: {}", hb_path, e),
         }
 
+        let (hb_channel, hb_chat_id) = config
+            .heartbeat
+            .deliver_to
+            .as_deref()
+            .and_then(|s| {
+                let parsed = parse_deliver_to(s);
+                if parsed.is_none() {
+                    warn!(
+                        "heartbeat.deliver_to {:?} is not in 'channel:chat_id' format; \
+                         falling back to pseudo-channel",
+                        s
+                    );
+                }
+                parsed
+            })
+            .unwrap_or_else(|| ("heartbeat".to_string(), "system".to_string()));
+
         let service = Arc::new(HeartbeatService::new(
             hb_path,
             config.heartbeat.interval_secs,
             bus.clone(),
-            "heartbeat:system",
+            &hb_channel,
+            &hb_chat_id,
         ));
         service.start().await?;
         Some(service)
@@ -467,6 +485,17 @@ async fn install_and_start_dep(mgr: &DepManager, dep: &zeptoclaw::deps::Dependen
     }
 }
 
+/// Parse a `deliver_to` string in `"channel:chat_id"` format.
+/// Returns `None` if the string is missing a colon or either part is empty.
+fn parse_deliver_to(s: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = s.splitn(2, ':').collect();
+    if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +547,29 @@ mod tests {
 
         let deps = collect_enabled_channel_deps(&config);
         assert_eq!(deps.len(), 0); // No deps when disabled
+    }
+
+    #[test]
+    fn test_parse_deliver_to_valid() {
+        assert_eq!(
+            parse_deliver_to("telegram:123456789"),
+            Some(("telegram".to_string(), "123456789".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_deliver_to_with_colon_in_chat_id() {
+        // chat IDs with colons in them should still parse (splitn(2,...))
+        assert_eq!(
+            parse_deliver_to("discord:guild:123"),
+            Some(("discord".to_string(), "guild:123".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_deliver_to_invalid() {
+        assert_eq!(parse_deliver_to("no-colon"), None);
+        assert_eq!(parse_deliver_to(":empty_channel"), None);
+        assert_eq!(parse_deliver_to("empty_chat:"), None);
     }
 }

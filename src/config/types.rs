@@ -1399,8 +1399,10 @@ pub struct HeartbeatConfig {
     /// Optional heartbeat file path override.
     #[serde(default)]
     pub file_path: Option<String>,
-    /// Channel to deliver heartbeat results to (e.g., "telegram", "slack").
-    /// If empty/none, heartbeat runs but results are not pushed.
+    /// Channel and chat ID to route heartbeat messages through, in "channel:chat_id" format
+    /// (e.g., "telegram:123456789"). Controls both where the inbound heartbeat prompt is
+    /// processed and where responses are delivered. If unset, falls back to the internal
+    /// "heartbeat:system" pseudo-channel (no outbound delivery).
     #[serde(default)]
     pub deliver_to: Option<String>,
 }
