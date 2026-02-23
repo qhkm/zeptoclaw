@@ -267,6 +267,22 @@ pub enum SkillsAction {
         /// Skill name
         name: String,
     },
+    /// Search for skills on ClawHub and GitHub
+    Search {
+        /// Search query
+        query: String,
+        /// Source filter: clawhub, github, or all (default)
+        #[arg(long, default_value = "all")]
+        source: String,
+    },
+    /// Install a skill from GitHub
+    Install {
+        /// ClawHub slug (reserved for future use)
+        slug: Option<String>,
+        /// Install from GitHub repository (owner/repo format)
+        #[arg(long)]
+        github: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -178,8 +178,129 @@ Describe usage and concrete command examples.
             std::fs::write(&skill_file, template)?;
             println!("Created skill at {:?}", skill_file);
         }
+        SkillsAction::Search { query, source } => {
+            cmd_skills_search(&config, &query, &source).await?;
+        }
+        SkillsAction::Install { slug, github } => {
+            cmd_skills_install(&config, slug.as_deref(), github.as_deref()).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn cmd_skills_search(config: &Config, query: &str, source: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let mut all_results = Vec::new();
+
+    // GitHub search
+    if source == "all" || source == "github" {
+        let topics = &["zeptoclaw-skill", "openclaw-skill"];
+        match zeptoclaw::skills::github_source::search_github(&client, query, topics).await {
+            Ok(results) => all_results.extend(results),
+            Err(e) => eprintln!("GitHub search failed: {}", e),
+        }
+    }
+
+    // ClawHub search (reserved — config check kept for future integration)
+    if source == "all" || source == "clawhub" {
+        let _ = config; // config used for future ClawHub API calls
+    }
+
+    // Sort by score descending
+    all_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if all_results.is_empty() {
+        println!("No skills found matching '{}'", query);
+        return Ok(());
+    }
+
+    println!("Found {} skill(s):\n", all_results.len());
+    for r in &all_results {
+        let source_label = match r.source {
+            zeptoclaw::skills::github_source::SkillSource::GitHub => "github",
+            zeptoclaw::skills::github_source::SkillSource::ClawHub => "clawhub",
+        };
+        println!(
+            "  {} ({}) [{}] score={:.2} stars={}",
+            r.name, r.slug, source_label, r.score, r.stars
+        );
+        if !r.description.is_empty() {
+            println!("    {}", r.description);
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+async fn cmd_skills_install(
+    _config: &Config,
+    _slug: Option<&str>,
+    github: Option<&str>,
+) -> Result<()> {
+    if let Some(repo) = github {
+        cmd_skills_install_github(repo).await
+    } else {
+        anyhow::bail!("Specify --github owner/repo to install a skill from GitHub")
+    }
+}
+
+async fn cmd_skills_install_github(repo: &str) -> Result<()> {
+    // Validate owner/repo format
+    if !repo.contains('/') {
+        anyhow::bail!("Expected owner/repo format, got: {}", repo);
+    }
+
+    let skills_dir = zeptoclaw::config::Config::dir().join("skills");
+    std::fs::create_dir_all(&skills_dir)?;
+
+    let repo_name = repo.split('/').nth(1).unwrap_or(repo);
+    let target_dir = skills_dir.join(repo_name);
+
+    if target_dir.exists() {
+        anyhow::bail!(
+            "Skill '{}' already exists at {}. Remove it first.",
+            repo_name,
+            target_dir.display()
+        );
+    }
+
+    println!("Installing skill from github.com/{} ...", repo);
+
+    let status = tokio::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            &format!("https://github.com/{}.git", repo),
+        ])
+        .arg(&target_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .status()
+        .await?;
+
+    if !status.success() {
+        anyhow::bail!("git clone failed for {}", repo);
+    }
+
+    // Validate SKILL.md exists
+    let skill_md = target_dir.join("SKILL.md");
+    if !skill_md.exists() {
+        // Clean up
+        let _ = std::fs::remove_dir_all(&target_dir);
+        anyhow::bail!("Repository {} has no SKILL.md — not a valid skill", repo);
+    }
+
+    // Remove .git to save space
+    let _ = std::fs::remove_dir_all(target_dir.join(".git"));
+
+    println!("Installed '{}' to {}", repo_name, target_dir.display());
     Ok(())
 }
 
