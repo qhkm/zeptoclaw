@@ -562,13 +562,93 @@ fn is_private_or_local_ipv4(addr: Ipv4Addr) -> bool {
 }
 
 fn is_private_or_local_ipv6(addr: Ipv6Addr) -> bool {
-    let first = addr.segments()[0];
+    let segs = addr.segments();
+    let first = segs[0];
 
-    addr.is_loopback()
+    // Standard IPv6 private/reserved ranges
+    if addr.is_loopback()
         || addr.is_unspecified()
-        || (first & 0xfe00) == 0xfc00
-        || (first & 0xffc0) == 0xfe80
+        || (first & 0xfe00) == 0xfc00  // ULA (fc00::/7)
+        || (first & 0xffc0) == 0xfe80  // Link-local (fe80::/10)
         || (first & 0xff00) == 0xff00
+    // Multicast (ff00::/8)
+    {
+        return true;
+    }
+
+    // IPv6-to-IPv4 transition addresses: extract the embedded IPv4 and check it.
+    // See GHSA-j8q9-r9pq-2hh9 for details on each bypass vector.
+
+    // IPv4-mapped (::ffff:w.x.y.z) and IPv4-compatible (::w.x.y.z) — RFC 4291
+    // Layout: first 80 bits zero, then either 0000 or ffff, then 32-bit IPv4
+    if (segs[0] == 0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0 && segs[4] == 0)
+        && (segs[5] == 0xffff || segs[5] == 0x0000)
+    {
+        let ipv4 = Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        );
+        // Skip the all-zeros case (already caught by is_unspecified above)
+        if ipv4 != Ipv4Addr::UNSPECIFIED {
+            return is_private_or_local_ipv4(ipv4);
+        }
+    }
+
+    // NAT64 well-known prefix (64:ff9b::/96) — RFC 6052
+    // Layout: 0064:ff9b:0000:0000:0000:0000:w.x.y.z
+    if segs[0] == 0x0064
+        && segs[1] == 0xff9b
+        && segs[2] == 0
+        && segs[3] == 0
+        && segs[4] == 0
+        && segs[5] == 0
+    {
+        let ipv4 = Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        );
+        return is_private_or_local_ipv4(ipv4);
+    }
+
+    // 6to4 (2002::/16) — RFC 3056
+    // IPv4 embedded in bits 16-47 (segments 1 and 2)
+    if first == 0x2002 {
+        let ipv4 = Ipv4Addr::new(
+            (segs[1] >> 8) as u8,
+            segs[1] as u8,
+            (segs[2] >> 8) as u8,
+            segs[2] as u8,
+        );
+        return is_private_or_local_ipv4(ipv4);
+    }
+
+    // Teredo (2001:0000::/32) — RFC 4380
+    // IPv4 is bitwise-inverted in the last 32 bits (segments 6 and 7)
+    if segs[0] == 0x2001 && segs[1] == 0x0000 {
+        let inv6 = !segs[6];
+        let inv7 = !segs[7];
+        let ipv4 = Ipv4Addr::new((inv6 >> 8) as u8, inv6 as u8, (inv7 >> 8) as u8, inv7 as u8);
+        return is_private_or_local_ipv4(ipv4);
+    }
+
+    // ISATAP (RFC 5214 section 6.1)
+    // Interface ID contains 0000:5efe or 0200:5efe followed by 32-bit IPv4
+    // Pattern: *:*:*:*:0000:5efe:w.x.y.z or *:*:*:*:0200:5efe:w.x.y.z
+    if (segs[4] == 0x0000 || segs[4] == 0x0200) && segs[5] == 0x5efe {
+        let ipv4 = Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        );
+        return is_private_or_local_ipv4(ipv4);
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -857,6 +937,115 @@ mod tests {
         assert!(
             is_blocked_host(&no_host),
             "URL with no host should be blocked"
+        );
+    }
+
+    // ==================== IPv6-to-IPv4 TRANSITION ADDRESS TESTS ====================
+    // Ref: GHSA-j8q9-r9pq-2hh9 — SSRF guard bypass via transition addresses
+
+    #[test]
+    fn test_ipv6_mapped_ipv4_blocked() {
+        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 (RFC 4291)
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) should be blocked"
+        );
+        // Cloud metadata
+        let meta: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(meta),
+            "IPv4-mapped cloud metadata (::ffff:169.254.169.254) should be blocked"
+        );
+        // Private range
+        let priv10: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(priv10),
+            "IPv4-mapped private (::ffff:10.0.0.1) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_compatible_ipv4_blocked() {
+        // ::127.0.0.1 — IPv4-compatible IPv6 (deprecated but still parsed)
+        let ip: IpAddr = "::127.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "IPv4-compatible IPv6 loopback (::127.0.0.1) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_nat64_blocked() {
+        // 64:ff9b::127.0.0.1 — NAT64 well-known prefix (RFC 6052)
+        let ip: IpAddr = "64:ff9b::127.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "NAT64 loopback (64:ff9b::127.0.0.1) should be blocked"
+        );
+        let meta: IpAddr = "64:ff9b::169.254.169.254".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(meta),
+            "NAT64 cloud metadata (64:ff9b::169.254.169.254) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_6to4_blocked() {
+        // 2002:7f00:0001:: — 6to4 (RFC 3056), embeds 127.0.0.1 in bits 16-47
+        let ip: IpAddr = "2002:7f00:0001::".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "6to4 loopback (2002:7f00:0001::) should be blocked"
+        );
+        // 2002:a9fe:a9fe:: embeds 169.254.169.254
+        let meta: IpAddr = "2002:a9fe:a9fe::".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(meta),
+            "6to4 cloud metadata (2002:a9fe:a9fe::) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_teredo_blocked() {
+        // Teredo (2001:0000::/32) — IPv4 embedded inverted in last 32 bits
+        // 127.0.0.1 inverted = 0x80fffffe → last 32 bits
+        let ip: IpAddr = "2001:0000:0:0:0:0:80ff:fefe".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "Teredo loopback (2001:0000::80ff:fefe) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_isatap_blocked() {
+        // ISATAP (RFC 5214) — ::5efe:w.x.y.z or ::0200:5efe:w.x.y.z
+        let ip: IpAddr = "2001:db8:1234::5efe:127.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip),
+            "ISATAP loopback (::5efe:127.0.0.1) should be blocked"
+        );
+        let ip2: IpAddr = "fe80::5efe:10.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_local_ip(ip2),
+            "ISATAP private (fe80::5efe:10.0.0.1) should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_transition_public_ipv4_allowed() {
+        // Legitimate public IPv4 embedded in transition addresses should NOT be blocked
+        // 8.8.8.8 via NAT64
+        let public_nat64: IpAddr = "64:ff9b::8.8.8.8".parse().unwrap();
+        assert!(
+            !is_private_or_local_ip(public_nat64),
+            "NAT64 with public IP (64:ff9b::8.8.8.8) should NOT be blocked"
+        );
+        // 8.8.8.8 via 6to4 (2002:0808:0808::)
+        let public_6to4: IpAddr = "2002:0808:0808::".parse().unwrap();
+        assert!(
+            !is_private_or_local_ip(public_6to4),
+            "6to4 with public IP (2002:0808:0808::) should NOT be blocked"
         );
     }
 }
