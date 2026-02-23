@@ -284,8 +284,8 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.runtime_type = RuntimeType::Firejail;
         let result = create_runtime(&config).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("sandbox-firejail"));
+        let err = result.err().expect("should be an error");
+        assert!(err.to_string().contains("sandbox-firejail"));
     }
 
     #[cfg(all(target_os = "linux", not(feature = "sandbox-bubblewrap")))]
@@ -294,10 +294,7 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.runtime_type = RuntimeType::Bubblewrap;
         let result = create_runtime(&config).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("sandbox-bubblewrap"));
+        let err = result.err().expect("should be an error");
+        assert!(err.to_string().contains("sandbox-bubblewrap"));
     }
 }
