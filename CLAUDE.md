@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 1791, main: 59, cli_smoke: 23, e2e: 13, integration: 70, doc: 141 (116 passed, 25 ignored)
+# lib: 2398, main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -487,10 +487,10 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (1791 tests)
+# Unit tests (2398 tests)
 cargo test --lib
 
-# Main binary tests (59 tests)
+# Main binary tests (91 tests)
 cargo test --bin zeptoclaw
 
 # CLI smoke tests (23 tests)
@@ -499,10 +499,10 @@ cargo test --test cli_smoke
 # End-to-end tests (13 tests)
 cargo test --test e2e
 
-# Integration tests (68 tests)
+# Integration tests (70 tests)
 cargo test --test integration
 
-# All tests (~2,101 total including doc tests)
+# All tests (~2,716 total including doc tests)
 cargo test
 
 # Specific test
