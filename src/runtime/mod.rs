@@ -10,6 +10,7 @@
 pub mod apple;
 pub mod docker;
 pub mod factory;
+pub mod landlock;
 pub mod native;
 pub mod types;
 
@@ -17,5 +18,6 @@ pub mod types;
 pub use apple::AppleContainerRuntime;
 pub use docker::DockerRuntime;
 pub use factory::{available_runtimes, create_runtime};
+pub use landlock::LandlockRuntime;
 pub use native::NativeRuntime;
 pub use types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult};
