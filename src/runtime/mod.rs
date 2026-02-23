@@ -11,9 +11,9 @@
 
 #[cfg(target_os = "macos")]
 pub mod apple;
+pub mod bubblewrap;
 pub mod docker;
 pub mod factory;
-pub mod bubblewrap;
 pub mod firejail;
 pub mod landlock;
 pub mod native;
@@ -21,9 +21,9 @@ pub mod types;
 
 #[cfg(target_os = "macos")]
 pub use apple::AppleContainerRuntime;
+pub use bubblewrap::BubblewrapRuntime;
 pub use docker::DockerRuntime;
 pub use factory::{available_runtimes, create_runtime};
-pub use bubblewrap::BubblewrapRuntime;
 pub use firejail::FirejailRuntime;
 pub use landlock::LandlockRuntime;
 pub use native::NativeRuntime;
