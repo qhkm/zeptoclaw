@@ -63,6 +63,16 @@ use super::model_switch::{
 };
 use super::{BaseChannelConfig, Channel};
 
+/// Newtype wrappers to disambiguate `Vec<String>` / `String` in dptree's
+/// type-based DI. Without these, the last registered value of a given type
+/// silently overwrites earlier ones.
+#[derive(Clone)]
+struct Allowlist(Vec<String>);
+#[derive(Clone)]
+struct DefaultModel(String);
+#[derive(Clone)]
+struct ConfiguredProviders(Vec<String>);
+
 fn render_telegram_html(content: &str) -> String {
     let mut out = String::with_capacity(content.len() + 16);
     let mut chars = content.chars().peekable();
@@ -283,11 +293,11 @@ impl Channel for TelegramChannel {
         // Clone values for the spawned task
         let token = self.config.token.clone();
         let bus = self.bus.clone();
-        let allowlist = self.config.allow_from.clone();
+        let allowlist = Allowlist(self.config.allow_from.clone());
         let deny_by_default = self.config.deny_by_default;
         let model_overrides = self.model_overrides.clone();
-        let default_model = self.default_model.clone();
-        let configured_providers = self.configured_providers.clone();
+        let default_model = DefaultModel(self.default_model.clone());
+        let configured_providers = ConfiguredProviders(self.configured_providers.clone());
         let longterm_memory = self.longterm_memory.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
@@ -370,23 +380,35 @@ impl Channel for TelegramChannel {
                         |bot: Bot,
                          msg: Message,
                          bus: Arc<MessageBus>,
-                         allowlist: Vec<String>,
+                         Allowlist(allowlist): Allowlist,
                          deny_by_default: bool,
                          model_overrides: ModelOverrideStore,
-                         default_model: String,
-                         configured_providers: Vec<String>,
+                         DefaultModel(default_model): DefaultModel,
+                         ConfiguredProviders(configured_providers): ConfiguredProviders,
                          longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
-                            // Extract user ID
-                            let user_id = msg
-                                .from()
+                            // Extract user ID and optional username
+                            let user = msg.from();
+                            let user_id = user
                                 .map(|u| u.id.0.to_string())
                                 .unwrap_or_else(|| "unknown".to_string());
+                            let username = user
+                                .and_then(|u| u.username.clone())
+                                .unwrap_or_default();
 
-                            // Check allowlist with deny_by_default support
+                            // Check allowlist with deny_by_default support.
+                            // Accepts both numeric IDs ("123456") and usernames ("alice" or "@alice").
                             let allowed = if allowlist.is_empty() {
                                 !deny_by_default
                             } else {
                                 allowlist.contains(&user_id)
+                                    || (!username.is_empty()
+                                        && allowlist.iter().any(|entry| {
+                                            let entry_lower = entry.to_lowercase();
+                                            let user_lower = username.to_lowercase();
+                                            entry_lower == user_lower
+                                                || entry_lower == format!("@{user_lower}")
+                                                || format!("@{entry_lower}") == user_lower
+                                        }))
                             };
                             if !allowed {
                                 if allowlist.is_empty() {
@@ -397,8 +419,9 @@ impl Channel for TelegramChannel {
                                     );
                                 } else {
                                     info!(
-                                        "Telegram: User {} not in allow_from list ({} IDs configured), ignoring message",
+                                        "Telegram: User {} (@{}) not in allow_from list ({} entries configured), ignoring message",
                                         user_id,
+                                        if username.is_empty() { "no_username" } else { &username },
                                         allowlist.len()
                                     );
                                 }
