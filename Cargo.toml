@@ -10,6 +10,7 @@ repository = "https://github.com/qhkm/zeptoclaw"
 homepage = "https://github.com/qhkm/zeptoclaw"
 keywords = ["ai", "agent", "llm", "cli", "rust"]
 categories = ["command-line-utilities"]
+autobins = false
 
 [dependencies]
 # =============================================================================
