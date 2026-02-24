@@ -1,7 +1,7 @@
 //! Web access tools.
 //!
 //! Provides:
-//! - `web_search`: search the web with Brave Search API.
+//! - `web_search`: search the web with Brave Search API (or DuckDuckGo free fallback).
 //! - `web_fetch`: fetch URL content and extract readable text.
 
 use std::collections::HashSet;

@@ -21,6 +21,7 @@
 //! - `EditFileTool`: Edit a file by replacing text
 //! - `ShellTool`: Execute shell commands
 //! - `WebSearchTool`: Search the web via Brave Search API
+//! - `DdgSearchTool`: Free web search via DuckDuckGo HTML scraping (fallback)
 //! - `WebFetchTool`: Fetch URL content and extract text
 //! - `MessageTool`: Send proactive outbound chat messages
 //! - `MemorySearchTool`: Search workspace markdown memory files
