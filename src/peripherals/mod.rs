@@ -32,6 +32,9 @@ pub mod nvs;
 #[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
 pub mod rpi;
 
+#[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
+pub mod rpi_i2c;
+
 #[cfg(feature = "peripheral-esp32")]
 pub mod esp32;
 

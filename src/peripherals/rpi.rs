@@ -56,7 +56,13 @@ impl Peripheral for RpiGpioPeripheral {
     }
 
     fn tools(&self) -> Vec<Box<dyn Tool>> {
-        vec![Box::new(RpiGpioReadTool), Box::new(RpiGpioWriteTool)]
+        vec![
+            Box::new(RpiGpioReadTool),
+            Box::new(RpiGpioWriteTool),
+            Box::new(super::rpi_i2c::RpiI2cScanTool),
+            Box::new(super::rpi_i2c::RpiI2cReadTool),
+            Box::new(super::rpi_i2c::RpiI2cWriteTool),
+        ]
     }
 }
 
