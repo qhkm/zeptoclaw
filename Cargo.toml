@@ -41,6 +41,12 @@ json5 = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
 
 # =============================================================================
+# HTML PARSING
+# =============================================================================
+# DOM parser built on Servo's html5ever — CSS selectors for web_fetch extraction
+scraper = "0.25"
+
+# =============================================================================
 # CLI
 # =============================================================================
 # Command-line argument parsing with derive macros
