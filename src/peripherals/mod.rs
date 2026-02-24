@@ -26,6 +26,9 @@ pub mod nucleo;
 #[cfg(feature = "hardware")]
 pub mod i2c;
 
+#[cfg(feature = "hardware")]
+pub mod nvs;
+
 #[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
 pub mod rpi;
 
