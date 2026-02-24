@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2443, main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
+# lib: 2453 (2492 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -199,7 +199,8 @@ src/
 │   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
 │   ├── webhook.rs  # Generic HTTP webhook inbound
 │   ├── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
-│   └── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
+│   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
+│   └── serial.rs  # Serial (UART) channel for embedded device messaging (feature: hardware)
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
@@ -220,6 +221,15 @@ src/
 │   ├── factory.rs        # create_searcher() factory from config
 │   ├── longterm.rs       # Persistent KV store with pluggable searcher
 │   └── mod.rs            # Workspace markdown search with pluggable searcher
+├── peripherals/    # Hardware peripherals (serial boards, GPIO, I2C, NVS)
+│   ├── traits.rs         # Peripheral trait (always compiled)
+│   ├── board_profile.rs  # BoardProfile registry — pin ranges, capabilities per board
+│   ├── serial.rs         # SerialTransport + SerialPeripheral + GPIO tools (feature: hardware)
+│   ├── i2c.rs            # I2C tools — scan, read, write (feature: hardware)
+│   ├── nvs.rs            # NVS tools — get, set, delete (feature: hardware)
+│   ├── esp32.rs          # ESP32 peripheral wrapper (feature: peripheral-esp32)
+│   ├── arduino.rs        # Arduino peripheral wrapper (feature: hardware)
+│   └── nucleo.rs         # STM32 Nucleo peripheral wrapper (feature: hardware)
 ├── providers/      # LLM providers (Claude, OpenAI, Retry, Fallback)
 ├── runtime/        # Container runtimes (Native, Docker, Apple)
 ├── routines/       # Event/webhook/cron triggered automations
@@ -312,6 +322,7 @@ Message input channels via `Channel` trait:
 - `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth
 - `WhatsAppChannel` - WhatsApp via whatsmeow-rs bridge (WebSocket JSON protocol)
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
+- `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
 - CLI mode via direct agent invocation
 - All channels support `deny_by_default` config option for sender allowlists
 - Per-chat persona override via `/persona` command (mirrors `/model` pattern)
@@ -458,6 +469,7 @@ cargo build --release --features memory-bm25
 ### Cargo Features
 
 - `android` — Enable Android device control tool (adds `quick-xml` dependency)
+- `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
 - `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
 - `sandbox-firejail` — Enable Firejail runtime (Linux only, requires `firejail` binary)
 - `sandbox-bubblewrap` — Enable Bubblewrap runtime (Linux only, requires `bwrap` binary)
