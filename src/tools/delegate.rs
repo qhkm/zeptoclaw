@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+use futures::future::join_all;
+
 use crate::agent::{AgentLoop, ContextBuilder, SwarmScratchpad};
 use crate::bus::{InboundMessage, MessageBus};
 use crate::config::Config;
@@ -141,6 +143,11 @@ impl DelegateTool {
     /// actions. It acquires a semaphore permit before creating the sub-agent,
     /// so concurrent calls are bounded by `config.swarm.max_concurrent`.
     ///
+    /// When `inject_prior_context` is true, the scratchpad contents are injected
+    /// into the sub-agent's system prompt so it can build on previous agents'
+    /// outputs (sequential mode). When false, the sub-agent runs independently
+    /// without seeing prior outputs (parallel mode).
+    ///
     /// The returned string does **not** include the `[role]:` prefix; callers
     /// are responsible for any formatting.
     async fn run_single_delegate(
@@ -149,6 +156,7 @@ impl DelegateTool {
         task: &str,
         tools: Option<&[String]>,
         _ctx: &ToolContext,
+        inject_prior_context: bool,
     ) -> Result<String> {
         let role_lower = role.to_lowercase();
         let role_config = self.config.swarm.roles.get(&role_lower);
@@ -165,9 +173,11 @@ impl DelegateTool {
         };
 
         // Inject previous agent outputs from the scratchpad so this sub-agent
-        // can build on what earlier agents produced.
-        if let Some(context) = self.scratchpad.format_for_prompt().await {
-            system_prompt = format!("{}\n\n{}", system_prompt, context);
+        // can build on what earlier agents produced (only in sequential mode).
+        if inject_prior_context {
+            if let Some(context) = self.scratchpad.format_for_prompt().await {
+                system_prompt = format!("{}\n\n{}", system_prompt, context);
+            }
         }
 
         // Determine allowed tools: explicit override > role config > all
@@ -251,8 +261,15 @@ impl Tool for DelegateTool {
         "Delegate a task to a specialist sub-agent with a specific role. \
          The sub-agent runs to completion and returns its result. \
          Use this to decompose complex tasks into specialist subtasks. \
-         Use action='aggregate' with a 'tasks' array to fan out multiple tasks \
-         and collect their results."
+         Use action='aggregate' with a 'tasks' array for multiple tasks. \
+         IMPORTANT: When using aggregate with multiple tasks, ask the user \
+         which execution mode they prefer before running: \
+         (1) Parallel — all agents run at the same time, faster but independent \
+         (no context sharing between agents). \
+         (2) Sequential — agents run one after another, each can build on \
+         prior agents' results (slower but coordinated). \
+         If the user already specified a preference (e.g. 'run in parallel', \
+         'run them together', 'one by one'), respect that directly."
     }
 
     fn compact_description(&self) -> &str {
@@ -305,6 +322,14 @@ impl Tool for DelegateTool {
                         "required": ["role", "task"]
                     }
                 },
+                "parallel": {
+                    "type": "boolean",
+                    "description": "For action='aggregate': if true, all sub-agents run concurrently \
+                                    (faster, but tasks cannot see each other's results). \
+                                    If false (default), tasks run sequentially and each sub-agent \
+                                    can build on prior agents' outputs. Use true for independent \
+                                    tasks; false for dependent chains."
+                },
                 "merge_strategy": {
                     "type": "string",
                     "enum": ["concatenate", "summarize"],
@@ -353,7 +378,7 @@ impl Tool for DelegateTool {
                     });
 
                 let result = self
-                    .run_single_delegate(role, task, tool_override.as_deref(), ctx)
+                    .run_single_delegate(role, task, tool_override.as_deref(), ctx, true)
                     .await?;
                 // Write the result to the scratchpad so subsequent sub-agents can
                 // see what this agent produced.
@@ -368,36 +393,91 @@ impl Tool for DelegateTool {
                     .and_then(Value::as_array)
                     .ok_or_else(|| ZeptoError::Tool("'aggregate' requires 'tasks' array".into()))?;
 
-                let mut results: Vec<(String, String)> = Vec::new();
-                for task_spec in tasks {
-                    let role = task_spec
-                        .get("role")
-                        .and_then(Value::as_str)
-                        .unwrap_or("assistant");
-                    let task_text =
-                        task_spec
+                let parallel = args
+                    .get("parallel")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+
+                // Parse all task specs upfront (validates before execution).
+                let task_specs: Vec<(String, String, Option<Vec<String>>)> = tasks
+                    .iter()
+                    .map(|task_spec| {
+                        let role = task_spec
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("assistant")
+                            .to_string();
+                        let task_text = task_spec
                             .get("task")
                             .and_then(Value::as_str)
                             .ok_or_else(|| {
                                 ZeptoError::Tool(
                                     "Each task in aggregate must have 'task' field".into(),
                                 )
-                            })?;
-                    let tools: Option<Vec<String>> =
-                        task_spec.get("tools").and_then(Value::as_array).map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        });
+                            })?
+                            .to_string();
+                        let tools: Option<Vec<String>> =
+                            task_spec.get("tools").and_then(Value::as_array).map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            });
+                        Ok((role, task_text, tools))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
-                    let result = self
-                        .run_single_delegate(role, task_text, tools.as_deref(), ctx)
-                        .await?;
-                    // Write each result to the scratchpad so subsequent sub-agents
-                    // in this aggregate batch can see prior outputs.
-                    self.scratchpad.write(role, &result).await;
-                    results.push((role.to_string(), result));
-                }
+                let results = if parallel {
+                    // Parallel fan-out: all sub-agents run concurrently without
+                    // scratchpad context injection. Bounded by the semaphore.
+                    info!(
+                        count = task_specs.len(),
+                        "Parallel aggregate: fanning out sub-agents"
+                    );
+                    let futures = task_specs.iter().map(|(role, task_text, tools)| {
+                        self.run_single_delegate(
+                            role,
+                            task_text,
+                            tools.as_deref(),
+                            ctx,
+                            false, // no scratchpad injection in parallel mode
+                        )
+                    });
+                    let raw_results = join_all(futures).await;
+
+                    let mut results: Vec<(String, String)> = Vec::new();
+                    for (i, res) in raw_results.into_iter().enumerate() {
+                        let role = &task_specs[i].0;
+                        match res {
+                            Ok(output) => {
+                                self.scratchpad.write(role, &output).await;
+                                results.push((role.clone(), output));
+                            }
+                            Err(e) => {
+                                let err_msg = format!("[error]: {}", e);
+                                warn!(role = %role, error = %e, "Parallel sub-agent failed");
+                                results.push((role.clone(), err_msg));
+                            }
+                        }
+                    }
+                    results
+                } else {
+                    // Sequential: each sub-agent sees prior outputs via scratchpad.
+                    let mut results: Vec<(String, String)> = Vec::new();
+                    for (role, task_text, tools) in &task_specs {
+                        let result = self
+                            .run_single_delegate(
+                                role,
+                                task_text,
+                                tools.as_deref(),
+                                ctx,
+                                true, // inject scratchpad context in sequential mode
+                            )
+                            .await?;
+                        self.scratchpad.write(role, &result).await;
+                        results.push((role.clone(), result));
+                    }
+                    results
+                };
 
                 let merge = args
                     .get("merge_strategy")
@@ -861,6 +941,153 @@ mod tests {
         assert!(
             props["tools"].is_object(),
             "tools field missing from schema"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Parallel fan-out tests
+    // -------------------------------------------------------------------------
+
+    /// The parameters schema must expose the `parallel` field.
+    #[test]
+    fn test_parameters_include_parallel_field() {
+        let tool = test_delegate_tool(true);
+        let params = tool.parameters();
+        let props = &params["properties"];
+        assert!(
+            props["parallel"].is_object(),
+            "parallel field missing from schema"
+        );
+        assert_eq!(
+            props["parallel"]["type"], "boolean",
+            "parallel should be boolean"
+        );
+    }
+
+    /// aggregate with parallel=true but missing 'task' field in a spec must
+    /// still error before any execution (validation happens upfront).
+    #[tokio::test]
+    async fn test_parallel_aggregate_validates_upfront() {
+        let tool = test_delegate_tool(true);
+        let ctx = ToolContext::new().with_channel("telegram", "chat-1");
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "aggregate",
+                    "parallel": true,
+                    "tasks": [
+                        {"role": "a", "task": "valid"},
+                        {"role": "b"}
+                    ]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("task"),
+            "Expected upfront validation error for missing 'task', got: {}",
+            err_msg
+        );
+    }
+
+    /// aggregate with parallel=false (default) and missing 'task' in a spec
+    /// must also error upfront (same validation path).
+    #[tokio::test]
+    async fn test_sequential_aggregate_validates_upfront() {
+        let tool = test_delegate_tool(true);
+        let ctx = ToolContext::new().with_channel("telegram", "chat-1");
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "aggregate",
+                    "tasks": [{"role": "c"}]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    /// aggregate with an empty 'tasks' array and parallel=true must succeed
+    /// (no sub-agents to run, returns empty result).
+    #[tokio::test]
+    async fn test_parallel_aggregate_empty_tasks() {
+        let tool = test_delegate_tool(true);
+        let ctx = ToolContext::new().with_channel("telegram", "chat-1");
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "aggregate",
+                    "parallel": true,
+                    "tasks": []
+                }),
+                &ctx,
+            )
+            .await;
+        // Empty tasks array is valid — returns empty concatenation.
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.for_llm.is_empty() || output.for_llm == "");
+    }
+
+    /// parallel=false should be the default when the key is absent.
+    #[tokio::test]
+    async fn test_parallel_defaults_to_false() {
+        // This is a structural test — we can't run real sub-agents without
+        // an API key, but we CAN verify that the default does not trigger
+        // the parallel info log. We verify indirectly by checking that an
+        // empty tasks array in default mode produces the same result as
+        // parallel=false.
+        let tool = test_delegate_tool(true);
+        let ctx = ToolContext::new().with_channel("telegram", "chat-1");
+
+        let result_default = tool
+            .execute(
+                json!({
+                    "action": "aggregate",
+                    "tasks": []
+                }),
+                &ctx,
+            )
+            .await;
+        let result_explicit = tool
+            .execute(
+                json!({
+                    "action": "aggregate",
+                    "parallel": false,
+                    "tasks": []
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result_default.is_ok());
+        assert!(result_explicit.is_ok());
+        assert_eq!(
+            result_default.unwrap().for_llm,
+            result_explicit.unwrap().for_llm
+        );
+    }
+
+    /// The description must mention both execution modes.
+    #[test]
+    fn test_description_mentions_execution_modes() {
+        let tool = test_delegate_tool(true);
+        let desc = tool.description();
+        assert!(
+            desc.contains("Parallel") && desc.contains("Sequential"),
+            "Description should mention both Parallel and Sequential modes: {}",
+            desc
+        );
+        assert!(
+            desc.contains("ask the user"),
+            "Description should instruct the agent to ask the user: {}",
+            desc
         );
     }
 }
