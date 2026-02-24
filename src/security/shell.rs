@@ -64,6 +64,9 @@ const LITERAL_BLOCKED_PATTERNS: &[&str] = &[
     ".ssh/authorized_keys",
     ".aws/credentials",
     ".kube/config",
+    // ZeptoClaw's own config (contains API keys and channel tokens)
+    ".zeptoclaw/config.json",
+    ".zeptoclaw/config.yaml",
 ];
 
 /// Controls allowlist enforcement behaviour.
@@ -418,6 +421,25 @@ mod tests {
         let config = ShellSecurityConfig::new();
 
         assert!(config.validate_command("cat ~/.kube/config").is_err());
+    }
+
+    #[test]
+    fn test_zeptoclaw_config_blocked() {
+        let config = ShellSecurityConfig::new();
+
+        assert!(config
+            .validate_command("cat ~/.zeptoclaw/config.json")
+            .is_err());
+        assert!(config
+            .validate_command("cat ~/.zeptoclaw/config.yaml")
+            .is_err());
+        assert!(config
+            .validate_command("cat /home/user/.zeptoclaw/config.json")
+            .is_err());
+        // Reading other zeptoclaw files (non-config) should be fine
+        assert!(config
+            .validate_command("cat ~/.zeptoclaw/skills/SKILL.md")
+            .is_ok());
     }
 
     #[test]

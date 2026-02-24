@@ -3,6 +3,7 @@
 //! Orchestrates four sub-modules (validator, leak_detector, policy, sanitizer)
 //! into a single pipeline that tool outputs pass through before reaching the LLM.
 
+pub mod chain_alert;
 pub mod leak_detector;
 pub mod policy;
 pub mod sanitizer;

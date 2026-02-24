@@ -23,6 +23,8 @@ pub enum AuditCategory {
     MountSecurity,
     /// Plugin integrity check failure.
     PluginIntegrity,
+    /// Dangerous tool call sequence detected.
+    ToolChainAlert,
 }
 
 impl std::fmt::Display for AuditCategory {
@@ -35,6 +37,7 @@ impl std::fmt::Display for AuditCategory {
             Self::PathSecurity => write!(f, "path_security"),
             Self::MountSecurity => write!(f, "mount_security"),
             Self::PluginIntegrity => write!(f, "plugin_integrity"),
+            Self::ToolChainAlert => write!(f, "tool_chain_alert"),
         }
     }
 }
@@ -128,6 +131,10 @@ mod tests {
         assert_eq!(
             AuditCategory::PluginIntegrity.to_string(),
             "plugin_integrity"
+        );
+        assert_eq!(
+            AuditCategory::ToolChainAlert.to_string(),
+            "tool_chain_alert"
         );
     }
 
