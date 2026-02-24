@@ -217,6 +217,24 @@ pub async fn register_configured_channels(
         }
     }
 
+    // Serial (UART) — requires hardware feature
+    #[cfg(feature = "hardware")]
+    if let Some(ref serial_config) = config.channels.serial {
+        if serial_config.enabled {
+            if serial_config.port.is_empty() {
+                warn!("Serial channel enabled but port is empty");
+            } else {
+                manager
+                    .register(Box::new(super::serial::SerialChannel::new(
+                        serial_config.clone(),
+                        bus.clone(),
+                    )))
+                    .await;
+                info!("Registered Serial channel on {}", serial_config.port);
+            }
+        }
+    }
+
     // Channel plugins
     let plugin_dir: Option<PathBuf> = config
         .channels

@@ -11,6 +11,7 @@
 //!
 //! Without feature flags, only the `Peripheral` trait and stub factory are compiled.
 
+pub mod board_profile;
 pub mod traits;
 
 #[cfg(feature = "hardware")]
@@ -22,8 +23,17 @@ pub mod arduino;
 #[cfg(feature = "hardware")]
 pub mod nucleo;
 
+#[cfg(feature = "hardware")]
+pub mod i2c;
+
+#[cfg(feature = "hardware")]
+pub mod nvs;
+
 #[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
 pub mod rpi;
+
+#[cfg(feature = "peripheral-esp32")]
+pub mod esp32;
 
 pub use traits::Peripheral;
 

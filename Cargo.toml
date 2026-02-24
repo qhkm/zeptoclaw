@@ -199,6 +199,8 @@ channel-email = ["async-imap", "lettre", "mail-parser", "tokio-rustls", "rustls"
 hardware = ["nusb", "tokio-serial"]
 # Raspberry Pi GPIO peripheral (Linux only, requires rppal)
 peripheral-rpi = ["rppal"]
+# ESP32 peripheral (wraps serial transport with ESP32 board profile)
+peripheral-esp32 = ["hardware"]
 # Debug probe for STM32/Nucleo memory read via USB (adds ~50 deps)
 probe = ["probe-rs"]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)

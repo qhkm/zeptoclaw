@@ -11,7 +11,7 @@
 
 use super::discover;
 use super::registry;
-use crate::error::{Result, ZeptoError};
+use crate::error::Result;
 use serde::Serialize;
 
 /// Result of introspecting a device by its serial path.
