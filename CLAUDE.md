@@ -252,7 +252,7 @@ src/
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── filesystem.rs  # Read, write, list, edit files
-│   ├── web.rs         # Web search (Brave) and fetch with SSRF protection
+│   ├── web.rs         # Web search (Brave + DuckDuckGo fallback) and fetch with SSRF protection
 │   ├── whatsapp.rs    # WhatsApp Cloud API messaging
 │   ├── gsheets.rs     # Google Sheets read/write
 │   ├── message.rs     # Proactive channel messaging (reply/thread hints)
