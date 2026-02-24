@@ -37,7 +37,7 @@ We studied the best AI assistants — and their tradeoffs. OpenClaw's integratio
   <img src="https://img.shields.io/badge/binary-~4MB-3b82f6" alt="~4MB binary">
   <img src="https://img.shields.io/badge/startup-~50ms-3b82f6" alt="~50ms startup">
   <img src="https://img.shields.io/badge/RAM-~6MB-3b82f6" alt="~6MB RAM">
-  <img src="https://img.shields.io/badge/tests-2%2C300%2B-3b82f6" alt="2,300+ tests">
+  <img src="https://img.shields.io/badge/tests-2%2C700%2B-3b82f6" alt="2,700+ tests">
   <img src="https://img.shields.io/badge/providers-9-3b82f6" alt="9 providers">
 </p>
 
@@ -227,13 +227,59 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 
 ZeptoClaw is inspired by projects in the open-source AI agent ecosystem — OpenClaw, NanoClaw, and PicoClaw — each taking a different approach to the same problem. ZeptoClaw's contribution is Rust's memory safety, async performance, and container isolation for production multi-tenant deployments.
 
+## Usage
+
+```bash
+# CLI agent (one-shot)
+zeptoclaw agent -m "Summarize this repo"
+
+# Streaming output
+zeptoclaw agent --stream -m "Explain async Rust"
+
+# Use a template (researcher, coder, task-manager, etc.)
+zeptoclaw agent --template coder -m "Add error handling to main.rs"
+
+# Batch process prompts from a file
+zeptoclaw batch --input prompts.txt --output results.jsonl --format jsonl
+
+# Run as a multi-channel gateway (Telegram, Slack, Discord, etc.)
+zeptoclaw gateway
+
+# With container isolation per request
+zeptoclaw gateway --containerized
+
+# Manage long-term memory
+zeptoclaw memory set project:name "ZeptoClaw" --category project
+zeptoclaw memory search "project"
+
+# Self-update to latest release
+zeptoclaw update
+```
+
 ## Development
 
 ```bash
-cargo test              # 2,300+ tests
+# Build
+cargo build
+
+# Run all tests (~2,700 total)
+cargo test
+
+# Lint and format (required before every PR)
 cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
+
+See [CLAUDE.md](CLAUDE.md) for full architecture reference and [AGENTS.md](AGENTS.md) for coding guidelines.
+
+## Contributing
+
+We welcome contributions! Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for:
+
+- How to set up your fork and branch from upstream
+- Issue-first workflow (open an issue before coding)
+- Pull request process and quality gates
+- Guides for adding new tools, channels, and providers
 
 ## License
 
