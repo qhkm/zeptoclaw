@@ -6,11 +6,9 @@
 //!
 //! This module is only compiled when the `hardware` feature is enabled.
 
-#![cfg(feature = "hardware")]
-
 use super::traits::Peripheral;
 use crate::error::{Result, ZeptoError};
-use crate::tools::{Tool, ToolCategory, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -235,14 +233,16 @@ impl Tool for GpioReadTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> crate::error::Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> crate::error::Result<ToolOutput> {
         let pin = args
             .get("pin")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| ZeptoError::Tool("Missing 'pin' parameter".into()))?;
-        self.transport
+        let result = self
+            .transport
             .request("gpio_read", json!({ "pin": pin }))
-            .await
+            .await?;
+        Ok(ToolOutput::llm_only(result))
     }
 }
 
@@ -286,7 +286,7 @@ impl Tool for GpioWriteTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> crate::error::Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> crate::error::Result<ToolOutput> {
         let pin = args
             .get("pin")
             .and_then(|v| v.as_u64())
@@ -295,8 +295,10 @@ impl Tool for GpioWriteTool {
             .get("value")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| ZeptoError::Tool("Missing 'value' parameter".into()))?;
-        self.transport
+        let result = self
+            .transport
             .request("gpio_write", json!({ "pin": pin, "value": value }))
-            .await
+            .await?;
+        Ok(ToolOutput::llm_only(result))
     }
 }

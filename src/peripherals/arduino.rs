@@ -4,8 +4,6 @@
 //! (115200 baud, board type "arduino-uno" or "arduino-mega").
 //! Only compiled when the `hardware` feature is enabled.
 
-#![cfg(feature = "hardware")]
-
 use super::serial::SerialPeripheral;
 use super::traits::Peripheral;
 use crate::error::Result;

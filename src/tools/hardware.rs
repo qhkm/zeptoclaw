@@ -340,7 +340,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.contains("nucleo-f401re"));
+        assert!(output.for_llm.contains("nucleo-f401re"));
     }
 
     #[cfg(feature = "hardware")]
@@ -355,7 +355,7 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("not found"));
+        assert!(result.unwrap().for_llm.contains("not found"));
     }
 
     #[cfg(feature = "hardware")]
