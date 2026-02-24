@@ -92,6 +92,27 @@ pub const ESP32_PROFILE: BoardProfile = BoardProfile {
     has_pwm: true,
 };
 
+/// Board profile for Raspberry Pi (BCM2835/2836/2837/2711/2712).
+///
+/// GPIO 0-1 excluded (reserved for EEPROM I2C). GPIO 2-27 available
+/// on the standard 40-pin header. I2C bus 1 is the user-accessible bus
+/// (SDA=GPIO2, SCL=GPIO3). RPi has no native ADC.
+pub const RPI_PROFILE: BoardProfile = BoardProfile {
+    name: "rpi",
+    gpio_pins: &[
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+        27,
+    ],
+    adc_pins: &[],
+    i2c_buses: &[I2cBus {
+        id: 1,
+        sda_pin: 2,
+        scl_pin: 3,
+    }],
+    has_nvs: false,
+    has_pwm: true,
+};
+
 // ---------------------------------------------------------------------------
 // Registry lookup
 // ---------------------------------------------------------------------------
@@ -101,14 +122,16 @@ pub const ESP32_PROFILE: BoardProfile = BoardProfile {
 /// Matching is case-sensitive on canonical lowercase identifiers
 /// listed below.
 ///
-/// | `board_type` | Profile          |
-/// |--------------|------------------|
+/// | `board_type` | Profile           |
+/// |--------------|-------------------|
 /// | `"esp32"`    | [`ESP32_PROFILE`] |
+/// | `"rpi"`      | [`RPI_PROFILE`]   |
 ///
 /// Returns `None` for unknown board types.
 pub fn profile_for(board_type: &str) -> Option<&'static BoardProfile> {
     match board_type {
         "esp32" => Some(&ESP32_PROFILE),
+        "rpi" => Some(&RPI_PROFILE),
         _ => None,
     }
 }
@@ -190,5 +213,60 @@ mod tests {
     #[test]
     fn test_esp32_gpio_pin_count() {
         assert_eq!(ESP32_PROFILE.gpio_pins.len(), 26);
+    }
+
+    #[test]
+    fn test_rpi_profile_name() {
+        assert_eq!(RPI_PROFILE.name, "rpi");
+    }
+
+    #[test]
+    fn test_rpi_valid_gpio_pins() {
+        for pin in 2..=27 {
+            assert!(
+                RPI_PROFILE.is_valid_gpio(pin),
+                "GPIO {} should be valid",
+                pin
+            );
+        }
+    }
+
+    #[test]
+    fn test_rpi_invalid_gpio_pins() {
+        assert!(!RPI_PROFILE.is_valid_gpio(0));
+        assert!(!RPI_PROFILE.is_valid_gpio(1));
+        assert!(!RPI_PROFILE.is_valid_gpio(28));
+        assert!(!RPI_PROFILE.is_valid_gpio(100));
+    }
+
+    #[test]
+    fn test_rpi_no_adc() {
+        assert!(RPI_PROFILE.adc_pins.is_empty());
+        assert!(!RPI_PROFILE.is_valid_adc(2));
+    }
+
+    #[test]
+    fn test_rpi_i2c_bus_1() {
+        let bus = RPI_PROFILE.i2c_bus(1).expect("bus 1 should exist");
+        assert_eq!(bus.sda_pin, 2);
+        assert_eq!(bus.scl_pin, 3);
+        assert!(RPI_PROFILE.i2c_bus(0).is_none());
+    }
+
+    #[test]
+    fn test_rpi_capabilities() {
+        assert!(!RPI_PROFILE.has_nvs);
+        assert!(RPI_PROFILE.has_pwm);
+    }
+
+    #[test]
+    fn test_rpi_gpio_pin_count() {
+        assert_eq!(RPI_PROFILE.gpio_pins.len(), 26);
+    }
+
+    #[test]
+    fn test_profile_for_rpi() {
+        let profile = profile_for("rpi").expect("rpi should be known");
+        assert_eq!(profile.name, "rpi");
     }
 }
