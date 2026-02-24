@@ -114,7 +114,9 @@ pub use skills_search::FindSkillsTool;
 pub use stripe::StripeTool;
 pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
-pub use web::{is_blocked_host, resolve_and_check_host, WebFetchTool, WebSearchTool};
+pub use web::{
+    is_blocked_host, resolve_and_check_host, DdgSearchTool, WebFetchTool, WebSearchTool,
+};
 pub use whatsapp::WhatsAppTool;
 
 use async_trait::async_trait;

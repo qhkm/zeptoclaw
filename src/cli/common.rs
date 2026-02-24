@@ -32,9 +32,9 @@ use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, Writ
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 use zeptoclaw::tools::{
-    EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool, InstallSkillTool,
-    MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool,
-    TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    DdgSearchTool, EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool,
+    InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
+    R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -634,17 +634,25 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
 
     // Register web tools.
     if tool_enabled("web_search") {
-        if let Some(web_search_key) = config.tools.web.search.api_key.as_deref() {
-            let web_search_key = web_search_key.trim();
-            if !web_search_key.is_empty() {
-                agent
-                    .register_tool(Box::new(WebSearchTool::with_max_results(
-                        web_search_key,
-                        config.tools.web.search.max_results as usize,
-                    )))
-                    .await;
-                info!("Registered web_search tool");
-            }
+        let brave_key = config
+            .tools
+            .web
+            .search
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty());
+        let max = config.tools.web.search.max_results as usize;
+        if let Some(key) = brave_key {
+            agent
+                .register_tool(Box::new(WebSearchTool::with_max_results(key, max)))
+                .await;
+            info!("Registered web_search tool (Brave)");
+        } else {
+            agent
+                .register_tool(Box::new(DdgSearchTool::with_max_results(max)))
+                .await;
+            info!("Registered web_search tool (DuckDuckGo fallback)");
         }
     }
     if tool_enabled("web_fetch") {

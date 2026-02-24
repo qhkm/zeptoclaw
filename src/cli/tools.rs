@@ -52,9 +52,9 @@ const TOOLS: &[ToolInfo] = &[
     },
     ToolInfo {
         name: "web_search",
-        description: "Search the web via Brave Search API",
-        requires_config: true,
-        config_hint: "Set tools.web.search.api_key or BRAVE_API_KEY",
+        description: "Search the web (Brave with API key, DuckDuckGo free fallback)",
+        requires_config: false,
+        config_hint: "Optional: Set tools.web.search.api_key for Brave Search",
     },
     ToolInfo {
         name: "web_fetch",
@@ -189,13 +189,7 @@ async fn cmd_tools_info(name: String) -> Result<()> {
 
 fn is_tool_configured(config: &Config, name: &str) -> bool {
     match name {
-        "web_search" => config
-            .tools
-            .web
-            .search
-            .api_key
-            .as_ref()
-            .is_some_and(|k| !k.trim().is_empty()),
+        "web_search" => true, // Always available: Brave with key, DDG fallback without
         "whatsapp_send" => {
             config
                 .tools
@@ -284,7 +278,7 @@ mod tests {
     #[test]
     fn test_is_tool_configured_web_search_no_key() {
         let config = Config::default();
-        assert!(!is_tool_configured(&config, "web_search"));
+        assert!(is_tool_configured(&config, "web_search")); // DDG fallback always available
     }
 
     #[test]
