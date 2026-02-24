@@ -28,6 +28,106 @@ const DEFAULT_HEALTH_PORT: u16 = 9090;
 const USAGE_FLUSH_INTERVAL_SECS: u64 = 60;
 
 // ============================================================================
+// Platform RSS helper
+// ============================================================================
+
+/// Return the current process RSS (Resident Set Size) in bytes, or `None`
+/// on unsupported platforms.
+///
+/// - **macOS**: Uses `mach_task_self()` + `task_info()` FFI to read
+///   `resident_size` from `MACH_TASK_BASIC_INFO` (flavor 20).
+/// - **Linux**: Reads `/proc/self/statm`, parses the 2nd field (RSS pages),
+///   and multiplies by the kernel page size via `sysconf(_SC_PAGESIZE)`.
+/// - **Other**: Returns `None`.
+///
+/// No new crate dependencies are added; all FFI is declared inline.
+pub fn get_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // mach/mach_types.h
+        type MachPort = u32;
+        type KernReturn = i32;
+        type TaskFlavor = u32;
+        type NaturalT = u32;
+
+        // MACH_TASK_BASIC_INFO flavor (20) struct layout
+        #[repr(C)]
+        struct MachTaskBasicInfo {
+            virtual_size: u64,
+            resident_size: u64,
+            resident_size_max: u64,
+            user_time_sec: i32,
+            user_time_usec: i32,
+            system_time_sec: i32,
+            system_time_usec: i32,
+            policy: i32,
+            suspend_count: i32,
+        }
+
+        const MACH_TASK_BASIC_INFO: TaskFlavor = 20;
+        const KERN_SUCCESS: KernReturn = 0;
+
+        extern "C" {
+            static mach_task_self_: MachPort;
+            fn task_info(
+                target_task: MachPort,
+                flavor: TaskFlavor,
+                task_info_out: *mut MachTaskBasicInfo,
+                task_info_out_cnt: *mut NaturalT,
+            ) -> KernReturn;
+        }
+
+        let mut info = MachTaskBasicInfo {
+            virtual_size: 0,
+            resident_size: 0,
+            resident_size_max: 0,
+            user_time_sec: 0,
+            user_time_usec: 0,
+            system_time_sec: 0,
+            system_time_usec: 0,
+            policy: 0,
+            suspend_count: 0,
+        };
+        let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<NaturalT>())
+            as NaturalT;
+
+        let ret =
+            unsafe { task_info(mach_task_self_, MACH_TASK_BASIC_INFO, &mut info, &mut count) };
+
+        if ret == KERN_SUCCESS {
+            Some(info.resident_size)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Read /proc/self/statm: fields are in pages.
+        // Format: size resident shared text lib data dt
+        // We want the 2nd field (resident pages).
+        let content = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages: u64 = content.split_whitespace().nth(1)?.parse().ok()?;
+
+        extern "C" {
+            fn sysconf(name: i32) -> i64;
+        }
+        // _SC_PAGESIZE = 30 on Linux (Linux-specific value)
+        const SC_PAGESIZE: i32 = 30;
+        let page_size = unsafe { sysconf(SC_PAGESIZE) };
+        if page_size <= 0 {
+            return None;
+        }
+        Some(resident_pages * (page_size as u64))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+// ============================================================================
 // HealthStatus
 // ============================================================================
 
@@ -988,5 +1088,21 @@ mod tests {
     fn test_all_checks_empty_registry() {
         let reg = HealthRegistry::new();
         assert!(reg.all_checks().is_empty());
+    }
+
+    // --- get_rss_bytes tests ---
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn test_get_rss_bytes_returns_some() {
+        let rss = get_rss_bytes();
+        assert!(
+            rss.is_some(),
+            "get_rss_bytes() returned None on a supported platform"
+        );
+        assert!(
+            rss.unwrap() > 0,
+            "get_rss_bytes() returned Some(0), expected a positive RSS value"
+        );
     }
 }
