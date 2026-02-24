@@ -247,3 +247,22 @@ Apache 2.0 — see [LICENSE](LICENSE)
 <p align="center">
   Built by <a href="https://github.com/qhkm">Aisar Labs</a>
 </p>
+
+
+## Installation
+
+```bash
+# Installation instructions
+```
+
+
+## Usage
+
+```python
+# Usage examples
+```
+
+
+## Contributing
+
+Contributions are welcome!
