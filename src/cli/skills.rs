@@ -250,16 +250,36 @@ async fn cmd_skills_install(
     }
 }
 
+/// Normalize a GitHub argument to `owner/repo`, accepting both full URLs and shorthand.
+fn normalize_github_repo(input: &str) -> &str {
+    input
+        .strip_prefix("https://github.com/")
+        .or_else(|| input.strip_prefix("http://github.com/"))
+        .unwrap_or(input)
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+}
+
 async fn cmd_skills_install_github(repo: &str) -> Result<()> {
-    // Validate owner/repo format
-    if !repo.contains('/') {
-        anyhow::bail!("Expected owner/repo format, got: {}", repo);
+    // Normalize: accept full GitHub URLs as well as owner/repo shorthand
+    let repo = normalize_github_repo(repo);
+
+    // Validate owner/repo format (exactly two segments)
+    let segments: Vec<&str> = repo.split('/').collect();
+    if segments.len() != 2 {
+        anyhow::bail!(
+            "Expected owner/repo format (e.g. steipete/gogcli), got: {}",
+            repo
+        );
+    }
+
+    let repo_name = segments[1];
+    if repo_name.is_empty() || repo_name == "." || repo_name == ".." {
+        anyhow::bail!("Invalid repository name: {:?}", repo_name);
     }
 
     let skills_dir = zeptoclaw::config::Config::dir().join("skills");
     std::fs::create_dir_all(&skills_dir)?;
-
-    let repo_name = repo.split('/').nth(1).unwrap_or(repo);
     let target_dir = skills_dir.join(repo_name);
 
     if target_dir.exists() {
@@ -272,7 +292,7 @@ async fn cmd_skills_install_github(repo: &str) -> Result<()> {
 
     println!("Installing skill from github.com/{} ...", repo);
 
-    let status = tokio::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .args([
             "clone",
             "--depth",
@@ -282,11 +302,12 @@ async fn cmd_skills_install_github(repo: &str) -> Result<()> {
         .arg(&target_dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .status()
+        .output()
         .await?;
 
-    if !status.success() {
-        anyhow::bail!("git clone failed for {}", repo);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git clone failed for {}: {}", repo, stderr.trim());
     }
 
     // Validate SKILL.md exists
@@ -412,5 +433,40 @@ Describe usage and concrete command examples.
             required: true,
         }];
         assert_eq!(compute_max_name_len(&single), "ONLY_ONE".len());
+    }
+
+    #[test]
+    fn test_normalize_github_repo() {
+        // Full HTTPS URL (the bug: split('/').nth(1) returns "" instead of repo name)
+        assert_eq!(
+            normalize_github_repo("https://github.com/steipete/gogcli"),
+            "steipete/gogcli"
+        );
+        // Trailing slash on URL
+        assert_eq!(
+            normalize_github_repo("https://github.com/owner/repo/"),
+            "owner/repo"
+        );
+        // HTTP variant
+        assert_eq!(
+            normalize_github_repo("http://github.com/owner/repo"),
+            "owner/repo"
+        );
+        // Already owner/repo shorthand — unchanged
+        assert_eq!(normalize_github_repo("owner/repo"), "owner/repo");
+        // org with trailing slash in shorthand
+        assert_eq!(normalize_github_repo("owner/repo/"), "owner/repo");
+        // .git suffix stripped
+        assert_eq!(
+            normalize_github_repo("https://github.com/owner/repo.git"),
+            "owner/repo"
+        );
+        // .git suffix on shorthand
+        assert_eq!(normalize_github_repo("owner/repo.git"), "owner/repo");
+        // Sub-path URL reduced to still contain sub-path (caught by segment validation)
+        assert_eq!(
+            normalize_github_repo("https://github.com/owner/repo/tree/main"),
+            "owner/repo/tree/main"
+        );
     }
 }

@@ -292,7 +292,7 @@ pub enum SkillsAction {
     Install {
         /// ClawHub slug (reserved for future use)
         slug: Option<String>,
-        /// Install from GitHub repository (owner/repo format)
+        /// Install from GitHub repository (owner/repo or full URL)
         #[arg(long)]
         github: Option<String>,
     },
