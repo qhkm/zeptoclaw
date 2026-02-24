@@ -34,6 +34,27 @@ When a message begins with `Reminder:`, it was delivered by the scheduler on beh
 
 When a message is the heartbeat prompt (checking workspace tasks), reply with `HEARTBEAT_OK` if there is nothing actionable to do, or take the requested action if there is."#;
 
+/// System prompt suffix for first-run persona guidance.
+// Wired in by the persona override extraction task (common.rs); suppress
+// the dead_code lint until that integration step is complete.
+#[allow(dead_code)]
+pub const FIRST_RUN_PERSONA_PROMPT: &str = r#"
+
+## First Conversation Setup
+
+This appears to be a new chat. Take a moment to introduce yourself briefly and ask the user what kind of assistant they'd like you to be. Offer these options:
+
+1. **Default** — balanced and helpful
+2. **Concise** — short, direct answers
+3. **Friendly** — warm and conversational
+4. **Professional** — formal and structured
+5. **Creative** — playful and imaginative
+6. **Technical** — detailed expert mode
+
+Say something like: "Hi! I'm your AI assistant. I can adapt my style to suit you. Would you like me to be concise, friendly, professional, creative, or technical? Or just say 'default' for a balanced approach. You can also describe any custom style you'd like!"
+
+After the user responds, save their preference using longterm_memory with key "persona_pref:{chat_id}" and apply it going forward."#;
+
 /// Runtime context injected into the system prompt to make agents environment-aware.
 ///
 /// This struct captures information about the agent's runtime environment such as
@@ -379,6 +400,14 @@ impl ContextBuilder {
         if !memory_context.is_empty() {
             self.memory_context = Some(memory_context);
         }
+        self
+    }
+
+    /// Append a suffix to the system prompt.
+    ///
+    /// Used for injecting additional instructions like first-run persona prompts.
+    pub fn with_system_prompt_suffix(mut self, suffix: &str) -> Self {
+        self.system_prompt.push_str(suffix);
         self
     }
 
@@ -1006,5 +1035,20 @@ mod tests {
             DEFAULT_SYSTEM_PROMPT.contains("HEARTBEAT_OK"),
             "System prompt must instruct how to handle heartbeat messages"
         );
+    }
+
+    #[test]
+    fn test_with_system_prompt_suffix() {
+        let builder = ContextBuilder::new().with_system_prompt_suffix("\n\nExtra instructions.");
+        let system = builder.build_system_message();
+        assert!(system.content.contains("ZeptoClaw"));
+        assert!(system.content.contains("Extra instructions."));
+    }
+
+    #[test]
+    fn test_first_run_persona_prompt_content() {
+        assert!(FIRST_RUN_PERSONA_PROMPT.contains("First Conversation Setup"));
+        assert!(FIRST_RUN_PERSONA_PROMPT.contains("concise"));
+        assert!(FIRST_RUN_PERSONA_PROMPT.contains("persona_pref"));
     }
 }
