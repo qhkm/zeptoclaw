@@ -7,7 +7,7 @@
 
 use super::traits::Peripheral;
 use crate::error::{Result, ZeptoError};
-use crate::tools::{Tool, ToolCategory, ToolContext};
+use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -93,7 +93,7 @@ impl Tool for RpiGpioReadTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let pin = args
             .get("pin")
             .and_then(|v| v.as_u64())
@@ -115,7 +115,7 @@ impl Tool for RpiGpioReadTool {
         .await
         .map_err(|e| ZeptoError::Tool(format!("GPIO read join error: {e}")))??;
 
-        Ok(format!("pin {} = {}", pin, value))
+        Ok(ToolOutput::llm_only(format!("pin {} = {}", pin, value)))
     }
 }
 
@@ -157,7 +157,7 @@ impl Tool for RpiGpioWriteTool {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let pin = args
             .get("pin")
             .and_then(|v| v.as_u64())
@@ -185,6 +185,6 @@ impl Tool for RpiGpioWriteTool {
         .await
         .map_err(|e| ZeptoError::Tool(format!("GPIO write join error: {e}")))??;
 
-        Ok(format!("pin {} = {}", pin, value))
+        Ok(ToolOutput::llm_only(format!("pin {} = {}", pin, value)))
     }
 }
