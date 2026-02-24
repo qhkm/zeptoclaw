@@ -81,8 +81,9 @@ pub use tools::screenshot::WebScreenshotTool;
 #[cfg(feature = "android")]
 pub use tools::AndroidTool;
 pub use tools::{
-    cron::CronTool, custom::CustomTool, delegate::DelegateTool, spawn::SpawnTool, BinaryPluginTool,
-    EchoTool, GitTool, GoogleSheetsTool, HardwareTool, HttpRequestTool, MemoryGetTool,
-    MemorySearchTool, MessageTool, PdfReadTool, ProjectTool, R8rTool, ReminderTool, StripeTool,
-    Tool, ToolCategory, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
+    composed::CreateToolTool, cron::CronTool, custom::CustomTool, delegate::DelegateTool,
+    spawn::SpawnTool, BinaryPluginTool, EchoTool, GitTool, GoogleSheetsTool, HardwareTool,
+    HttpRequestTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
+    R8rTool, ReminderTool, StripeTool, Tool, ToolCategory, ToolContext, ToolRegistry, WebFetchTool,
+    WebSearchTool, WhatsAppTool,
 };

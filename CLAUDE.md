@@ -329,7 +329,13 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-18 built-in tools + dynamic MCP tools via `Tool` async trait. All filesystem tools require workspace.
+18 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
+
+**Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
+- `CreateToolTool` — agent tool with create/list/delete/run actions
+- `ComposedTool` — wraps a `ComposedToolDef`, interpolates `{{param}}` placeholders into action template, returns instructions for the agent to follow
+- `ComposedToolStore` — persistence at `~/.zeptoclaw/composed_tools.json`
+- Auto-loaded at startup in `create_agent()` as first-class tools
 
 ### Utils (`src/utils/`)
 - `sanitize.rs` - Tool result sanitization (strip base64, hex, truncate)

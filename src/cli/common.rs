@@ -963,6 +963,23 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    // Register create_tool management tool
+    if tool_enabled("create_tool") {
+        agent
+            .register_tool(Box::new(zeptoclaw::tools::composed::CreateToolTool::new()))
+            .await;
+    }
+
+    // Load and register user-defined composed tools
+    for tool in zeptoclaw::tools::composed::load_composed_tools() {
+        let name = tool.name().to_string();
+        if !tool_enabled(&name) {
+            continue;
+        }
+        agent.register_tool(tool).await;
+        info!(tool = %name, "Registered composed tool");
+    }
+
     // Validate and register custom CLI-defined tools
     let tool_warnings = zeptoclaw::config::validate::validate_custom_tools(&config);
     for w in &tool_warnings {
