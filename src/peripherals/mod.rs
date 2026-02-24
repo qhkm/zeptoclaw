@@ -11,6 +11,7 @@
 //!
 //! Without feature flags, only the `Peripheral` trait and stub factory are compiled.
 
+pub mod board_profile;
 pub mod traits;
 
 #[cfg(feature = "hardware")]
