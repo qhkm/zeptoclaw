@@ -36,7 +36,7 @@ pub mod transcription;
 pub mod tunnel;
 pub mod utils;
 
-pub use agent::{AgentLoop, ContextBuilder, SwarmScratchpad};
+pub use agent::{AgentLoop, ContextBuilder, SwarmScratchpad, ZeptoAgent, ZeptoAgentBuilder};
 pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 pub use channels::{
     BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,

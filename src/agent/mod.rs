@@ -58,12 +58,14 @@ pub mod budget;
 pub mod compaction;
 mod context;
 pub mod context_monitor;
+pub mod facade;
 mod r#loop;
 pub mod scratchpad;
 
 pub use budget::TokenBudget;
 pub use context::{format_message_envelope, ContextBuilder, RuntimeContext};
 pub use context_monitor::{CompactionStrategy, ContextMonitor};
+pub use facade::{ZeptoAgent, ZeptoAgentBuilder};
 pub use r#loop::AgentLoop;
 pub use r#loop::{ToolFeedback, ToolFeedbackPhase};
 pub use scratchpad::SwarmScratchpad;
