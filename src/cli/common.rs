@@ -288,7 +288,8 @@ fn apply_retry_wrapper(provider: Box<dyn LLMProvider>, config: &Config) -> Box<d
         RetryProvider::new(provider)
             .with_max_retries(config.providers.retry.max_retries)
             .with_base_delay_ms(config.providers.retry.base_delay_ms)
-            .with_max_delay_ms(config.providers.retry.max_delay_ms),
+            .with_max_delay_ms(config.providers.retry.max_delay_ms)
+            .with_retry_budget_ms(config.providers.retry.retry_budget_ms),
     )
 }
 
