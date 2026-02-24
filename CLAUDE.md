@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2453 (2492 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
+# lib: 2497 (2536 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -213,6 +213,7 @@ src/
 │   ├── fetcher.rs  # DepFetcher trait + real/mock implementations
 │   └── manager.rs  # DepManager lifecycle orchestrator
 ├── gateway/        # Containerized agent proxy (Docker/Apple)
+├── health.rs       # Health server, HealthRegistry, UsageMetrics, get_rss_bytes()
 ├── heartbeat/      # Periodic background task service
 ├── memory/         # Workspace memory + long-term memory with pluggable search backends
 │   ├── traits.rs         # MemorySearcher trait
@@ -381,6 +382,14 @@ Message input channels via `Channel` trait:
 - `decay_score()` on `MemoryEntry` - 30-day half-life decay with importance weighting; pinned entries exempt (always 1.0)
 - `build_memory_injection()` - Pinned + query-matched memory injection for system prompt (2000 char budget)
 - Pre-compaction memory flush - Silent LLM turn saves important facts before context compaction (10s timeout)
+
+### Health (`src/health.rs`)
+- `HealthRegistry` — named component checks with restart count, last error
+- `UsageMetrics` — lock-free counters (requests, tool calls, tokens, errors)
+- `get_rss_bytes()` — platform RSS (macOS mach + Linux /proc/self/statm)
+- `/health` returns version, uptime, memory RSS, usage metrics, component checks
+- `/ready` returns boolean readiness (all checks not Down)
+- Raw TCP server — no web framework dependency
 
 ### Landing (`landing/zeptoclaw/index.html`)
 - Hero ambient animation, mascot eye/pupil motion, and magnetic CTA interactions
