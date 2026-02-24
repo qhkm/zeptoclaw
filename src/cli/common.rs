@@ -470,8 +470,20 @@ pub(crate) async fn create_agent_with_template(
             None
         };
 
+    // Build deny set from config (e.g. startup guard degraded mode)
+    let deny_tools: HashSet<String> = config
+        .tools
+        .deny
+        .iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+
     let tool_enabled = |name: &str| {
         let key = name.to_ascii_lowercase();
+        // Deny list (startup guard degraded mode, etc.)
+        if deny_tools.contains(&key) {
+            return false;
+        }
         // Profile filter (if active)
         if let Some(ref profile) = profile_tools {
             if !profile.contains(&key) {

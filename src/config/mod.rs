@@ -141,6 +141,19 @@ impl Config {
                 self.gateway.rate_limit.webhook_per_min = n;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_STARTUP_GUARD_ENABLED") {
+            self.gateway.startup_guard.enabled = val.parse().unwrap_or(true);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_STARTUP_GUARD_CRASH_THRESHOLD") {
+            if let Ok(n) = val.parse() {
+                self.gateway.startup_guard.crash_threshold = n;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_STARTUP_GUARD_WINDOW_SECS") {
+            if let Ok(n) = val.parse() {
+                self.gateway.startup_guard.window_secs = n;
+            }
+        }
 
         // Provider API keys
         self.apply_provider_env_overrides();

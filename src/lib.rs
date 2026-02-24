@@ -61,7 +61,7 @@ pub use gateway::is_apple_container_available;
 pub use gateway::{
     generate_env_file_content, is_docker_available, is_docker_available_with_binary,
     parse_marked_response, resolve_backend, AgentRequest, AgentResponse, AgentResult,
-    ContainerAgentProxy, ResolvedBackend, RESPONSE_END_MARKER, RESPONSE_START_MARKER,
+    ContainerAgentProxy, ResolvedBackend, StartupGuard, RESPONSE_END_MARKER, RESPONSE_START_MARKER,
 };
 pub use health::{
     get_rss_bytes, health_port, start_health_server, start_health_server_legacy,

@@ -1166,6 +1166,28 @@ pub struct RateLimitConfig {
     pub webhook_per_min: u32,
 }
 
+/// Startup guard configuration — degrade after consecutive crashes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupGuardConfig {
+    /// Enable startup guard (default: true).
+    pub enabled: bool,
+    /// Consecutive crashes before entering degraded mode (default: 4).
+    pub crash_threshold: u32,
+    /// Time window in seconds — crashes older than this are stale (default: 300).
+    pub window_secs: u64,
+}
+
+impl Default for StartupGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            crash_threshold: 4,
+            window_secs: 300,
+        }
+    }
+}
+
 /// Gateway server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1177,6 +1199,9 @@ pub struct GatewayConfig {
     /// Per-IP rate limiting for gateway endpoints.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Startup guard — degrade after consecutive crashes.
+    #[serde(default)]
+    pub startup_guard: StartupGuardConfig,
 }
 
 impl Default for GatewayConfig {
@@ -1185,6 +1210,7 @@ impl Default for GatewayConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             rate_limit: RateLimitConfig::default(),
+            startup_guard: StartupGuardConfig::default(),
         }
     }
 }
@@ -1229,6 +1255,9 @@ pub struct ToolsConfig {
     /// Skills marketplace (ClawHub) configuration
     #[serde(default)]
     pub skills: SkillsMarketplaceConfig,
+    /// Tools to deny (disable). Set by startup guard in degraded mode.
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 /// Configuration for the HTTP request tool.

@@ -55,7 +55,7 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
 ];
 
 #[allow(dead_code)]
-const KNOWN_GATEWAY: &[&str] = &["host", "port"];
+const KNOWN_GATEWAY: &[&str] = &["host", "port", "rate_limit", "startup_guard"];
 
 /// A validation diagnostic.
 #[derive(Debug)]

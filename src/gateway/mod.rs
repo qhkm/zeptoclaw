@@ -18,5 +18,7 @@ pub use ipc::{RESPONSE_END_MARKER, RESPONSE_START_MARKER};
 
 pub mod idempotency;
 pub mod rate_limit;
+pub mod startup_guard;
 pub use idempotency::IdempotencyStore;
 pub use rate_limit::{GatewayRateLimiter, SlidingWindowRateLimiter};
+pub use startup_guard::StartupGuard;

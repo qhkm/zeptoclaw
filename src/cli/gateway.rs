@@ -32,6 +32,33 @@ pub(crate) async fn cmd_gateway(
     // Load configuration
     let mut config = Config::load().with_context(|| "Failed to load configuration")?;
 
+    // Startup guard — check for consecutive crash degradation
+    let guard = if config.gateway.startup_guard.enabled {
+        let g = zeptoclaw::StartupGuard::new(
+            config.gateway.startup_guard.crash_threshold,
+            config.gateway.startup_guard.window_secs,
+        );
+        match g.check() {
+            Ok(true) => {
+                warn!(
+                    threshold = config.gateway.startup_guard.crash_threshold,
+                    "Startup guard: consecutive crashes detected — entering degraded mode"
+                );
+                warn!("Degraded mode: shell and filesystem write tools disabled");
+                config.tools.deny = vec![
+                    "shell".to_string(),
+                    "write_file".to_string(),
+                    "edit_file".to_string(),
+                ];
+            }
+            Ok(false) => {}
+            Err(e) => warn!("Startup guard check failed (continuing normally): {}", e),
+        }
+        Some(g)
+    } else {
+        None
+    };
+
     // --containerized [docker|apple] overrides config backend
     let containerized = containerized_flag.is_some();
     if let Some(ref b) = containerized_flag {
@@ -188,13 +215,21 @@ pub(crate) async fn cmd_gateway(
         proxy_instance.set_usage_metrics(Arc::clone(&metrics));
         let proxy_for_task = Arc::clone(&proxy_instance);
         let proxy_metrics = Arc::clone(&metrics);
+        let proxy_guard = guard.clone();
         proxy = Some(proxy_instance);
 
         Some(tokio::spawn(async move {
             let result = proxy_for_task.start().await;
             proxy_metrics.set_ready(false);
             match result {
-                Err(e) => error!("Container agent proxy error: {}", e),
+                Err(e) => {
+                    error!("Container agent proxy error: {}", e);
+                    if let Some(ref g) = proxy_guard {
+                        if let Err(re) = g.record_crash() {
+                            warn!("Failed to record crash: {}", re);
+                        }
+                    }
+                }
                 Ok(()) => warn!("Container agent proxy stopped"),
             }
         }))
@@ -334,11 +369,19 @@ pub(crate) async fn cmd_gateway(
     let agent_handle = if let Some(ref agent) = agent {
         let agent_clone = Arc::clone(agent);
         let agent_metrics = Arc::clone(&metrics);
+        let agent_guard = guard.clone();
         Some(tokio::spawn(async move {
             let result = agent_clone.start().await;
             agent_metrics.set_ready(false);
             match result {
-                Err(e) => error!("Agent loop error: {}", e),
+                Err(e) => {
+                    error!("Agent loop error: {}", e);
+                    if let Some(ref g) = agent_guard {
+                        if let Err(re) = g.record_crash() {
+                            warn!("Failed to record crash: {}", re);
+                        }
+                    }
+                }
                 Ok(()) => warn!("Agent loop stopped"),
             }
         }))
@@ -349,7 +392,19 @@ pub(crate) async fn cmd_gateway(
     // Mark gateway as ready for /readyz
     metrics.set_ready(true);
 
+    // Record clean start (reset crash counter)
+    if let Some(ref g) = guard {
+        if let Err(e) = g.record_clean_start() {
+            warn!("Failed to record clean start: {}", e);
+        }
+    }
+
     println!();
+    if !config.tools.deny.is_empty() {
+        println!("  WARNING: DEGRADED MODE — dangerous tools disabled after consecutive crashes");
+        println!("  Fix the underlying issue and restart to clear.");
+        println!();
+    }
     if containerized {
         println!("Gateway is running (containerized mode). Press Ctrl+C to stop.");
     } else {
