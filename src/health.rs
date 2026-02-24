@@ -479,12 +479,7 @@ pub async fn start_health_server(
 
                         let (status_line, body) = match (method, path) {
                             ("GET", "/health") | ("GET", "/healthz") => {
-                                let checks_json = registry.render_checks_json();
-                                let uptime = registry.uptime().as_secs();
-                                let body = format!(
-                                    "{{\"status\":\"ok\",\"uptime_secs\":{},\"checks\":{}}}",
-                                    uptime, checks_json
-                                );
+                                let body = registry.render_health_json();
                                 ("200 OK", body)
                             }
                             ("GET", "/ready") | ("GET", "/readyz") => {
@@ -559,18 +554,44 @@ pub async fn start_health_server_legacy(
                         let raw_path = parts.next().unwrap_or_default();
                         let path = raw_path.split('?').next().unwrap_or(raw_path);
 
-                        let (status, body) = match (method, path) {
+                        let (status, body): (&str, String) = match (method, path) {
                             ("GET", "/healthz") | ("GET", "/health") => {
-                                ("200 OK", "{\"status\":\"ok\"}")
+                                let mut parts: Vec<String> = Vec::with_capacity(5);
+                                let ready = metrics.ready.load(Ordering::SeqCst);
+                                parts.push(format!(
+                                    "\"status\":\"{}\"",
+                                    if ready { "ok" } else { "degraded" }
+                                ));
+                                parts
+                                    .push(format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION")));
+                                if let Some(rss) = get_rss_bytes() {
+                                    let mb = rss as f64 / 1_048_576.0;
+                                    parts.push(format!(
+                                        "\"memory\":{{\"rss_bytes\":{},\"rss_mb\":{:.1}}}",
+                                        rss, mb
+                                    ));
+                                }
+                                parts.push(format!(
+                                    "\"usage\":{{\"requests\":{},\"tool_calls\":{},\"input_tokens\":{},\"output_tokens\":{},\"errors\":{}}}",
+                                    metrics.requests.load(Ordering::Relaxed),
+                                    metrics.tool_calls.load(Ordering::Relaxed),
+                                    metrics.input_tokens.load(Ordering::Relaxed),
+                                    metrics.output_tokens.load(Ordering::Relaxed),
+                                    metrics.errors.load(Ordering::Relaxed),
+                                ));
+                                ("200 OK", format!("{{{}}}", parts.join(",")))
                             }
                             ("GET", "/readyz") | ("GET", "/ready") => {
                                 if metrics.ready.load(Ordering::SeqCst) {
-                                    ("200 OK", "{\"status\":\"ready\"}")
+                                    ("200 OK", "{\"status\":\"ready\"}".to_string())
                                 } else {
-                                    ("503 Service Unavailable", "{\"status\":\"not_ready\"}")
+                                    (
+                                        "503 Service Unavailable",
+                                        "{\"status\":\"not_ready\"}".to_string(),
+                                    )
                                 }
                             }
-                            _ => ("404 Not Found", "{\"error\":\"not_found\"}"),
+                            _ => ("404 Not Found", "{\"error\":\"not_found\"}".to_string()),
                         };
 
                         let response = format!(
@@ -1057,6 +1078,58 @@ mod tests {
         let response = String::from_utf8_lossy(&buf[..n]);
         assert!(response.contains("200 OK"));
         assert!(response.contains("\"status\":\"ok\""));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_includes_version_and_memory() {
+        let registry = HealthRegistry::new();
+        registry.register(HealthCheck {
+            name: "svc".into(),
+            status: HealthStatus::Ok,
+            ..Default::default()
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let handle = start_health_server("127.0.0.1", port, registry)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(
+            &mut stream,
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await
+        .unwrap();
+
+        let mut buf = vec![0u8; 2048];
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+            .await
+            .unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            response.contains("\"version\":\""),
+            "missing version: {}",
+            response
+        );
+        assert!(
+            response.contains("\"uptime_secs\":"),
+            "missing uptime: {}",
+            response
+        );
+        assert!(
+            response.contains("\"checks\":"),
+            "missing checks: {}",
+            response
+        );
 
         handle.abort();
     }
