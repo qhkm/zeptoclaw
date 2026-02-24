@@ -203,6 +203,7 @@ impl Default for HealthCheck {
 pub struct HealthRegistry {
     checks: Arc<RwLock<HashMap<String, HealthCheck>>>,
     start_time: Instant,
+    metrics: Arc<RwLock<Option<Arc<UsageMetrics>>>>,
 }
 
 impl HealthRegistry {
@@ -211,7 +212,13 @@ impl HealthRegistry {
         Self {
             checks: Arc::new(RwLock::new(HashMap::new())),
             start_time: Instant::now(),
+            metrics: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Attach a [`UsageMetrics`] instance for inclusion in health responses.
+    pub fn set_metrics(&self, metrics: Arc<UsageMetrics>) {
+        *self.metrics.write().unwrap() = Some(metrics);
     }
 
     /// Register a new named check. Replaces any existing check with the same name.
@@ -273,7 +280,7 @@ impl HealthRegistry {
     }
 
     /// Render all checks as a compact JSON object for `/health` responses.
-    fn render_checks_json(&self) -> String {
+    pub(crate) fn render_checks_json(&self) -> String {
         let checks = self.checks.read().unwrap();
         if checks.is_empty() {
             return "{}".to_string();
@@ -281,19 +288,58 @@ impl HealthRegistry {
         let parts: Vec<String> = checks
             .values()
             .map(|c| {
+                let mut fields = format!("\"status\":\"{}\"", c.status.as_str());
                 if let Some(ref msg) = c.message {
-                    format!(
-                        "\"{}\":{{\"status\":\"{}\",\"message\":\"{}\"}}",
-                        c.name,
-                        c.status.as_str(),
-                        msg.replace('"', "\\\"")
-                    )
-                } else {
-                    format!("\"{}\":{{\"status\":\"{}\"}}", c.name, c.status.as_str())
+                    fields.push_str(&format!(",\"message\":\"{}\"", msg.replace('"', "\\\"")));
                 }
+                if c.restart_count > 0 {
+                    fields.push_str(&format!(",\"restart_count\":{}", c.restart_count));
+                }
+                if let Some(ref err) = c.last_error {
+                    fields.push_str(&format!(",\"last_error\":\"{}\"", err.replace('"', "\\\"")));
+                }
+                format!("\"{}\":{{{}}}", c.name, fields)
             })
             .collect();
         format!("{{{}}}", parts.join(","))
+    }
+
+    /// Render a rich health JSON response with status, version, uptime, memory, usage, and checks.
+    pub fn render_health_json(&self) -> String {
+        let status = if self.is_ready() { "ok" } else { "degraded" };
+        let version = env!("CARGO_PKG_VERSION");
+        let uptime = self.uptime().as_secs();
+        let checks_json = self.render_checks_json();
+
+        let mut json = format!(
+            "{{\"status\":\"{}\",\"version\":\"{}\",\"uptime_secs\":{}",
+            status, version, uptime
+        );
+
+        // memory section — only on supported platforms
+        if let Some(rss) = get_rss_bytes() {
+            let rss_mb = rss as f64 / (1024.0 * 1024.0);
+            json.push_str(&format!(
+                ",\"memory\":{{\"rss_bytes\":{},\"rss_mb\":{:.1}}}",
+                rss, rss_mb
+            ));
+        }
+
+        // usage section — only when metrics are attached
+        if let Some(ref m) = *self.metrics.read().unwrap() {
+            let requests = m.requests.load(Ordering::Relaxed);
+            let tool_calls = m.tool_calls.load(Ordering::Relaxed);
+            let input_tokens = m.input_tokens.load(Ordering::Relaxed);
+            let output_tokens = m.output_tokens.load(Ordering::Relaxed);
+            let errors = m.errors.load(Ordering::Relaxed);
+            json.push_str(&format!(
+                ",\"usage\":{{\"requests\":{},\"tool_calls\":{},\"input_tokens\":{},\"output_tokens\":{},\"errors\":{}}}",
+                requests, tool_calls, input_tokens, output_tokens, errors
+            ));
+        }
+
+        json.push_str(&format!(",\"checks\":{}}}", checks_json));
+        json
     }
 }
 
@@ -1088,6 +1134,71 @@ mod tests {
     fn test_all_checks_empty_registry() {
         let reg = HealthRegistry::new();
         assert!(reg.all_checks().is_empty());
+    }
+
+    // --- render_health_json + set_metrics tests ---
+
+    #[test]
+    fn test_registry_with_metrics() {
+        let reg = HealthRegistry::new();
+        let metrics = Arc::new(UsageMetrics::new());
+        metrics.record_request();
+        metrics.record_request();
+        metrics.record_tool_calls(5);
+        metrics.record_tokens(1000, 500);
+        metrics.record_error();
+        reg.set_metrics(Arc::clone(&metrics));
+
+        let json = reg.render_health_json();
+        assert!(json.contains("\"requests\":2"));
+        assert!(json.contains("\"tool_calls\":5"));
+        assert!(json.contains("\"input_tokens\":1000"));
+        assert!(json.contains("\"output_tokens\":500"));
+        assert!(json.contains("\"errors\":1"));
+    }
+
+    #[test]
+    fn test_registry_without_metrics_omits_usage() {
+        let reg = HealthRegistry::new();
+        let json = reg.render_health_json();
+        assert!(!json.contains("\"usage\""));
+    }
+
+    #[test]
+    fn test_render_health_json_has_version() {
+        let reg = HealthRegistry::new();
+        let json = reg.render_health_json();
+        assert!(json.contains("\"version\":\""));
+        assert!(json.contains("\"uptime_secs\":"));
+        assert!(json.contains("\"status\":\"ok\""));
+        assert!(json.contains("\"checks\":{}"));
+    }
+
+    #[test]
+    fn test_render_health_json_status_degraded_when_down() {
+        let reg = HealthRegistry::new();
+        reg.register(HealthCheck {
+            name: "db".into(),
+            status: HealthStatus::Down,
+            ..Default::default()
+        });
+        let json = reg.render_health_json();
+        assert!(json.contains("\"status\":\"degraded\""));
+    }
+
+    #[test]
+    fn test_render_checks_json_with_restart_and_error() {
+        let reg = HealthRegistry::new();
+        reg.register(HealthCheck {
+            name: "gw".into(),
+            status: HealthStatus::Down,
+            message: None,
+            restart_count: 3,
+            last_error: Some("timeout".into()),
+        });
+        let json = reg.render_checks_json();
+        assert!(json.contains("\"restart_count\":3"));
+        assert!(json.contains("\"last_error\":\"timeout\""));
     }
 
     // --- get_rss_bytes tests ---
