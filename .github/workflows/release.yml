@@ -17,15 +17,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: zeptoclaw-linux-x86_64
+            features: peripheral-esp32
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: zeptoclaw-linux-aarch64
+            features: peripheral-esp32,peripheral-rpi
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: zeptoclaw-macos-aarch64
+            features: peripheral-esp32
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: zeptoclaw-macos-x86_64
+            features: peripheral-esp32
 
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +52,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
 
       - name: Package binary
         run: |
