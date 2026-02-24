@@ -1053,6 +1053,8 @@ pub struct RetryConfig {
     pub base_delay_ms: u64,
     /// Maximum delay cap in milliseconds for exponential backoff.
     pub max_delay_ms: u64,
+    /// Total wall-clock retry budget in milliseconds. 0 = unlimited.
+    pub retry_budget_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -1062,6 +1064,7 @@ impl Default for RetryConfig {
             max_retries: 3,
             base_delay_ms: 1_000,
             max_delay_ms: 30_000,
+            retry_budget_ms: 45_000,
         }
     }
 }

@@ -420,6 +420,7 @@ Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_RETRY_MAX_RETRIES` — max retry attempts (default: 3)
 - `ZEPTOCLAW_PROVIDERS_RETRY_BASE_DELAY_MS` — base delay in ms (default: 1000)
 - `ZEPTOCLAW_PROVIDERS_RETRY_MAX_DELAY_MS` — max delay in ms (default: 30000)
+- `ZEPTOCLAW_PROVIDERS_RETRY_BUDGET_MS` — total wall-clock retry budget in ms, 0 = unlimited (default: 45000)
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_ENABLED` — enable fallback provider (default: false)
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_PROVIDER` — fallback provider name
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET` — per-session token budget (default: 0 = unlimited)

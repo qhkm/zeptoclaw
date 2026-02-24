@@ -369,6 +369,11 @@ impl Config {
                 self.providers.retry.max_delay_ms = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_RETRY_BUDGET_MS") {
+            if let Ok(v) = val.parse() {
+                self.providers.retry.retry_budget_ms = v;
+            }
+        }
 
         // Provider fallback behavior
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_FALLBACK_ENABLED") {

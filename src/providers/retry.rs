@@ -42,6 +42,8 @@ pub struct RetryProvider {
     base_delay_ms: u64,
     /// Maximum delay cap in milliseconds. Default: 30000 (30 seconds).
     max_delay_ms: u64,
+    /// Total wall-clock retry budget in milliseconds. 0 = unlimited. Default: 45000 (45 seconds).
+    retry_budget_ms: u64,
 }
 
 impl std::fmt::Debug for RetryProvider {
@@ -51,6 +53,7 @@ impl std::fmt::Debug for RetryProvider {
             .field("max_retries", &self.max_retries)
             .field("base_delay_ms", &self.base_delay_ms)
             .field("max_delay_ms", &self.max_delay_ms)
+            .field("retry_budget_ms", &self.retry_budget_ms)
             .finish()
     }
 }
@@ -71,6 +74,7 @@ impl RetryProvider {
             max_retries: 3,
             base_delay_ms: 1000,
             max_delay_ms: 30_000,
+            retry_budget_ms: 45_000,
         }
     }
 
@@ -104,6 +108,23 @@ impl RetryProvider {
     pub fn with_max_delay_ms(mut self, max_delay_ms: u64) -> Self {
         self.max_delay_ms = max_delay_ms;
         self
+    }
+
+    /// Set the total wall-clock retry budget in milliseconds.
+    ///
+    /// Once this deadline elapses (measured from the first attempt), no further
+    /// retries are attempted and the last error is returned. Set to 0 for unlimited.
+    ///
+    /// # Arguments
+    /// * `retry_budget_ms` - Total retry budget in milliseconds (0 = unlimited)
+    pub fn with_retry_budget_ms(mut self, retry_budget_ms: u64) -> Self {
+        self.retry_budget_ms = retry_budget_ms;
+        self
+    }
+
+    /// Check whether the wall-clock retry budget has been exceeded.
+    fn budget_exceeded(&self, start: std::time::Instant) -> bool {
+        self.retry_budget_ms > 0 && start.elapsed().as_millis() as u64 >= self.retry_budget_ms
     }
 }
 
@@ -247,10 +268,20 @@ impl LLMProvider for RetryProvider {
         options: ChatOptions,
     ) -> Result<LLMResponse> {
         let mut last_err: Option<ZeptoError> = None;
+        let start = std::time::Instant::now();
 
         // Retry attempts (clone for each since we may need the originals again)
         for attempt in 0..self.max_retries {
             if attempt > 0 {
+                if self.budget_exceeded(start) {
+                    warn!(
+                        provider = self.inner.name(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        budget_ms = self.retry_budget_ms,
+                        "Retry budget exhausted for chat request"
+                    );
+                    return Err(last_err.unwrap());
+                }
                 if let Some(ref err) = last_err {
                     warn!(
                         provider = self.inner.name(),
@@ -280,6 +311,15 @@ impl LLMProvider for RetryProvider {
 
         // Final attempt — move instead of clone
         if self.max_retries > 0 {
+            if self.budget_exceeded(start) {
+                warn!(
+                    provider = self.inner.name(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    budget_ms = self.retry_budget_ms,
+                    "Retry budget exhausted for chat request"
+                );
+                return Err(last_err.unwrap());
+            }
             if let Some(ref err) = last_err {
                 warn!(
                     provider = self.inner.name(),
@@ -302,10 +342,20 @@ impl LLMProvider for RetryProvider {
         options: ChatOptions,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let mut last_err: Option<ZeptoError> = None;
+        let start = std::time::Instant::now();
 
         // Retry attempts (clone for each since we may need the originals again)
         for attempt in 0..self.max_retries {
             if attempt > 0 {
+                if self.budget_exceeded(start) {
+                    warn!(
+                        provider = self.inner.name(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        budget_ms = self.retry_budget_ms,
+                        "Retry budget exhausted for chat_stream request"
+                    );
+                    return Err(last_err.unwrap());
+                }
                 if let Some(ref err) = last_err {
                     warn!(
                         provider = self.inner.name(),
@@ -335,6 +385,15 @@ impl LLMProvider for RetryProvider {
 
         // Final attempt — move instead of clone
         if self.max_retries > 0 {
+            if self.budget_exceeded(start) {
+                warn!(
+                    provider = self.inner.name(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    budget_ms = self.retry_budget_ms,
+                    "Retry budget exhausted for chat_stream request"
+                );
+                return Err(last_err.unwrap());
+            }
             if let Some(ref err) = last_err {
                 warn!(
                     provider = self.inner.name(),
@@ -407,6 +466,7 @@ mod tests {
         assert_eq!(provider.max_retries, 3);
         assert_eq!(provider.base_delay_ms, 1000);
         assert_eq!(provider.max_delay_ms, 30_000);
+        assert_eq!(provider.retry_budget_ms, 45_000);
     }
 
     #[test]
@@ -415,11 +475,13 @@ mod tests {
         let provider = RetryProvider::new(Box::new(mock))
             .with_max_retries(5)
             .with_base_delay_ms(500)
-            .with_max_delay_ms(60_000);
+            .with_max_delay_ms(60_000)
+            .with_retry_budget_ms(10_000);
 
         assert_eq!(provider.max_retries, 5);
         assert_eq!(provider.base_delay_ms, 500);
         assert_eq!(provider.max_delay_ms, 60_000);
+        assert_eq!(provider.retry_budget_ms, 10_000);
     }
 
     #[test]
@@ -910,5 +972,129 @@ mod tests {
         // "403 Forbidden" without "HTTP" prefix still caught by is_auth_failure → not retryable
         let err = ZeptoError::Provider("403 Forbidden: quota exceeded".to_string());
         assert!(!is_retryable(&err));
+    }
+
+    // ====================================================================
+    // Retry budget tests
+    // ====================================================================
+
+    #[test]
+    fn test_budget_exceeded_zero_means_unlimited() {
+        let mock = MockProvider::new("test", "model");
+        let provider = RetryProvider::new(Box::new(mock)).with_retry_budget_ms(0);
+        let start = std::time::Instant::now();
+        // Even after time passes, budget=0 should never be exceeded
+        assert!(!provider.budget_exceeded(start));
+    }
+
+    #[test]
+    fn test_budget_exceeded_not_yet() {
+        let mock = MockProvider::new("test", "model");
+        // Set a large budget so it won't be exceeded immediately
+        let provider = RetryProvider::new(Box::new(mock)).with_retry_budget_ms(60_000);
+        let start = std::time::Instant::now();
+        assert!(!provider.budget_exceeded(start));
+    }
+
+    #[test]
+    fn test_budget_exceeded_past_deadline() {
+        let mock = MockProvider::new("test", "model");
+        // Set budget to 1ms — should be exceeded almost immediately
+        let provider = RetryProvider::new(Box::new(mock)).with_retry_budget_ms(1);
+        let start = std::time::Instant::now() - std::time::Duration::from_millis(10);
+        assert!(provider.budget_exceeded(start));
+    }
+
+    /// A mock provider that always fails with a retryable error and adds a delay.
+    struct SlowFailProvider {
+        delay_ms: u64,
+    }
+
+    #[async_trait]
+    impl LLMProvider for SlowFailProvider {
+        fn name(&self) -> &str {
+            "slow-fail"
+        }
+
+        fn default_model(&self) -> &str {
+            "test-model"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            Err(ZeptoError::Provider(
+                "HTTP 429 Too Many Requests".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_budget_stops_retrying() {
+        // Each call takes ~20ms, budget is 50ms, max_retries is 100.
+        // Budget should cut off retries well before 100 attempts.
+        let inner = SlowFailProvider { delay_ms: 20 };
+        let provider = RetryProvider::new(Box::new(inner))
+            .with_max_retries(100)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(5)
+            .with_retry_budget_ms(50);
+
+        let start = std::time::Instant::now();
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        assert!(result.is_err());
+        // Should have stopped well before 100*20ms = 2000ms
+        assert!(start.elapsed().as_millis() < 500);
+    }
+
+    #[tokio::test]
+    async fn test_retry_budget_zero_unlimited() {
+        // budget=0 means unlimited — should retry up to max_retries
+        let inner = FailThenSucceedProvider::new(3, "HTTP 429 Too Many Requests");
+        let provider = RetryProvider::new(Box::new(inner))
+            .with_max_retries(5)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(5)
+            .with_retry_budget_ms(0);
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "recovered");
+    }
+
+    #[tokio::test]
+    async fn test_retry_budget_succeeds_within_budget() {
+        // Fails twice then succeeds — budget is generous enough
+        let inner = FailThenSucceedProvider::new(2, "HTTP 429 Too Many Requests");
+        let provider = RetryProvider::new(Box::new(inner))
+            .with_max_retries(5)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(5)
+            .with_retry_budget_ms(5_000);
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "recovered");
+    }
+
+    #[test]
+    fn test_retry_config_default_budget() {
+        use crate::config::RetryConfig;
+        let config = RetryConfig::default();
+        assert_eq!(config.retry_budget_ms, 45_000);
     }
 }
