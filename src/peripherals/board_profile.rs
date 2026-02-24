@@ -36,7 +36,7 @@ pub struct I2cBus {
 /// without heap allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardProfile {
-    /// Human-readable board name (e.g. `"ESP32"`).
+    /// Human-readable board name (e.g. `"esp32"`).
     pub name: &'static str,
     /// GPIO pin numbers available on this board.
     pub gpio_pins: &'static [u8],
@@ -77,7 +77,7 @@ impl BoardProfile {
 ///
 /// Pin list covers all pins typically broken out on a 38-pin DevKit.
 pub const ESP32_PROFILE: BoardProfile = BoardProfile {
-    name: "ESP32",
+    name: "esp32",
     gpio_pins: &[
         0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33, 34, 35,
         36, 39,
@@ -98,7 +98,7 @@ pub const ESP32_PROFILE: BoardProfile = BoardProfile {
 
 /// Return the [`BoardProfile`] for a known `board_type` string.
 ///
-/// Matching is case-insensitive on the canonical lowercase identifiers
+/// Matching is case-sensitive on canonical lowercase identifiers
 /// listed below.
 ///
 /// | `board_type` | Profile          |
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_esp32_profile_name() {
-        assert_eq!(ESP32_PROFILE.name, "ESP32");
+        assert_eq!(ESP32_PROFILE.name, "esp32");
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn test_profile_for_known_board() {
         let profile = profile_for("esp32").expect("esp32 should be known");
-        assert_eq!(profile.name, "ESP32");
+        assert_eq!(profile.name, "esp32");
     }
 
     #[test]
