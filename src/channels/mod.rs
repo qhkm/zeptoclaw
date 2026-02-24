@@ -116,6 +116,8 @@ mod manager;
 pub mod model_switch;
 pub mod persona_switch;
 pub mod plugin;
+#[cfg(feature = "hardware")]
+pub mod serial;
 pub mod slack;
 pub mod telegram;
 mod types;
@@ -129,6 +131,8 @@ pub use factory::register_configured_channels;
 pub use lark::LarkChannel;
 pub use manager::ChannelManager;
 pub use plugin::ChannelPluginAdapter;
+#[cfg(feature = "hardware")]
+pub use serial::SerialChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};

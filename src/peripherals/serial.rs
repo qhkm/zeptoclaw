@@ -161,6 +161,7 @@ impl SerialPeripheral {
     }
 
     /// Get a clone of the shared transport for tool construction.
+    #[allow(dead_code)]
     pub(crate) fn transport(&self) -> Arc<SerialTransport> {
         self.transport.clone()
     }

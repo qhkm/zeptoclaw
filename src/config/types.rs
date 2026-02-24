@@ -614,9 +614,41 @@ pub struct ChannelsConfig {
     pub webhook: Option<WebhookConfig>,
     /// Email channel configuration (IMAP IDLE + SMTP). Feature-gated behind channel-email.
     pub email: Option<EmailConfig>,
+    /// Serial (UART) channel configuration. Requires `hardware` feature.
+    pub serial: Option<SerialChannelConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
+}
+
+/// Serial (UART) channel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SerialChannelConfig {
+    /// Whether the channel is enabled.
+    pub enabled: bool,
+    /// Serial port path (e.g., "/dev/ttyUSB0", "COM3").
+    pub port: String,
+    /// Baud rate (default: 115200).
+    pub baud_rate: u32,
+    /// Allow only specific sender IDs.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// Deny all senders unless in allowlist.
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+impl Default for SerialChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: String::new(),
+            baud_rate: 115_200,
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
 }
 
 /// Webhook inbound channel configuration
