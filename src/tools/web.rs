@@ -22,6 +22,7 @@ use crate::error::{Result, ZeptoError};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const BRAVE_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
+const DDG_HTML_URL: &str = "https://html.duckduckgo.com/html/";
 const WEB_USER_AGENT: &str = "zeptoclaw/0.1 (+https://github.com/zeptoclaw/zeptoclaw)";
 const MAX_WEB_SEARCH_COUNT: usize = 10;
 const DEFAULT_MAX_FETCH_CHARS: usize = 50_000;
@@ -40,6 +41,9 @@ static SEL_ARTICLE: Lazy<Selector> = Lazy::new(|| Selector::parse("article").unw
 static SEL_ROLE_MAIN: Lazy<Selector> = Lazy::new(|| Selector::parse("[role=main]").unwrap());
 static SEL_BODY: Lazy<Selector> = Lazy::new(|| Selector::parse("body").unwrap());
 static SEL_LINKS: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href]").unwrap());
+static SEL_DDG_RESULT_LINK: Lazy<Selector> = Lazy::new(|| Selector::parse("a.result__a").unwrap());
+static SEL_DDG_RESULT_SNIPPET: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("a.result__snippet").unwrap());
 
 const SKIP_ELEMENTS: &[&str] = &[
     "script", "style", "noscript", "nav", "footer", "header", "aside", "iframe", "svg", "form",
@@ -89,6 +93,13 @@ struct BraveResult {
     title: String,
     url: String,
     #[serde(default)]
+    description: Option<String>,
+}
+
+/// Generic search result used by the DDG backend.
+struct SearchResult {
+    title: String,
+    url: String,
     description: Option<String>,
 }
 
@@ -199,6 +210,183 @@ impl Tool for WebSearchTool {
             if let Some(description) = item.description.as_deref().map(str::trim) {
                 if !description.is_empty() {
                     output.push_str(&format!("   {}\n", description));
+                }
+            }
+            output.push('\n');
+        }
+
+        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+    }
+}
+
+/// Extract the real URL from a DDG redirect link.
+/// DDG wraps results in `https://duckduckgo.com/l/?uddg=<encoded_url>&...`
+fn extract_ddg_real_url(href: &str) -> String {
+    if let Ok(parsed) = Url::parse(href) {
+        if parsed.host_str() == Some("duckduckgo.com") {
+            if let Some(uddg) = parsed.query_pairs().find(|(k, _)| k == "uddg") {
+                return uddg.1.to_string();
+            }
+        }
+    }
+    href.to_string()
+}
+
+/// Parse DDG HTML search results page into structured results.
+fn parse_ddg_html(html: &str, max_results: usize) -> Vec<SearchResult> {
+    let doc = Html::parse_document(html);
+    let mut results = Vec::new();
+
+    let link_elements: Vec<_> = doc.select(&SEL_DDG_RESULT_LINK).collect();
+    let snippet_elements: Vec<_> = doc.select(&SEL_DDG_RESULT_SNIPPET).collect();
+
+    for (i, link_el) in link_elements.iter().enumerate() {
+        if results.len() >= max_results {
+            break;
+        }
+        let title = link_el.text().collect::<String>().trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let href = link_el.value().attr("href").unwrap_or_default();
+        let url = extract_ddg_real_url(href);
+
+        let description = snippet_elements
+            .get(i)
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        results.push(SearchResult {
+            title,
+            url,
+            description,
+        });
+    }
+
+    results
+}
+
+/// Free web search tool backed by DuckDuckGo HTML scraping.
+/// Used as automatic fallback when no Brave API key is configured.
+pub struct DdgSearchTool {
+    client: Client,
+    max_results: usize,
+}
+
+impl Default for DdgSearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DdgSearchTool {
+    /// Create a new DDG search tool with default settings.
+    pub fn new() -> Self {
+        Self {
+            client: Client::new(),
+            max_results: 5,
+        }
+    }
+
+    /// Create with custom max results.
+    pub fn with_max_results(max_results: usize) -> Self {
+        Self {
+            client: Client::new(),
+            max_results: max_results.clamp(1, MAX_WEB_SEARCH_COUNT),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for DdgSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web and return result titles, URLs, and snippets."
+    }
+
+    fn compact_description(&self) -> &str {
+        "Web search"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkRead
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of results (1-10)",
+                    "minimum": 1,
+                    "maximum": 10
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ZeptoError::Tool("Missing 'query' parameter".to_string()))?;
+
+        let count = args
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize)
+            .unwrap_or(self.max_results)
+            .clamp(1, MAX_WEB_SEARCH_COUNT);
+
+        let response = self
+            .client
+            .post(DDG_HTML_URL)
+            .header("User-Agent", WEB_USER_AGENT)
+            .form(&[("q", query)])
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("DuckDuckGo search failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(ZeptoError::Tool(format!(
+                "DuckDuckGo search error: {}",
+                response.status()
+            )));
+        }
+
+        let html = response
+            .text()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to read DDG response: {}", e)))?;
+
+        let results = parse_ddg_html(&html, count);
+
+        if results.is_empty() {
+            return Ok(ToolOutput::user_visible(format!(
+                "No web search results found for '{}'.",
+                query
+            )));
+        }
+
+        let mut output = format!("Web search results for '{}':\n\n", query);
+        for (index, item) in results.iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", index + 1, item.title));
+            output.push_str(&format!("   {}\n", item.url));
+            if let Some(desc) = item.description.as_deref().map(str::trim) {
+                if !desc.is_empty() {
+                    output.push_str(&format!("   {}\n", desc));
                 }
             }
             output.push('\n');
@@ -1714,5 +1902,120 @@ mod tests {
         assert!(text.contains("Content"));
         assert!(text.contains("## Links"));
         assert!(text.contains("https://example.com"));
+    }
+
+    // ==================== DDG SEARCH PARSING TESTS ====================
+
+    #[test]
+    fn test_parse_ddg_results_basic() {
+        let html = r#"<html><body>
+            <div class="results">
+                <div class="result">
+                    <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&amp;rut=abc">Example Page</a>
+                    <a class="result__snippet">This is the snippet for example page.</a>
+                </div>
+            </div>
+        </body></html>"#;
+        let results = parse_ddg_html(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Page");
+        assert_eq!(results[0].url, "https://example.com/page");
+        assert_eq!(
+            results[0].description,
+            Some("This is the snippet for example page.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_ddg_results_multiple() {
+        let html = r#"<html><body>
+            <div class="results">
+                <div class="result">
+                    <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com">A</a>
+                    <a class="result__snippet">Snippet A</a>
+                </div>
+                <div class="result">
+                    <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fb.com">B</a>
+                    <a class="result__snippet">Snippet B</a>
+                </div>
+                <div class="result">
+                    <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fc.com">C</a>
+                    <a class="result__snippet">Snippet C</a>
+                </div>
+            </div>
+        </body></html>"#;
+        let results = parse_ddg_html(html, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "A");
+        assert_eq!(results[1].title, "B");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_empty() {
+        let html = "<html><body><div class='results'></div></body></html>";
+        let results = parse_ddg_html(html, 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ddg_direct_url() {
+        let html = r#"<html><body>
+            <div class="results">
+                <div class="result">
+                    <a class="result__a" href="https://example.com/direct">Direct Link</a>
+                    <a class="result__snippet">Direct snippet</a>
+                </div>
+            </div>
+        </body></html>"#;
+        let results = parse_ddg_html(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://example.com/direct");
+    }
+
+    #[test]
+    fn test_extract_ddg_url_with_uddg() {
+        let url = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Flearn&rut=abc";
+        assert_eq!(extract_ddg_real_url(url), "https://rust-lang.org/learn");
+    }
+
+    #[test]
+    fn test_extract_ddg_url_direct() {
+        let url = "https://example.com/page";
+        assert_eq!(extract_ddg_real_url(url), "https://example.com/page");
+    }
+
+    #[test]
+    fn test_extract_ddg_url_no_uddg_param() {
+        let url = "https://duckduckgo.com/l/?other=value";
+        assert_eq!(
+            extract_ddg_real_url(url),
+            "https://duckduckgo.com/l/?other=value"
+        );
+    }
+
+    // ==================== DDG SEARCH TOOL TESTS ====================
+
+    #[test]
+    fn test_ddg_search_tool_name() {
+        let tool = DdgSearchTool::new();
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn test_ddg_search_tool_description() {
+        let tool = DdgSearchTool::new();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_ddg_search_tool_parameters() {
+        let tool = DdgSearchTool::new();
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("query")));
     }
 }
