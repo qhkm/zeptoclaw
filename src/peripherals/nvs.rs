@@ -36,6 +36,9 @@ pub const MAX_KEY_LEN: usize = 15;
 /// Maximum length of an NVS namespace name (same limit as key).
 pub const MAX_NAMESPACE_LEN: usize = 15;
 
+/// Maximum length of an NVS string value (ESP-IDF NVS blob limit for strings).
+pub const MAX_VALUE_LEN: usize = 4000;
+
 /// Default NVS namespace used when the caller omits the parameter.
 const DEFAULT_NAMESPACE: &str = "config";
 
@@ -82,7 +85,6 @@ pub struct NvsGetTool {
     pub(crate) transport: Arc<SerialTransport>,
 }
 
-#[cfg(feature = "hardware")]
 #[async_trait]
 impl Tool for NvsGetTool {
     fn name(&self) -> &str {
@@ -150,7 +152,6 @@ pub struct NvsSetTool {
     pub(crate) transport: Arc<SerialTransport>,
 }
 
-#[cfg(feature = "hardware")]
 #[async_trait]
 impl Tool for NvsSetTool {
     fn name(&self) -> &str {
@@ -208,6 +209,14 @@ impl Tool for NvsSetTool {
         validate_nvs_string(namespace, "namespace", MAX_NAMESPACE_LEN)?;
         validate_nvs_string(key, "key", MAX_KEY_LEN)?;
 
+        if value.len() > MAX_VALUE_LEN {
+            return Err(ZeptoError::Tool(format!(
+                "NVS value exceeds maximum length of {} bytes (got {})",
+                MAX_VALUE_LEN,
+                value.len()
+            )));
+        }
+
         let result = self
             .transport
             .request(
@@ -229,7 +238,6 @@ pub struct NvsDeleteTool {
     pub(crate) transport: Arc<SerialTransport>,
 }
 
-#[cfg(feature = "hardware")]
 #[async_trait]
 impl Tool for NvsDeleteTool {
     fn name(&self) -> &str {
@@ -423,6 +431,11 @@ mod tests {
     #[test]
     fn test_max_namespace_len_is_15() {
         assert_eq!(MAX_NAMESPACE_LEN, 15);
+    }
+
+    #[test]
+    fn test_max_value_len_is_4000() {
+        assert_eq!(MAX_VALUE_LEN, 4000);
     }
 
     // -----------------------------------------------------------------------

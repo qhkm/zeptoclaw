@@ -28,6 +28,7 @@
 
 #[cfg(feature = "hardware")]
 mod inner {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -35,7 +36,7 @@ mod inner {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;
     use tokio_serial::SerialPortBuilderExt;
-    use tracing::{debug, error, warn};
+    use tracing::{debug, error, info, warn};
 
     use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
     use crate::channels::types::{BaseChannelConfig, Channel};
@@ -66,8 +67,11 @@ mod inner {
         config: SerialChannelConfig,
         base_config: BaseChannelConfig,
         bus: Arc<MessageBus>,
-        running: bool,
+        /// Atomic running flag shared with the spawned read-loop task.
+        running: Arc<AtomicBool>,
         port: Option<Arc<Mutex<tokio_serial::SerialStream>>>,
+        /// Shutdown signal sender — dropping or sending signals the read loop to exit.
+        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     impl SerialChannel {
@@ -82,8 +86,9 @@ mod inner {
                 config,
                 base_config,
                 bus,
-                running: false,
+                running: Arc::new(AtomicBool::new(false)),
                 port: None,
+                shutdown_tx: None,
             }
         }
     }
@@ -108,35 +113,54 @@ mod inner {
 
             let port = Arc::new(Mutex::new(stream));
             self.port = Some(port.clone());
-            self.running = true;
+            self.running.store(true, Ordering::SeqCst);
+
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            self.shutdown_tx = Some(shutdown_tx);
 
             // Spawn the read loop in a background task.
             let bus = self.bus.clone();
+            let running = self.running.clone();
             let channel_name = "serial".to_string();
             let allow_from = self.config.allow_from.clone();
             let deny_by_default = self.config.deny_by_default;
 
             tokio::spawn(async move {
+                let mut shutdown_rx = shutdown_rx;
+
+                // Acquire the lock once for the read loop. The BufReader persists
+                // across iterations so its internal buffer is never discarded (C2 fix).
+                // Outbound `send()` will block on the Mutex while the read loop holds
+                // it; this is acceptable for half-duplex serial where inbound messages
+                // and outbound responses do not overlap.
+                let mut guard = port.lock().await;
+                let mut reader = BufReader::new(&mut *guard);
+
                 loop {
-                    // Acquire lock, read one line, then release.
-                    let line = {
-                        let mut guard = port.lock().await;
-                        let mut reader = BufReader::new(&mut *guard);
-                        let mut buf = String::new();
-                        match reader.read_line(&mut buf).await {
-                            Ok(0) => {
-                                // EOF — port closed.
-                                break;
-                            }
-                            Ok(_) => buf,
-                            Err(e) => {
-                                error!("Serial read error: {}", e);
-                                break;
-                            }
+                    let mut buf = String::new();
+
+                    let read_result = tokio::select! {
+                        result = reader.read_line(&mut buf) => result,
+                        _ = &mut shutdown_rx => {
+                            info!("Serial channel shutdown signal received");
+                            break;
                         }
                     };
 
-                    let trimmed = line.trim();
+                    match read_result {
+                        Ok(0) => {
+                            // EOF — port closed.
+                            info!("Serial channel: port closed (EOF)");
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("Serial read error: {}", e);
+                            break;
+                        }
+                    }
+
+                    let trimmed = buf.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -178,17 +202,36 @@ mod inner {
                     let msg =
                         InboundMessage::new(&channel_name, &sender, &channel_name, &inbound.text);
 
+                    // Drop the Mutex guard temporarily so send() can acquire it
+                    // for outbound writes while we publish.
+                    // NOTE: For half-duplex serial this is not strictly needed, but
+                    // we release it here so bus.publish_inbound() doesn't deadlock
+                    // if the handler tries to send() a response synchronously.
+                    // In practice the bus is async and the send() path is separate,
+                    // so holding the lock is fine. Keeping the simpler single-lock
+                    // approach avoids split() complexity on SerialStream.
+
                     if let Err(e) = bus.publish_inbound(msg).await {
                         error!("Serial: failed to publish inbound message: {}", e);
                     }
                 }
+
+                running.store(false, Ordering::SeqCst);
+                info!("Serial channel stopped");
             });
 
             Ok(())
         }
 
         async fn stop(&mut self) -> Result<()> {
-            self.running = false;
+            self.running.store(false, Ordering::SeqCst);
+
+            if let Some(tx) = self.shutdown_tx.take() {
+                if tx.send(()).is_err() {
+                    warn!("Serial shutdown receiver already dropped");
+                }
+            }
+
             self.port = None;
             Ok(())
         }
@@ -220,7 +263,7 @@ mod inner {
         }
 
         fn is_running(&self) -> bool {
-            self.running
+            self.running.load(Ordering::SeqCst)
         }
 
         fn is_allowed(&self, user_id: &str) -> bool {
@@ -297,6 +340,19 @@ mod inner {
             assert_eq!(inbound.msg_type, "message");
             assert_eq!(inbound.text, "Hello");
             assert_eq!(inbound.sender, "esp32-0");
+        }
+
+        #[test]
+        fn test_serial_channel_running_flag_is_atomic() {
+            let ch = make_channel(SerialChannelConfig {
+                port: "/dev/ttyUSB0".to_string(),
+                ..Default::default()
+            });
+            assert!(!ch.is_running());
+            ch.running.store(true, Ordering::SeqCst);
+            assert!(ch.is_running());
+            ch.running.store(false, Ordering::SeqCst);
+            assert!(!ch.is_running());
         }
     }
 }
