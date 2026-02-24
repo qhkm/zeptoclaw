@@ -64,8 +64,8 @@ pub use gateway::{
     ContainerAgentProxy, ResolvedBackend, RESPONSE_END_MARKER, RESPONSE_START_MARKER,
 };
 pub use health::{
-    health_port, start_health_server, start_health_server_legacy, start_periodic_usage_flush,
-    HealthCheck, HealthRegistry, HealthStatus, UsageMetrics,
+    get_rss_bytes, health_port, start_health_server, start_health_server_legacy,
+    start_periodic_usage_flush, HealthCheck, HealthRegistry, HealthStatus, UsageMetrics,
 };
 
 #[cfg(target_os = "macos")]

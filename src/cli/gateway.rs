@@ -97,6 +97,7 @@ pub(crate) async fn cmd_gateway(
 
     // Create HealthRegistry (shared between health server and channel supervisor)
     let health_registry = HealthRegistry::new();
+    health_registry.set_metrics(Arc::clone(&metrics));
 
     // Start HealthRegistry-based server if config.health.enabled
     if config.health.enabled {
