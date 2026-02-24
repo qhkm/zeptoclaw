@@ -27,7 +27,7 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// Validate that `hex` is a non-empty, even-length string of ASCII hex digits.
-fn validate_hex(hex: &str) -> std::result::Result<(), String> {
+pub(crate) fn validate_hex(hex: &str) -> std::result::Result<(), String> {
     if hex.is_empty() {
         return Err("Hex data must not be empty".into());
     }
