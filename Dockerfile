@@ -48,6 +48,7 @@ FROM debian:bookworm-slim AS runtime
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    git \
     gosu \
     wget \
     && rm -rf /var/lib/apt/lists/* \

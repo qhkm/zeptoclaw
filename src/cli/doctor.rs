@@ -97,27 +97,43 @@ fn check_workspace_writable(workspace: &Path, diags: &mut Vec<DiagItem>) {
 }
 
 fn check_environment(diags: &mut Vec<DiagItem>) {
-    for binary in &["git", "curl", "sh"] {
-        check_binary(binary, diags);
-    }
+    // sh is required for the shell tool.
+    check_binary("sh", diags);
+    // git is needed for skill installation from GitHub and the git tool.
+    check_binary_with_hint("git", "skill installation from GitHub won't work", diags);
 }
 
 pub fn check_binary(name: &str, diags: &mut Vec<DiagItem>) {
-    match Command::new("which").arg(name).output() {
-        Ok(output) if output.status.success() => {
-            diags.push(DiagItem {
-                severity: Severity::Ok,
-                category: "environment",
-                message: format!("{} found", name),
-            });
-        }
-        _ => {
-            diags.push(DiagItem {
-                severity: Severity::Warn,
-                category: "environment",
-                message: format!("{} not found in PATH", name),
-            });
-        }
+    check_binary_with_hint(name, "", diags);
+}
+
+fn check_binary_with_hint(name: &str, hint: &str, diags: &mut Vec<DiagItem>) {
+    // Probe the binary directly instead of relying on `which`, which may
+    // not be installed in minimal containers (e.g. Debian slim).
+    let found = Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok();
+
+    if found {
+        diags.push(DiagItem {
+            severity: Severity::Ok,
+            category: "environment",
+            message: format!("{} found", name),
+        });
+    } else {
+        let message = if hint.is_empty() {
+            format!("{} not found in PATH", name)
+        } else {
+            format!("{} not found in PATH — {}", name, hint)
+        };
+        diags.push(DiagItem {
+            severity: Severity::Warn,
+            category: "environment",
+            message,
+        });
     }
 }
 
