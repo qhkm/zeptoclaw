@@ -7,6 +7,7 @@
 
 use super::traits::Peripheral;
 use crate::error::{Result, ZeptoError};
+use crate::peripherals::board_profile::RPI_PROFILE;
 use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -100,6 +101,13 @@ impl Tool for RpiGpioReadTool {
             .ok_or_else(|| ZeptoError::Tool("Missing 'pin' parameter".into()))?;
         let pin_u8 = pin as u8;
 
+        if !RPI_PROFILE.is_valid_gpio(pin_u8) {
+            return Err(ZeptoError::Tool(format!(
+                "GPIO pin {} is not a valid user-accessible BCM pin on Raspberry Pi (valid: 2-27)",
+                pin
+            )));
+        }
+
         let value = tokio::task::spawn_blocking(move || {
             let gpio = rppal::gpio::Gpio::new()
                 .map_err(|e| ZeptoError::Tool(format!("GPIO init: {e}")))?;
@@ -167,6 +175,14 @@ impl Tool for RpiGpioWriteTool {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| ZeptoError::Tool("Missing 'value' parameter".into()))?;
         let pin_u8 = pin as u8;
+
+        if !RPI_PROFILE.is_valid_gpio(pin_u8) {
+            return Err(ZeptoError::Tool(format!(
+                "GPIO pin {} is not a valid user-accessible BCM pin on Raspberry Pi (valid: 2-27)",
+                pin
+            )));
+        }
+
         let level = match value {
             0 => rppal::gpio::Level::Low,
             _ => rppal::gpio::Level::High,
@@ -186,5 +202,44 @@ impl Tool for RpiGpioWriteTool {
         .map_err(|e| ZeptoError::Tool(format!("GPIO write join error: {e}")))??;
 
         Ok(ToolOutput::llm_only(format!("pin {} = {}", pin, value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peripherals::board_profile::RPI_PROFILE;
+
+    #[test]
+    fn test_validate_gpio_pin_valid() {
+        for pin in 2..=27u8 {
+            assert!(RPI_PROFILE.is_valid_gpio(pin));
+        }
+    }
+
+    #[test]
+    fn test_validate_gpio_pin_invalid() {
+        assert!(!RPI_PROFILE.is_valid_gpio(0));
+        assert!(!RPI_PROFILE.is_valid_gpio(1));
+        assert!(!RPI_PROFILE.is_valid_gpio(28));
+    }
+
+    #[test]
+    fn test_gpio_read_tool_metadata() {
+        let tool = RpiGpioReadTool;
+        assert_eq!(tool.name(), "rpi_gpio_read");
+        assert_eq!(tool.category(), ToolCategory::Hardware);
+        let params = tool.parameters();
+        assert!(params["properties"]["pin"].is_object());
+    }
+
+    #[test]
+    fn test_gpio_write_tool_metadata() {
+        let tool = RpiGpioWriteTool;
+        assert_eq!(tool.name(), "rpi_gpio_write");
+        assert_eq!(tool.category(), ToolCategory::Hardware);
+        let params = tool.parameters();
+        assert!(params["properties"]["pin"].is_object());
+        assert!(params["properties"]["value"].is_object());
     }
 }
