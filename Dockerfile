@@ -7,7 +7,7 @@
 # =============================================================================
 # Stage 1: Build
 # =============================================================================
-FROM rust:1.93-slim-bookworm AS builder
+FROM rust:1.93-slim-trixie AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -43,7 +43,7 @@ RUN cargo build --release --bin zeptoclaw
 # =============================================================================
 # Stage 2: Runtime (minimal)
 # =============================================================================
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \

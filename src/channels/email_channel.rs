@@ -337,7 +337,7 @@ impl EmailChannel {
                 .with_metadata("subject", &subject);
 
             // Extract image attachments
-            use mail_parser::GetHeader;
+            use mail_parser::MimeHeaders;
             for part in parsed.attachments() {
                 if let Some(ct) = part.content_type() {
                     let main_type = ct.c_type.as_ref();

@@ -83,7 +83,7 @@ struct PbHeader {
 
 /// Top-level Lark / Feishu WS frame (pbbp2.proto).
 ///
-/// `method=0` → CONTROL (ping / pong)  
+/// `method=0` → CONTROL (ping / pong)
 /// `method=1` → DATA (events)
 #[derive(Clone, PartialEq, prost::Message)]
 struct PbFrame {
