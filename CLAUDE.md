@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2497 (2536 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
+# lib: 2533 (2572 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -229,6 +229,8 @@ src/
 │   ├── i2c.rs            # I2C tools — scan, read, write (feature: hardware)
 │   ├── nvs.rs            # NVS tools — get, set, delete (feature: hardware)
 │   ├── esp32.rs          # ESP32 peripheral wrapper (feature: peripheral-esp32)
+│   ├── rpi.rs            # RPi GPIO peripheral + pin validation (feature: peripheral-rpi, Linux)
+│   ├── rpi_i2c.rs        # RPi native I2C tools — scan, read, write via rppal (feature: peripheral-rpi, Linux)
 │   ├── arduino.rs        # Arduino peripheral wrapper (feature: hardware)
 │   └── nucleo.rs         # STM32 Nucleo peripheral wrapper (feature: hardware)
 ├── providers/      # LLM providers (Claude, OpenAI, Retry, Fallback)
@@ -486,6 +488,7 @@ cargo build --release --features memory-bm25
 
 - `android` — Enable Android device control tool (adds `quick-xml` dependency)
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
+- `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
 - `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
 - `sandbox-firejail` — Enable Firejail runtime (Linux only, requires `firejail` binary)
 - `sandbox-bubblewrap` — Enable Bubblewrap runtime (Linux only, requires `bwrap` binary)
