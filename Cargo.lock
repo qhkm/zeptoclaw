@@ -5224,7 +5224,7 @@ dependencies = [
 
 [[package]]
 name = "zeptoclaw"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "aho-corasick",
  "anyhow",
