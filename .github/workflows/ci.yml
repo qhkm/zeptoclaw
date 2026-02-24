@@ -27,6 +27,8 @@ jobs:
       - run: cargo test --doc
       - name: Test with memory-bm25 feature
         run: cargo test --lib --features memory-bm25
+      - name: Test with hardware features (ESP32)
+        run: cargo test --lib --features peripheral-esp32
 
   clippy:
     name: Clippy
@@ -38,6 +40,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -- -D warnings
+      - name: Clippy with hardware features
+        run: cargo clippy --features peripheral-esp32 -- -D warnings
 
   fmt:
     name: Format
