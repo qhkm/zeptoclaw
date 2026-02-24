@@ -159,6 +159,11 @@ impl SerialPeripheral {
             transport,
         })
     }
+
+    /// Get a clone of the shared transport for tool construction.
+    pub(crate) fn transport(&self) -> Arc<SerialTransport> {
+        self.transport.clone()
+    }
 }
 
 #[async_trait]

@@ -32,6 +32,9 @@ pub mod nvs;
 #[cfg(all(feature = "peripheral-rpi", target_os = "linux"))]
 pub mod rpi;
 
+#[cfg(feature = "peripheral-esp32")]
+pub mod esp32;
+
 pub use traits::Peripheral;
 
 use crate::tools::Tool;
