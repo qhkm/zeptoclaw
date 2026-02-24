@@ -61,6 +61,7 @@ use super::model_switch::{
     format_current_model, format_model_list, hydrate_overrides, new_override_store,
     parse_model_command, persist_single, remove_single, ModelCommand, ModelOverrideStore,
 };
+use super::persona_switch::{self, PersonaCommand, PersonaOverrideStore};
 use super::{BaseChannelConfig, Channel};
 
 /// Newtype wrappers to disambiguate `Vec<String>` / `String` in dptree's
@@ -72,6 +73,13 @@ struct Allowlist(Vec<String>);
 struct DefaultModel(String);
 #[derive(Clone)]
 struct ConfiguredProviders(Vec<String>);
+/// Bundles both override stores into one DI dependency so that dptree's
+/// 9-parameter arity limit is not exceeded.
+#[derive(Clone)]
+struct OverridesDep {
+    model: ModelOverrideStore,
+    persona: PersonaOverrideStore,
+}
 
 fn render_telegram_html(content: &str) -> String {
     let mut out = String::with_capacity(content.len() + 16);
@@ -135,6 +143,8 @@ pub struct TelegramChannel {
     bot: Option<teloxide::Bot>,
     /// Per-chat model overrides (in-memory)
     model_overrides: ModelOverrideStore,
+    /// Per-chat persona overrides (in-memory)
+    persona_overrides: PersonaOverrideStore,
     /// Default model name for /model status output
     default_model: String,
     /// Configured providers (for /model list)
@@ -207,6 +217,7 @@ impl TelegramChannel {
             shutdown_tx: None,
             bot: None,
             model_overrides: new_override_store(),
+            persona_overrides: persona_switch::new_persona_store(),
             default_model,
             configured_providers,
             longterm_memory,
@@ -295,7 +306,10 @@ impl Channel for TelegramChannel {
         let bus = self.bus.clone();
         let allowlist = Allowlist(self.config.allow_from.clone());
         let deny_by_default = self.config.deny_by_default;
-        let model_overrides = self.model_overrides.clone();
+        let overrides_dep = OverridesDep {
+            model: self.model_overrides.clone(),
+            persona: self.persona_overrides.clone(),
+        };
         let default_model = DefaultModel(self.default_model.clone());
         let configured_providers = ConfiguredProviders(self.configured_providers.clone());
         let longterm_memory = self.longterm_memory.clone();
@@ -315,6 +329,9 @@ impl Channel for TelegramChannel {
 
         if let Some(ltm) = self.longterm_memory.as_ref() {
             hydrate_overrides(&self.model_overrides, ltm).await;
+        }
+        if let Some(ltm) = self.longterm_memory.as_ref() {
+            persona_switch::hydrate_overrides(&self.persona_overrides, ltm).await;
         }
 
         // Spawn the bot polling task
@@ -382,10 +399,12 @@ impl Channel for TelegramChannel {
                          bus: Arc<MessageBus>,
                          Allowlist(allowlist): Allowlist,
                          deny_by_default: bool,
-                         model_overrides: ModelOverrideStore,
+                         overrides_dep: OverridesDep,
                          DefaultModel(default_model): DefaultModel,
                          ConfiguredProviders(configured_providers): ConfiguredProviders,
                          longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
+                            let model_overrides = overrides_dep.model;
+                            let persona_overrides = overrides_dep.persona;
                             // Extract user ID and optional username
                             let user = msg.from();
                             let user_id = user
@@ -515,6 +534,89 @@ impl Channel for TelegramChannel {
                                     return Ok(());
                                 }
 
+                                // Intercept /persona commands
+                                if let Some(cmd) = persona_switch::parse_persona_command(text) {
+                                    match cmd {
+                                        PersonaCommand::Show => {
+                                            let current = {
+                                                let overrides = persona_overrides.read().await;
+                                                overrides.get(&chat_id).cloned()
+                                            };
+                                            let reply = persona_switch::format_current_persona(
+                                                current.as_deref(),
+                                            );
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        PersonaCommand::Set(value) => {
+                                            let resolved =
+                                                persona_switch::resolve_soul_content(&value);
+                                            let reply = if resolved.is_empty() {
+                                                "Switched to default persona".to_string()
+                                            } else {
+                                                format!("Switched to persona: {}", value)
+                                            };
+                                            {
+                                                let mut overrides =
+                                                    persona_overrides.write().await;
+                                                overrides
+                                                    .insert(chat_id.clone(), value.clone());
+                                            }
+                                            if let Some(ref ltm) = longterm_memory {
+                                                persona_switch::persist_single(
+                                                    &chat_id, &value, ltm,
+                                                )
+                                                .await;
+                                            }
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        PersonaCommand::Reset => {
+                                            {
+                                                let mut overrides =
+                                                    persona_overrides.write().await;
+                                                overrides.remove(&chat_id);
+                                            }
+                                            if let Some(ref ltm) = longterm_memory {
+                                                persona_switch::remove_single(&chat_id, ltm)
+                                                    .await;
+                                            }
+                                            let reply =
+                                                "Persona reset to default".to_string();
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                        PersonaCommand::List => {
+                                            let current = {
+                                                let overrides = persona_overrides.read().await;
+                                                overrides.get(&chat_id).cloned()
+                                            };
+                                            let reply = persona_switch::format_persona_list(
+                                                current.as_deref(),
+                                            );
+                                            let _ = bot
+                                                .send_message(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    reply,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+
                                 // Create and publish the inbound message
                                 let mut inbound =
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
@@ -528,6 +630,15 @@ impl Channel for TelegramChannel {
                                         inbound =
                                             inbound.with_metadata("provider_override", &provider);
                                     }
+                                }
+
+                                let persona_entry = {
+                                    let overrides = persona_overrides.read().await;
+                                    overrides.get(&chat_id).cloned()
+                                };
+                                if let Some(persona_value) = persona_entry {
+                                    inbound = inbound
+                                        .with_metadata("persona_override", &persona_value);
                                 }
 
                                 if let Err(e) = bus.publish_inbound(inbound).await {
@@ -546,7 +657,7 @@ impl Channel for TelegramChannel {
                         bus,
                         allowlist,
                         deny_by_default,
-                        model_overrides,
+                        overrides_dep,
                         default_model,
                         configured_providers,
                         longterm_memory

@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2430, main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
+# lib: 2443, main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -40,6 +40,13 @@ cargo fmt
 /model list
 /model reset
 /model <provider:model>
+
+# Telegram persona switching (in chat)
+/persona              # show current persona
+/persona list         # show available presets
+/persona concise      # switch to preset
+/persona Be a pirate  # set custom persona
+/persona reset        # clear per-chat override
 
 # Run gateway with container isolation
 ./target/release/zeptoclaw gateway --containerized          # auto-detect
@@ -186,6 +193,7 @@ src/
 │   ├── factory.rs  # Channel factory/registry
 │   ├── manager.rs  # Channel lifecycle management
 │   ├── model_switch.rs # /model command parsing + model registry + persistence
+│   ├── persona_switch.rs # /persona command parsing + preset registry + LTM persistence
 │   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support)
 │   ├── slack.rs    # Slack outbound channel
 │   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
@@ -306,6 +314,9 @@ Message input channels via `Channel` trait:
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
 - CLI mode via direct agent invocation
 - All channels support `deny_by_default` config option for sender allowlists
+- Per-chat persona override via `/persona` command (mirrors `/model` pattern)
+- `PersonaOverrideStore` + LTM persistence for per-chat personas
+- First-chat detection: `FIRST_RUN_PERSONA_PROMPT` constant for prompting persona selection on first message
 - `ChannelManager` stores channel handles as `Arc<Mutex<_>>`, so outbound dispatch does not hold the channel map lock across async `send()`
 - `ChannelManager` supervision: polling supervisor (15s) detects dead channels via `is_running()`, restarts with 60s cooldown, max 5 restarts, reports to `HealthRegistry`
 - All spawned channel tasks set `running = false` on exit to prevent stale `is_running()` flags

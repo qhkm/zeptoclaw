@@ -4,6 +4,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 
+use zeptoclaw::channels::persona_switch;
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode, RuntimeType};
 use zeptoclaw::providers::configured_provider_names;
 
@@ -136,6 +137,67 @@ fn express_next_steps() -> String {
     .join("\n")
 }
 
+/// Configure AI personality via SOUL.md.
+fn configure_soul(config: &Config) -> Result<()> {
+    println!();
+    println!("AI Personality Setup");
+    println!("====================");
+    println!("Choose how your AI assistant should behave:");
+    println!("  1. Default (balanced and helpful)");
+    println!("  2. Concise & Direct");
+    println!("  3. Friendly & Warm");
+    println!("  4. Professional & Formal");
+    println!("  5. Creative & Playful");
+    println!("  6. Technical Expert");
+    println!("  7. Custom (write your own)");
+    println!("  8. Skip (decide later per chat)");
+    println!();
+    print!("Choice [1]: ");
+    io::stdout().flush()?;
+
+    let choice = read_line()?;
+    let choice = if choice.is_empty() {
+        "1"
+    } else {
+        choice.trim()
+    };
+
+    let soul_content: Option<String> = match choice {
+        "1" | "default" => None, // no SOUL.md needed for default
+        "2" => Some(persona_switch::PERSONA_PRESETS[1].soul_content.to_string()),
+        "3" => Some(persona_switch::PERSONA_PRESETS[2].soul_content.to_string()),
+        "4" => Some(persona_switch::PERSONA_PRESETS[3].soul_content.to_string()),
+        "5" => Some(persona_switch::PERSONA_PRESETS[4].soul_content.to_string()),
+        "6" => Some(persona_switch::PERSONA_PRESETS[5].soul_content.to_string()),
+        "7" => {
+            println!("Describe how you want your AI to behave:");
+            print!("> ");
+            io::stdout().flush()?;
+            let custom = read_line()?;
+            if custom.is_empty() {
+                None
+            } else {
+                Some(custom)
+            }
+        }
+        _ => {
+            println!("  Skipped. You can set personality per chat with /persona command.");
+            return Ok(());
+        }
+    };
+
+    if let Some(content) = soul_content {
+        let soul_path = config.workspace_path().join("SOUL.md");
+        std::fs::write(&soul_path, &content)?;
+        println!("  Saved personality to {}", soul_path.display());
+        println!("  Edit this file anytime to change your AI's personality.");
+    } else {
+        println!("  Using default personality. Change anytime with /persona command.");
+    }
+
+    Ok(())
+}
+
 /// Initialize configuration directory and save default config.
 ///
 /// When `full` is false (default), runs express mode: creates directories
@@ -186,6 +248,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
 
         println!();
         configure_providers(&mut config).await?;
+        configure_soul(&config)?;
 
         // Configure web search integration
         configure_web_search(&mut config)?;
@@ -227,6 +290,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         println!();
 
         configure_providers(&mut config).await?;
+        configure_soul(&config)?;
 
         // Save config
         config
