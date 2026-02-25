@@ -1247,6 +1247,9 @@ pub struct ToolsConfig {
     pub whatsapp: WhatsAppToolConfig,
     /// Google Sheets tool configuration
     pub google_sheets: GoogleSheetsToolConfig,
+    /// Google Workspace tool configuration (Gmail + Calendar)
+    #[serde(default)]
+    pub google: GoogleToolConfig,
     /// HTTP request tool configuration
     pub http_request: Option<HttpRequestConfig>,
     /// Voice transcription tool configuration
@@ -1352,6 +1355,37 @@ pub struct GoogleSheetsToolConfig {
     /// Optional service account JSON encoded as base64
     #[serde(default)]
     pub service_account_base64: Option<String>,
+}
+
+/// Google Workspace tool configuration (Gmail + Calendar).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoogleToolConfig {
+    /// OAuth bearer access token (fallback when no stored OAuth session)
+    #[serde(default)]
+    pub access_token: Option<String>,
+    /// Google OAuth client ID
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Google OAuth client secret
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Default calendar ID for calendar actions
+    pub default_calendar: String,
+    /// Maximum results for gmail_search
+    pub max_search_results: u32,
+}
+
+impl Default for GoogleToolConfig {
+    fn default() -> Self {
+        Self {
+            access_token: None,
+            client_id: None,
+            client_secret: None,
+            default_calendar: "primary".to_string(),
+            max_search_results: 20,
+        }
+    }
 }
 
 // ============================================================================
@@ -2335,6 +2369,31 @@ mod tests {
         assert!(cfg.landlock.fs_read_dirs.contains(&"/usr".to_string()));
         assert!(cfg.firejail.profile.is_none());
         assert!(cfg.bubblewrap.dev_bind);
+    }
+
+    #[test]
+    fn test_google_tool_config_default() {
+        let config = GoogleToolConfig::default();
+        assert!(config.access_token.is_none());
+        assert!(config.client_id.is_none());
+        assert!(config.client_secret.is_none());
+        assert_eq!(config.default_calendar, "primary");
+        assert_eq!(config.max_search_results, 20);
+    }
+
+    #[test]
+    fn test_google_tool_config_deserialize() {
+        let json = r#"{
+            "access_token": "ya29.test",
+            "client_id": "123.apps.googleusercontent.com",
+            "client_secret": "secret",
+            "default_calendar": "work",
+            "max_search_results": 50
+        }"#;
+        let config: GoogleToolConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.access_token.as_deref(), Some("ya29.test"));
+        assert_eq!(config.default_calendar, "work");
+        assert_eq!(config.max_search_results, 50);
     }
 }
 
