@@ -225,7 +225,7 @@ impl WhatsAppChannel {
             WsError::Capacity(msg) => format!("capacity: {}", msg),
             WsError::Protocol(p) => format!("protocol: {}", p),
             WsError::WriteBufferFull(_) => "write buffer full".to_string(),
-            WsError::Utf8 => "UTF-8 error".to_string(),
+            WsError::Utf8(_) => "UTF-8 error".to_string(),
             WsError::AttackAttempt => "attack attempt detected".to_string(),
             WsError::Url(u) => format!("URL error: {}", u),
             // Http variant may contain the full request with Authorization header.
@@ -322,7 +322,7 @@ impl WhatsAppChannel {
                             Some(send_msg) => {
                                 match serde_json::to_string(&send_msg) {
                                     Ok(json) => {
-                                        if let Err(e) = ws_writer.send(WsMessage::Text(json)).await {
+                                        if let Err(e) = ws_writer.send(WsMessage::Text(json.into())).await {
                                             warn!("WhatsApp: failed to send to bridge: {}", e);
                                             break;
                                         }

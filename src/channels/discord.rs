@@ -645,7 +645,7 @@ impl DiscordChannel {
 
             // --- Send IDENTIFY (opcode 2) ---
             let identify = Self::build_identify_payload(&token);
-            if let Err(e) = ws_writer.send(WsMessage::Text(identify)).await {
+            if let Err(e) = ws_writer.send(WsMessage::Text(identify.into())).await {
                 warn!("Discord: failed to send IDENTIFY: {}", e);
                 let delay = Self::backoff_delay(reconnect_attempt);
                 reconnect_attempt = (reconnect_attempt + 1).min(MAX_RECONNECT_ATTEMPTS);
@@ -703,7 +703,7 @@ impl DiscordChannel {
                     hb = heartbeat_rx.recv() => {
                         match hb {
                             Some(payload) => {
-                                if let Err(e) = ws_writer.send(WsMessage::Text(payload)).await {
+                                if let Err(e) = ws_writer.send(WsMessage::Text(payload.into())).await {
                                     warn!("Discord: heartbeat send failed: {}", e);
                                     break;
                                 }
@@ -761,7 +761,7 @@ impl DiscordChannel {
                                                     None
                                                 };
                                                 let hb = Self::build_heartbeat_payload(s);
-                                                if let Err(e) = ws_writer.send(WsMessage::Text(hb)).await {
+                                                if let Err(e) = ws_writer.send(WsMessage::Text(hb.into())).await {
                                                     warn!("Discord: heartbeat response send failed: {}", e);
                                                     break;
                                                 }
