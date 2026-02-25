@@ -177,6 +177,14 @@ probe-rs = { version = "0.31", optional = true }
 # Fast XML parser for Android uiautomator dump parsing
 quick-xml = { version = "0.36", optional = true }
 
+# =============================================================================
+# GOOGLE WORKSPACE (optional, --features google)
+# =============================================================================
+gog-gmail    = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
+gog-calendar = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
+gog-auth     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
+gog-core     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
+
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nusb = { version = "0.2", default-features = false, optional = true }
@@ -215,6 +223,8 @@ android = ["quick-xml"]
 sandbox-landlock   = ["dep:landlock"]
 sandbox-firejail   = []
 sandbox-bubblewrap = []
+# Google Workspace tools (Gmail + Calendar) via gogcli-rs
+google = ["dep:gog-gmail", "dep:gog-calendar", "dep:gog-auth", "dep:gog-core"]
 
 
 [dev-dependencies]
