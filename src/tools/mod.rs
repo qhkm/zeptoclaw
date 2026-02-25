@@ -65,6 +65,8 @@ pub mod custom;
 pub mod delegate;
 pub mod filesystem;
 pub mod git;
+#[cfg(feature = "google")]
+pub mod google;
 pub mod gsheets;
 pub mod hardware;
 pub mod http_request;
@@ -97,6 +99,8 @@ pub use composed::{ComposedTool, CreateToolTool};
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
 pub use git::GitTool;
+#[cfg(feature = "google")]
+pub use google::GoogleTool;
 pub use gsheets::GoogleSheetsTool;
 pub use hardware::HardwareTool;
 pub use http_request::HttpRequestTool;
