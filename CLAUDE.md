@@ -256,6 +256,7 @@ src/
 │   ├── filesystem.rs  # Read, write, list, edit files
 │   ├── web.rs         # Web search (Brave + DuckDuckGo fallback) and fetch with SSRF protection
 │   ├── whatsapp.rs    # WhatsApp Cloud API messaging
+│   ├── google.rs      # Google Workspace tool — Gmail + Calendar actions (feature: google)
 │   ├── gsheets.rs     # Google Sheets read/write
 │   ├── message.rs     # Proactive channel messaging (reply/thread hints)
 │   ├── memory.rs      # Workspace memory get/search
@@ -497,6 +498,7 @@ cargo build --release --features memory-bm25
 ### Cargo Features
 
 - `android` — Enable Android device control tool (adds `quick-xml` dependency)
+- `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
 - `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
 - `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
