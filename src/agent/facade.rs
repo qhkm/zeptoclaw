@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::error::{Result, ZeptoError};
 use crate::providers::{ChatOptions, LLMProvider, ToolDefinition};
@@ -62,6 +63,15 @@ impl ZeptoAgent {
     /// executes tool calls until the LLM returns a plain text response (or
     /// the iteration cap is reached).
     pub async fn chat(&self, user_message: &str) -> Result<String> {
+        self.chat_with_callback(user_message, |_, _| {}).await
+    }
+
+    /// Like `chat()` but calls `on_step(tool_name, tool_result)` after each
+    /// tool execution, enabling live progress updates in UIs.
+    pub async fn chat_with_callback<F>(&self, user_message: &str, on_step: F) -> Result<String>
+    where
+        F: Fn(&str, &str),
+    {
         let mut history = self.history.lock().await;
 
         // Append user message to history
@@ -79,7 +89,13 @@ impl ZeptoAgent {
 
         let ctx = ToolContext::default();
 
-        for _ in 0..self.max_iterations {
+        for iteration in 0..self.max_iterations {
+            info!(
+                "[ZeptoAgent] Iteration {}/{} — sending {} messages to LLM",
+                iteration + 1,
+                self.max_iterations,
+                messages.len()
+            );
             let response = self
                 .provider
                 .chat(
@@ -92,39 +108,70 @@ impl ZeptoAgent {
 
             if !response.has_tool_calls() {
                 // Store assistant response in history and return
+                info!(
+                    "[ZeptoAgent] LLM returned text response: {:?}",
+                    &response.content[..response.content.len().min(200)]
+                );
                 history.push(Message::assistant(&response.content));
                 return Ok(response.content);
             }
 
-            // Build assistant message with tool calls
-            let session_tool_calls: Vec<ToolCall> = response
-                .tool_calls
-                .iter()
-                .map(|tc| ToolCall::new(&tc.id, &tc.name, &tc.arguments))
-                .collect();
+            // Only process the FIRST tool call per LLM turn.
+            // This ensures sequential execution: the LLM sees each result
+            // before deciding the next action (critical for desktop automation).
+            let tc = &response.tool_calls[0];
+            info!(
+                "[ZeptoAgent] LLM returned {} tool call(s), executing first: '{}'",
+                response.tool_calls.len(),
+                tc.name
+            );
 
+            let session_tool_calls = vec![ToolCall::new(&tc.id, &tc.name, &tc.arguments)];
             let assistant_msg =
                 Message::assistant_with_tools(&response.content, session_tool_calls);
             messages.push(assistant_msg.clone());
             history.push(assistant_msg);
 
-            // Execute each tool call
-            for tc in &response.tool_calls {
-                let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+            info!(
+                "[ZeptoAgent] Executing tool '{}' with args: {}",
+                tc.name, args
+            );
 
-                let result = if let Some(tool) = self.tools.iter().find(|t| t.name() == tc.name) {
-                    match tool.execute(args, &ctx).await {
-                        Ok(output) => output.for_llm,
-                        Err(e) => format!("Tool error: {e}"),
+            // Notify UI that a tool is being executed
+            on_step(&tc.name, &format!("Executing: {} {}", tc.name, args));
+
+            let result = if let Some(tool) = self.tools.iter().find(|t| t.name() == tc.name) {
+                match tool.execute(args, &ctx).await {
+                    Ok(output) => {
+                        debug!(
+                            "[ZeptoAgent] Tool '{}' succeeded: {}",
+                            tc.name,
+                            &output.for_llm[..output.for_llm.len().min(200)]
+                        );
+                        output.for_llm
                     }
-                } else {
-                    format!("Unknown tool: {}", tc.name)
-                };
+                    Err(e) => {
+                        warn!("[ZeptoAgent] Tool '{}' failed: {}", tc.name, e);
+                        format!("Tool error: {e}")
+                    }
+                }
+            } else {
+                warn!("[ZeptoAgent] Unknown tool: {}", tc.name);
+                format!("Unknown tool: {}", tc.name)
+            };
 
-                let tool_msg = Message::tool_result(&tc.id, &result);
-                messages.push(tool_msg.clone());
-                history.push(tool_msg);
-            }
+            // Notify UI with the result
+            let result_preview = if result.len() > 150 {
+                format!("{}...", &result[..147])
+            } else {
+                result.clone()
+            };
+            on_step(&tc.name, &format!("Done: {}", result_preview));
+
+            let tool_msg = Message::tool_result(&tc.id, &result);
+            messages.push(tool_msg.clone());
+            history.push(tool_msg);
         }
 
         // Safety cap reached
@@ -137,6 +184,29 @@ impl ZeptoAgent {
     pub async fn clear_history(&self) {
         let mut history = self.history.lock().await;
         history.clear();
+    }
+
+    /// Repair history after a cancelled generation.
+    ///
+    /// If the last assistant message has tool_calls with no matching tool
+    /// response, this removes the dangling messages to keep history valid.
+    /// OpenAI requires every `tool_call_id` to have a corresponding tool
+    /// response — this prevents the "tool_call_ids did not have response
+    /// messages" error.
+    pub async fn repair_history(&self) {
+        use crate::session::Role;
+        let mut history = self.history.lock().await;
+        // Walk backwards: if the last message is an assistant with tool_calls
+        // (i.e. not followed by a tool result), remove it.
+        while let Some(last) = history.last() {
+            let has_tool_calls = last.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
+            if matches!(last.role, Role::Assistant) && has_tool_calls {
+                info!("[ZeptoAgent] Removing dangling assistant tool_call from history");
+                history.pop();
+            } else {
+                break;
+            }
+        }
     }
 
     /// Get a snapshot of the current conversation history.
