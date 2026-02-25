@@ -80,6 +80,8 @@ pub use session::{Message, Role, Session, SessionManager, ToolCall};
 pub use tools::screenshot::WebScreenshotTool;
 #[cfg(feature = "android")]
 pub use tools::AndroidTool;
+#[cfg(feature = "google")]
+pub use tools::GoogleTool;
 pub use tools::{
     composed::CreateToolTool, cron::CronTool, custom::CustomTool, delegate::DelegateTool,
     spawn::SpawnTool, BinaryPluginTool, EchoTool, GitTool, GoogleSheetsTool, HardwareTool,
