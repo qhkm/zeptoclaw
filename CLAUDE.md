@@ -262,7 +262,7 @@ src/
 │   ├── longterm_memory.rs # Long-term memory tool (set/get/search/delete/list/categories/pin)
 │   ├── cron.rs        # Cron job scheduling
 │   ├── spawn.rs       # Background task delegation
-│   ├── delegate.rs    # Agent swarm delegation (DelegateTool)
+│   ├── delegate.rs    # Agent swarm delegation (DelegateTool) — parallel + sequential modes
 │   ├── plugin.rs      # Plugin tool adapter (PluginTool)
 │   ├── approval.rs    # Tool approval gate (ApprovalGate)
 │   ├── r8r.rs         # R8r workflow integration
@@ -351,6 +351,15 @@ Message input channels via `Channel` trait:
 - `ComposedToolStore` — persistence at `~/.zeptoclaw/composed_tools.json`
 - Auto-loaded at startup in `create_agent()` as first-class tools
 
+**Delegate tool** (`src/tools/delegate.rs`): Multi-agent orchestration with parallel + sequential modes.
+- `DelegateTool` — `run` action delegates a single task to a sub-agent; `aggregate` action dispatches multiple tasks
+- `parallel: true` — concurrent fan-out via `futures::future::join_all`, bounded by semaphore (`config.swarm.max_concurrent`); no scratchpad context injection; partial results on per-agent errors
+- `parallel: false` (default) — sequential execution with `SwarmScratchpad` chaining (each sub-agent sees prior agents' outputs injected into system prompt)
+- Agent is instructed to ask the user which mode they prefer; respects explicit hints ("run in parallel", "one by one")
+- Recursion blocked: sub-agents cannot call `delegate` or `spawn`
+- `ProviderRef` wrapper shares `Arc<dyn LLMProvider>` across sub-agents without cloning
+- Config: `SwarmConfig` — `enabled` (default true), `max_depth` (1), `max_concurrent` (3), `roles` (HashMap of role presets with system prompts + tool whitelists)
+
 ### Utils (`src/utils/`)
 - `sanitize.rs` - Tool result sanitization (strip base64, hex, truncate)
 - `metrics.rs` - MetricsCollector: per-tool call stats, token tracking, session summary (wired into AgentLoop)
@@ -372,6 +381,7 @@ Message input channels via `Channel` trait:
 - `TokenBudget` - Atomic per-session token budget tracker (lock-free via `AtomicU64`)
 - `ContextMonitor` - Token estimation (`words * 1.3 + 4/msg`), threshold-based compaction triggers
 - `Compactor` - Summarize (LLM-based) or Truncate strategies for context window management
+- `SwarmScratchpad` - Thread-safe `Arc<RwLock<HashMap>>` for agent-to-agent context passing; `format_for_prompt()` injects prior outputs into sub-agent system prompts (truncated at 2000 chars per entry)
 - `start()` now routes inbound work through `process_inbound_message()` helper and calls `try_queue_or_process()` before processing
 
 ### Memory (`src/memory/`)
