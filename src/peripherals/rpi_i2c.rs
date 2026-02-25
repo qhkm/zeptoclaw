@@ -203,12 +203,11 @@ impl Tool for RpiI2cReadTool {
                 .map_err(|e| ZeptoError::Tool(format!("I2C set address {addr_u16:#04x}: {e}")))?;
 
             let mut buf = vec![0u8; len];
-            i2c.smbus_read_i2c_block_data(reg_u8, &mut buf)
-                .map_err(|e| {
-                    ZeptoError::Tool(format!(
-                        "I2C read addr={addr_u16:#04x} reg={reg_u8:#04x}: {e}"
-                    ))
-                })?;
+            i2c.block_read(reg_u8, &mut buf).map_err(|e| {
+                ZeptoError::Tool(format!(
+                    "I2C read addr={addr_u16:#04x} reg={reg_u8:#04x}: {e}"
+                ))
+            })?;
 
             Ok(buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
         })
@@ -331,12 +330,11 @@ impl Tool for RpiI2cWriteTool {
             i2c.set_slave_address(addr_u16)
                 .map_err(|e| ZeptoError::Tool(format!("I2C set address {addr_u16:#04x}: {e}")))?;
 
-            i2c.smbus_write_i2c_block_data(reg_u8, &data_bytes)
-                .map_err(|e| {
-                    ZeptoError::Tool(format!(
-                        "I2C write addr={addr_u16:#04x} reg={reg_u8:#04x}: {e}"
-                    ))
-                })?;
+            i2c.block_write(reg_u8, &data_bytes).map_err(|e| {
+                ZeptoError::Tool(format!(
+                    "I2C write addr={addr_u16:#04x} reg={reg_u8:#04x}: {e}"
+                ))
+            })?;
 
             Ok(())
         })
