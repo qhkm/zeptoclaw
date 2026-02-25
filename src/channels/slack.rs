@@ -322,7 +322,7 @@ impl SlackChannel {
                             Ok(parsed) => {
                                 if let Some(ack_message) = parsed.ack_message {
                                     if let Err(e) =
-                                        ws_writer.send(WsMessage::Text(ack_message)).await
+                                        ws_writer.send(WsMessage::Text(ack_message.into())).await
                                     {
                                         warn!("Slack Socket Mode ack send failed: {}", e);
                                         break;

@@ -367,7 +367,7 @@ impl Channel for TelegramChannel {
                             }
 
                             let delay = if let RequestError::RetryAfter(d) = &e {
-                                *d
+                                d.duration()
                             } else {
                                 TelegramChannel::startup_backoff_delay(attempt)
                             };
@@ -406,7 +406,7 @@ impl Channel for TelegramChannel {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
                             // Extract user ID and optional username
-                            let user = msg.from();
+                            let user = msg.from.as_ref();
                             let user_id = user
                                 .map(|u| u.id.0.to_string())
                                 .unwrap_or_else(|| "unknown".to_string());
