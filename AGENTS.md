@@ -9,17 +9,24 @@ Project-level guidance for coding agents working in this repository.
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
-- Codebase: ~43,000+ lines of Rust
-- Channels: 5 (Telegram, Slack, Discord, Webhook, WhatsApp)
+- Codebase: ~50,000+ lines of Rust
+- Channels: 9 (Telegram, Slack, Discord, WhatsApp, WhatsApp Cloud, Lark, Email, Webhook, Serial)
+- Runtimes: 6 (Native, Docker, Apple Container, Landlock, Firejail, Bubblewrap)
+- Peripherals: 4 boards (ESP32, RPi, Arduino, Nucleo) with GPIO, I2C, NVS, Serial
 - Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
 - Plugins: Command-mode (shell template) + Binary-mode (JSON-RPC 2.0 stdin/stdout)
+- Library facade: `ZeptoAgent::builder()` for embedding as a crate (Tauri, GUI apps)
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
+- Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
-- Tests: 1791 lib + 59 main + 23 cli_smoke + 13 e2e + 70 integration + 141 doc (116 passed, 25 ignored)
+- Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
+- Tool composition: natural language tool creation with `{{param}}` template interpolation
+- Gateway startup guard: degrade after N crashes to prevent crash loops
+- Tests: 2567 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (27 ignored)
 
 ## Task Tracking Protocol
 

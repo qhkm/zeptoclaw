@@ -5,6 +5,49 @@ All notable changes to ZeptoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.8] - 2026-02-25
+
+### Added
+- **ZeptoAgent library facade** — `ZeptoAgent::builder().provider(p).tool(t).build()` for embedding ZeptoClaw as a crate in Tauri/Electron/GUI apps; persistent conversation history behind `Mutex` for thread-safe concurrent access (#154)
+- **Parallel fan-out for multi-agent aggregate** — DelegateTool now supports parallel dispatch to multiple sub-agents with result aggregation (#150)
+- **RPi peripheral parity with ESP32** — Raspberry Pi GPIO + native I2C tools via rppal with board profile pin validation (#152)
+- **Gateway startup guard** — Degrade gracefully after N crashes to prevent crash loops; configurable crash threshold (#147)
+- **DOM-based web extraction** — `web_fetch` now uses `scraper` crate for proper HTML→text extraction instead of regex stripping (#146)
+- **Rich health endpoint** — `/health` returns version, uptime, memory RSS, usage metrics, component checks; `/ready` returns boolean readiness (#145)
+- **Hardware features in release binaries** — CI release builds now bake in `peripheral-esp32` and `peripheral-rpi` features (#144)
+- **ESP32 hardware tools** — GPIO read/write, I2C scan/read/write, NVS get/set/delete, Serial channel for UART messaging (#139)
+- **Natural language tool composition** — `CreateToolTool` with create/list/delete/run actions; `ComposedTool` interpolates `{{param}}` placeholders into action templates (#138)
+- **Soul/persona system** — Per-chat personality switching via `/persona` command (list, set preset, custom text, reset) with long-term memory persistence (#133)
+- **Channel supervisor** — Polling supervisor (15s) detects dead channels via `is_running()`, restarts with 60s cooldown, max 5 restarts, reports to HealthRegistry (#117)
+- **Self-update command** — `zeptoclaw update` downloads latest release from GitHub; supports `--check`, `--version`, `--force` flags (#111)
+- **Linux sandbox runtimes** — Landlock LSM (kernel 5.13+), Firejail (namespace + seccomp), Bubblewrap (OCI-compatible `bwrap`) — feature-gated (#104)
+- **Shell allowlist mode** — Off/Warn/Strict modes for command allowlisting alongside existing blocklist
+- **Retry budget** — `retry_budget_ms` wall-clock cap on total retry time (default: 45s) (#135)
+- **Board profiles** — Pin ranges and capability registry per board type (ESP32, RPi, Arduino, Nucleo)
+
+### Changed
+- Channel count increased from 8 to 9 (added Serial/UART channel)
+- Runtime count increased from 3 to 6 (added Landlock, Firejail, Bubblewrap)
+- Test count increased from 2,300+ to 2,880+
+- Web fetch uses DOM-based extraction (scraper) instead of regex HTML stripping
+
+### Fixed
+- Telegram allowlist silently broken since v0.5.0 due to dptree type collision (#109)
+- SSRF guard bypass via IPv6-to-IPv4 transition addresses (#105)
+- Doctor false negative on binary detection in containers (#134)
+- Stale state on task exit in cron, heartbeat, lark, gateway (#118)
+- OpenAI `max_tokens` → `max_completion_tokens` retry for known model families
+- Filesystem writer tool serialization to prevent race conditions (#113)
+- Full GitHub URLs in skills install (#131)
+
+### Security
+- Memory poisoning guard — injection pattern detection on `longterm_memory.set()` (#124)
+- Tiered inbound injection scanning — block webhooks, warn-only on allowlisted channels (#124)
+- Tool chain alerting — detects dangerous sequences (write→execute, execute→fetch, memory→execute) (#124)
+- SSRF IPv6-to-IPv4 transition address blocking
+- Shell allowlist mode (Off/Warn/Strict) alongside existing blocklist
+- Config path blocklist prevents LLM-driven config exfiltration
+
 ## [0.5.0] - 2026-02-22
 
 ### Added
@@ -130,6 +173,7 @@ First public release.
 - Mount allowlist validation
 - Cron job caps and spawn recursion prevention
 
+[0.5.8]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.5.8
 [0.5.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.5.0
 [0.4.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.4.0
 [0.2.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.2.0

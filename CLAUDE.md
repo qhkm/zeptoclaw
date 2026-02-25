@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2533 (2572 with --features hardware), main: 91, cli_smoke: 23, e2e: 13, integration: 70, doc: 147 (121 passed, 26 ignored)
+# lib: 2567, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
