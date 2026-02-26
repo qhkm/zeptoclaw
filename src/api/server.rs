@@ -27,6 +27,7 @@ impl AppState {
 pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let api = Router::new()
         .route("/api/health", get(super::routes::health::get_health))
+        .route("/ws/events", get(super::routes::ws::ws_events))
         .layer(CorsLayer::permissive()) // Tightened in security task
         .with_state(Arc::new(state));
 
