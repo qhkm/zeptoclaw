@@ -5,6 +5,22 @@ All notable changes to ZeptoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-02-26
+
+### Fixed
+- RPi I2C block read/write method names corrected for rppal API (`block_read`/`block_write`)
+
+### Changed
+- Dependency upgrades: teloxide 0.12→0.17, tokio-tungstenite 0.21→0.28
+
+## [0.5.9] - 2026-02-26
+
+### Added
+- **ZeptoAgent facade improvements** — Sequential execution, callback support, and repair semantics for embedding as a crate (#157)
+
+### Fixed
+- Upgrade teloxide 0.12→0.17 and tokio-tungstenite 0.21→0.28 for compatibility (#156)
+
 ## [0.5.8] - 2026-02-25
 
 ### Added
@@ -173,6 +189,8 @@ First public release.
 - Mount allowlist validation
 - Cron job caps and spawn recursion prevention
 
+[0.6.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.6.0
+[0.5.9]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.5.9
 [0.5.8]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.5.8
 [0.5.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.5.0
 [0.4.0]: https://github.com/qhkm/zeptoclaw/releases/tag/v0.4.0

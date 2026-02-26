@@ -102,7 +102,7 @@ Use conventional commits:
 1. Create `src/tools/yourtool.rs`
 2. Implement the `Tool` trait with `async fn execute()`
 3. Register in `src/tools/mod.rs` and `src/lib.rs`
-4. Register in agent setup in `src/cli/agent.rs`
+4. Register in agent setup in `src/cli/common.rs`
 5. Add tests
 
 ## Adding a New Channel

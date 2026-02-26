@@ -281,7 +281,7 @@ cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
 
-See [CLAUDE.md](CLAUDE.md) for full architecture reference and [AGENTS.md](AGENTS.md) for coding guidelines.
+See [CLAUDE.md](CLAUDE.md) for full architecture reference, [AGENTS.md](AGENTS.md) for coding guidelines, and [docs/](docs/) for benchmarks, multi-tenant deployment, and performance guides.
 
 ## Contributing
 

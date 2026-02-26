@@ -154,6 +154,7 @@ Skip issue creation only for trivial changes (typo fixes, one-line tweaks).
 ### 3. Session End — Link and close
 
 - If creating a PR: include `Closes #N` in the PR body
+- Merge PRs with: `gh pr merge <number> --squash --delete-branch --admin`
 - If committing directly to main: close the issue with `gh issue close N --comment "Done in <commit-sha>"`
 - Update `CLAUDE.md` and `AGENTS.md` per the post-implementation checklist
 
@@ -200,6 +201,8 @@ src/
 │   ├── webhook.rs  # Generic HTTP webhook inbound
 │   ├── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
 │   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
+│   ├── lark.rs     # Lark/Feishu messaging (WS long-connection)
+│   ├── email_channel.rs # Email channel (IMAP IDLE + SMTP)
 │   └── serial.rs  # Serial (UART) channel for embedded device messaging (feature: hardware)
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
@@ -238,12 +241,15 @@ src/
 ├── routines/       # Event/webhook/cron triggered automations
 ├── safety/         # Prompt injection detection, secret leak scanning, policy engine, chain alerting
 ├── security/       # Shell blocklist, path validation, mount policy, secret encryption
+│   ├── agent_mode.rs # Agent modes (Observer, Assistant, Autonomous) — category-based tool access
 │   └── encryption.rs # XChaCha20-Poly1305 + Argon2id secret encryption at rest
 ├── session/        # Session, message persistence, conversation history
 ├── tunnel/         # Tunnel providers (Cloudflare, ngrok, Tailscale)
+├── hooks/          # Config-driven hooks (before_tool, after_tool, on_error)
+├── migrate/        # OpenClaw migration (config, skills import)
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (18 tools + MCP + binary plugins + android)
+├── tools/          # Agent tools (29 built-in + MCP + binary plugins + android)
 │   ├── android/     # Android device control via ADB (feature-gated: --features android)
 │   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
 │   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
@@ -253,18 +259,30 @@ src/
 │   │   └── stuck.rs    # Screen hash, repetition/drift detection, alerts
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
-│   ├── filesystem.rs  # Read, write, list, edit files
+│   ├── filesystem.rs  # Read, write, list, edit files (4 tools: read, write, list, edit)
 │   ├── web.rs         # Web search (Brave + DuckDuckGo fallback) and fetch with SSRF protection
+│   ├── git.rs         # Git operations (status, diff, log, commit)
+│   ├── stripe.rs      # Stripe API integration for payment operations
+│   ├── pdf_read.rs    # PDF text extraction (PdfReadTool)
+│   ├── transcribe.rs  # Audio transcription with provider abstraction
+│   ├── http_request.rs # General-purpose HTTP client tool
+│   ├── project.rs     # Project scaffolding and management
+│   ├── screenshot.rs  # Web screenshot capture (feature: screenshot)
+│   ├── custom.rs      # CLI-defined tools via custom_tools config
+│   ├── hardware.rs    # GPIO, serial, USB peripheral operations (feature: hardware)
 │   ├── whatsapp.rs    # WhatsApp Cloud API messaging
 │   ├── google.rs      # Google Workspace tool — Gmail + Calendar actions (feature: google)
 │   ├── gsheets.rs     # Google Sheets read/write
 │   ├── message.rs     # Proactive channel messaging (reply/thread hints)
-│   ├── memory.rs      # Workspace memory get/search
+│   ├── memory.rs      # Workspace memory get/search (2 tools)
 │   ├── longterm_memory.rs # Long-term memory tool (set/get/search/delete/list/categories/pin)
 │   ├── cron.rs        # Cron job scheduling
 │   ├── spawn.rs       # Background task delegation
 │   ├── delegate.rs    # Agent swarm delegation (DelegateTool) — parallel + sequential modes
+│   ├── composed.rs    # Natural language tool composition (CreateToolTool + ComposedTool)
 │   ├── plugin.rs      # Plugin tool adapter (PluginTool)
+│   ├── skills_install.rs # Skill installation tool
+│   ├── skills_search.rs  # Skill discovery/search tool
 │   ├── approval.rs    # Tool approval gate (ApprovalGate)
 │   ├── r8r.rs         # R8r workflow integration
 │   ├── reminder.rs    # Persistent reminders (add/complete/snooze/overdue) with cron delivery
@@ -344,7 +362,7 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-18 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
+29 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
 
 **Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
 - `CreateToolTool` — agent tool with create/list/delete/run actions
@@ -482,23 +500,9 @@ Environment variables override config:
 
 ### Cargo Features
 
-```bash
-# Default build (builtin memory searcher only)
-cargo build --release
-
-# With BM25 keyword scoring
-cargo build --release --features memory-bm25
-
-# Future features (not yet implemented)
-# cargo build --release --features memory-embedding
-# cargo build --release --features memory-hnsw
-# cargo build --release --features memory-tantivy
-```
-
-### Cargo Features
-
 - `android` — Enable Android device control tool (adds `quick-xml` dependency)
 - `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
+- `memory-bm25` — Enable BM25 keyword scoring for memory search
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
 - `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
 - `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
