@@ -34,6 +34,8 @@ pub struct RuntimeProviderSelection {
     pub backend: &'static str,
     /// Resolved credential (OAuth token or API key).
     pub credential: ResolvedCredential,
+    /// Per-provider model override from config.
+    pub model: Option<String>,
 }
 
 /// Provider registry in priority order.
@@ -202,6 +204,7 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
             api_base,
             backend: spec.backend,
             credential,
+            model: provider.and_then(|p| p.model.clone()),
         });
     }
 
@@ -539,5 +542,32 @@ mod tests {
 
         assert_eq!(api_key, "sk-ant-fallback");
         assert!(matches!(credential, ResolvedCredential::ApiKey(_)));
+    }
+
+    #[test]
+    fn test_runtime_selection_carries_provider_model() {
+        let mut config = Config::default();
+        config.providers.anthropic = Some(ProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            model: Some("claude-opus-4-20250514".to_string()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_runtime_providers(&config);
+        let anthropic = resolved.iter().find(|s| s.name == "anthropic").unwrap();
+        assert_eq!(anthropic.model, Some("claude-opus-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn test_runtime_selection_model_none_when_not_configured() {
+        let mut config = Config::default();
+        config.providers.anthropic = Some(ProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_runtime_providers(&config);
+        let anthropic = resolved.iter().find(|s| s.name == "anthropic").unwrap();
+        assert_eq!(anthropic.model, None);
     }
 }
