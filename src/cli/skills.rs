@@ -181,8 +181,8 @@ Describe usage and concrete command examples.
         SkillsAction::Search { query, source } => {
             cmd_skills_search(&config, &query, &source).await?;
         }
-        SkillsAction::Install { slug, github } => {
-            cmd_skills_install(&config, slug.as_deref(), github.as_deref()).await?;
+        SkillsAction::Install { name, github } => {
+            cmd_skills_install(&name, github.as_deref()).await?;
         }
     }
 
@@ -238,19 +238,71 @@ async fn cmd_skills_search(config: &Config, query: &str, source: &str) -> Result
     Ok(())
 }
 
-async fn cmd_skills_install(
-    _config: &Config,
-    _slug: Option<&str>,
-    github: Option<&str>,
-) -> Result<()> {
-    if let Some(repo) = github {
-        cmd_skills_install_github(repo).await
-    } else {
-        anyhow::bail!("Specify --github owner/repo to install a skill from GitHub")
+/// Default community skills repository.
+const COMMUNITY_REPO: &str = "qhkm/zeptoclaw-skills";
+
+/// Validate a skill name for filesystem safety.
+fn validate_skill_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Skill name cannot be empty");
     }
+    if name.contains('/') || name.contains('\\') {
+        anyhow::bail!("Skill name cannot contain path separators: {:?}", name);
+    }
+    if name.starts_with('.') || name == ".." {
+        anyhow::bail!("Skill name cannot start with dot: {:?}", name);
+    }
+    if name.contains("..") {
+        anyhow::bail!("Skill name cannot contain '..': {:?}", name);
+    }
+    Ok(())
 }
 
-/// Normalize a GitHub argument to `owner/repo`, accepting both full URLs and shorthand.
+async fn cmd_skills_install(name: &str, github: Option<&str>) -> Result<()> {
+    validate_skill_name(name)?;
+
+    let skills_dir = zeptoclaw::config::Config::dir().join("skills");
+    std::fs::create_dir_all(&skills_dir)?;
+    let target_dir = skills_dir.join(name);
+
+    if target_dir.exists() {
+        anyhow::bail!(
+            "Skill '{}' already exists at {}. Remove it first.",
+            name,
+            target_dir.display()
+        );
+    }
+
+    if let Some(repo_arg) = github {
+        let normalized = normalize_github_repo(repo_arg);
+        let segments: Vec<&str> = normalized.split('/').collect();
+        match segments.len() {
+            2 => {
+                // Single-skill repo: owner/repo → clone directly
+                install_single_skill_repo(normalized, name, &target_dir).await?;
+            }
+            n if n >= 3 => {
+                // Multi-skill repo: owner/repo/skill-path
+                let repo_part = format!("{}/{}", segments[0], segments[1]);
+                let skill_path = segments[2..].join("/");
+                install_from_multi_skill_repo(&repo_part, &skill_path, &target_dir).await?;
+            }
+            _ => {
+                anyhow::bail!(
+                    "Expected owner/repo or owner/repo/skill format, got: {}",
+                    normalized
+                );
+            }
+        }
+    } else {
+        // Default: install from community repo
+        install_from_multi_skill_repo(COMMUNITY_REPO, name, &target_dir).await?;
+    }
+
+    Ok(())
+}
+
+/// Normalize a GitHub argument, accepting both full URLs and shorthand.
 fn normalize_github_repo(input: &str) -> &str {
     input
         .strip_prefix("https://github.com/")
@@ -260,37 +312,13 @@ fn normalize_github_repo(input: &str) -> &str {
         .trim_end_matches(".git")
 }
 
-async fn cmd_skills_install_github(repo: &str) -> Result<()> {
-    // Normalize: accept full GitHub URLs as well as owner/repo shorthand
-    let repo = normalize_github_repo(repo);
-
-    // Validate owner/repo format (exactly two segments)
-    let segments: Vec<&str> = repo.split('/').collect();
-    if segments.len() != 2 {
-        anyhow::bail!(
-            "Expected owner/repo format (e.g. steipete/gogcli), got: {}",
-            repo
-        );
-    }
-
-    let repo_name = segments[1];
-    if repo_name.is_empty() || repo_name == "." || repo_name == ".." {
-        anyhow::bail!("Invalid repository name: {:?}", repo_name);
-    }
-
-    let skills_dir = zeptoclaw::config::Config::dir().join("skills");
-    std::fs::create_dir_all(&skills_dir)?;
-    let target_dir = skills_dir.join(repo_name);
-
-    if target_dir.exists() {
-        anyhow::bail!(
-            "Skill '{}' already exists at {}. Remove it first.",
-            repo_name,
-            target_dir.display()
-        );
-    }
-
-    println!("Installing skill from github.com/{} ...", repo);
+/// Install a single-skill repo (root SKILL.md) by cloning directly into target.
+async fn install_single_skill_repo(
+    repo: &str,
+    name: &str,
+    target_dir: &std::path::Path,
+) -> Result<()> {
+    println!("Installing '{}' from github.com/{} ...", name, repo);
 
     let output = tokio::process::Command::new("git")
         .args([
@@ -299,7 +327,7 @@ async fn cmd_skills_install_github(repo: &str) -> Result<()> {
             "1",
             &format!("https://github.com/{}.git", repo),
         ])
-        .arg(&target_dir)
+        .arg(target_dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -310,18 +338,84 @@ async fn cmd_skills_install_github(repo: &str) -> Result<()> {
         anyhow::bail!("git clone failed for {}: {}", repo, stderr.trim());
     }
 
-    // Validate SKILL.md exists
     let skill_md = target_dir.join("SKILL.md");
     if !skill_md.exists() {
-        // Clean up
-        let _ = std::fs::remove_dir_all(&target_dir);
+        let _ = std::fs::remove_dir_all(target_dir);
         anyhow::bail!("Repository {} has no SKILL.md — not a valid skill", repo);
     }
 
-    // Remove .git to save space
     let _ = std::fs::remove_dir_all(target_dir.join(".git"));
+    println!("Installed '{}' to {}", name, target_dir.display());
+    Ok(())
+}
 
-    println!("Installed '{}' to {}", repo_name, target_dir.display());
+/// Install a specific skill subdirectory from a multi-skill repo.
+async fn install_from_multi_skill_repo(
+    repo: &str,
+    skill_path: &str,
+    target_dir: &std::path::Path,
+) -> Result<()> {
+    println!("Installing '{}' from github.com/{} ...", skill_path, repo);
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("zeptoclaw-skill-install-{}", std::process::id()));
+
+    let output = tokio::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            &format!("https://github.com/{}.git", repo),
+        ])
+        .arg(&tmp_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        anyhow::bail!("git clone failed for {}: {}", repo, stderr.trim());
+    }
+
+    let skill_src = tmp_dir.join(skill_path);
+    let skill_md = skill_src.join("SKILL.md");
+
+    if !skill_md.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        anyhow::bail!(
+            "Skill '{}' not found in {} (no {}/SKILL.md)",
+            skill_path,
+            repo,
+            skill_path,
+        );
+    }
+
+    copy_dir_recursive(&skill_src, target_dir)?;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let name = target_dir
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    println!("Installed '{}' to {}", name, target_dir.display());
+    Ok(())
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -437,7 +531,7 @@ Describe usage and concrete command examples.
 
     #[test]
     fn test_normalize_github_repo() {
-        // Full HTTPS URL (the bug: split('/').nth(1) returns "" instead of repo name)
+        // Full HTTPS URL
         assert_eq!(
             normalize_github_repo("https://github.com/steipete/gogcli"),
             "steipete/gogcli"
@@ -463,10 +557,93 @@ Describe usage and concrete command examples.
         );
         // .git suffix on shorthand
         assert_eq!(normalize_github_repo("owner/repo.git"), "owner/repo");
-        // Sub-path URL reduced to still contain sub-path (caught by segment validation)
+        // Sub-path preserved for multi-skill repos
         assert_eq!(
-            normalize_github_repo("https://github.com/owner/repo/tree/main"),
-            "owner/repo/tree/main"
+            normalize_github_repo("https://github.com/qhkm/zeptoclaw-skills/obsidian-vault"),
+            "qhkm/zeptoclaw-skills/obsidian-vault"
         );
+        // Shorthand with skill path
+        assert_eq!(
+            normalize_github_repo("qhkm/zeptoclaw-skills/weather"),
+            "qhkm/zeptoclaw-skills/weather"
+        );
+    }
+
+    #[test]
+    fn test_validate_skill_name() {
+        // Valid names
+        assert!(validate_skill_name("obsidian-vault").is_ok());
+        assert!(validate_skill_name("my_skill").is_ok());
+        assert!(validate_skill_name("weather").is_ok());
+        assert!(validate_skill_name("send-email").is_ok());
+
+        // Invalid: empty
+        assert!(validate_skill_name("").is_err());
+        // Invalid: path traversal
+        assert!(validate_skill_name("..").is_err());
+        assert!(validate_skill_name("../escape").is_err());
+        assert!(validate_skill_name("foo/bar").is_err());
+        // Invalid: hidden files
+        assert!(validate_skill_name(".hidden").is_err());
+        // Invalid: backslash
+        assert!(validate_skill_name("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_github_segment_parsing() {
+        // 2 segments → single-skill repo
+        let normalized = normalize_github_repo("user/my-skill");
+        let segments: Vec<&str> = normalized.split('/').collect();
+        assert_eq!(segments.len(), 2);
+
+        // 3 segments → multi-skill repo with skill path
+        let normalized =
+            normalize_github_repo("https://github.com/qhkm/zeptoclaw-skills/obsidian-vault");
+        let segments: Vec<&str> = normalized.split('/').collect();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(
+            format!("{}/{}", segments[0], segments[1]),
+            "qhkm/zeptoclaw-skills"
+        );
+        assert_eq!(segments[2..].join("/"), "obsidian-vault");
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let tmp = std::env::temp_dir().join("zeptoclaw-test-copy-dir");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+
+        // Create source structure
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("SKILL.md"), "# Test").unwrap();
+        std::fs::write(src.join("sub/nested.txt"), "nested").unwrap();
+
+        // Copy
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        // Verify
+        assert!(dst.join("SKILL.md").exists());
+        assert!(dst.join("sub/nested.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dst.join("SKILL.md")).unwrap(),
+            "# Test"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub/nested.txt")).unwrap(),
+            "nested"
+        );
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_community_repo_constant() {
+        assert_eq!(COMMUNITY_REPO, "qhkm/zeptoclaw-skills");
+        let segments: Vec<&str> = COMMUNITY_REPO.split('/').collect();
+        assert_eq!(segments.len(), 2);
     }
 }

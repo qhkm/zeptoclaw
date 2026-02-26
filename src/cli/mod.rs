@@ -288,11 +288,11 @@ pub enum SkillsAction {
         #[arg(long, default_value = "all")]
         source: String,
     },
-    /// Install a skill from GitHub
+    /// Install a skill by name (from community repo) or --github
     Install {
-        /// ClawHub slug (reserved for future use)
-        slug: Option<String>,
-        /// Install from GitHub repository (owner/repo or full URL)
+        /// Skill name (installs from community repo by default)
+        name: String,
+        /// Install from explicit GitHub repo (owner/repo or owner/repo/skill)
         #[arg(long)]
         github: Option<String>,
     },
