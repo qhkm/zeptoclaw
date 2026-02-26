@@ -5,6 +5,16 @@ All notable changes to ZeptoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-02-27
+
+### Fixed
+- **Per-message memory injection** — LLM now receives query-matched relevant memories (not just pinned) in every message, including tool-loop follow-up calls (#188)
+- Shared single LTM instance between agent injection and `longterm_memory` tool (eliminates duplicate initialization)
+- Added `version` spec to `gog-*` git dependencies for crates.io publishing compatibility
+
+### Changed
+- Test count: 2,612 lib tests
+
 ## [0.6.0] - 2026-02-26
 
 ### Added
