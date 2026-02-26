@@ -94,9 +94,9 @@ export default function KanbanCard({ task }: { task: KanbanTask }) {
         </span>
 
         {/* Labels */}
-        {task.labels.slice(0, 3).map((label) => (
+        {task.labels.slice(0, 3).map((label, i) => (
           <span
-            key={label}
+            key={`${i}-${label}`}
             className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-800 text-zinc-400"
           >
             {label}

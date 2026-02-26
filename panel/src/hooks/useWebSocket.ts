@@ -20,7 +20,9 @@ export function useWebSocket(maxEvents = 50) {
   const connect = useCallback(() => {
     if (!mounted.current) return
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/events`)
+    const authToken = localStorage.getItem('panel_token') ?? ''
+    const url = `${protocol}//${window.location.host}/ws/events${authToken ? `?auth=${encodeURIComponent(authToken)}` : ''}`
+    const ws = new WebSocket(url)
     wsRef.current = ws
 
     ws.onopen = () => {

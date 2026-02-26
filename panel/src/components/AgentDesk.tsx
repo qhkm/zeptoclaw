@@ -89,7 +89,9 @@ function ChannelIcon({ channel, className = '' }: { channel: string; className?:
 
 function formatRelativeTime(iso: string): string {
   try {
-    const diff = Date.now() - new Date(iso).getTime()
+    const timestamp = new Date(iso).getTime()
+    if (isNaN(timestamp)) return 'unknown'
+    const diff = Date.now() - timestamp
     const secs = Math.floor(diff / 1000)
     if (secs < 10) return 'just now'
     if (secs < 60) return `${secs}s ago`
@@ -99,7 +101,7 @@ function formatRelativeTime(iso: string): string {
     if (hours < 24) return `${hours}h ago`
     return `${Math.floor(hours / 24)}d ago`
   } catch {
-    return iso
+    return 'unknown'
   }
 }
 

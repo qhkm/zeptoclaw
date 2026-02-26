@@ -3,22 +3,24 @@
 // Shown when the user has no valid token in localStorage.
 // On successful login the parent (App.tsx) re-renders with isAuthenticated=true
 // and the layout/dashboard becomes visible.
+//
+// The parent passes down its own `login` function from useAuth so both App and
+// Login share the same React state — no stale-closure or authVersion hack needed.
 
 import { useState, type FormEvent } from 'react'
-import { useAuth } from '../hooks/useAuth'
 
 interface LoginProps {
-  onSuccess: () => void
+  login: (password: string) => Promise<boolean>
+  error: string | null
+  loading: boolean
 }
 
-export default function Login({ onSuccess }: LoginProps) {
-  const { login, error, loading } = useAuth()
+export default function Login({ login, error, loading }: LoginProps) {
   const [password, setPassword] = useState('')
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    const ok = await login(password)
-    if (ok) onSuccess()
+    await login(password)
   }
 
   return (
@@ -74,7 +76,7 @@ export default function Login({ onSuccess }: LoginProps) {
                          text-sm font-semibold text-white
                          py-2.5 transition-colors duration-150"
             >
-              {loading ? 'Signing in…' : 'Sign in'}
+              {loading ? 'Signing in...' : 'Sign in'}
             </button>
           </form>
         </div>

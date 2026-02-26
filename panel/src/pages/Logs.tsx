@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useWebSocket, PanelEvent } from '../hooks/useWebSocket'
+import { useWebSocket, type PanelEvent } from '../hooks/useWebSocket'
 
 // Filter category definitions
 type FilterCategory = 'all' | 'tool' | 'agent' | 'channel' | 'cron' | 'error'
@@ -38,11 +38,11 @@ function getTypeBadgeClass(type: string): string {
 
 // Map event type to its filter category
 function getEventCategory(type: string): FilterCategory {
+  if (type === 'tool_failed' || type.includes('error') || type.includes('fail')) return 'error'
   if (type.startsWith('tool_')) return 'tool'
   if (type.startsWith('agent_')) return 'agent'
   if (type === 'channel_status') return 'channel'
   if (type === 'cron_fired') return 'cron'
-  if (type === 'tool_failed' || type.includes('error') || type.includes('fail')) return 'error'
   if (type === 'message_received') return 'channel'
   return 'all'
 }
