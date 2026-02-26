@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2609, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (33 ignored)
+# lib: 2612, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (33 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -462,8 +462,8 @@ Message input channels via `Channel` trait:
 - `repair.rs` - Auto-repair malformed session history (orphans, empty/duplicate, alternation)
 
 ### Agent (`src/agent/`)
-- `AgentLoop` - Core message processing loop with tool execution + pre-compaction memory flush
-- `ContextBuilder` - System prompt and conversation context builder + memory context injection
+- `AgentLoop` - Core message processing loop with tool execution + pre-compaction memory flush + per-message LTM memory injection override
+- `ContextBuilder` - System prompt and conversation context builder + optional per-message memory override API
 - `TokenBudget` - Atomic per-session token budget tracker (lock-free via `AtomicU64`)
 - `ContextMonitor` - Token estimation (`words * 1.3 + 4/msg`), threshold-based compaction triggers
 - `LoopGuard` - SHA256 tool-call repetition detection with warning + circuit breaker
@@ -479,7 +479,7 @@ Message input channels via `Channel` trait:
 - Workspace memory - Markdown search/read with pluggable searcher injection
 - `LongTermMemory` - Persistent key-value store at `~/.zeptoclaw/memory/longterm.json` with pluggable searcher, categories, tags, access tracking; injection guard on `set()` rejects values containing prompt injection patterns
 - `decay_score()` on `MemoryEntry` - 30-day half-life decay with importance weighting; pinned entries exempt (always 1.0)
-- `build_memory_injection()` - Pinned + query-matched memory injection for system prompt (2000 char budget)
+- `build_memory_injection()` - Pinned + query-matched memory injection for system prompt (2000 char budget), now applied per inbound message via shared LTM
 - Pre-compaction memory flush - Silent LLM turn saves important facts before context compaction (10s timeout)
 
 ### Health (`src/health.rs`)

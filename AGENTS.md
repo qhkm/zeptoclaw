@@ -24,6 +24,7 @@ Project-level guidance for coding agents working in this repository.
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
+- Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
@@ -31,7 +32,7 @@ Project-level guidance for coding agents working in this repository.
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
-- Tests: 2609 lib + 97 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (33 ignored)
+- Tests: 2612 lib + 97 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (33 ignored)
 
 ## Task Tracking Protocol
 

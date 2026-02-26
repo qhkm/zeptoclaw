@@ -601,8 +601,12 @@ pub(crate) async fn create_agent_with_template(
         };
     let memory_searcher = create_searcher_with_provider(&config.memory, embedding_provider);
 
-    // Inject pinned memories into system prompt
-    if !matches!(config.memory.backend, MemoryBackend::Disabled) {
+    // Create one shared long-term memory instance for both:
+    // 1) per-message memory injection in AgentLoop
+    // 2) longterm_memory tool operations
+    let shared_ltm: Option<
+        std::sync::Arc<tokio::sync::Mutex<zeptoclaw::memory::longterm::LongTermMemory>>,
+    > = if !matches!(config.memory.backend, MemoryBackend::Disabled) {
         let ltm_path = zeptoclaw::config::Config::dir()
             .join("memory")
             .join("longterm.json");
@@ -610,20 +614,15 @@ pub(crate) async fn create_agent_with_template(
             ltm_path,
             memory_searcher.clone(),
         ) {
-            Ok(ltm) => {
-                let memory_ctx = zeptoclaw::memory::build_memory_injection(
-                    &ltm,
-                    "",
-                    zeptoclaw::memory::MEMORY_INJECTION_BUDGET,
-                );
-                if !memory_ctx.is_empty() {
-                    context_builder = context_builder.with_memory_context(memory_ctx);
-                    info!("Injected pinned memories into system prompt");
-                }
+            Ok(ltm) => Some(std::sync::Arc::new(tokio::sync::Mutex::new(ltm))),
+            Err(e) => {
+                warn!("Failed to load long-term memory: {}", e);
+                None
             }
-            Err(e) => warn!("Failed to load long-term memory for injection: {}", e),
         }
-    }
+    } else {
+        None
+    };
 
     // Build runtime context for environment awareness (time, platform, etc.)
     let runtime_ctx = RuntimeContext::new()
@@ -632,12 +631,13 @@ pub(crate) async fn create_agent_with_template(
     context_builder = context_builder.with_runtime_context(runtime_ctx);
 
     // Create agent loop
-    let agent = Arc::new(AgentLoop::with_context_builder(
-        config.clone(),
-        session_manager,
-        bus,
-        context_builder,
-    ));
+    let mut agent_loop =
+        AgentLoop::with_context_builder(config.clone(), session_manager, bus, context_builder);
+    if let Some(ref ltm) = shared_ltm {
+        agent_loop.set_ltm(ltm.clone());
+        info!("Wired shared LTM into agent for per-message memory injection");
+    }
+    let agent = Arc::new(agent_loop);
 
     // Create and start cron service for scheduled tasks.
     let cron_store_path = Config::dir().join("cron").join("jobs.json");
@@ -837,24 +837,16 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                 .await;
         }
         if tool_enabled("longterm_memory") {
-            let ltm_path = zeptoclaw::config::Config::dir()
-                .join("memory")
-                .join("longterm.json");
-            match zeptoclaw::memory::longterm::LongTermMemory::with_path_and_searcher(
-                ltm_path,
-                memory_searcher.clone(),
-            ) {
-                Ok(ltm) => {
-                    let tool = zeptoclaw::tools::longterm_memory::LongTermMemoryTool::with_memory(
-                        std::sync::Arc::new(tokio::sync::Mutex::new(ltm)),
-                    );
-                    agent.register_tool(Box::new(tool)).await;
-                    info!(
-                        "Registered longterm_memory tool (searcher: {})",
-                        memory_searcher.name()
-                    );
-                }
-                Err(e) => warn!("Failed to initialize longterm_memory tool: {}", e),
+            if let Some(ref ltm) = shared_ltm {
+                let tool =
+                    zeptoclaw::tools::longterm_memory::LongTermMemoryTool::with_memory(ltm.clone());
+                agent.register_tool(Box::new(tool)).await;
+                info!(
+                    "Registered longterm_memory tool (searcher: {})",
+                    memory_searcher.name()
+                );
+            } else {
+                warn!("longterm_memory tool enabled but LTM failed to initialize");
             }
         }
         info!(
