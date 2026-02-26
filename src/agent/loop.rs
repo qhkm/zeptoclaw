@@ -238,6 +238,9 @@ pub struct AgentLoop {
     /// Optional pairing manager for device token validation.
     /// Present only when `config.pairing.enabled` is true.
     pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
+    /// Optional panel event bus for real-time dashboard streaming.
+    #[cfg(feature = "panel")]
+    event_bus: Option<crate::api::events::EventBus>,
 }
 
 impl AgentLoop {
@@ -336,6 +339,8 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            #[cfg(feature = "panel")]
+            event_bus: None,
         }
     }
 
@@ -397,6 +402,8 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            #[cfg(feature = "panel")]
+            event_bus: None,
         }
     }
 
@@ -787,6 +794,8 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            #[cfg(feature = "panel")]
+            let event_bus_clone = self.event_bus.clone();
             let is_dry_run = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode = self.agent_mode;
 
@@ -812,6 +821,8 @@ impl AgentLoop {
                     let safety = safety_layer.clone();
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    #[cfg(feature = "panel")]
+                    let event_bus = event_bus_clone.clone();
                     let dry_run = is_dry_run;
                     let agent_mode = current_agent_mode;
                     let bus_for_tools = Arc::clone(&self.bus);
@@ -888,6 +899,12 @@ impl AgentLoop {
                                 phase: ToolFeedbackPhase::Starting,
                             });
                         }
+                        #[cfg(feature = "panel")]
+                        if let Some(bus) = &event_bus {
+                            bus.send(crate::api::events::PanelEvent::ToolStarted {
+                                tool: name.clone(),
+                            });
+                        }
                         let tool_start = std::time::Instant::now();
                         let (result, success) = {
                             let tools_guard = tools.read().await;
@@ -901,6 +918,13 @@ impl AgentLoop {
                                         let _ = tx.send(ToolFeedback {
                                             tool_name: name.clone(),
                                             phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
+                                        });
+                                    }
+                                    #[cfg(feature = "panel")]
+                                    if let Some(bus) = &event_bus {
+                                        bus.send(crate::api::events::PanelEvent::ToolDone {
+                                            tool: name.clone(),
+                                            duration_ms: latency_ms,
                                         });
                                     }
                                     // Send to user if tool opted in
@@ -933,6 +957,13 @@ impl AgentLoop {
                                                 elapsed_ms: latency_ms,
                                                 error: e.to_string(),
                                             },
+                                        });
+                                    }
+                                    #[cfg(feature = "panel")]
+                                    if let Some(bus) = &event_bus {
+                                        bus.send(crate::api::events::PanelEvent::ToolFailed {
+                                            tool: name.clone(),
+                                            error: e.to_string(),
                                         });
                                     }
                                     (format!("Error: {}", e), false)
@@ -1226,6 +1257,8 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            #[cfg(feature = "panel")]
+            let event_bus_clone_stream = self.event_bus.clone();
             let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode_stream = self.agent_mode;
 
@@ -1249,6 +1282,8 @@ impl AgentLoop {
                     let safety = safety_layer_stream.clone();
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    #[cfg(feature = "panel")]
+                    let event_bus = event_bus_clone_stream.clone();
                     let dry_run = is_dry_run_stream;
                     let agent_mode = current_agent_mode_stream;
                     let bus_for_tools = Arc::clone(&self.bus);
@@ -1311,6 +1346,12 @@ impl AgentLoop {
                                 phase: ToolFeedbackPhase::Starting,
                             });
                         }
+                        #[cfg(feature = "panel")]
+                        if let Some(bus) = &event_bus {
+                            bus.send(crate::api::events::PanelEvent::ToolStarted {
+                                tool: name.clone(),
+                            });
+                        }
                         let tool_start = std::time::Instant::now();
                         let (result, success) = {
                             let tools_guard = tools.read().await;
@@ -1336,8 +1377,8 @@ impl AgentLoop {
                         };
                         metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
                         // Send tool done/failed feedback
+                        let latency_ms = tool_start.elapsed().as_millis() as u64;
                         if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                            let latency_ms = tool_start.elapsed().as_millis() as u64;
                             if success {
                                 let _ = tx.send(ToolFeedback {
                                     tool_name: name.clone(),
@@ -1352,6 +1393,20 @@ impl AgentLoop {
                                         elapsed_ms: latency_ms,
                                         error: result.clone(),
                                     },
+                                });
+                            }
+                        }
+                        #[cfg(feature = "panel")]
+                        if let Some(bus) = &event_bus {
+                            if success {
+                                bus.send(crate::api::events::PanelEvent::ToolDone {
+                                    tool: name.clone(),
+                                    duration_ms: latency_ms,
+                                });
+                            } else {
+                                bus.send(crate::api::events::PanelEvent::ToolFailed {
+                                    tool: name.clone(),
+                                    error: result.clone(),
                                 });
                             }
                         }
@@ -2015,6 +2070,12 @@ impl AgentLoop {
     /// Set tool feedback sender for CLI tool execution display.
     pub async fn set_tool_feedback(&self, tx: tokio::sync::mpsc::UnboundedSender<ToolFeedback>) {
         *self.tool_feedback_tx.write().await = Some(tx);
+    }
+
+    /// Set the panel event bus for real-time dashboard events.
+    #[cfg(feature = "panel")]
+    pub fn set_event_bus(&mut self, bus: crate::api::events::EventBus) {
+        self.event_bus = Some(bus);
     }
 
     /// Get a reference to the token budget tracker.
@@ -2816,5 +2877,37 @@ mod tests {
         }]);
         let calls = vec![make_tool_call("memory_search")];
         assert!(!needs_sequential_execution(&reg, &calls).await);
+    }
+
+    #[cfg(feature = "panel")]
+    #[tokio::test]
+    async fn test_event_bus_emissions() {
+        let bus = crate::api::events::EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        // Send events as the agent loop would
+        bus.send(crate::api::events::PanelEvent::ToolStarted {
+            tool: "echo".into(),
+        });
+        bus.send(crate::api::events::PanelEvent::ToolDone {
+            tool: "echo".into(),
+            duration_ms: 42,
+        });
+
+        let ev1 = rx.recv().await.unwrap();
+        match ev1 {
+            crate::api::events::PanelEvent::ToolStarted { tool } => {
+                assert_eq!(tool, "echo");
+            }
+            _ => panic!("expected ToolStarted"),
+        }
+        let ev2 = rx.recv().await.unwrap();
+        match ev2 {
+            crate::api::events::PanelEvent::ToolDone { tool, duration_ms } => {
+                assert_eq!(tool, "echo");
+                assert_eq!(duration_ms, 42);
+            }
+            _ => panic!("expected ToolDone"),
+        }
     }
 }

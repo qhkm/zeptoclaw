@@ -87,6 +87,8 @@ pub mod skills_install;
 pub mod skills_search;
 pub mod spawn;
 pub mod stripe;
+#[cfg(feature = "panel")]
+pub mod task;
 pub mod transcribe;
 mod types;
 pub mod web;
@@ -117,6 +119,8 @@ pub use screenshot::WebScreenshotTool;
 pub use skills_install::InstallSkillTool;
 pub use skills_search::FindSkillsTool;
 pub use stripe::StripeTool;
+#[cfg(feature = "panel")]
+pub use task::TaskTool;
 pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
 pub use web::{

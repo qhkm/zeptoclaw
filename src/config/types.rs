@@ -129,6 +129,9 @@ pub struct Config {
     /// Logging configuration (format, level, optional file output).
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Panel (control panel) configuration.
+    #[serde(default)]
+    pub panel: PanelConfig,
 }
 
 // ============================================================================
@@ -192,6 +195,51 @@ pub struct DevicesConfig {
     /// Monitor USB hotplug events (default: false).
     #[serde(default)]
     pub monitor_usb: bool,
+}
+
+// ============================================================================
+// Panel Configuration
+// ============================================================================
+
+/// Authentication mode for the panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Bearer token auth (default) — no login screen.
+    #[default]
+    Token,
+    /// Username/password login with JWT session.
+    Password,
+    /// No authentication (localhost trust only).
+    None,
+}
+
+/// Panel (control panel) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelConfig {
+    /// Whether the panel is enabled.
+    pub enabled: bool,
+    /// Port for the panel frontend (static files).
+    pub port: u16,
+    /// Port for the API server.
+    pub api_port: u16,
+    /// Authentication mode.
+    pub auth_mode: AuthMode,
+    /// Bind address (default: 127.0.0.1).
+    pub bind: String,
+}
+
+impl Default for PanelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 9092,
+            api_port: 9091,
+            auth_mode: AuthMode::Token,
+            bind: "127.0.0.1".to_string(),
+        }
+    }
 }
 
 // ============================================================================

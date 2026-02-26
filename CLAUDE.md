@@ -116,6 +116,13 @@ cargo fmt
 # Watch URLs for changes
 ./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
 
+# Panel (control panel web UI)
+./target/release/zeptoclaw panel                    # Start panel API server
+./target/release/zeptoclaw panel install             # Install panel frontend (build from source)
+./target/release/zeptoclaw panel auth set-password   # Set panel password
+./target/release/zeptoclaw panel auth show-token     # Show API token
+./target/release/zeptoclaw panel uninstall           # Remove panel frontend
+
 # Release (requires cargo-release: cargo install cargo-release)
 cargo release patch          # preview bump 0.5.x → 0.5.x+1 (dry-run by default)
 cargo release minor          # preview bump 0.5.x → 0.6.0
@@ -198,6 +205,23 @@ cargo fmt && cargo clippy -- -D warnings && cargo test --lib && cargo fmt -- --c
 ```
 src/
 ├── agent/          # Agent loop, context builder, token budget, context compaction
+├── api/            # Panel API server (axum)
+│   ├── auth.rs         # Token generation, JWT, bcrypt password hashing
+│   ├── config.rs       # PanelConfig with AuthMode enum
+│   ├── events.rs       # EventBus (tokio::broadcast) for real-time panel events
+│   ├── middleware.rs    # Auth middleware, CSRF validation
+│   ├── routes/         # REST API route handlers
+│   │   ├── auth.rs     # Login endpoint
+│   │   ├── channels.rs # Channel status
+│   │   ├── cron.rs     # Cron job CRUD + trigger
+│   │   ├── health.rs   # Health endpoint
+│   │   ├── metrics.rs  # Metrics endpoint
+│   │   ├── routines.rs # Routine CRUD + toggle
+│   │   ├── sessions.rs # Session list + detail
+│   │   ├── tasks.rs    # Kanban task CRUD + move
+│   │   └── ws.rs       # WebSocket event streaming
+│   ├── server.rs       # AppState, router builder, server startup
+│   └── tasks.rs        # KanbanTask model + TaskStore persistence
 ├── auth/           # OAuth (PKCE), token refresh, encrypted token store
 ├── bus/            # Async message bus (pub/sub)
 ├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.)
@@ -312,6 +336,35 @@ landing/
 └── zeptoclaw/
     ├── index.html        # Static landing page (hero, sections, interactive animations)
     └── mascot-no-bg.png  # README mascot asset used in landing hero
+
+panel/
+├── src/
+│   ├── components/     # Reusable UI components
+│   │   ├── AgentDesk.tsx     # Live agent session card
+│   │   ├── ChatBubble.tsx    # Chat message bubble
+│   │   ├── KanbanCard.tsx    # Draggable kanban card
+│   │   ├── KanbanColumn.tsx  # Droppable kanban column
+│   │   ├── Layout.tsx        # Full-height flex layout
+│   │   ├── Sidebar.tsx       # Navigation sidebar
+│   │   └── ToolCallBlock.tsx # Collapsible tool call display
+│   ├── hooks/          # React hooks
+│   │   ├── useAuth.ts        # Auth state + login/logout
+│   │   ├── useHealth.ts      # Health polling (5s)
+│   │   ├── useMetrics.ts     # Metrics polling (10s)
+│   │   └── useWebSocket.ts   # Auto-reconnecting WebSocket
+│   ├── lib/
+│   │   └── api.ts            # Fetch wrapper with auth headers
+│   └── pages/          # Route pages
+│       ├── Agents.tsx        # Live agent office grid
+│       ├── CronRoutines.tsx  # Cron + routine management
+│       ├── Dashboard.tsx     # Health, stats, activity feed
+│       ├── Kanban.tsx        # Drag-and-drop task board
+│       ├── Login.tsx         # Password login form
+│       ├── Logs.tsx          # Real-time event log viewer
+│       └── Sessions.tsx      # Session list + chat viewer
+├── index.html
+├── package.json
+└── vite.config.ts
 ```
 
 ## Key Modules
@@ -437,6 +490,17 @@ Message input channels via `Channel` trait:
 - `/ready` returns boolean readiness (all checks not Down)
 - Raw TCP server — no web framework dependency
 
+### API Server (`src/api/`)
+Panel web dashboard backend:
+- `PanelConfig` — Auth mode (Token/Password/None), ports, bind address
+- `EventBus` — `tokio::broadcast` channel bridging agent events to WebSocket clients
+- `AppState` — Shared state: API token, EventBus, JWT secret, password hash, WS semaphore
+- Auth middleware: Bearer token + JWT validation, CSRF protection
+- REST routes for sessions, channels, cron, routines, kanban tasks, metrics, health
+- WebSocket route streams `PanelEvent`s (tool start/done/fail, agent lifecycle, etc.)
+- `TaskStore` — JSON file persistence for kanban tasks
+- `TaskTool` — Agent-accessible tool for kanban board operations
+
 ### Landing (`landing/zeptoclaw/index.html`)
 - Hero ambient animation, mascot eye/pupil motion, and magnetic CTA interactions
 - Scroll-triggered feature-card reveal and stats count-up animations
@@ -513,6 +577,10 @@ Environment variables override config:
 - `ZEPTOCLAW_MEMORY_BACKEND` — memory search backend: builtin (default), bm25, embedding, hnsw, tantivy, none
 - `ZEPTOCLAW_MEMORY_EMBEDDING_PROVIDER` — embedding provider name (for embedding backend)
 - `ZEPTOCLAW_MEMORY_EMBEDDING_MODEL` — embedding model name (for embedding backend)
+- `ZEPTOCLAW_PANEL_ENABLED` — enable panel API server (default: false)
+- `ZEPTOCLAW_PANEL_PORT` — panel frontend port (default: 9092)
+- `ZEPTOCLAW_PANEL_API_PORT` — panel API port (default: 9091)
+- `ZEPTOCLAW_PANEL_BIND` — bind address (default: 127.0.0.1)
 
 ### Cargo Features
 
@@ -646,3 +714,7 @@ Key crates:
 - `scraper` - HTML parsing for web_fetch
 - `aho-corasick` - Multi-pattern string matching for safety layer
 - `quick-xml` - XML parsing for Android uiautomator dumps (optional, `android` feature)
+- `axum` - Web framework for panel API (WebSocket support)
+- `tower-http` - CORS, static file serving, tracing
+- `jsonwebtoken` - JWT generation and validation for panel auth
+- `bcrypt` - Password hashing for panel auth
