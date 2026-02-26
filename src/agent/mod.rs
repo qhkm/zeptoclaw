@@ -60,6 +60,7 @@ mod context;
 pub mod context_monitor;
 pub mod facade;
 mod r#loop;
+pub mod loop_guard;
 pub mod scratchpad;
 
 pub use budget::TokenBudget;

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::agent::context_monitor::ContextMonitor;
+use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor};
+use crate::agent::loop_guard::{LoopGuard, LoopGuardDecision, ToolCallSig};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::cache::ResponseCache;
 use crate::config::Config;
@@ -242,9 +243,11 @@ impl AgentLoop {
             None
         };
         let context_monitor = if config.compaction.enabled {
-            Some(ContextMonitor::new(
+            Some(ContextMonitor::new_with_thresholds(
                 config.compaction.context_limit,
                 config.compaction.threshold,
+                config.compaction.emergency_threshold,
+                config.compaction.critical_threshold,
             ))
         } else {
             None
@@ -301,9 +304,11 @@ impl AgentLoop {
             None
         };
         let context_monitor = if config.compaction.enabled {
-            Some(ContextMonitor::new(
+            Some(ContextMonitor::new_with_thresholds(
                 config.compaction.context_limit,
                 config.compaction.threshold,
+                config.compaction.emergency_threshold,
+                config.compaction.critical_threshold,
             ))
         } else {
             None
@@ -546,20 +551,24 @@ impl AgentLoop {
 
         // Apply three-tier context overflow recovery if needed
         if let Some(ref monitor) = self.context_monitor {
-            if monitor.needs_compaction(&session.messages) {
-                // Flush important memories before compaction discards context
-                self.memory_flush(&session.messages).await;
+            if let Some(urgency) = monitor.urgency(&session.messages) {
+                if matches!(urgency, CompactionUrgency::Normal) {
+                    // Skip memory flush in emergency/critical mode to recover faster.
+                    self.memory_flush(&session.messages).await;
+                }
 
                 let context_limit = self.config.compaction.context_limit;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context(
+                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
                     session.messages,
                     context_limit,
+                    urgency,
                     8,    // keep_recent for tier 1
                     5120, // 5KB tool result budget for tier 2
                 );
                 if tier > 0 {
                     debug!(
                         tier = tier,
+                        urgency = ?urgency,
                         "Context recovered via tier {} compaction", tier
                     );
                 }
@@ -661,6 +670,15 @@ impl AgentLoop {
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
         let mut iteration = 0;
         let mut chain_tracker = crate::safety::chain_alert::ChainTracker::new();
+        let mut loop_guard = if self.config.agents.defaults.loop_guard_enabled {
+            Some(LoopGuard::new(
+                self.config.agents.defaults.loop_guard_window,
+                self.config.agents.defaults.loop_guard_repetition_threshold,
+                self.config.agents.defaults.loop_guard_max_hits,
+            ))
+        } else {
+            None
+        };
 
         while response.has_tool_calls() && iteration < max_iterations {
             iteration += 1;
@@ -701,10 +719,12 @@ impl AgentLoop {
             // Compute dynamic tool result budget based on remaining context space
             let current_tokens = ContextMonitor::estimate_tokens(&session.messages);
             let context_limit = self.config.compaction.context_limit;
+            let max_result_bytes = self.config.agents.defaults.max_tool_result_bytes;
             let result_budget = crate::utils::sanitize::compute_tool_result_budget(
                 context_limit,
                 current_tokens,
                 response.tool_calls.len(),
+                max_result_bytes,
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
@@ -910,6 +930,59 @@ impl AgentLoop {
                 session.add_message(Message::tool_result(&id, &result));
             }
 
+            if let Some(guard) = loop_guard.as_mut() {
+                let call_sigs: Vec<ToolCallSig<'_>> = response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCallSig {
+                        name: tc.name.as_str(),
+                        arguments: tc.arguments.as_str(),
+                    })
+                    .collect();
+                match guard.record_batch(&call_sigs) {
+                    LoopGuardDecision::Continue => {}
+                    LoopGuardDecision::Warn {
+                        hash,
+                        occurrences,
+                        loops_detected,
+                    } => {
+                        warn!(
+                            hash = %hash,
+                            occurrences = occurrences,
+                            loops_detected = loops_detected,
+                            "Loop guard detected repeated tool-call pattern"
+                        );
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] repeated tool-call pattern detected (hash={}, repeats={}, loops_detected={}). If this is intentional, change strategy or provide new context.",
+                            &hash[..8],
+                            occurrences,
+                            loops_detected
+                        )));
+                    }
+                    LoopGuardDecision::Break {
+                        hash,
+                        occurrences,
+                        loops_detected,
+                    } => {
+                        warn!(
+                            hash = %hash,
+                            occurrences = occurrences,
+                            loops_detected = loops_detected,
+                            "Loop guard circuit breaker triggered"
+                        );
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] circuit breaker tripped after repeated tool loops (hash={}, repeats={}, loops_detected={}).",
+                            &hash[..8],
+                            occurrences,
+                            loops_detected
+                        )));
+                        response.content =
+                            "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                        break;
+                    }
+                }
+            }
+
             // Get fresh tool definitions for the next LLM call
             let tool_definitions = {
                 let tools = self.tools.read().await;
@@ -1028,20 +1101,23 @@ impl AgentLoop {
 
         // Apply three-tier context overflow recovery if needed (streaming)
         if let Some(ref monitor) = self.context_monitor {
-            if monitor.needs_compaction(&session.messages) {
-                // Flush important memories before compaction discards context
-                self.memory_flush(&session.messages).await;
+            if let Some(urgency) = monitor.urgency(&session.messages) {
+                if matches!(urgency, CompactionUrgency::Normal) {
+                    self.memory_flush(&session.messages).await;
+                }
 
                 let context_limit = self.config.compaction.context_limit;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context(
+                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
                     session.messages,
                     context_limit,
+                    urgency,
                     8,    // keep_recent for tier 1
                     5120, // 5KB tool result budget for tier 2
                 );
                 if tier > 0 {
                     debug!(
                         tier = tier,
+                        urgency = ?urgency,
                         "Context recovered via tier {} compaction (streaming)", tier
                     );
                 }
@@ -1087,6 +1163,15 @@ impl AgentLoop {
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
         let mut iteration = 0;
         let mut chain_tracker = crate::safety::chain_alert::ChainTracker::new();
+        let mut loop_guard = if self.config.agents.defaults.loop_guard_enabled {
+            Some(LoopGuard::new(
+                self.config.agents.defaults.loop_guard_window,
+                self.config.agents.defaults.loop_guard_repetition_threshold,
+                self.config.agents.defaults.loop_guard_max_hits,
+            ))
+        } else {
+            None
+        };
 
         while response.has_tool_calls() && iteration < max_iterations {
             iteration += 1;
@@ -1117,10 +1202,12 @@ impl AgentLoop {
             // Compute dynamic tool result budget based on remaining context space
             let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
             let context_limit_stream = self.config.compaction.context_limit;
+            let max_result_bytes_stream = self.config.agents.defaults.max_tool_result_bytes;
             let result_budget_stream = crate::utils::sanitize::compute_tool_result_budget(
                 context_limit_stream,
                 current_tokens_stream,
                 response.tool_calls.len(),
+                max_result_bytes_stream,
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
@@ -1295,6 +1382,59 @@ impl AgentLoop {
             chain_tracker.record(&tool_names);
             for (id, result) in results {
                 session.add_message(Message::tool_result(&id, &result));
+            }
+
+            if let Some(guard) = loop_guard.as_mut() {
+                let call_sigs: Vec<ToolCallSig<'_>> = response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCallSig {
+                        name: tc.name.as_str(),
+                        arguments: tc.arguments.as_str(),
+                    })
+                    .collect();
+                match guard.record_batch(&call_sigs) {
+                    LoopGuardDecision::Continue => {}
+                    LoopGuardDecision::Warn {
+                        hash,
+                        occurrences,
+                        loops_detected,
+                    } => {
+                        warn!(
+                            hash = %hash,
+                            occurrences = occurrences,
+                            loops_detected = loops_detected,
+                            "Loop guard detected repeated tool-call pattern (streaming)"
+                        );
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] repeated tool-call pattern detected (hash={}, repeats={}, loops_detected={}).",
+                            &hash[..8],
+                            occurrences,
+                            loops_detected
+                        )));
+                    }
+                    LoopGuardDecision::Break {
+                        hash,
+                        occurrences,
+                        loops_detected,
+                    } => {
+                        warn!(
+                            hash = %hash,
+                            occurrences = occurrences,
+                            loops_detected = loops_detected,
+                            "Loop guard circuit breaker triggered (streaming)"
+                        );
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] circuit breaker tripped after repeated tool loops (hash={}, repeats={}, loops_detected={}).",
+                            &hash[..8],
+                            occurrences,
+                            loops_detected
+                        )));
+                        response.content =
+                            "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                        break;
+                    }
+                }
             }
 
             let tool_definitions = {

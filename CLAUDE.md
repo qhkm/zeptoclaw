@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2590, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (27 ignored)
+# lib: 2609, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -70,6 +70,11 @@ cargo fmt
 ./target/release/zeptoclaw template show coder
 ./target/release/zeptoclaw agent --template researcher -m "Search for..."
 ./target/release/zeptoclaw agent --template task-manager -m "Add task: finish proposal by Friday"
+
+# Hands-lite
+./target/release/zeptoclaw hand list
+./target/release/zeptoclaw hand activate researcher
+./target/release/zeptoclaw hand status
 
 # Batch mode (process multiple prompts from file)
 ./target/release/zeptoclaw batch --input prompts.txt
@@ -207,8 +212,10 @@ src/
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
+│   ├── hand.rs     # Hands-lite list/activate/status commands
 │   └── watch.rs    # URL change monitoring with channel notification
-├── config/         # Configuration types and loading
+├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
+├── hands/          # HAND.toml manifest parsing + built-in hands registry
 ├── cron/           # Persistent cron scheduler service (dispatch timeout + error backoff)
 ├── deps/           # Dependency manager (install, start, stop, health check)
 │   ├── types.rs    # Dependency, DepKind, HealthCheck, HasDependencies
@@ -394,12 +401,14 @@ Message input channels via `Channel` trait:
 ### Session (`src/session/`)
 - `SessionManager` - Async session storage with file persistence
 - `ConversationHistory` - CLI session discovery, listing, fuzzy search by title/key, cleanup
+- `repair.rs` - Auto-repair malformed session history (orphans, empty/duplicate, alternation)
 
 ### Agent (`src/agent/`)
 - `AgentLoop` - Core message processing loop with tool execution + pre-compaction memory flush
 - `ContextBuilder` - System prompt and conversation context builder + memory context injection
 - `TokenBudget` - Atomic per-session token budget tracker (lock-free via `AtomicU64`)
 - `ContextMonitor` - Token estimation (`words * 1.3 + 4/msg`), threshold-based compaction triggers
+- `LoopGuard` - SHA256 tool-call repetition detection with warning + circuit breaker
 - `Compactor` - Summarize (LLM-based) or Truncate strategies for context window management
 - `SwarmScratchpad` - Thread-safe `Arc<RwLock<HashMap>>` for agent-to-agent context passing; `format_for_prompt()` injects prior outputs into sub-agent system prompts (truncated at 2000 chars per entry)
 - `start()` now routes inbound work through `process_inbound_message()` helper and calls `try_queue_or_process()` before processing

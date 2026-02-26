@@ -27,9 +27,11 @@
 //! ```
 
 pub mod history;
+pub mod repair;
 pub mod types;
 
 pub use history::ConversationHistory;
+pub use repair::{repair_messages, RepairStats};
 pub use types::{Message, Role, Session, ToolCall};
 
 use crate::config::Config;
@@ -38,6 +40,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Session manager for storing and retrieving conversation sessions.
 ///
@@ -167,7 +170,8 @@ impl SessionManager {
             let file_path = storage_path.join(format!("{}.json", Self::sanitize_key(key)));
             if file_path.exists() {
                 let content = tokio::fs::read_to_string(&file_path).await?;
-                let session: Session = serde_json::from_str(&content)?;
+                let mut session: Session = serde_json::from_str(&content)?;
+                self.maybe_repair_loaded_session(&mut session, "get_or_create");
 
                 // Cache it in memory
                 let mut sessions = self.sessions.write().await;
@@ -209,7 +213,8 @@ impl SessionManager {
             let file_path = storage_path.join(format!("{}.json", Self::sanitize_key(key)));
             if file_path.exists() {
                 let content = tokio::fs::read_to_string(&file_path).await?;
-                let session: Session = serde_json::from_str(&content)?;
+                let mut session: Session = serde_json::from_str(&content)?;
+                self.maybe_repair_loaded_session(&mut session, "get");
 
                 // Cache it in memory
                 let mut sessions = self.sessions.write().await;
@@ -450,6 +455,27 @@ impl SessionManager {
             }
         }
         result
+    }
+
+    fn maybe_repair_loaded_session(&self, session: &mut Session, source: &str) {
+        if !Config::get().session.auto_repair {
+            return;
+        }
+        let (repaired, stats) =
+            crate::session::repair::repair_messages(std::mem::take(&mut session.messages));
+        if stats.total_repairs() > 0 {
+            warn!(
+                session_key = %session.key,
+                source = source,
+                orphan_tool_results_removed = stats.orphan_tool_results_removed,
+                empty_messages_removed = stats.empty_messages_removed,
+                role_alternation_fixes = stats.role_alternation_fixes,
+                duplicate_messages_removed = stats.duplicate_messages_removed,
+                truncation_repairs = stats.truncation_repairs,
+                "Session history repaired on load"
+            );
+        }
+        session.messages = repaired;
     }
 }
 

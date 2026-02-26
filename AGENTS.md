@@ -26,7 +26,12 @@ Project-level guidance for coding agents working in this repository.
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Gateway startup guard: degrade after N crashes to prevent crash loops
-- Tests: 2581 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (27 ignored)
+- Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
+- Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
+- Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
+- Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
+- Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
+- Tests: 2609 lib + 97 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (27 ignored)
 
 ## Task Tracking Protocol
 

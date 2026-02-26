@@ -16,6 +16,7 @@ use zeptoclaw::config::templates::{AgentTemplate, TemplateRegistry};
 use zeptoclaw::config::ProjectBackend;
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode};
 use zeptoclaw::cron::CronService;
+use zeptoclaw::hands::resolve_hand;
 use zeptoclaw::memory::factory::create_searcher_with_provider;
 use zeptoclaw::providers::{
     provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
@@ -26,6 +27,7 @@ use zeptoclaw::runtime::{create_runtime, NativeRuntime};
 use zeptoclaw::session::SessionManager;
 use zeptoclaw::skills::registry::{ClawHubRegistry, SearchCache};
 use zeptoclaw::skills::SkillsLoader;
+use zeptoclaw::tools::approval::ApprovalPolicyConfig;
 use zeptoclaw::tools::cron::CronTool;
 use zeptoclaw::tools::delegate::DelegateTool;
 use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
@@ -423,6 +425,35 @@ pub(crate) async fn create_agent_with_template(
     bus: Arc<MessageBus>,
     template: Option<AgentTemplate>,
 ) -> Result<Arc<AgentLoop>> {
+    let active_hand = if template.is_none() {
+        if let Some(name) = config.agents.defaults.active_hand.as_deref() {
+            let hands_dir = Config::dir().join("hands");
+            match resolve_hand(name, &hands_dir)? {
+                Some(hand) => Some(hand),
+                None => {
+                    warn!("Active hand '{}' not found, continuing without hand", name);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(hand) = active_hand.as_ref() {
+        if !hand.manifest.guardrails.require_approval_for.is_empty() {
+            config.approval.enabled = true;
+            config.approval.policy = ApprovalPolicyConfig::RequireForTools;
+            for pattern in &hand.manifest.guardrails.require_approval_for {
+                if !config.approval.require_for.contains(pattern) {
+                    config.approval.require_for.push(pattern.clone());
+                }
+            }
+        }
+    }
+
     if let Some(tpl) = &template {
         if let Some(model) = &tpl.model {
             config.agents.defaults.model = model.clone();
@@ -438,7 +469,7 @@ pub(crate) async fn create_agent_with_template(
         }
     }
 
-    let allowed_tools = template
+    let template_allowed_tools = template
         .as_ref()
         .and_then(|tpl| tpl.allowed_tools.as_ref())
         .map(|names| {
@@ -447,6 +478,21 @@ pub(crate) async fn create_agent_with_template(
                 .map(|name| name.to_ascii_lowercase())
                 .collect::<HashSet<_>>()
         });
+    let hand_allowed_tools = active_hand.as_ref().map(|hand| {
+        hand.manifest
+            .required_tools
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+    });
+    let allowed_tools = match (template_allowed_tools, hand_allowed_tools) {
+        (Some(template_set), Some(hand_set)) => {
+            Some(template_set.intersection(&hand_set).cloned().collect())
+        }
+        (Some(template_set), None) => Some(template_set),
+        (None, Some(hand_set)) => Some(hand_set),
+        (None, None) => None,
+    };
     let blocked_tools = template
         .as_ref()
         .and_then(|tpl| tpl.blocked_tools.as_ref())
@@ -532,9 +578,16 @@ pub(crate) async fn create_agent_with_template(
 
     if let Some(tpl) = &template {
         context_builder = context_builder.with_system_prompt(&tpl.system_prompt);
+    } else if let Some(hand) = active_hand.as_ref() {
+        context_builder = context_builder.with_system_prompt(&hand.manifest.system_prompt);
     }
     if !skills_prompt.is_empty() {
         context_builder = context_builder.with_skills(&skills_prompt);
+    }
+    if let Some(hand) = active_hand.as_ref() {
+        if !hand.skill_md.trim().is_empty() {
+            context_builder = context_builder.with_skills(&hand.skill_md);
+        }
     }
 
     // Create memory searcher from config (reused for injection + tool registration).
