@@ -1065,7 +1065,11 @@ impl AgentLoop {
             // Call LLM again with tool results -- provider lock NOT held
             let messages: Vec<_> = self
                 .context_builder
-                .build_messages(&session.messages, "")
+                .build_messages_with_memory_override(
+                    &session.messages,
+                    "",
+                    memory_override.as_deref(),
+                )
                 .into_iter()
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
@@ -1500,7 +1504,11 @@ impl AgentLoop {
 
             let messages: Vec<_> = self
                 .context_builder
-                .build_messages(&session.messages, "")
+                .build_messages_with_memory_override(
+                    &session.messages,
+                    "",
+                    memory_override.as_deref(),
+                )
                 .into_iter()
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
@@ -1521,7 +1529,11 @@ impl AgentLoop {
             // Re-issue the final call via chat_stream
             let messages: Vec<_> = self
                 .context_builder
-                .build_messages(&session.messages, "")
+                .build_messages_with_memory_override(
+                    &session.messages,
+                    "",
+                    memory_override.as_deref(),
+                )
                 .into_iter()
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
