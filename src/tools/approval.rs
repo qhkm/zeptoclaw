@@ -276,12 +276,14 @@ impl ApprovalGate {
         match &self.policy {
             ApprovalPolicy::AlwaysAllow => false,
             ApprovalPolicy::AlwaysRequire => true,
-            ApprovalPolicy::RequireForTools(tools) => tools.iter().any(|t| t == tool_name),
+            ApprovalPolicy::RequireForTools(tools) => tools
+                .iter()
+                .any(|pattern| matches_tool_pattern(pattern, tool_name)),
             // RequireForDangerous is converted to RequireForTools at
             // construction time, but we handle it here for completeness.
             ApprovalPolicy::RequireForDangerous => Self::default_dangerous_tools()
                 .iter()
-                .any(|t| t == tool_name),
+                .any(|pattern| matches_tool_pattern(pattern, tool_name)),
         }
     }
 
@@ -336,6 +338,19 @@ impl ApprovalGate {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
+}
+
+fn matches_tool_pattern(pattern: &str, tool_name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return tool_name.starts_with(prefix);
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return tool_name.ends_with(suffix);
+    }
+    pattern == tool_name
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +537,21 @@ mod tests {
         assert!(gate.requires_approval("shell"));
         assert!(!gate.requires_approval("Shell"));
         assert!(!gate.requires_approval("SHELL"));
+    }
+
+    #[test]
+    fn test_wildcard_patterns() {
+        let config = ApprovalConfig {
+            enabled: true,
+            policy: ApprovalPolicyConfig::RequireForTools,
+            require_for: vec!["shell*".to_string(), "*_file".to_string()],
+            ..Default::default()
+        };
+        let gate = ApprovalGate::new(config);
+        assert!(gate.requires_approval("shell"));
+        assert!(gate.requires_approval("shell_exec"));
+        assert!(gate.requires_approval("write_file"));
+        assert!(!gate.requires_approval("web_search"));
     }
 
     // ---- format_approval_request ---------------------------------------

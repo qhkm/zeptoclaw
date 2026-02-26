@@ -6,6 +6,7 @@
 pub mod templates;
 mod types;
 pub mod validate;
+pub mod watcher;
 
 pub use types::*;
 
@@ -69,6 +70,18 @@ impl Config {
         Ok(config)
     }
 
+    /// Reload this config instance from the default path.
+    pub fn reload(&mut self) -> Result<()> {
+        *self = Self::load()?;
+        Ok(())
+    }
+
+    /// Reload this config instance from a specific path.
+    pub fn reload_from_path(&mut self, path: &PathBuf) -> Result<()> {
+        *self = Self::load_from_path(path)?;
+        Ok(())
+    }
+
     /// Apply environment variable overrides to the configuration.
     ///
     /// Environment variables follow the pattern: ZEPTOCLAW_SECTION_SUBSECTION_KEY
@@ -118,8 +131,35 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_PROFILE") {
             self.agents.defaults.tool_profile = if val.is_empty() { None } else { Some(val) };
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_ACTIVE_HAND") {
+            self.agents.defaults.active_hand = if val.is_empty() { None } else { Some(val) };
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE") {
             self.agents.defaults.timezone = val;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED") {
+            self.agents.defaults.loop_guard_enabled = val == "true" || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard_window = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_REPETITION_THRESHOLD")
+        {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard_repetition_threshold = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_MAX_HITS") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard_max_hits = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_BYTES") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.max_tool_result_bytes = v;
+            }
         }
 
         // Gateway
@@ -203,6 +243,11 @@ impl Config {
 
         // Device pairing
         self.apply_pairing_env_overrides();
+
+        // Session
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SESSION_AUTO_REPAIR") {
+            self.session.auto_repair = val.eq_ignore_ascii_case("true") || val == "1";
+        }
 
         // Transcription
         if let Ok(val) = std::env::var("ZEPTOCLAW_TRANSCRIPTION_MODEL") {
@@ -817,6 +862,16 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_COMPACTION_THRESHOLD") {
             if let Ok(v) = val.parse::<f64>() {
                 self.compaction.threshold = v.clamp(0.1, 1.0);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_COMPACTION_EMERGENCY_THRESHOLD") {
+            if let Ok(v) = val.parse::<f64>() {
+                self.compaction.emergency_threshold = v.clamp(0.1, 1.0);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_COMPACTION_CRITICAL_THRESHOLD") {
+            if let Ok(v) = val.parse::<f64>() {
+                self.compaction.critical_threshold = v.clamp(0.1, 1.0);
             }
         }
     }

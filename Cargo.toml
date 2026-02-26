@@ -28,6 +28,7 @@ tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+toml = "0.8"
 # JSON5 parsing for OpenClaw config migration (comments, trailing commas, unquoted keys)
 json5 = "0.4"
 

@@ -11,6 +11,7 @@
 //! is responsible for obtaining any LLM-generated summaries before
 //! calling `summarize_messages`.
 
+use super::context_monitor::CompactionUrgency;
 use crate::session::{Message, Role};
 
 /// Truncate messages to keep only the N most recent.
@@ -318,6 +319,23 @@ pub fn try_recover_context(
     keep_recent_tier1: usize,
     tool_result_budget: usize,
 ) -> (Vec<Message>, u8) {
+    try_recover_context_with_urgency(
+        messages,
+        context_limit,
+        CompactionUrgency::Normal,
+        keep_recent_tier1,
+        tool_result_budget,
+    )
+}
+
+/// Overflow recovery with urgency-aware behavior.
+pub fn try_recover_context_with_urgency(
+    messages: Vec<Message>,
+    context_limit: usize,
+    urgency: CompactionUrgency,
+    keep_recent_tier1: usize,
+    tool_result_budget: usize,
+) -> (Vec<Message>, u8) {
     use super::context_monitor::ContextMonitor;
 
     let target = context_limit as f64 * 0.95;
@@ -328,23 +346,48 @@ pub fn try_recover_context(
         return (messages, 0);
     }
 
-    // Tier 1: Truncate old messages
-    let recovered = truncate_messages(messages, keep_recent_tier1);
-    let estimated = ContextMonitor::estimate_tokens(&recovered);
-    if (estimated as f64) <= target {
-        return (recovered, 1);
-    }
+    match urgency {
+        CompactionUrgency::Critical => {
+            // Keep system prompt + last 3 message pairs where possible.
+            let recovered = truncate_messages(messages, 6);
+            (recovered, 3)
+        }
+        CompactionUrgency::Emergency => {
+            // Emergency path: prioritize fast truncation, avoid summarization.
+            let recovered = truncate_messages(messages, keep_recent_tier1.min(5));
+            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            if (estimated as f64) <= target {
+                return (recovered, 1);
+            }
 
-    // Tier 2: Shrink tool results progressively
-    let recovered = shrink_tool_results_progressive(recovered, tool_result_budget, 3);
-    let estimated = ContextMonitor::estimate_tokens(&recovered);
-    if (estimated as f64) <= target {
-        return (recovered, 2);
-    }
+            let emergency_budget = (tool_result_budget / 2).max(1).min(tool_result_budget);
+            let recovered = shrink_tool_results_progressive(recovered, emergency_budget, 2);
+            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            if (estimated as f64) <= target {
+                return (recovered, 2);
+            }
+            (truncate_messages(recovered, 3), 3)
+        }
+        CompactionUrgency::Normal => {
+            // Tier 1: Truncate old messages
+            let recovered = truncate_messages(messages, keep_recent_tier1);
+            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            if (estimated as f64) <= target {
+                return (recovered, 1);
+            }
 
-    // Tier 3: Hard truncate to system + last 3 messages
-    let recovered = truncate_messages(recovered, 3);
-    (recovered, 3)
+            // Tier 2: Shrink tool results progressively
+            let recovered = shrink_tool_results_progressive(recovered, tool_result_budget, 3);
+            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            if (estimated as f64) <= target {
+                return (recovered, 2);
+            }
+
+            // Tier 3: Hard truncate to system + last 3 messages
+            let recovered = truncate_messages(recovered, 3);
+            (recovered, 3)
+        }
+    }
 }
 
 /// Build a prompt asking an LLM to summarize a set of messages.
@@ -769,5 +812,27 @@ mod tests {
             "Estimated {} should be <= 95",
             estimated
         );
+    }
+
+    #[test]
+    fn test_try_recover_context_with_emergency_uses_truncate_path() {
+        let msgs: Vec<Message> = (0..12)
+            .map(|_| Message::user("one two three four five six seven eight nine ten"))
+            .collect();
+        let (result, tier) =
+            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Emergency, 8, 5120);
+        assert!(tier >= 1);
+        assert!(result.len() <= 6);
+    }
+
+    #[test]
+    fn test_try_recover_context_with_critical_hard_trims() {
+        let msgs: Vec<Message> = (0..20)
+            .map(|_| Message::user("one two three four five six seven eight nine ten"))
+            .collect();
+        let (result, tier) =
+            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Critical, 8, 5120);
+        assert_eq!(tier, 3);
+        assert!(result.len() <= 6);
     }
 }

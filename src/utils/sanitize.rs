@@ -7,8 +7,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Default maximum result size in bytes (50 KB).
-pub const DEFAULT_MAX_RESULT_BYTES: usize = 51_200;
+/// Default maximum result size in bytes (20 KB).
+pub const DEFAULT_MAX_RESULT_BYTES: usize = 20_480;
 
 /// Minimum tool result budget in bytes (1 KB).
 pub const MIN_RESULT_BUDGET: usize = 1024;
@@ -18,6 +18,8 @@ const BYTES_PER_TOKEN: usize = 4;
 
 /// Minimum length of a contiguous hex string to be stripped.
 const MIN_HEX_BLOB_LEN: usize = 200;
+const DEFAULT_TRUNCATION_HEAD_BYTES: usize = 10_240;
+const DEFAULT_TRUNCATION_TAIL_BYTES: usize = 2_048;
 
 static BASE64_URI_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"data:[a-zA-Z0-9/+\-\.]+;base64,[A-Za-z0-9+/=]+").unwrap());
@@ -47,12 +49,25 @@ pub fn sanitize_tool_result(result: &str, max_bytes: usize) -> String {
 
     if out.len() > max_bytes {
         let total = out.len();
-        out.truncate(max_bytes);
-        // Ensure we don't split a multi-byte char
-        while !out.is_char_boundary(out.len()) {
-            out.pop();
+        let head = take_prefix_charsafe(&out, DEFAULT_TRUNCATION_HEAD_BYTES.min(max_bytes));
+        let remaining_budget = max_bytes.saturating_sub(head.len());
+        let tail_candidate_budget = DEFAULT_TRUNCATION_TAIL_BYTES.min(remaining_budget);
+        let mut tail = String::new();
+
+        if tail_candidate_budget > 0 && head.len() < total {
+            tail = take_suffix_charsafe(&out, tail_candidate_budget).to_string();
+            if head.len() + tail.len() > total {
+                tail.clear();
+            }
         }
-        out.push_str(&format!("\n...[truncated, {} total bytes]", total));
+
+        let kept = head.len() + tail.len();
+        let truncated = total.saturating_sub(kept);
+        if tail.is_empty() {
+            out = format!("{head}\n...[truncated {truncated} bytes]...");
+        } else {
+            out = format!("{head}\n...[truncated {truncated} bytes]...\n{tail}");
+        }
     }
 
     out
@@ -77,12 +92,33 @@ pub fn compute_tool_result_budget(
     context_limit: usize,
     current_usage_tokens: usize,
     pending_result_count: usize,
+    max_result_bytes: usize,
 ) -> usize {
     let remaining_tokens = context_limit.saturating_sub(current_usage_tokens);
     let remaining_bytes = remaining_tokens * BYTES_PER_TOKEN;
     let count = pending_result_count.max(1);
     let per_result = remaining_bytes / count;
-    per_result.clamp(MIN_RESULT_BUDGET, DEFAULT_MAX_RESULT_BYTES)
+    let max_budget = max_result_bytes.max(MIN_RESULT_BUDGET);
+    per_result.clamp(MIN_RESULT_BUDGET, max_budget)
+}
+
+fn take_prefix_charsafe(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn take_suffix_charsafe(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 #[cfg(test)]
@@ -129,8 +165,9 @@ mod tests {
     fn test_truncation() {
         let input = "x".repeat(1000);
         let result = sanitize_tool_result(&input, 100);
-        assert!(result.len() < 200); // 100 + truncation message
-        assert!(result.contains("[truncated, 1000 total bytes]"));
+        assert!(result.contains("[truncated"));
+        assert!(result.contains("bytes]"));
+        assert!(result.starts_with(&"x".repeat(100)));
     }
 
     #[test]
@@ -156,8 +193,8 @@ mod tests {
     #[test]
     fn test_compute_budget_plenty_of_space() {
         // 100k limit, 10k used => 90k remaining => 90k * 4 = 360k bytes
-        // Single result => 360k, clamped to DEFAULT_MAX_RESULT_BYTES (50KB)
-        let budget = compute_tool_result_budget(100_000, 10_000, 1);
+        // Single result => 360k, clamped to DEFAULT_MAX_RESULT_BYTES (20KB)
+        let budget = compute_tool_result_budget(100_000, 10_000, 1, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, DEFAULT_MAX_RESULT_BYTES);
     }
 
@@ -165,7 +202,7 @@ mod tests {
     fn test_compute_budget_tight_space() {
         // 100k limit, 99_000 used => 1000 remaining => 1000 * 4 = 4000 bytes
         // Single result => 4000 bytes
-        let budget = compute_tool_result_budget(100_000, 99_000, 1);
+        let budget = compute_tool_result_budget(100_000, 99_000, 1, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, 4000);
         assert!(budget > MIN_RESULT_BUDGET);
         assert!(budget < DEFAULT_MAX_RESULT_BYTES);
@@ -174,11 +211,11 @@ mod tests {
     #[test]
     fn test_compute_budget_no_space() {
         // Usage >= limit => 0 remaining => clamped to MIN_RESULT_BUDGET
-        let budget = compute_tool_result_budget(100_000, 100_000, 1);
+        let budget = compute_tool_result_budget(100_000, 100_000, 1, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, MIN_RESULT_BUDGET);
 
         // Usage exceeds limit
-        let budget = compute_tool_result_budget(100_000, 120_000, 1);
+        let budget = compute_tool_result_budget(100_000, 120_000, 1, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, MIN_RESULT_BUDGET);
     }
 
@@ -186,7 +223,7 @@ mod tests {
     fn test_compute_budget_multiple_results() {
         // 100k limit, 90k used => 10k remaining => 10k * 4 = 40k bytes
         // 4 results => 40k / 4 = 10k each
-        let budget = compute_tool_result_budget(100_000, 90_000, 4);
+        let budget = compute_tool_result_budget(100_000, 90_000, 4, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, 10_000);
     }
 
@@ -194,15 +231,15 @@ mod tests {
     fn test_compute_budget_single_result() {
         // 100k limit, 95_000 used => 5k remaining => 5k * 4 = 20k bytes
         // 1 result => 20k
-        let budget = compute_tool_result_budget(100_000, 95_000, 1);
+        let budget = compute_tool_result_budget(100_000, 95_000, 1, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, 20_000);
     }
 
     #[test]
     fn test_compute_budget_zero_results() {
         // pending_result_count=0 should not panic; treated as 1
-        let budget = compute_tool_result_budget(100_000, 50_000, 0);
-        // 50k remaining => 50k * 4 = 200k bytes / 1 => clamped to 51_200
+        let budget = compute_tool_result_budget(100_000, 50_000, 0, DEFAULT_MAX_RESULT_BYTES);
+        // 50k remaining => 50k * 4 = 200k bytes / 1 => clamped to 20_480
         assert_eq!(budget, DEFAULT_MAX_RESULT_BYTES);
     }
 
@@ -211,11 +248,26 @@ mod tests {
         // Even with very little space and many results, never below MIN
         // 1000 limit, 999 used => 1 remaining => 1 * 4 = 4 bytes / 10 results = 0
         // Clamped to MIN_RESULT_BUDGET
-        let budget = compute_tool_result_budget(1000, 999, 10);
+        let budget = compute_tool_result_budget(1000, 999, 10, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, MIN_RESULT_BUDGET);
 
         // Zero remaining, many results
-        let budget = compute_tool_result_budget(1000, 1000, 100);
+        let budget = compute_tool_result_budget(1000, 1000, 100, DEFAULT_MAX_RESULT_BYTES);
         assert_eq!(budget, MIN_RESULT_BUDGET);
+    }
+
+    #[test]
+    fn test_truncation_preserves_head_and_tail() {
+        let input = format!("{}{}", "G".repeat(24_000), "Z".repeat(4_000));
+        let result = sanitize_tool_result(&input, DEFAULT_MAX_RESULT_BYTES);
+        assert!(result.starts_with(&"G".repeat(DEFAULT_TRUNCATION_HEAD_BYTES)));
+        assert!(result.ends_with(&"Z".repeat(DEFAULT_TRUNCATION_TAIL_BYTES)));
+        assert!(result.contains("[truncated "));
+    }
+
+    #[test]
+    fn test_compute_budget_respects_custom_max() {
+        let budget = compute_tool_result_budget(100_000, 10_000, 1, 8_192);
+        assert_eq!(budget, 8_192);
     }
 }

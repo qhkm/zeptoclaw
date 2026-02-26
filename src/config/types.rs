@@ -107,6 +107,8 @@ pub struct Config {
     pub agent_mode: crate::security::agent_mode::AgentModeConfig,
     /// Device pairing configuration (bearer token auth for gateway)
     pub pairing: PairingConfig,
+    /// Session validation and repair behavior.
+    pub session: SessionConfig,
     /// Custom CLI-defined tools (shell commands as agent tools).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolDef>,
@@ -252,6 +254,20 @@ impl Default for PairingConfig {
     }
 }
 
+/// Session validation and auto-repair configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Automatically repair malformed conversation histories when loaded.
+    pub auto_repair: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self { auto_repair: true }
+    }
+}
+
 // ============================================================================
 // Health Server Configuration
 // ============================================================================
@@ -302,6 +318,10 @@ pub struct CompactionConfig {
     pub context_limit: usize,
     /// Fraction (0.0-1.0) of context_limit that triggers compaction.
     pub threshold: f64,
+    /// Fraction (0.0-1.0) for emergency truncation mode.
+    pub emergency_threshold: f64,
+    /// Fraction (0.0-1.0) for critical hard-trim mode.
+    pub critical_threshold: f64,
 }
 
 impl Default for CompactionConfig {
@@ -309,7 +329,9 @@ impl Default for CompactionConfig {
         Self {
             enabled: false,
             context_limit: 100_000,
-            threshold: 0.80,
+            threshold: 0.70,
+            emergency_threshold: 0.90,
+            critical_threshold: 0.95,
         }
     }
 }
@@ -517,11 +539,29 @@ pub struct AgentDefaults {
     /// Default tool profile name (from `tool_profiles`). Omit for all tools.
     #[serde(default)]
     pub tool_profile: Option<String>,
+    /// Active hand package name (HAND.toml + SKILL.md) if selected.
+    #[serde(default)]
+    pub active_hand: Option<String>,
     /// IANA timezone for the agent (e.g., "Asia/Kuala_Lumpur", "US/Pacific").
     /// Used for time-aware system prompts and message timestamps.
     /// Defaults to system local timezone, falls back to "UTC".
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    /// Enable SHA256-based repeated tool-call loop detection.
+    #[serde(default = "default_true")]
+    pub loop_guard_enabled: bool,
+    /// Sliding window size for loop guard hash history.
+    #[serde(default = "default_loop_guard_window")]
+    pub loop_guard_window: usize,
+    /// Number of repeated hashes required before warning.
+    #[serde(default = "default_loop_guard_repetition_threshold")]
+    pub loop_guard_repetition_threshold: usize,
+    /// Number of detected loops before forcing turn stop.
+    #[serde(default = "default_loop_guard_max_hits")]
+    pub loop_guard_max_hits: usize,
+    /// Maximum bytes allowed per tool result before truncation.
+    #[serde(default = "default_max_tool_result_bytes")]
+    pub max_tool_result_bytes: usize,
 }
 
 /// Detect the system's IANA timezone.
@@ -545,6 +585,22 @@ fn default_timezone() -> String {
     "UTC".to_string()
 }
 
+fn default_loop_guard_window() -> usize {
+    10
+}
+
+fn default_loop_guard_repetition_threshold() -> usize {
+    3
+}
+
+fn default_loop_guard_max_hits() -> usize {
+    2
+}
+
+fn default_max_tool_result_bytes() -> usize {
+    crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES
+}
+
 /// Default model compile-time configuration.
 /// Set `ZEPTOCLAW_DEFAULT_MODEL` at compile time to override.
 const COMPILE_TIME_DEFAULT_MODEL: &str = match option_env!("ZEPTOCLAW_DEFAULT_MODEL") {
@@ -566,7 +622,13 @@ impl Default for AgentDefaults {
             token_budget: 0,
             compact_tools: false,
             tool_profile: None,
+            active_hand: None,
             timezone: default_timezone(),
+            loop_guard_enabled: true,
+            loop_guard_window: default_loop_guard_window(),
+            loop_guard_repetition_threshold: default_loop_guard_repetition_threshold(),
+            loop_guard_max_hits: default_loop_guard_max_hits(),
+            max_tool_result_bytes: default_max_tool_result_bytes(),
         }
     }
 }

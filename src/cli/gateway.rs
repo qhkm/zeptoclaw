@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use zeptoclaw::bus::MessageBus;
 use zeptoclaw::channels::{register_configured_channels, ChannelManager, WhatsAppChannel};
+use zeptoclaw::config::watcher::ConfigWatcher;
 use zeptoclaw::config::{Config, ContainerAgentBackend};
 use zeptoclaw::deps::{fetcher::RealFetcher, DepManager, HasDependencies};
 use zeptoclaw::health::{
@@ -257,7 +259,7 @@ pub(crate) async fn cmd_gateway(
     };
 
     // Create in-process agent (only needed when not containerized)
-    let agent = if !containerized {
+    let mut agent = if !containerized {
         let agent = create_agent(config.clone(), bus.clone()).await?;
         agent.set_usage_metrics(Arc::clone(&metrics)).await;
         Some(agent)
@@ -267,7 +269,7 @@ pub(crate) async fn cmd_gateway(
 
     // Create channel manager with health supervision
     let mut channel_manager = ChannelManager::new(bus.clone(), config.clone());
-    channel_manager.set_health_registry(health_registry);
+    channel_manager.set_health_registry(health_registry.clone());
 
     // Install and start channel dependencies (if any)
     let deps_dir = DepManager::default_dir();
@@ -366,7 +368,7 @@ pub(crate) async fn cmd_gateway(
             });
 
     // Start agent loop in background (only for in-process mode)
-    let agent_handle = if let Some(ref agent) = agent {
+    let mut agent_handle = if let Some(ref agent) = agent {
         let agent_clone = Arc::clone(agent);
         let agent_metrics = Arc::clone(&metrics);
         let agent_guard = guard.clone();
@@ -412,10 +414,99 @@ pub(crate) async fn cmd_gateway(
     }
     println!();
 
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c()
-        .await
-        .with_context(|| "Failed to listen for Ctrl+C")?;
+    // Config watcher (30s polling) for hot-reload.
+    let (reload_tx, mut reload_rx) = mpsc::unbounded_channel::<Config>();
+    let (reload_shutdown_tx, reload_shutdown_rx) = watch::channel(false);
+    let watcher_handle = tokio::spawn(
+        ConfigWatcher::default_path(Duration::from_secs(30)).watch(reload_tx, reload_shutdown_rx),
+    );
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+            maybe_cfg = reload_rx.recv() => {
+                let Some(new_config) = maybe_cfg else {
+                    break;
+                };
+
+                let changed_sections = diff_hot_reload_sections(&config, &new_config);
+                if changed_sections.is_empty() {
+                    continue;
+                }
+
+                info!(
+                    sections = %changed_sections.join(", "),
+                    "Applying hot-reloaded config sections"
+                );
+
+                let old_config = config.clone();
+                config = new_config;
+
+                // Rebuild in-process agent to apply provider + safety changes.
+                if !containerized {
+                    if let Some(ref running_agent) = agent {
+                        running_agent.stop();
+                    }
+                    if let Some(handle) = agent_handle.take() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+                    }
+
+                    match create_agent(config.clone(), bus.clone()).await {
+                        Ok(new_agent) => {
+                            new_agent.set_usage_metrics(Arc::clone(&metrics)).await;
+                            let agent_clone = Arc::clone(&new_agent);
+                            let agent_metrics = Arc::clone(&metrics);
+                            let agent_guard = guard.clone();
+                            agent_handle = Some(tokio::spawn(async move {
+                                let result = agent_clone.start().await;
+                                agent_metrics.set_ready(false);
+                                match result {
+                                    Err(e) => {
+                                        error!("Agent loop error: {}", e);
+                                        if let Some(ref g) = agent_guard {
+                                            if let Err(re) = g.record_crash() {
+                                                warn!("Failed to record crash: {}", re);
+                                            }
+                                        }
+                                    }
+                                    Ok(()) => warn!("Agent loop stopped"),
+                                }
+                            }));
+                            agent = Some(new_agent);
+                        }
+                        Err(e) => {
+                            config = old_config;
+                            warn!("Hot-reload failed to rebuild agent, keeping prior config: {}", e);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!("Config hot-reload for containerized mode is not yet supported");
+                }
+
+                // Rebuild channels only if channel config actually changed.
+                if changed_sections.contains(&"channels") {
+                    if let Err(e) = channel_manager.stop_all().await {
+                        warn!("Failed to stop channels during hot-reload: {}", e);
+                    }
+                    let mut new_manager = ChannelManager::new(bus.clone(), config.clone());
+                    new_manager.set_health_registry(health_registry.clone());
+                    let count = register_configured_channels(&new_manager, bus.clone(), &config).await;
+                    if count == 0 {
+                        warn!("No channels configured after hot-reload");
+                    }
+                    if let Err(e) = new_manager.start_all().await {
+                        config = old_config;
+                        warn!("Failed to start channels after hot-reload, keeping previous config: {}", e);
+                        continue;
+                    }
+                    channel_manager = new_manager;
+                }
+            }
+        }
+    }
 
     println!();
     println!("Shutting down...");
@@ -444,6 +535,10 @@ pub(crate) async fn cmd_gateway(
         .stop_all()
         .await
         .with_context(|| "Failed to stop channels")?;
+
+    // Stop config watcher
+    let _ = reload_shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(2), watcher_handle).await;
 
     // Wait for agent/proxy to stop
     if let Some(handle) = agent_handle {
@@ -558,6 +653,27 @@ fn parse_deliver_to(s: &str) -> Option<(String, String)> {
     }
 }
 
+fn diff_hot_reload_sections(old: &Config, new: &Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if section_changed(&old.providers, &new.providers) {
+        changed.push("providers");
+    }
+    if section_changed(&old.channels, &new.channels) {
+        changed.push("channels");
+    }
+    if section_changed(&old.safety, &new.safety) {
+        changed.push("safety");
+    }
+    if section_changed(&old.agents, &new.agents) {
+        changed.push("agents");
+    }
+    changed
+}
+
+fn section_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
+    serde_json::to_value(old).ok() != serde_json::to_value(new).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +749,17 @@ mod tests {
         assert_eq!(parse_deliver_to("no-colon"), None);
         assert_eq!(parse_deliver_to(":empty_channel"), None);
         assert_eq!(parse_deliver_to("empty_chat:"), None);
+    }
+
+    #[test]
+    fn test_diff_hot_reload_sections() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.safety.enabled = !new.safety.enabled;
+        new.gateway.port += 1; // non-hot-reload section should be ignored
+
+        let changed = diff_hot_reload_sections(&old, &new);
+        assert!(changed.contains(&"safety"));
+        assert!(!changed.contains(&"gateway"));
     }
 }

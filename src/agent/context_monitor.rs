@@ -40,6 +40,14 @@ pub enum CompactionStrategy {
     Truncate { keep_recent: usize },
 }
 
+/// Compaction urgency tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionUrgency {
+    Normal,
+    Emergency,
+    Critical,
+}
+
 /// Monitors conversation context size and suggests compaction strategies.
 ///
 /// Uses heuristic token estimation to detect when the conversation is
@@ -50,6 +58,10 @@ pub struct ContextMonitor {
     context_limit: usize,
     /// Fraction (0.0-1.0) of context_limit at which compaction is suggested.
     threshold: f64,
+    /// Fraction for emergency truncation behavior.
+    emergency_threshold: f64,
+    /// Fraction for critical hard-trim behavior.
+    critical_threshold: f64,
 }
 
 impl ContextMonitor {
@@ -59,9 +71,21 @@ impl ContextMonitor {
     /// * `context_limit` - Maximum token capacity (e.g. 100_000)
     /// * `threshold` - Fraction of limit that triggers compaction (e.g. 0.80)
     pub fn new(context_limit: usize, threshold: f64) -> Self {
+        Self::new_with_thresholds(context_limit, threshold, 0.90, 0.95)
+    }
+
+    /// Create a new context monitor with explicit normal/emergency/critical thresholds.
+    pub fn new_with_thresholds(
+        context_limit: usize,
+        threshold: f64,
+        emergency_threshold: f64,
+        critical_threshold: f64,
+    ) -> Self {
         Self {
             context_limit,
             threshold,
+            emergency_threshold,
+            critical_threshold,
         }
     }
 
@@ -97,6 +121,21 @@ impl ContextMonitor {
         estimated as f64 > self.threshold * self.context_limit as f64
     }
 
+    /// Determine compaction urgency tier based on fullness ratio.
+    pub fn urgency(&self, messages: &[Message]) -> Option<CompactionUrgency> {
+        let estimated = Self::estimate_tokens(messages);
+        let ratio = estimated as f64 / self.context_limit as f64;
+        if ratio <= self.threshold {
+            None
+        } else if ratio >= self.critical_threshold {
+            Some(CompactionUrgency::Critical)
+        } else if ratio >= self.emergency_threshold {
+            Some(CompactionUrgency::Emergency)
+        } else {
+            Some(CompactionUrgency::Normal)
+        }
+    }
+
     /// Suggest a compaction strategy based on current context fullness.
     ///
     /// Returns:
@@ -111,15 +150,17 @@ impl ContextMonitor {
         let estimated = Self::estimate_tokens(messages);
         let ratio = estimated as f64 / self.context_limit as f64;
 
-        if ratio <= self.threshold {
-            CompactionStrategy::None
-        } else if ratio > 0.95 {
-            CompactionStrategy::Truncate { keep_recent: 3 }
-        } else if ratio > 0.85 {
-            CompactionStrategy::Summarize { keep_recent: 5 }
-        } else {
-            // Above threshold but <= 0.85
-            CompactionStrategy::Summarize { keep_recent: 8 }
+        match self.urgency(messages) {
+            None => CompactionStrategy::None,
+            Some(CompactionUrgency::Critical) => CompactionStrategy::Truncate { keep_recent: 3 },
+            Some(CompactionUrgency::Emergency) => CompactionStrategy::Truncate { keep_recent: 5 },
+            Some(CompactionUrgency::Normal) => {
+                if ratio > 0.85 {
+                    CompactionStrategy::Summarize { keep_recent: 5 }
+                } else {
+                    CompactionStrategy::Summarize { keep_recent: 8 }
+                }
+            }
         }
     }
 }
@@ -128,7 +169,9 @@ impl Default for ContextMonitor {
     fn default() -> Self {
         Self {
             context_limit: 100_000,
-            threshold: 0.80,
+            threshold: 0.70,
+            emergency_threshold: 0.90,
+            critical_threshold: 0.95,
         }
     }
 }
@@ -187,6 +230,34 @@ mod tests {
         // "hello   world" = 2 words => 2*1.3+4 = 6.6 => 6
         let messages = vec![make_message("hello   world")];
         assert_eq!(ContextMonitor::estimate_tokens(&messages), 6);
+    }
+
+    #[test]
+    fn test_urgency_normal_emergency_critical() {
+        let monitor = ContextMonitor::new_with_thresholds(200, 0.70, 0.90, 0.95);
+
+        let normal: Vec<Message> = (0..9)
+            .map(|_| make_message("one two three four five six seven eight nine ten"))
+            .collect();
+        // 9 * 17 = 153 => normal range (>=140 && <180)
+        assert_eq!(monitor.urgency(&normal), Some(CompactionUrgency::Normal));
+
+        let emergency: Vec<Message> = (0..11)
+            .map(|_| make_message("one two three four five six seven eight nine ten"))
+            .collect();
+        // 11 * 17 = 187 => emergency range (>=180 && <190)
+        assert_eq!(
+            monitor.urgency(&emergency),
+            Some(CompactionUrgency::Emergency)
+        );
+
+        let critical: Vec<Message> = (0..12)
+            .map(|_| make_message("one two three four five six seven eight nine ten"))
+            .collect();
+        assert_eq!(
+            monitor.urgency(&critical),
+            Some(CompactionUrgency::Critical)
+        );
     }
 
     // --- needs_compaction tests ---
@@ -248,18 +319,15 @@ mod tests {
 
     #[test]
     fn test_strategy_above_85() {
-        // Need ratio > 0.85 but <= 0.95
+        // Need ratio > 0.85 but < emergency threshold (0.90).
         // context_limit=100
-        // 5 * 17 = 85 + some extra => 90 tokens => ratio=0.90
-        // 5 msgs of 10 words = 85. Add one msg of ~4 words: 4*1.3+4=9.2=>9, total=94 (0.94)
-        // Actually 94 > 0.85 and <= 0.95 => Summarize { keep_recent: 5 }
+        // 5 msgs of 10 words = 85. Add one empty message (4 tokens) => 89.
         let monitor = ContextMonitor::new(100, 0.80);
         let mut messages: Vec<Message> = (0..5)
             .map(|_| make_message("one two three four five six seven eight nine ten"))
             .collect();
-        messages.push(make_message("a b c d"));
-        // 5*17 + 9 = 94
-        assert_eq!(ContextMonitor::estimate_tokens(&messages), 94);
+        messages.push(make_message(""));
+        assert_eq!(ContextMonitor::estimate_tokens(&messages), 89);
         assert_eq!(
             monitor.suggest_strategy(&messages),
             CompactionStrategy::Summarize { keep_recent: 5 }

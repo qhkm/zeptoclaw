@@ -13,6 +13,7 @@ pub mod deps;
 pub mod devices;
 pub mod error;
 pub mod gateway;
+pub mod hands;
 pub mod hardware;
 pub mod health;
 pub mod heartbeat;

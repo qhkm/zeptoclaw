@@ -292,7 +292,7 @@ impl std::fmt::Display for Role {
 /// A tool call made by the assistant.
 ///
 /// Tool calls represent requests to execute specific tools with given arguments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCall {
     /// Unique identifier for this tool call
     pub id: String,

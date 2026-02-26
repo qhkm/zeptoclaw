@@ -10,6 +10,7 @@ pub mod config;
 pub mod daemon;
 pub mod doctor;
 pub mod gateway;
+pub mod hand;
 pub mod heartbeat;
 pub mod history;
 pub mod memory;
@@ -122,6 +123,11 @@ enum Commands {
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
+    },
+    /// Manage hands-lite packages
+    Hand {
+        #[command(subcommand)]
+        action: HandAction,
     },
     /// Manage and discover tools
     Tools {
@@ -296,6 +302,21 @@ pub enum SkillsAction {
         #[arg(long)]
         github: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum HandAction {
+    /// List built-in and user-installed hands
+    List,
+    /// Activate a hand
+    Activate {
+        /// Hand name
+        name: String,
+    },
+    /// Deactivate the current hand
+    Deactivate,
+    /// Show currently active hand
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -492,6 +513,9 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Skills { action }) => {
             skills::cmd_skills(action).await?;
+        }
+        Some(Commands::Hand { action }) => {
+            hand::cmd_hand(action).await?;
         }
         Some(Commands::Tools { action }) => {
             tools::cmd_tools(action).await?;
