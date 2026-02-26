@@ -2,19 +2,24 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::api::server::AppState;
 
-pub async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn list_tasks(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let Some(ref store) = state.task_store else {
-        return Json(json!({ "tasks": [] }));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Task store not available"})),
+        )
+            .into_response();
     };
 
     let tasks = store.list(None).await;
-    Json(serde_json::to_value(json!({ "tasks": tasks })).unwrap_or_else(|_| json!({ "tasks": [] })))
+    (StatusCode::OK, Json(json!({ "tasks": tasks }))).into_response()
 }
 
 pub async fn create_task(
@@ -22,7 +27,10 @@ pub async fn create_task(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let Some(ref store) = state.task_store else {
-        return (StatusCode::CREATED, Json(json!({ "id": "stub" })));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Task store not available"})),
+        );
     };
 
     let title = body
@@ -53,7 +61,7 @@ pub async fn update_task(
     Json(body): Json<Value>,
 ) -> StatusCode {
     let Some(ref store) = state.task_store else {
-        return StatusCode::OK;
+        return StatusCode::SERVICE_UNAVAILABLE;
     };
 
     match store.update(&id, body).await {
@@ -64,7 +72,7 @@ pub async fn update_task(
 
 pub async fn delete_task(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
     let Some(ref store) = state.task_store else {
-        return StatusCode::NO_CONTENT;
+        return StatusCode::SERVICE_UNAVAILABLE;
     };
 
     match store.delete(&id).await {
@@ -79,11 +87,10 @@ pub async fn move_task(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let Some(ref store) = state.task_store else {
-        let column = body
-            .get("column")
-            .and_then(|v| v.as_str())
-            .unwrap_or("in_progress");
-        return (StatusCode::OK, Json(json!({ "column": column })));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Task store not available"})),
+        );
     };
 
     let column = match body.get("column").and_then(|v| v.as_str()) {
@@ -127,41 +134,45 @@ mod tests {
         (State(Arc::new(state)), store)
     }
 
-    // ── no store (stub behaviour preserved) ──────────────────────────────────
+    // ── no store (returns 503) ──────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_list_tasks_no_store() {
-        let Json(body) = list_tasks(test_state()).await;
-        assert!(body["tasks"].is_array());
+    async fn test_list_tasks_no_store_returns_503() {
+        let resp = list_tasks(test_state()).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
-    async fn test_create_task_no_store() {
+    async fn test_create_task_no_store_returns_503() {
         let (status, _) = create_task(test_state(), Json(json!({"title": "test"}))).await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
-    async fn test_move_task_no_store() {
-        let Json(body) = move_task(
+    async fn test_move_task_no_store_returns_503() {
+        let (status, _) = move_task(
             test_state(),
             Path("t1".into()),
             Json(json!({"column": "done"})),
         )
-        .await
-        .1;
-        assert!(body["column"].is_string());
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // ── with real store ───────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_list_tasks_with_store() {
+        use axum::body::to_bytes;
+
         let (state, store) = state_with_store();
         store.create("Alpha", "backlog", None).await.unwrap();
         store.create("Beta", "in_progress", None).await.unwrap();
 
-        let Json(body) = list_tasks(state).await;
+        let resp = list_tasks(state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
         let tasks = body["tasks"].as_array().expect("tasks array");
         assert_eq!(tasks.len(), 2);
     }

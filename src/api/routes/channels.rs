@@ -54,10 +54,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> Json<Value> {
         })
         .collect();
 
-    Json(
-        serde_json::to_value(json!({ "channels": channels }))
-            .unwrap_or_else(|_| json!({ "channels": [] })),
-    )
+    Json(json!({ "channels": channels }))
 }
 
 #[cfg(test)]

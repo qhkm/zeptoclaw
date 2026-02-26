@@ -117,7 +117,17 @@ impl Tool for TaskTool {
                         None => "No tasks found".to_string(),
                     }
                 } else {
-                    serde_json::to_string_pretty(&tasks).unwrap_or_default()
+                    let json = serde_json::to_string_pretty(&tasks).unwrap_or_default();
+                    if json.len() > 50_000 {
+                        format!(
+                            "Found {} tasks (output truncated to 50KB). \
+                             Use column= filter to narrow results.\n{}",
+                            tasks.len(),
+                            &json[..50_000]
+                        )
+                    } else {
+                        json
+                    }
                 }
             }
 

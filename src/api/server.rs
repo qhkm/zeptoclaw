@@ -79,18 +79,29 @@ async fn csrf_token_handler(State(state): State<Arc<AppState>>) -> Json<serde_js
 }
 
 /// Build the axum router with all API routes.
-pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+///
+/// `cors_origin` is the `http://{bind}:{port}` origin of the panel frontend.
+/// When `None`, defaults to `http://localhost:9092`.
+pub fn build_router(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    cors_origin: Option<String>,
+) -> Router {
     // Wrap state in Arc once so it can be shared across both the middleware
     // layer and the route handlers without a double-Arc.
     let shared_state = Arc::new(state);
 
-    // CORS: only allow requests from the panel frontend origin.
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
+    // CORS: allow requests from the panel frontend origin (derived from config).
+    let origin_str = cors_origin.unwrap_or_else(|| "http://localhost:9092".to_string());
+    let origin_value = origin_str
+        .parse::<axum::http::HeaderValue>()
+        .unwrap_or_else(|_| {
             "http://localhost:9092"
                 .parse::<axum::http::HeaderValue>()
-                .expect("valid origin"),
-        ))
+                .expect("fallback origin is valid")
+        });
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::exact(origin_value))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
             HeaderName::from_static("content-type"),
@@ -181,7 +192,8 @@ pub async fn start_server(
     state: AppState,
     static_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = build_router(state, static_dir);
+    let cors_origin = format!("http://{}:{}", config.bind, config.port);
+    let app = build_router(state, static_dir, Some(cors_origin));
     let addr = format!("{}:{}", config.bind, config.api_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Panel API server listening on {addr}");
@@ -216,7 +228,7 @@ mod tests {
     fn test_build_router_no_static() {
         let bus = EventBus::new(16);
         let state = AppState::new("tok".into(), bus);
-        let _router = build_router(state, None);
+        let _router = build_router(state, None, None);
     }
 
     #[test]
@@ -224,7 +236,14 @@ mod tests {
         let bus = EventBus::new(16);
         let state = AppState::new("tok".into(), bus);
         let dir = std::env::temp_dir();
-        let _router = build_router(state, Some(dir));
+        let _router = build_router(state, Some(dir), None);
+    }
+
+    #[test]
+    fn test_build_router_with_custom_cors_origin() {
+        let bus = EventBus::new(16);
+        let state = AppState::new("tok".into(), bus);
+        let _router = build_router(state, None, Some("http://10.0.0.1:3000".to_string()));
     }
 
     #[test]

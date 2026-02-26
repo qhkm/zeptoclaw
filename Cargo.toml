@@ -85,6 +85,8 @@ sha2 = "0.10"
 subtle = "2.5"
 # Hex encoding/decoding for master key transport
 hex = "0.4"
+# HMAC-SHA256 for CSRF token generation/validation
+ring = "0.17"
 
 # =============================================================================
 # ASYNC UTILITIES

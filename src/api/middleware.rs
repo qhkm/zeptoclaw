@@ -15,6 +15,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use ring::hmac;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,56 +27,65 @@ use super::server::AppState;
 
 /// Generate a CSRF token valid for 1 hour.
 ///
-/// Token format: `"{timestamp}:{hash}"` where `hash` is the first 16 hex
-/// digits of a simple polynomial hash over `secret + timestamp`.  This is
-/// intentionally lightweight (no new crate dependency) — the goal is
-/// cross-site-request forgery protection, not cryptographic strength.  The
-/// token is bound to `jwt_secret`, which rotates on every process restart.
+/// Token format: `"{timestamp}:{hmac_hex}"` where `hmac_hex` is the full
+/// HMAC-SHA256 of the timestamp string keyed with `secret`, hex-encoded.
+/// The token is bound to `jwt_secret`, which rotates on every process restart.
 pub fn generate_csrf_token(secret: &str) -> String {
-    let timestamp = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let hash = csrf_hash(secret, timestamp);
-    format!("{timestamp}:{hash:016x}")
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let tag = hmac::sign(&key, now.to_string().as_bytes());
+    let sig = hex::encode(tag.as_ref());
+    format!("{now}:{sig}")
 }
 
 /// Validate a CSRF token produced by [`generate_csrf_token`].
 ///
 /// Returns `true` when the token:
-/// 1. Has the expected `"{timestamp}:{hash}"` structure.
-/// 2. Was issued within the last hour (1 h window).
-/// 3. Contains a hash that matches re-deriving from `secret + timestamp`.
+/// 1. Has the expected `"{timestamp}:{hmac_hex}"` structure.
+/// 2. Was issued within the last hour (not expired).
+/// 3. Was not issued more than 60 seconds in the future (prevents pre-generated tokens).
+/// 4. Contains an HMAC that matches re-deriving from `secret + timestamp`.
+/// 5. Comparison uses constant-time equality to prevent timing attacks.
 pub fn validate_csrf_token(token: &str, secret: &str) -> bool {
-    let Some((ts_str, hash_str)) = token.split_once(':') else {
+    let Some((ts_str, provided_sig)) = token.split_once(':') else {
         return false;
     };
 
-    let Ok(timestamp) = ts_str.parse::<u64>() else {
+    let Ok(ts) = ts_str.parse::<u64>() else {
         return false;
     };
 
-    // Reject tokens older than 1 hour.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if now.saturating_sub(timestamp) > 3600 {
+
+    // Reject expired tokens (older than 1 hour).
+    if now.saturating_sub(ts) > 3600 {
+        return false;
+    }
+    // Reject future tokens (more than 60 seconds ahead).
+    if ts.saturating_sub(now) > 60 {
         return false;
     }
 
-    let expected_hash = csrf_hash(secret, timestamp);
-    format!("{expected_hash:016x}") == hash_str
-}
+    // Recompute expected HMAC.
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let tag = hmac::sign(&key, ts_str.as_bytes());
+    let expected_sig = hex::encode(tag.as_ref());
 
-/// Polynomial rolling hash: fold each byte of `secret + timestamp_string`
-/// using multiplier 31 with wrapping arithmetic.
-fn csrf_hash(secret: &str, timestamp: u64) -> u64 {
-    let ts_str = timestamp.to_string();
-    secret
+    // Constant-time comparison to prevent timing side-channels.
+    if expected_sig.len() != provided_sig.len() {
+        return false;
+    }
+    expected_sig
         .bytes()
-        .chain(ts_str.bytes())
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+        .zip(provided_sig.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -335,14 +345,18 @@ mod tests {
     #[test]
     fn test_generate_csrf_token_format() {
         let token = generate_csrf_token("my-secret");
-        // Expected format: "{timestamp}:{16-hex-chars}"
+        // Expected format: "{timestamp}:{64-hex-chars}" (HMAC-SHA256 = 32 bytes = 64 hex)
         let parts: Vec<&str> = token.splitn(2, ':').collect();
         assert_eq!(parts.len(), 2, "token must contain exactly one ':'");
         assert!(
             parts[0].parse::<u64>().is_ok(),
             "first part must be u64 timestamp"
         );
-        assert_eq!(parts[1].len(), 16, "second part must be 16 hex chars");
+        assert_eq!(
+            parts[1].len(),
+            64,
+            "second part must be 64 hex chars (HMAC-SHA256)"
+        );
         assert!(
             parts[1].chars().all(|c| c.is_ascii_hexdigit()),
             "hash must be hex digits"
@@ -378,18 +392,36 @@ mod tests {
             .unwrap_or_default()
             .as_secs()
             .saturating_sub(7200);
-        let hash = csrf_hash(secret, old_timestamp);
-        let expired_token = format!("{old_timestamp}:{hash:016x}");
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, old_timestamp.to_string().as_bytes());
+        let sig = hex::encode(tag.as_ref());
+        let expired_token = format!("{old_timestamp}:{sig}");
         assert!(!validate_csrf_token(&expired_token, secret));
+    }
+
+    #[test]
+    fn test_validate_csrf_token_future_fails() {
+        // Forge a token with a timestamp 120 seconds in the future (past the 60s window).
+        let secret = "test-secret";
+        let future_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 120;
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, future_timestamp.to_string().as_bytes());
+        let sig = hex::encode(tag.as_ref());
+        let future_token = format!("{future_timestamp}:{sig}");
+        assert!(!validate_csrf_token(&future_token, secret));
     }
 
     #[test]
     fn test_validate_csrf_token_tampered_hash_fails() {
         let secret = "test-secret";
         let token = generate_csrf_token(secret);
-        // Corrupt the hash portion.
+        // Corrupt the hash portion — use wrong-length zeroes to test length check too.
         let (ts, _hash) = token.split_once(':').unwrap();
-        let tampered = format!("{ts}:0000000000000000");
+        let tampered = format!("{ts}:{}", "0".repeat(64));
         assert!(!validate_csrf_token(&tampered, secret));
     }
 

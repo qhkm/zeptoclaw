@@ -259,7 +259,7 @@ impl Config {
 
         // Panel (env overrides always applied — PanelConfig is always present in Config)
         if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_ENABLED") {
-            self.panel.enabled = val.to_lowercase() == "true";
+            self.panel.enabled = val.eq_ignore_ascii_case("true") || val == "1";
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_PORT") {
             if let Ok(v) = val.parse() {

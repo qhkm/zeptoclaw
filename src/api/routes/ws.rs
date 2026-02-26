@@ -3,10 +3,17 @@
 use crate::api::events::EventBus;
 use crate::api::server::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// GET /ws/events — upgrades to WebSocket, streams PanelEvents as JSON.
+///
+/// Authentication: Browsers cannot set custom headers during the WebSocket
+/// upgrade handshake, so the `/ws/` path is exempt from the auth middleware.
+/// Instead, this handler validates the auth token from a `?auth=<token>`
+/// query parameter before upgrading.  Both static API tokens and valid JWTs
+/// are accepted.
 ///
 /// Enforces a hard cap of [`AppState::MAX_WS_CONNECTIONS`] concurrent
 /// WebSocket connections via a semaphore stored in [`AppState`].  When the
@@ -15,7 +22,24 @@ use std::sync::Arc;
 pub async fn ws_events(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
+    // Validate auth token from query param (browsers can't set headers for WS).
+    let is_authenticated = params
+        .get("auth")
+        .map(|token| {
+            token == &state.api_token
+                || crate::api::auth::validate_jwt(token, &state.jwt_secret).is_ok()
+        })
+        .unwrap_or(false);
+
+    if !is_authenticated {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::UNAUTHORIZED)
+            .body(axum::body::Body::from("Missing or invalid auth token"))
+            .expect("response build is infallible");
+    }
+
     // Try to acquire a connection slot.  `try_acquire_owned` is non-blocking:
     // it either succeeds immediately or returns `TryAcquireError::NoPermits`.
     let permit = match state.ws_semaphore.clone().try_acquire_owned() {
@@ -79,8 +103,11 @@ mod tests {
 
     #[test]
     fn test_ws_handler_compiles() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
         // Verify the handler signature is correct for axum routing.
-        let _: fn(WebSocketUpgrade, State<Arc<AppState>>) -> _ = |ws, state| ws_events(ws, state);
+        let _: fn(WebSocketUpgrade, State<Arc<AppState>>, Query<HashMap<String, String>>) -> _ =
+            |ws, state, query| ws_events(ws, state, query);
     }
 
     #[test]

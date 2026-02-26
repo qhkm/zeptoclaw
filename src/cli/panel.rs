@@ -181,15 +181,23 @@ async fn cmd_start(
     };
 
     let event_bus = EventBus::new(256);
-    let state = AppState::new(api_token.clone(), event_bus);
+    let mut state = AppState::new(api_token.clone(), event_bus);
+
+    // Wire in the TaskStore so kanban endpoints return real data.
+    let task_store_path = Config::dir().join("tasks.json");
+    let task_store = std::sync::Arc::new(zeptoclaw::api::tasks::TaskStore::new(task_store_path));
+    if let Err(e) = task_store.load().await {
+        tracing::warn!("Failed to load task store: {e}");
+    }
+    state.task_store = Some(task_store);
 
     println!(
-        "Starting ZeptoClaw Panel API on {}:{}",
+        "Panel API:      http://{}:{}",
         panel_config.bind, panel_config.api_port
     );
     if !dev && !api_only && static_dir.is_some() {
         println!(
-            "Panel UI: http://{}:{}",
+            "Panel Frontend: http://{}:{}",
             panel_config.bind, panel_config.port
         );
     }
@@ -206,9 +214,10 @@ async fn cmd_start(
 /// Install the panel.
 async fn cmd_install(download: bool, rebuild: bool) -> Result<()> {
     if download {
-        println!("Downloading pre-built panel assets...");
-        // TODO: fetch from GitHub releases and extract to ~/.zeptoclaw/panel/dist/
-        println!("Download not yet implemented. Use 'pnpm --dir panel build' manually.");
+        anyhow::bail!(
+            "Downloading pre-built panel is not yet implemented. \
+             Use `zeptoclaw panel install` (without --download) to build from source."
+        );
     } else {
         println!("Installing ZeptoClaw Panel...\n");
 
@@ -365,14 +374,16 @@ async fn cmd_auth(action: PanelAuthAction) -> Result<()> {
             Ok(())
         }
         PanelAuthAction::Mode { mode } => {
-            // TODO: persist auth mode to panel config
-            println!("Auth mode set to: {mode}");
-            Ok(())
+            anyhow::bail!(
+                "Setting auth mode to '{mode}' is not yet implemented. \
+                 Edit ~/.zeptoclaw/config.json manually to set panel.auth_mode."
+            );
         }
         PanelAuthAction::ResetPassword => {
-            // TODO: prompt for new password, hash with bcrypt, persist
-            println!("Password reset is not yet implemented.");
-            Ok(())
+            anyhow::bail!(
+                "Password reset is not yet implemented. \
+                 Edit ~/.zeptoclaw/config.json manually to set panel.password_hash."
+            );
         }
     }
 }

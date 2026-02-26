@@ -90,7 +90,7 @@ impl TaskStore {
         let Some(ref path) = self.path else {
             return Ok(());
         };
-        if !path.exists() {
+        if tokio::fs::metadata(path).await.is_err() {
             return Ok(());
         }
         let data = tokio::fs::read_to_string(path)
@@ -123,7 +123,13 @@ impl TaskStore {
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        tokio::fs::write(path, data)
+        // Atomic write: write to a temp file then rename, so readers never
+        // see a partial/corrupt file.
+        let tmp_path = path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, data)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::rename(&tmp_path, path)
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
