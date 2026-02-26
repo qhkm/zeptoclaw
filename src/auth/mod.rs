@@ -185,13 +185,23 @@ pub fn provider_oauth_config(provider: &str) -> Option<ProviderOAuthConfig> {
             client_name: "ZeptoClaw".to_string(),
             scopes: vec![],
         }),
+        "google" => Some(ProviderOAuthConfig {
+            provider: "google".to_string(),
+            token_url: "https://oauth2.googleapis.com/token".to_string(),
+            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+            client_name: "ZeptoClaw".to_string(),
+            scopes: vec![
+                "https://www.googleapis.com/auth/gmail.modify".to_string(),
+                "https://www.googleapis.com/auth/calendar".to_string(),
+            ],
+        }),
         _ => None,
     }
 }
 
 /// Returns a list of providers that support OAuth authentication.
 pub fn oauth_supported_providers() -> &'static [&'static str] {
-    &["anthropic"]
+    &["anthropic", "google"]
 }
 
 // ============================================================================
@@ -354,5 +364,24 @@ mod tests {
         let providers = oauth_supported_providers();
         assert!(providers.contains(&"anthropic"));
         assert!(!providers.contains(&"openai"));
+    }
+
+    #[test]
+    fn test_provider_oauth_config_google() {
+        let config = provider_oauth_config("google");
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.provider, "google");
+        assert!(config.authorize_url.contains("accounts.google.com"));
+        assert!(
+            config.token_url.contains("googleapis.com") || config.token_url.contains("google")
+        );
+        assert!(!config.scopes.is_empty());
+    }
+
+    #[test]
+    fn test_oauth_supported_providers_includes_google() {
+        let providers = oauth_supported_providers();
+        assert!(providers.contains(&"google"));
     }
 }

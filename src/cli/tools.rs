@@ -117,6 +117,12 @@ const TOOLS: &[ToolInfo] = &[
         config_hint: "Set tools.google_sheets.access_token",
     },
     ToolInfo {
+        name: "google",
+        description: "Gmail + Calendar (search, read, send, schedule)",
+        requires_config: true,
+        config_hint: "Run `zeptoclaw auth login google` or set tools.google.access_token",
+    },
+    ToolInfo {
         name: "r8r",
         description: "Execute R8r deterministic workflows",
         requires_config: true,
@@ -218,6 +224,20 @@ fn is_tool_configured(config: &Config, name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|v| !v.trim().is_empty())
         }
+        "google" => {
+            config
+                .tools
+                .google
+                .access_token
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+                || config
+                    .tools
+                    .google
+                    .client_id
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty())
+        }
         "message" => {
             config.channels.telegram.as_ref().is_some_and(|c| c.enabled)
                 || config.channels.slack.as_ref().is_some_and(|c| c.enabled)
@@ -254,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_tools_list_count() {
-        assert_eq!(TOOLS.len(), 19);
+        assert_eq!(TOOLS.len(), 20);
     }
 
     #[test]

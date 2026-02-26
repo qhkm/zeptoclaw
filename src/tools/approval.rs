@@ -323,6 +323,7 @@ impl ApprovalGate {
             "shell".to_string(),
             "write_file".to_string(),
             "edit_file".to_string(),
+            "google".to_string(),
         ]
     }
 
@@ -500,7 +501,7 @@ mod tests {
         assert!(config.require_for.is_empty());
         assert_eq!(
             config.dangerous_tools,
-            vec!["shell", "write_file", "edit_file"]
+            vec!["shell", "write_file", "edit_file", "google"]
         );
         assert_eq!(config.auto_approve_timeout_secs, 0);
     }
@@ -675,10 +676,11 @@ mod tests {
     #[test]
     fn test_default_dangerous_tools_list() {
         let defaults = ApprovalGate::default_dangerous_tools();
-        assert_eq!(defaults.len(), 3);
+        assert_eq!(defaults.len(), 4);
         assert!(defaults.contains(&"shell".to_string()));
         assert!(defaults.contains(&"write_file".to_string()));
         assert!(defaults.contains(&"edit_file".to_string()));
+        assert!(defaults.contains(&"google".to_string()));
     }
 
     #[test]

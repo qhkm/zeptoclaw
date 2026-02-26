@@ -36,6 +36,8 @@ use zeptoclaw::tools::{
     InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
     R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
+#[cfg(feature = "google")]
+use zeptoclaw::tools::GoogleTool;
 
 /// Read a line from stdin, trimming whitespace.
 pub(crate) fn read_line() -> Result<String> {
@@ -745,6 +747,22 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         }
     }
 
+    // Register Google Workspace tool (feature-gated).
+    #[cfg(feature = "google")]
+    if tool_enabled("google") {
+        let google_token = resolve_google_token(&config).await;
+        if let Some(token) = google_token {
+            agent
+                .register_tool(Box::new(GoogleTool::new(
+                    &token,
+                    &config.tools.google.default_calendar,
+                    config.tools.google.max_search_results,
+                )))
+                .await;
+            info!("Registered google tool");
+        }
+    }
+
     // Register memory tools via factory-created searcher
     if !matches!(config.memory.backend, MemoryBackend::Disabled) {
         if tool_enabled("memory_search") {
@@ -1276,6 +1294,30 @@ pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> Str
     } else {
         base
     }
+}
+
+/// Resolve Google access token: stored OAuth -> config fallback.
+#[cfg(feature = "google")]
+async fn resolve_google_token(config: &Config) -> Option<String> {
+    // 1. Try stored OAuth token
+    let token_path = Config::dir().join("tokens").join("google.json");
+    if let Ok(data) = tokio::fs::read_to_string(&token_path).await {
+        if let Ok(token_set) = serde_json::from_str::<zeptoclaw::auth::OAuthTokenSet>(&data) {
+            if !token_set.is_expired() {
+                return Some(token_set.access_token.clone());
+            }
+            tracing::warn!("Stored Google OAuth token expired, falling back to config");
+        }
+    }
+
+    // 2. Fall back to static access_token from config
+    config
+        .tools
+        .google
+        .access_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from)
 }
 
 #[cfg(test)]

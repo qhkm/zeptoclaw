@@ -570,6 +570,17 @@ impl Config {
             self.tools.google_sheets.service_account_base64 = Some(val);
         }
 
+        // Google Workspace tool
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_GOOGLE_ACCESS_TOKEN") {
+            self.tools.google.access_token = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_GOOGLE_CLIENT_ID") {
+            self.tools.google.client_id = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_GOOGLE_CLIENT_SECRET") {
+            self.tools.google.client_secret = Some(val);
+        }
+
         if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_TRANSCRIBE_GROQ_API_KEY") {
             self.tools.transcribe.groq_api_key = Some(v);
         }
