@@ -76,22 +76,14 @@ mod tests {
     fn make_state_with_password(password: &str) -> Arc<AppState> {
         let hash = panel_auth::hash_password(password).expect("hash must succeed");
         let bus = EventBus::new(8);
-        Arc::new(AppState {
-            api_token: "tok".into(),
-            event_bus: bus,
-            password_hash: Some(hash),
-            jwt_secret: "test-jwt-secret".into(),
-        })
+        let mut state = AppState::new("tok".into(), bus);
+        state.password_hash = Some(hash);
+        Arc::new(state)
     }
 
     fn make_state_no_password() -> Arc<AppState> {
         let bus = EventBus::new(8);
-        Arc::new(AppState {
-            api_token: "tok".into(),
-            event_bus: bus,
-            password_hash: None,
-            jwt_secret: "test-jwt-secret".into(),
-        })
+        Arc::new(AppState::new("tok".into(), bus))
     }
 
     fn make_app(state: Arc<AppState>) -> Router {
