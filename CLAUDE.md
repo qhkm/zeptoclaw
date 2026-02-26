@@ -74,6 +74,7 @@ cargo fmt
 # Hands-lite
 ./target/release/zeptoclaw hand list
 ./target/release/zeptoclaw hand activate researcher
+./target/release/zeptoclaw hand deactivate
 ./target/release/zeptoclaw hand status
 
 # Batch mode (process multiple prompts from file)
@@ -216,7 +217,7 @@ src/
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
-│   ├── hand.rs     # Hands-lite list/activate/status commands
+│   ├── hand.rs     # Hands-lite list/activate/deactivate/status commands
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
 ├── hands/          # HAND.toml manifest parsing + built-in hands registry

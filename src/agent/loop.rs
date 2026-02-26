@@ -616,12 +616,13 @@ impl AgentLoop {
                 }
 
                 let context_limit = self.config.compaction.context_limit;
+                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
                 let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
                     session.messages,
                     context_limit,
                     urgency,
-                    8,    // keep_recent for tier 1
-                    5120, // 5KB tool result budget for tier 2
+                    8,               // keep_recent for tier 1
+                    tool_result_cap, // tool result budget for tier 2
                 );
                 if tier > 0 {
                     debug!(
@@ -1120,12 +1121,13 @@ impl AgentLoop {
                 }
 
                 let context_limit = self.config.compaction.context_limit;
+                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
                 let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
                     session.messages,
                     context_limit,
                     urgency,
-                    8,    // keep_recent for tier 1
-                    5120, // 5KB tool result budget for tier 2
+                    8,               // keep_recent for tier 1
+                    tool_result_cap, // tool result budget for tier 2
                 );
                 if tier > 0 {
                     debug!(

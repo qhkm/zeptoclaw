@@ -51,7 +51,7 @@ impl ConfigWatcher {
 
             let current = read_mtime(&self.path);
             let changed = match (self.last_mtime, current) {
-                (Some(prev), Some(next)) => next > prev,
+                (Some(prev), Some(next)) => next != prev,
                 (None, Some(_)) => true,
                 _ => false,
             };

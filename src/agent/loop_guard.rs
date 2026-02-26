@@ -32,9 +32,11 @@ pub struct LoopGuard {
 
 impl LoopGuard {
     pub fn new(window: usize, repetition_threshold: usize, max_loops_detected: usize) -> Self {
+        let repetition_threshold = repetition_threshold.max(2);
+        let window = window.max(repetition_threshold);
         Self {
-            window: window.max(1),
-            repetition_threshold: repetition_threshold.max(2),
+            window,
+            repetition_threshold,
             max_loops_detected: max_loops_detected.max(1),
             recent_hashes: VecDeque::new(),
             loops_detected: 0,

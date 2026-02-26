@@ -360,8 +360,8 @@ pub fn try_recover_context_with_urgency(
                 return (recovered, 1);
             }
 
-            let recovered =
-                shrink_tool_results_progressive(recovered, (tool_result_budget / 2).max(1024), 2);
+            let emergency_budget = (tool_result_budget / 2).max(1).min(tool_result_budget);
+            let recovered = shrink_tool_results_progressive(recovered, emergency_budget, 2);
             let estimated = ContextMonitor::estimate_tokens(&recovered);
             if (estimated as f64) <= target {
                 return (recovered, 2);

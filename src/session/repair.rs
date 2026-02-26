@@ -89,25 +89,31 @@ fn remove_empty_messages(messages: Vec<Message>) -> (Vec<Message>, usize) {
 fn fix_role_alternation(messages: Vec<Message>) -> (Vec<Message>, usize) {
     let mut fixed = 0;
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
-    let mut last_dialog_role: Option<Role> = None;
 
-    for msg in messages {
+    for mut msg in messages {
         match msg.role {
             Role::User | Role::Assistant => {
-                if last_dialog_role.as_ref() == Some(&msg.role) {
-                    // Merge content into the previous same-role message instead of dropping
-                    if let Some(prev) = out.iter_mut().rev().find(|m| m.role == msg.role) {
+                // Only merge truly consecutive same-role dialog messages.
+                if let Some(prev) = out.last_mut() {
+                    if prev.role == msg.role {
                         if !msg.content.is_empty() {
                             if !prev.content.is_empty() {
                                 prev.content.push('\n');
                             }
                             prev.content.push_str(&msg.content);
                         }
+                        // Preserve tool_calls when merging assistant messages
+                        if msg.role == Role::Assistant {
+                            if let Some(mut calls) = msg.tool_calls.take() {
+                                prev.tool_calls
+                                    .get_or_insert_with(Vec::new)
+                                    .append(&mut calls);
+                            }
+                        }
+                        fixed += 1;
+                        continue;
                     }
-                    fixed += 1;
-                    continue;
                 }
-                last_dialog_role = Some(msg.role.clone());
                 out.push(msg);
             }
             Role::System | Role::Tool => out.push(msg),
@@ -126,7 +132,7 @@ fn remove_consecutive_duplicates(messages: Vec<Message>) -> (Vec<Message>, usize
             prev.role == msg.role
                 && prev.content == msg.content
                 && prev.tool_call_id == msg.tool_call_id
-                && prev.tool_calls.is_some() == msg.tool_calls.is_some()
+                && prev.tool_calls == msg.tool_calls
         });
         if duplicate.unwrap_or(false) {
             removed += 1;
