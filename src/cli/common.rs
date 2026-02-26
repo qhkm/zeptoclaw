@@ -31,13 +31,13 @@ use zeptoclaw::tools::delegate::DelegateTool;
 use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
+#[cfg(feature = "google")]
+use zeptoclaw::tools::GoogleTool;
 use zeptoclaw::tools::{
     DdgSearchTool, EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool,
     InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
     R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
-#[cfg(feature = "google")]
-use zeptoclaw::tools::GoogleTool;
 
 /// Read a line from stdin, trimming whitespace.
 pub(crate) fn read_line() -> Result<String> {
@@ -180,6 +180,8 @@ fn provider_from_runtime_selection(
 struct RuntimeProviderCandidate {
     name: &'static str,
     provider: Box<dyn LLMProvider>,
+    /// Per-provider model override from config.
+    model: Option<String>,
 }
 
 fn apply_fallback_preference(
@@ -236,6 +238,7 @@ fn build_runtime_provider_chain(
             candidates.push(RuntimeProviderCandidate {
                 name: selection.name,
                 provider,
+                model: selection.model.clone(),
             });
         } else {
             warn!(
@@ -271,8 +274,10 @@ fn build_runtime_provider_chain(
 
         for candidate in ordered_iter {
             provider_names.push(candidate.name);
-            provider_chain = Box::new(FallbackProvider::new(provider_chain, candidate.provider))
-                as Box<dyn LLMProvider>;
+            provider_chain = Box::new(
+                FallbackProvider::new(provider_chain, candidate.provider)
+                    .with_fallback_model(candidate.model.clone()),
+            ) as Box<dyn LLMProvider>;
         }
 
         return Some((provider_chain, provider_names));

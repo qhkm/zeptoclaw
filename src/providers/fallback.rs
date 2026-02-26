@@ -160,6 +160,11 @@ pub struct FallbackProvider {
     circuit_breaker: CircuitBreaker,
     /// Per-reason cooldown tracker for smarter provider skipping.
     cooldown: CooldownTracker,
+    /// Optional model override for the fallback provider.
+    /// When set, the fallback provider uses this model instead of the
+    /// original request model. Enables cross-provider model mapping
+    /// (e.g., primary uses "claude-sonnet-4-5-20250929", fallback uses "gpt-5.1").
+    fallback_model: Option<String>,
 }
 
 impl fmt::Debug for FallbackProvider {
@@ -187,7 +192,18 @@ impl FallbackProvider {
             composite_name,
             circuit_breaker: CircuitBreaker::new(3, 30),
             cooldown: CooldownTracker::new(),
+            fallback_model: None,
         }
+    }
+
+    /// Set an optional model override for the fallback provider.
+    ///
+    /// When set, the fallback provider will use this model instead of the
+    /// original request model. This enables cross-provider model mapping
+    /// (e.g., primary uses Claude, fallback uses OpenAI with a different model).
+    pub fn with_fallback_model(mut self, model: Option<String>) -> Self {
+        self.fallback_model = model;
+        self
     }
 }
 
@@ -218,7 +234,11 @@ impl LLMProvider for FallbackProvider {
                 fallback = self.fallback.name(),
                 "Circuit open or cooldown active: skipping primary, using fallback directly"
             );
-            return self.fallback.chat(messages, tools, model, options).await;
+            let effective_model = self.fallback_model.as_deref().or(model);
+            return self
+                .fallback
+                .chat(messages, tools, effective_model, options)
+                .await;
         }
 
         // Closed or HalfOpen -- try the primary provider.
@@ -257,7 +277,10 @@ impl LLMProvider for FallbackProvider {
                         ?reason,
                         "Primary provider failed, falling back"
                     );
-                    self.fallback.chat(messages, tools, model, options).await
+                    let effective_model = self.fallback_model.as_deref().or(model);
+                    self.fallback
+                        .chat(messages, tools, effective_model, options)
+                        .await
                 } else {
                     warn!(
                         primary = self.primary.name(),
@@ -287,9 +310,10 @@ impl LLMProvider for FallbackProvider {
                 fallback = self.fallback.name(),
                 "Circuit open or cooldown active: skipping primary streaming, using fallback directly"
             );
+            let effective_model = self.fallback_model.as_deref().or(model);
             return self
                 .fallback
-                .chat_stream(messages, tools, model, options)
+                .chat_stream(messages, tools, effective_model, options)
                 .await;
         }
 
@@ -329,8 +353,9 @@ impl LLMProvider for FallbackProvider {
                         ?reason,
                         "Primary provider streaming failed, falling back"
                     );
+                    let effective_model = self.fallback_model.as_deref().or(model);
                     self.fallback
-                        .chat_stream(messages, tools, model, options)
+                        .chat_stream(messages, tools, effective_model, options)
                         .await
                 } else {
                     warn!(
@@ -961,6 +986,151 @@ mod tests {
             "primary should be skipped while in cooldown"
         );
         assert_eq!(fallback_calls.load(Ordering::SeqCst), 2);
+    }
+
+    // ====================================================================
+    // Fallback model override tests
+    // ====================================================================
+
+    /// A provider that captures the model parameter passed to `chat()`.
+    struct ModelCapturingProvider {
+        name: &'static str,
+        captured_model: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl fmt::Debug for ModelCapturingProvider {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ModelCapturingProvider")
+                .field("name", &self.name)
+                .finish()
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for ModelCapturingProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn default_model(&self) -> &str {
+            "capturing-model"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            *self.captured_model.lock().unwrap() = model.map(String::from);
+            Ok(LLMResponse::text(&format!("success from {}", self.name)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fallback_uses_fallback_model_when_set() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+
+        let provider = FallbackProvider::new(
+            Box::new(FailProvider { name: "primary" }),
+            Box::new(ModelCapturingProvider {
+                name: "fallback",
+                captured_model: Arc::clone(&captured),
+            }),
+        )
+        .with_fallback_model(Some("nvidia/llama-3.3-70b".into()));
+
+        let result = provider
+            .chat(
+                vec![],
+                vec![],
+                Some("gemini-2.5-pro"),
+                ChatOptions::default(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let model = captured.lock().unwrap().clone();
+        assert_eq!(
+            model,
+            Some("nvidia/llama-3.3-70b".to_string()),
+            "fallback should receive the fallback_model, not the original model"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fallback_uses_original_model_when_no_override() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+
+        let provider = FallbackProvider::new(
+            Box::new(FailProvider { name: "primary" }),
+            Box::new(ModelCapturingProvider {
+                name: "fallback",
+                captured_model: Arc::clone(&captured),
+            }),
+        );
+
+        let result = provider
+            .chat(
+                vec![],
+                vec![],
+                Some("gemini-2.5-pro"),
+                ChatOptions::default(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let model = captured.lock().unwrap().clone();
+        assert_eq!(
+            model,
+            Some("gemini-2.5-pro".to_string()),
+            "fallback should receive the original model when no fallback_model is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fallback_model_used_on_circuit_open() {
+        let primary_calls = Arc::new(AtomicU32::new(0));
+        let captured = Arc::new(std::sync::Mutex::new(None));
+
+        let provider = FallbackProvider::new(
+            Box::new(CountingFailProvider {
+                name: "primary",
+                call_count: Arc::clone(&primary_calls),
+            }),
+            Box::new(ModelCapturingProvider {
+                name: "fallback",
+                captured_model: Arc::clone(&captured),
+            }),
+        )
+        .with_fallback_model(Some("fallback-model".into()));
+
+        // First call: primary fails, triggers cooldown, falls back
+        let _ = provider
+            .chat(vec![], vec![], Some("original"), ChatOptions::default())
+            .await;
+
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+
+        // Second call: primary is in cooldown, goes directly to fallback
+        let result = provider
+            .chat(vec![], vec![], Some("original"), ChatOptions::default())
+            .await;
+
+        assert!(result.is_ok());
+        // Primary should NOT have been called again (cooldown active)
+        assert_eq!(
+            primary_calls.load(Ordering::SeqCst),
+            1,
+            "primary should be skipped while in cooldown"
+        );
+        let model = captured.lock().unwrap().clone();
+        assert_eq!(
+            model,
+            Some("fallback-model".to_string()),
+            "fallback should receive fallback_model on circuit-open path"
+        );
     }
 
     #[tokio::test]

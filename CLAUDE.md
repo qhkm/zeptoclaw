@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2567, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (27 ignored)
+# lib: 2590, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -328,6 +328,7 @@ LLM provider abstraction via `LLMProvider` trait:
 - `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM)
 - `RetryProvider` - Decorator: exponential backoff on 429/5xx with structured `ProviderError` classification
 - `FallbackProvider` - Decorator: primary → secondary auto-failover with circuit breaker (Closed/Open/HalfOpen)
+- Per-provider model mapping: `ProviderConfig.model` overrides `agents.defaults.model` per provider; `FallbackProvider` swaps model on failover via `with_fallback_model()`
 - `ProviderError` enum: Auth, RateLimit, Billing, ServerError, InvalidRequest, ModelNotFound, Timeout — enables smart retry/fallback
 - Runtime provider assembly in `create_agent()`: resolves configured runtime providers in registry order, builds fallback chain only when `providers.fallback.enabled`, honors `providers.fallback.provider` as preferred first fallback, and optionally wraps the chain with `RetryProvider` (`providers.retry.*`)
 - `StreamEvent` enum + `chat_stream()` on LLMProvider trait for token-by-token streaming
@@ -480,6 +481,7 @@ Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_RETRY_BUDGET_MS` — total wall-clock retry budget in ms, 0 = unlimited (default: 45000)
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_ENABLED` — enable fallback provider (default: false)
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_PROVIDER` — fallback provider name
+- `ZEPTOCLAW_PROVIDERS_<NAME>_MODEL` — per-provider model override (e.g. `ZEPTOCLAW_PROVIDERS_NVIDIA_MODEL=nvidia/llama-3.3-70b`); used instead of `agents.defaults.model` for this provider in fallback chains
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET` — per-session token budget (default: 0 = unlimited)
 - `ZEPTOCLAW_SAFETY_ENABLED` — enable safety layer (default: true)
 - `ZEPTOCLAW_SAFETY_LEAK_DETECTION_ENABLED` — enable secret leak detection (default: true)
@@ -549,7 +551,7 @@ cargo build --release
 ## Testing
 
 ```bash
-# Unit tests (2430 tests)
+# Unit tests (2590 tests)
 cargo test --lib
 
 # Main binary tests (91 tests)

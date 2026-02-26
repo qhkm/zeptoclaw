@@ -1038,6 +1038,10 @@ pub struct ProviderConfig {
     /// Authentication method: "api_key" (default), "oauth", or "auto"
     #[serde(default)]
     pub auth_method: Option<String>,
+    /// Per-provider model override. When set, this model is used instead of
+    /// `agents.defaults.model` when this provider is selected (e.g. in fallback chains).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl ProviderConfig {
@@ -2394,6 +2398,31 @@ mod tests {
         assert_eq!(config.access_token.as_deref(), Some("ya29.test"));
         assert_eq!(config.default_calendar, "work");
         assert_eq!(config.max_search_results, 50);
+    }
+
+    #[test]
+    fn test_provider_config_model_default_is_none() {
+        let config = ProviderConfig::default();
+        assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_model_deserialize() {
+        let json = r#"{
+            "api_key": "sk-test",
+            "model": "gpt-4o"
+        }"#;
+        let config: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(config.model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_provider_config_model_absent() {
+        let json = r#"{"api_key": "sk-test"}"#;
+        let config: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("sk-test"));
+        assert!(config.model.is_none());
     }
 }
 
