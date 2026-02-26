@@ -361,6 +361,62 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // Per-provider model overrides
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
+            self.providers
+                .anthropic
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_MODEL") {
+            self.providers
+                .openai
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_GEMINI_MODEL") {
+            self.providers
+                .gemini
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NVIDIA_MODEL") {
+            self.providers
+                .nvidia
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENROUTER_MODEL") {
+            self.providers
+                .openrouter
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_GROQ_MODEL") {
+            self.providers
+                .groq
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OLLAMA_MODEL") {
+            self.providers
+                .ollama
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VLLM_MODEL") {
+            self.providers
+                .vllm
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL") {
+            self.providers
+                .zhipu
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+
         // Provider retry behavior
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_RETRY_ENABLED") {
             if let Ok(enabled) = val.parse() {
@@ -1506,5 +1562,76 @@ mod tests {
         config.apply_env_overrides();
         assert!(config.agents.defaults.compact_tools);
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_COMPACT_TOOLS");
+    }
+
+    #[test]
+    fn test_env_override_per_provider_model() {
+        // Use all provider model env vars to verify they are wired correctly
+        let vars = [
+            (
+                "ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL",
+                "claude-opus-4-20250514",
+            ),
+            ("ZEPTOCLAW_PROVIDERS_OPENAI_MODEL", "gpt-5.1"),
+            ("ZEPTOCLAW_PROVIDERS_GEMINI_MODEL", "gemini-2.0-flash"),
+            ("ZEPTOCLAW_PROVIDERS_NVIDIA_MODEL", "meta/llama-3.3-70b"),
+            (
+                "ZEPTOCLAW_PROVIDERS_OPENROUTER_MODEL",
+                "anthropic/claude-opus-4-20250514",
+            ),
+            ("ZEPTOCLAW_PROVIDERS_GROQ_MODEL", "llama-3.3-70b"),
+            ("ZEPTOCLAW_PROVIDERS_OLLAMA_MODEL", "mistral:latest"),
+            ("ZEPTOCLAW_PROVIDERS_VLLM_MODEL", "meta-llama/Llama-3"),
+            ("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL", "glm-4"),
+        ];
+
+        for (key, val) in &vars {
+            std::env::set_var(key, val);
+        }
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        assert_eq!(
+            config.providers.anthropic.as_ref().unwrap().model,
+            Some("claude-opus-4-20250514".to_string())
+        );
+        assert_eq!(
+            config.providers.openai.as_ref().unwrap().model,
+            Some("gpt-5.1".to_string())
+        );
+        assert_eq!(
+            config.providers.gemini.as_ref().unwrap().model,
+            Some("gemini-2.0-flash".to_string())
+        );
+        assert_eq!(
+            config.providers.nvidia.as_ref().unwrap().model,
+            Some("meta/llama-3.3-70b".to_string())
+        );
+        assert_eq!(
+            config.providers.openrouter.as_ref().unwrap().model,
+            Some("anthropic/claude-opus-4-20250514".to_string())
+        );
+        assert_eq!(
+            config.providers.groq.as_ref().unwrap().model,
+            Some("llama-3.3-70b".to_string())
+        );
+        assert_eq!(
+            config.providers.ollama.as_ref().unwrap().model,
+            Some("mistral:latest".to_string())
+        );
+        assert_eq!(
+            config.providers.vllm.as_ref().unwrap().model,
+            Some("meta-llama/Llama-3".to_string())
+        );
+        assert_eq!(
+            config.providers.zhipu.as_ref().unwrap().model,
+            Some("glm-4".to_string())
+        );
+
+        // Clean up
+        for (key, _) in &vars {
+            std::env::remove_var(key);
+        }
     }
 }
