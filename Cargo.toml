@@ -1,6 +1,6 @@
 [package]
 name = "zeptoclaw"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
@@ -183,10 +183,10 @@ quick-xml = { version = "0.36", optional = true }
 # =============================================================================
 # GOOGLE WORKSPACE (optional, --features google)
 # =============================================================================
-gog-gmail    = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
-gog-calendar = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
-gog-auth     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
-gog-core     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
+gog-gmail    = { git = "https://github.com/qhkm/gogcli-rs", version = "0.1", optional = true }
+gog-calendar = { git = "https://github.com/qhkm/gogcli-rs", version = "0.1", optional = true }
+gog-auth     = { git = "https://github.com/qhkm/gogcli-rs", version = "0.1", optional = true }
+gog-core     = { git = "https://github.com/qhkm/gogcli-rs", version = "0.1", optional = true }
 
 # =============================================================================
 # API SERVER (panel — optional, feature-gated)
