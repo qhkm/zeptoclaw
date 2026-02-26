@@ -17,6 +17,7 @@ pub mod memory;
 pub mod migrate;
 pub mod onboard;
 pub mod pair;
+#[cfg(feature = "panel")]
 pub mod panel;
 pub mod secrets;
 pub mod skills;
@@ -175,6 +176,7 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
+    #[cfg(feature = "panel")]
     /// Start the control panel (API server + dashboard)
     Panel {
         /// Panel subcommand (install, auth, uninstall). Omit to start.
@@ -567,6 +569,7 @@ pub async fn run() -> Result<()> {
         Some(Commands::Pair { action }) => {
             pair::cmd_pair(action).await?;
         }
+        #[cfg(feature = "panel")]
         Some(Commands::Panel {
             action,
             dev,

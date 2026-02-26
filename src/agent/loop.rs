@@ -239,6 +239,7 @@ pub struct AgentLoop {
     /// Present only when `config.pairing.enabled` is true.
     pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
     /// Optional panel event bus for real-time dashboard streaming.
+    #[cfg(feature = "panel")]
     event_bus: Option<crate::api::events::EventBus>,
 }
 
@@ -338,6 +339,7 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            #[cfg(feature = "panel")]
             event_bus: None,
         }
     }
@@ -400,6 +402,7 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            #[cfg(feature = "panel")]
             event_bus: None,
         }
     }
@@ -791,6 +794,7 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            #[cfg(feature = "panel")]
             let event_bus_clone = self.event_bus.clone();
             let is_dry_run = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode = self.agent_mode;
@@ -817,6 +821,7 @@ impl AgentLoop {
                     let safety = safety_layer.clone();
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    #[cfg(feature = "panel")]
                     let event_bus = event_bus_clone.clone();
                     let dry_run = is_dry_run;
                     let agent_mode = current_agent_mode;
@@ -894,6 +899,7 @@ impl AgentLoop {
                                 phase: ToolFeedbackPhase::Starting,
                             });
                         }
+                        #[cfg(feature = "panel")]
                         if let Some(bus) = &event_bus {
                             bus.send(crate::api::events::PanelEvent::ToolStarted {
                                 tool: name.clone(),
@@ -914,6 +920,7 @@ impl AgentLoop {
                                             phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
                                         });
                                     }
+                                    #[cfg(feature = "panel")]
                                     if let Some(bus) = &event_bus {
                                         bus.send(crate::api::events::PanelEvent::ToolDone {
                                             tool: name.clone(),
@@ -952,6 +959,7 @@ impl AgentLoop {
                                             },
                                         });
                                     }
+                                    #[cfg(feature = "panel")]
                                     if let Some(bus) = &event_bus {
                                         bus.send(crate::api::events::PanelEvent::ToolFailed {
                                             tool: name.clone(),
@@ -1249,6 +1257,7 @@ impl AgentLoop {
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
+            #[cfg(feature = "panel")]
             let event_bus_clone_stream = self.event_bus.clone();
             let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode_stream = self.agent_mode;
@@ -1273,6 +1282,7 @@ impl AgentLoop {
                     let safety = safety_layer_stream.clone();
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
+                    #[cfg(feature = "panel")]
                     let event_bus = event_bus_clone_stream.clone();
                     let dry_run = is_dry_run_stream;
                     let agent_mode = current_agent_mode_stream;
@@ -1336,6 +1346,7 @@ impl AgentLoop {
                                 phase: ToolFeedbackPhase::Starting,
                             });
                         }
+                        #[cfg(feature = "panel")]
                         if let Some(bus) = &event_bus {
                             bus.send(crate::api::events::PanelEvent::ToolStarted {
                                 tool: name.clone(),
@@ -1385,6 +1396,7 @@ impl AgentLoop {
                                 });
                             }
                         }
+                        #[cfg(feature = "panel")]
                         if let Some(bus) = &event_bus {
                             if success {
                                 bus.send(crate::api::events::PanelEvent::ToolDone {
@@ -2061,6 +2073,7 @@ impl AgentLoop {
     }
 
     /// Set the panel event bus for real-time dashboard events.
+    #[cfg(feature = "panel")]
     pub fn set_event_bus(&mut self, bus: crate::api::events::EventBus) {
         self.event_bus = Some(bus);
     }
@@ -2866,6 +2879,7 @@ mod tests {
         assert!(!needs_sequential_execution(&reg, &calls).await);
     }
 
+    #[cfg(feature = "panel")]
     #[tokio::test]
     async fn test_event_bus_emissions() {
         let bus = crate::api::events::EventBus::new(16);

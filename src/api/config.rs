@@ -1,47 +1,11 @@
 //! Panel configuration types.
+//!
+//! The canonical definitions of [`PanelConfig`] and [`AuthMode`] live in
+//! [`crate::config::types`] so that config deserialization works regardless of
+//! whether the `panel` feature is enabled.  This module re-exports them for
+//! backward compatibility within the `api` crate.
 
-use serde::{Deserialize, Serialize};
-
-/// Authentication mode for the panel.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthMode {
-    /// Bearer token auth (default) — no login screen.
-    #[default]
-    Token,
-    /// Username/password login with JWT session.
-    Password,
-    /// No authentication (localhost trust only).
-    None,
-}
-
-/// Panel (control panel) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PanelConfig {
-    /// Whether the panel is enabled.
-    pub enabled: bool,
-    /// Port for the panel frontend (static files).
-    pub port: u16,
-    /// Port for the API server.
-    pub api_port: u16,
-    /// Authentication mode.
-    pub auth_mode: AuthMode,
-    /// Bind address (default: 127.0.0.1).
-    pub bind: String,
-}
-
-impl Default for PanelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            port: 9092,
-            api_port: 9091,
-            auth_mode: AuthMode::Token,
-            bind: "127.0.0.1".to_string(),
-        }
-    }
-}
+pub use crate::config::{AuthMode, PanelConfig};
 
 #[cfg(test)]
 mod tests {

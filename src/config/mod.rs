@@ -257,7 +257,7 @@ impl Config {
             self.transcription.enabled = val == "true" || val == "1";
         }
 
-        // Panel
+        // Panel (env overrides always applied — PanelConfig is always present in Config)
         if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_ENABLED") {
             self.panel.enabled = val.to_lowercase() == "true";
         }
