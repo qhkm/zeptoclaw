@@ -373,9 +373,7 @@ mod tests {
         let config = config.unwrap();
         assert_eq!(config.provider, "google");
         assert!(config.authorize_url.contains("accounts.google.com"));
-        assert!(
-            config.token_url.contains("googleapis.com") || config.token_url.contains("google")
-        );
+        assert!(config.token_url.contains("googleapis.com") || config.token_url.contains("google"));
         assert!(!config.scopes.is_empty());
     }
 
