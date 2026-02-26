@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.6.0] - 2026-02-26
 
+### Added
+- **Loop guard** — SHA256 tool-call repetition detection with configurable window and threshold; warns then circuit-breaks on repeated patterns (#171)
+- **Emergency context trimming** — Three-tier compaction (normal 70% / emergency 90% / critical 95%) with reduced tool result budgets at higher tiers (#172)
+- **Session repair** — Auto-fixes orphan tool results, empty/duplicate messages, and role alternation issues before sending to LLM (#173)
+- **Config hot-reload** — Gateway polls config file mtime every 30s; applies provider, channel, and safety changes without restart (#174)
+- **Hands-lite** — `HAND.toml` agent profiles with bundled presets (researcher, coder, monitor); `hand list/activate/deactivate/status` CLI commands (#176)
+- **Telegram forum topic support** — Messages in forum topics include `thread_id` for thread-aware replies (#170)
+
 ### Fixed
 - RPi I2C block read/write method names corrected for rppal API (`block_read`/`block_write`)
+- Tool result budget now uses configured `max_tool_result_bytes` instead of hardcoded 5120 in emergency compaction (#177)
 
 ### Changed
 - Dependency upgrades: teloxide 0.12→0.17, tokio-tungstenite 0.21→0.28
+- Test count increased from 2,880+ to 2,900+
 
 ## [0.5.9] - 2026-02-26
 

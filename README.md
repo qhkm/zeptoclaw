@@ -37,7 +37,7 @@ We studied the best AI assistants — and their tradeoffs. OpenClaw's integratio
   <img src="https://img.shields.io/badge/binary-~6MB-3b82f6" alt="~6MB binary">
   <img src="https://img.shields.io/badge/startup-~50ms-3b82f6" alt="~50ms startup">
   <img src="https://img.shields.io/badge/RAM-~6MB-3b82f6" alt="~6MB RAM">
-  <img src="https://img.shields.io/badge/tests-2%2C880%2B-3b82f6" alt="2,880+ tests">
+  <img src="https://img.shields.io/badge/tests-2%2C900%2B-3b82f6" alt="2,900+ tests">
   <img src="https://img.shields.io/badge/providers-9-3b82f6" alt="9 providers">
 </p>
 
@@ -227,6 +227,11 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 | **Rich Health Endpoint** | `/health` with version, uptime, RSS, usage metrics, component checks |
 | **Telemetry** | Prometheus + JSON metrics export, structured logging, per-tenant tracing |
 | **Self-Update** | `zeptoclaw update` downloads latest release from GitHub |
+| **Loop Guard** | SHA256 tool-call repetition detection with circuit-breaker stop |
+| **Context Trimming** | Normal/emergency/critical compaction tiers (70%/90%/95%) for context window management |
+| **Session Repair** | Auto-fixes orphan tool results, empty/duplicate messages, and alternation issues |
+| **Config Hot-Reload** | Gateway polls config mtime every 30s and applies provider/channel/safety updates live |
+| **Hands-Lite** | `HAND.toml` agent profiles with bundled presets (researcher, coder, monitor) and `hand` CLI |
 | **Multi-Tenant** | Hundreds of tenants on one VPS — isolated workspaces, ~6MB RAM each |
 
 > **Full documentation** — [zeptoclaw.com/docs](https://zeptoclaw.com/docs/) covers configuration, environment variables, CLI reference, deployment guides, and more.
@@ -265,6 +270,12 @@ zeptoclaw update
 
 # Encrypt secrets in config
 zeptoclaw secrets encrypt
+
+# Manage agent hands (profiles)
+zeptoclaw hand list
+zeptoclaw hand activate researcher
+zeptoclaw hand deactivate
+zeptoclaw hand status
 ```
 
 ## Development
@@ -273,7 +284,7 @@ zeptoclaw secrets encrypt
 # Build
 cargo build
 
-# Run all tests (~2,880 total)
+# Run all tests (~2,900 total)
 cargo test
 
 # Lint and format (required before every PR)
