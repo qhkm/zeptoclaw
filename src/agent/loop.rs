@@ -238,6 +238,8 @@ pub struct AgentLoop {
     /// Optional pairing manager for device token validation.
     /// Present only when `config.pairing.enabled` is true.
     pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
+    /// Optional long-term memory handle for per-message memory injection.
+    ltm: Option<Arc<tokio::sync::Mutex<crate::memory::longterm::LongTermMemory>>>,
     /// Optional panel event bus for real-time dashboard streaming.
     #[cfg(feature = "panel")]
     event_bus: Option<crate::api::events::EventBus>,
@@ -339,6 +341,7 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            ltm: None,
             #[cfg(feature = "panel")]
             event_bus: None,
         }
@@ -402,8 +405,24 @@ impl AgentLoop {
             tool_feedback_tx: Arc::new(RwLock::new(None)),
             cache,
             pairing,
+            ltm: None,
             #[cfg(feature = "panel")]
             event_bus: None,
+        }
+    }
+
+    async fn build_memory_override(&self, user_input: &str) -> Option<String> {
+        let ltm = self.ltm.as_ref()?;
+        let guard = ltm.lock().await;
+        let memory = crate::memory::build_memory_injection(
+            &guard,
+            user_input,
+            crate::memory::MEMORY_INJECTION_BUDGET,
+        );
+        if memory.is_empty() {
+            None
+        } else {
+            Some(memory)
         }
     }
 
@@ -642,10 +661,13 @@ impl AgentLoop {
             }
         }
 
-        // Build messages with history
-        let messages = self
-            .context_builder
-            .build_messages(&session.messages, &msg.content);
+        // Build messages with history and per-message memory override.
+        let memory_override = self.build_memory_override(&msg.content).await;
+        let messages = self.context_builder.build_messages_with_memory_override(
+            &session.messages,
+            &msg.content,
+            memory_override.as_deref(),
+        );
 
         // Get tool definitions (short-lived read lock)
         let tool_definitions = {
@@ -1171,9 +1193,12 @@ impl AgentLoop {
             }
         }
 
-        let messages = self
-            .context_builder
-            .build_messages(&session.messages, &msg.content);
+        let memory_override = self.build_memory_override(&msg.content).await;
+        let messages = self.context_builder.build_messages_with_memory_override(
+            &session.messages,
+            &msg.content,
+            memory_override.as_deref(),
+        );
 
         let tool_definitions = {
             let tools = self.tools.read().await;
@@ -2070,6 +2095,14 @@ impl AgentLoop {
     /// Set tool feedback sender for CLI tool execution display.
     pub async fn set_tool_feedback(&self, tx: tokio::sync::mpsc::UnboundedSender<ToolFeedback>) {
         *self.tool_feedback_tx.write().await = Some(tx);
+    }
+
+    /// Set the long-term memory source for per-message prompt injection.
+    pub fn set_ltm(
+        &mut self,
+        ltm: Arc<tokio::sync::Mutex<crate::memory::longterm::LongTermMemory>>,
+    ) {
+        self.ltm = Some(ltm);
     }
 
     /// Set the panel event bus for real-time dashboard events.

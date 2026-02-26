@@ -449,6 +449,41 @@ impl ContextBuilder {
         Message::system(&content)
     }
 
+    /// Build system message with an optional memory context override.
+    ///
+    /// When `memory_override` is `Some`, it replaces the stored
+    /// `memory_context`. `Some("")` suppresses memory injection.
+    fn build_system_message_with_memory_override(&self, memory_override: Option<&str>) -> Message {
+        let mut content = String::new();
+        if let Some(ref soul) = self.soul_prompt {
+            content.push_str(soul);
+            content.push_str("\n\n");
+        }
+        content.push_str(&self.system_prompt);
+        if let Some(ref skills) = self.skills_prompt {
+            content.push_str("\n\n## Available Skills\n\n");
+            content.push_str(skills);
+        }
+        if let Some(ref ctx) = self.runtime_context {
+            if let Some(rendered) = ctx.render() {
+                content.push_str("\n\n");
+                content.push_str(&rendered);
+            }
+        }
+
+        let memory = match memory_override {
+            Some("") => None,
+            Some(memory) => Some(memory),
+            None => self.memory_context.as_deref(),
+        };
+        if let Some(memory) = memory {
+            content.push_str("\n\n");
+            content.push_str(memory);
+        }
+
+        Message::system(&content)
+    }
+
     /// Build the full message list for an LLM call.
     ///
     /// This constructs a message list with:
@@ -482,6 +517,34 @@ impl ContextBuilder {
         if !user_input.is_empty() {
             // Prepend timestamp envelope to user message so the LLM knows
             // exactly when this message arrived (prevents stale-time bugs).
+            let content = if let Some(ref ctx) = self.runtime_context {
+                if ctx.timezone.is_some() {
+                    let envelope = format_message_envelope();
+                    format!("{} {}", envelope, user_input)
+                } else {
+                    user_input.to_string()
+                }
+            } else {
+                user_input.to_string()
+            };
+            messages.push(Message::user(&content));
+        }
+        messages
+    }
+
+    /// Build the full message list with an optional per-message memory override.
+    ///
+    /// Works like `build_messages`, but `memory_override` can replace the
+    /// stored memory section for this specific message build.
+    pub fn build_messages_with_memory_override(
+        &self,
+        history: &[Message],
+        user_input: &str,
+        memory_override: Option<&str>,
+    ) -> Vec<Message> {
+        let mut messages = vec![self.build_system_message_with_memory_override(memory_override)];
+        messages.extend(history.iter().cloned());
+        if !user_input.is_empty() {
             let content = if let Some(ref ctx) = self.runtime_context {
                 if ctx.timezone.is_some() {
                     let envelope = format_message_envelope();
@@ -983,6 +1046,35 @@ mod tests {
         let runtime_pos = system.content.find("Runtime Context").unwrap();
         let memory_pos = system.content.find("## Memory").unwrap();
         assert!(runtime_pos < memory_pos);
+    }
+
+    #[test]
+    fn test_build_messages_with_memory_override_some() {
+        let builder = ContextBuilder::new()
+            .with_memory_context("## Memory\n\n### Pinned\n- old: data".to_string());
+        let override_ctx =
+            "## Memory\n\n### Pinned\n- user:name: Alice\n\n### Relevant\n- fact:project: ZeptoClaw";
+        let messages =
+            builder.build_messages_with_memory_override(&[], "Hello", Some(override_ctx));
+        assert!(messages[0].content.contains("fact:project: ZeptoClaw"));
+        assert!(!messages[0].content.contains("old: data"));
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_build_messages_with_memory_override_none_falls_back() {
+        let builder = ContextBuilder::new()
+            .with_memory_context("## Memory\n\n### Pinned\n- stored: value".to_string());
+        let messages = builder.build_messages_with_memory_override(&[], "Hello", None);
+        assert!(messages[0].content.contains("stored: value"));
+    }
+
+    #[test]
+    fn test_build_messages_with_memory_override_empty_string() {
+        let builder = ContextBuilder::new()
+            .with_memory_context("## Memory\n\n### Pinned\n- old: data".to_string());
+        let messages = builder.build_messages_with_memory_override(&[], "Hello", Some(""));
+        assert!(!messages[0].content.contains("## Memory"));
     }
 
     // ---- Memory system prompt tests ----
