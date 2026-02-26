@@ -34,6 +34,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "cache",
     "agent_mode",
     "pairing",
+    "panel",
     "health",
     "devices",
     "logging",

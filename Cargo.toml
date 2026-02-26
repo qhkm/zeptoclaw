@@ -185,6 +185,18 @@ gog-calendar = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
 gog-auth     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
 gog-core     = { git = "https://github.com/qhkm/gogcli-rs", optional = true }
 
+# =============================================================================
+# API SERVER (panel)
+# =============================================================================
+# Axum web framework for panel API server + WebSocket
+axum = { version = "0.8", features = ["ws"] }
+# Tower HTTP middleware (CORS, static file serving, tracing)
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+# JWT token generation/validation for panel auth
+jsonwebtoken = "9"
+# Password hashing for panel password auth mode
+bcrypt = "0.17"
+
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nusb = { version = "0.2", default-features = false, optional = true }
@@ -230,6 +242,7 @@ google = ["dep:gog-gmail", "dep:gog-calendar", "dep:gog-auth", "dep:gog-core"]
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
+tower = { version = "0.5", features = ["util"] }
 # Benchmarking framework
 criterion = { version = "0.5", features = ["async_tokio"] }
 
