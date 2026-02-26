@@ -242,6 +242,7 @@ google = ["dep:gog-gmail", "dep:gog-calendar", "dep:gog-auth", "dep:gog-core"]
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
+tower = { version = "0.5", features = ["util"] }
 # Benchmarking framework
 criterion = { version = "0.5", features = ["async_tokio"] }
 

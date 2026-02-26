@@ -63,7 +63,7 @@ pub async fn cmd_panel(
     }
 }
 
-/// Resolve the panel dist directory.
+/// Resolve the panel dist directory (for serving static assets).
 ///
 /// Checks two locations in order:
 /// 1. `./panel/dist/` — local repo checkout (dev mode)
@@ -76,6 +76,25 @@ fn resolve_panel_dir() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         let global = home.join(".zeptoclaw/panel/dist");
         if global.join("index.html").exists() {
+            return Some(global);
+        }
+    }
+    None
+}
+
+/// Resolve the panel source directory (for building — looks for `package.json`).
+///
+/// Checks two locations in order:
+/// 1. `./panel/` — local repo checkout (development)
+/// 2. `~/.zeptoclaw/panel/` — user-level installed source
+fn resolve_panel_source_dir() -> Option<PathBuf> {
+    let local = PathBuf::from("panel");
+    if local.join("package.json").exists() {
+        return Some(local);
+    }
+    if let Some(home) = dirs::home_dir() {
+        let global = home.join(".zeptoclaw/panel");
+        if global.join("package.json").exists() {
             return Some(global);
         }
     }
@@ -185,77 +204,149 @@ async fn cmd_start(
 }
 
 /// Install the panel.
-async fn cmd_install(download: bool, _rebuild: bool) -> Result<()> {
+async fn cmd_install(download: bool, rebuild: bool) -> Result<()> {
     if download {
         println!("Downloading pre-built panel assets...");
         // TODO: fetch from GitHub releases and extract to ~/.zeptoclaw/panel/dist/
         println!("Download not yet implemented. Use 'pnpm --dir panel build' manually.");
     } else {
-        println!("Building panel from source...");
+        println!("Installing ZeptoClaw Panel...\n");
 
-        // Verify Node.js is available
-        let node_check = tokio::process::Command::new("node")
+        // ------------------------------------------------------------------
+        // 1. Check Node.js >= 18
+        // ------------------------------------------------------------------
+        let node_output = tokio::process::Command::new("node")
             .arg("--version")
             .output()
             .await;
 
-        match node_check {
+        match node_output {
             Ok(output) if output.status.success() => {
-                let version = String::from_utf8_lossy(&output.stdout);
-                println!("Found Node.js {}", version.trim());
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+                // Parse "vMAJOR.MINOR.PATCH" → major integer.
+                let major: u32 = version
+                    .trim_start_matches('v')
+                    .split('.')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                if major < 18 {
+                    anyhow::bail!(
+                        "Node.js >= 18 required (found {}). \
+                         Install the LTS release from https://nodejs.org",
+                        version
+                    );
+                }
+
+                println!("  Node.js: {version}");
             }
             _ => {
-                anyhow::bail!("Node.js >= 18 is required. Install from https://nodejs.org");
+                anyhow::bail!(
+                    "Node.js not found. \
+                     Install Node.js >= 18 from https://nodejs.org"
+                );
             }
         }
 
-        // Verify pnpm is available, attempt corepack activation if not
-        let pnpm_check = tokio::process::Command::new("pnpm")
+        // ------------------------------------------------------------------
+        // 2. Check pnpm; enable via corepack if absent
+        // ------------------------------------------------------------------
+        let pnpm_output = tokio::process::Command::new("pnpm")
             .arg("--version")
             .output()
             .await;
-        let pnpm_ok = pnpm_check.map(|o| o.status.success()).unwrap_or(false);
-        if !pnpm_ok {
-            println!("pnpm not found. Attempting to enable via corepack...");
-            let _ = tokio::process::Command::new("corepack")
-                .args(["enable", "pnpm"])
+
+        match pnpm_output {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("  pnpm: {version}");
+            }
+            _ => {
+                println!("  pnpm not found, enabling via corepack...");
+                let corepack_status = tokio::process::Command::new("corepack")
+                    .args(["enable", "pnpm"])
+                    .status()
+                    .await;
+
+                match corepack_status {
+                    Ok(status) if status.success() => {
+                        println!("  pnpm enabled via corepack.");
+                    }
+                    _ => {
+                        anyhow::bail!(
+                            "Failed to enable pnpm via corepack. \
+                             Install pnpm manually: https://pnpm.io/installation"
+                        );
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 3. Locate panel source directory
+        // ------------------------------------------------------------------
+        let panel_dir = resolve_panel_source_dir().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Panel source not found (no package.json in ./panel/ or \
+                     ~/.zeptoclaw/panel/). Clone the repo or run from the \
+                     ZeptoClaw source directory."
+            )
+        })?;
+
+        println!("  Panel source: {}", panel_dir.display());
+
+        // ------------------------------------------------------------------
+        // 4. Check if already built and skip if rebuild is not requested
+        // ------------------------------------------------------------------
+        let dist_dir = panel_dir.join("dist");
+        let already_built = dist_dir.join("index.html").exists();
+
+        if already_built && !rebuild {
+            println!("\n  Panel is already installed. Use --rebuild to force a rebuild.");
+        } else {
+            // --------------------------------------------------------------
+            // 5. Install Node dependencies
+            // --------------------------------------------------------------
+            println!("\n  Installing dependencies...");
+            let install_status = tokio::process::Command::new("pnpm")
+                .arg("install")
+                .current_dir(&panel_dir)
                 .status()
-                .await;
-        }
+                .await
+                .with_context(|| "Failed to spawn pnpm install")?;
 
-        // Install dependencies
-        println!("Installing dependencies...");
-        let install = tokio::process::Command::new("pnpm")
-            .args(["install", "--dir", "panel"])
-            .status()
-            .await
-            .with_context(|| "Failed to run pnpm install")?;
+            if !install_status.success() {
+                anyhow::bail!("pnpm install failed in {}", panel_dir.display());
+            }
 
-        if !install.success() {
-            anyhow::bail!("pnpm install failed");
-        }
+            // --------------------------------------------------------------
+            // 6. Build the frontend
+            // --------------------------------------------------------------
+            println!("  Building frontend...");
+            let build_status = tokio::process::Command::new("pnpm")
+                .arg("build")
+                .current_dir(&panel_dir)
+                .status()
+                .await
+                .with_context(|| "Failed to spawn pnpm build")?;
 
-        // Build the panel
-        println!("Building panel...");
-        let build = tokio::process::Command::new("pnpm")
-            .args(["--dir", "panel", "build"])
-            .status()
-            .await
-            .with_context(|| "Failed to run pnpm build")?;
-
-        if !build.success() {
-            anyhow::bail!("Panel build failed");
+            if !build_status.success() {
+                anyhow::bail!("pnpm build failed in {}", panel_dir.display());
+            }
         }
     }
 
-    // Ensure an API token exists after install
+    // ------------------------------------------------------------------
+    // 7. Ensure an API token exists (generate + persist if missing)
+    // ------------------------------------------------------------------
     let tp = token_path();
     let token = ensure_api_token(&tp).await?;
 
-    println!();
-    println!("Panel installed successfully!");
-    println!("API token: {token}");
-    println!("Start with: zeptoclaw panel");
+    println!("\n  Panel installed successfully!");
+    println!("  API token: {token}");
+    println!("\n  Start with: zeptoclaw panel");
 
     Ok(())
 }
@@ -319,6 +410,41 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_panel_source_dir_missing() {
+        // In CI / test environments without a panel checkout, this returns None.
+        // The important invariant is that it does not panic.
+        let _ = resolve_panel_source_dir();
+    }
+
+    #[test]
+    fn test_resolve_panel_source_dir_local_package_json() {
+        // Create a temporary directory tree that mimics `./panel/package.json`
+        // and verify the function discovers it.
+        use std::env;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let panel_dir = tmp.path().join("panel");
+        std::fs::create_dir_all(&panel_dir).unwrap();
+        std::fs::write(panel_dir.join("package.json"), "{}").unwrap();
+
+        // Change CWD so "./panel/package.json" resolves inside `tmp`.
+        let original_cwd = env::current_dir().unwrap();
+        env::set_current_dir(tmp.path()).unwrap();
+
+        let found = resolve_panel_source_dir();
+
+        // Restore CWD regardless of assertion outcome.
+        env::set_current_dir(original_cwd).unwrap();
+
+        assert!(found.is_some(), "must find panel/package.json under CWD");
+        assert!(
+            found.unwrap().join("package.json").exists(),
+            "resolved dir must contain package.json"
+        );
+    }
+
+    #[test]
     fn test_token_path_contains_zeptoclaw() {
         let path = token_path();
         let s = path.to_str().unwrap();
@@ -330,6 +456,52 @@ mod tests {
             s.ends_with("panel.token"),
             "token file must be named panel.token"
         );
+    }
+
+    /// The Node.js version string parsing used in cmd_install must correctly
+    /// extract the major version component from the canonical "vMAJOR.MINOR.PATCH"
+    /// format emitted by `node --version`.
+    #[test]
+    fn test_node_version_major_parsing() {
+        let parse_major = |ver: &str| -> u32 {
+            ver.trim_start_matches('v')
+                .split('.')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+        };
+
+        assert_eq!(parse_major("v20.11.1"), 20);
+        assert_eq!(parse_major("v18.0.0"), 18);
+        assert_eq!(parse_major("v16.20.2"), 16);
+        assert_eq!(
+            parse_major("v22.3.0\n"),
+            22,
+            "trailing newline must be handled"
+        );
+        // Malformed / absent version falls back to 0, triggering the error path.
+        assert_eq!(parse_major("not-a-version"), 0);
+        assert_eq!(parse_major(""), 0);
+    }
+
+    #[test]
+    fn test_node_version_major_minimum_check() {
+        // Versions below 18 must be rejected.
+        let is_sufficient = |ver: &str| -> bool {
+            let major: u32 = ver
+                .trim()
+                .trim_start_matches('v')
+                .split('.')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            major >= 18
+        };
+
+        assert!(!is_sufficient("v17.9.1"), "v17 is below minimum");
+        assert!(!is_sufficient("v0.12.0"), "v0 is below minimum");
+        assert!(is_sufficient("v18.0.0"), "v18 meets minimum exactly");
+        assert!(is_sufficient("v20.11.1"), "v20 exceeds minimum");
     }
 
     #[tokio::test]

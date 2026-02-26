@@ -2,6 +2,7 @@
 
 use crate::api::config::PanelConfig;
 use crate::api::events::EventBus;
+use axum::middleware as axum_mw;
 use axum::routing::{get, post, put};
 use axum::Router;
 use std::path::PathBuf;
@@ -11,8 +12,21 @@ use tower_http::cors::CorsLayer;
 /// Shared state for all API handlers.
 #[derive(Clone)]
 pub struct AppState {
+    /// Static API token accepted on all protected endpoints.
     pub api_token: String,
+    /// Event bus for WebSocket broadcasts.
     pub event_bus: EventBus,
+    /// Optional bcrypt hash of the panel password.
+    ///
+    /// When `Some`, `POST /api/auth/login` is enabled and exchanges a valid
+    /// password for a short-lived HS256 JWT.  When `None`, the login endpoint
+    /// returns 404 and callers must use the static `api_token` directly.
+    pub password_hash: Option<String>,
+    /// Secret used to sign and verify HS256 JWTs.
+    ///
+    /// Generated randomly at startup via `uuid::Uuid::new_v4()` so it rotates
+    /// on every process restart, invalidating any previously issued JWTs.
+    pub jwt_secret: String,
 }
 
 impl AppState {
@@ -20,13 +34,21 @@ impl AppState {
         Self {
             api_token,
             event_bus,
+            password_hash: None,
+            jwt_secret: uuid::Uuid::new_v4().to_string(),
         }
     }
 }
 
 /// Build the axum router with all API routes.
 pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    // Wrap state in Arc once so it can be shared across both the middleware
+    // layer and the route handlers without a double-Arc.
+    let shared_state = Arc::new(state);
+
     let api = Router::new()
+        // Auth
+        .route("/api/auth/login", post(super::routes::auth::login))
         // Health & metrics
         .route("/api/health", get(super::routes::health::get_health))
         .route("/api/metrics", get(super::routes::metrics::get_metrics))
@@ -83,7 +105,11 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         // WebSocket
         .route("/ws/events", get(super::routes::ws::ws_events))
         .layer(CorsLayer::permissive()) // Tightened in security task
-        .with_state(Arc::new(state));
+        .layer(axum_mw::from_fn_with_state(
+            shared_state.clone(),
+            super::middleware::auth_middleware,
+        ))
+        .with_state(shared_state);
 
     if let Some(dir) = static_dir {
         api.fallback_service(tower_http::services::ServeDir::new(dir))
@@ -115,6 +141,18 @@ mod tests {
         let bus = EventBus::new(16);
         let state = AppState::new("test-token".into(), bus);
         assert_eq!(state.api_token, "test-token");
+        assert!(state.password_hash.is_none());
+        assert!(!state.jwt_secret.is_empty());
+    }
+
+    #[test]
+    fn test_app_state_jwt_secret_rotates() {
+        let bus1 = EventBus::new(4);
+        let bus2 = EventBus::new(4);
+        let s1 = AppState::new("tok".into(), bus1);
+        let s2 = AppState::new("tok".into(), bus2);
+        // Each instance generates a distinct secret.
+        assert_ne!(s1.jwt_secret, s2.jwt_secret);
     }
 
     #[test]
