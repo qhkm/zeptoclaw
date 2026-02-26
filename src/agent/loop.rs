@@ -60,6 +60,17 @@ async fn needs_sequential_execution(
     })
 }
 
+/// Propagate channel-specific routing metadata (e.g. `telegram_thread_id`)
+/// from an inbound message to an outbound message so that the response is
+/// delivered to the correct forum topic / thread.
+fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundMessage) {
+    if let Some(tid) = inbound.metadata.get("telegram_thread_id") {
+        outbound
+            .metadata
+            .insert("telegram_thread_id".to_string(), tid.clone());
+    }
+}
+
 /// Tool execution feedback event for CLI display.
 #[derive(Debug, Clone)]
 pub struct ToolFeedback {
@@ -703,6 +714,9 @@ impl AgentLoop {
             let run_sequential =
                 needs_sequential_execution(&self.tools, &response.tool_calls).await;
 
+            // Clone inbound metadata for routing propagation in tool `for_user` messages.
+            let inbound_metadata = msg.metadata.clone();
+
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -722,6 +736,7 @@ impl AgentLoop {
                     let dry_run = is_dry_run;
                     let agent_mode = current_agent_mode;
                     let bus_for_tools = Arc::clone(&self.bus);
+                    let inbound_meta = inbound_metadata.clone();
 
                     async move {
                         let args: serde_json::Value = match serde_json::from_str(&raw_args) {
@@ -811,11 +826,15 @@ impl AgentLoop {
                                     }
                                     // Send to user if tool opted in
                                     if let Some(ref user_msg) = output.for_user {
-                                        let outbound = crate::bus::OutboundMessage::new(
+                                        let mut outbound = crate::bus::OutboundMessage::new(
                                             ctx.channel.as_deref().unwrap_or(""),
                                             ctx.chat_id.as_deref().unwrap_or(""),
                                             user_msg,
                                         );
+                                        // Propagate routing metadata (e.g. telegram_thread_id)
+                                        if let Some(tid) = inbound_meta.get("telegram_thread_id") {
+                                            outbound.metadata.insert("telegram_thread_id".to_string(), tid.clone());
+                                        }
                                         let _ = bus_for_tools.publish_outbound(outbound).await;
                                     }
                                     (output.for_llm, !output.is_error)
@@ -1111,6 +1130,9 @@ impl AgentLoop {
             let run_sequential =
                 needs_sequential_execution(&self.tools, &response.tool_calls).await;
 
+            // Clone inbound metadata for routing propagation in tool `for_user` messages.
+            let inbound_metadata_stream = msg.metadata.clone();
+
             let tool_futures: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -1128,6 +1150,7 @@ impl AgentLoop {
                     let dry_run = is_dry_run_stream;
                     let agent_mode = current_agent_mode_stream;
                     let bus_for_tools = Arc::clone(&self.bus);
+                    let inbound_meta = inbound_metadata_stream.clone();
 
                     async move {
                         let args: serde_json::Value = serde_json::from_str(&raw_args)
@@ -1193,11 +1216,15 @@ impl AgentLoop {
                                 Ok(output) => {
                                     // Send to user if tool opted in
                                     if let Some(ref user_msg) = output.for_user {
-                                        let outbound = crate::bus::OutboundMessage::new(
+                                        let mut outbound = crate::bus::OutboundMessage::new(
                                             ctx.channel.as_deref().unwrap_or(""),
                                             ctx.chat_id.as_deref().unwrap_or(""),
                                             user_msg,
                                         );
+                                        // Propagate routing metadata (e.g. telegram_thread_id)
+                                        if let Some(tid) = inbound_meta.get("telegram_thread_id") {
+                                            outbound.metadata.insert("telegram_thread_id".to_string(), tid.clone());
+                                        }
                                         let _ = bus_for_tools.publish_outbound(outbound).await;
                                     }
                                     (output.for_llm, !output.is_error)
@@ -1598,7 +1625,8 @@ impl AgentLoop {
                     "Request completed"
                 );
 
-                let outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
+                let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
+                propagate_routing_metadata(&mut outbound, msg);
                 if let Err(e) = self.bus.publish_outbound(outbound).await {
                     error!("Failed to publish outbound message: {}", e);
                     if let Some(metrics) = usage_metrics.as_ref() {
@@ -1614,8 +1642,9 @@ impl AgentLoop {
                     metrics.record_error();
                 }
 
-                let error_msg =
+                let mut error_msg =
                     OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("Error: {}", e));
+                propagate_routing_metadata(&mut error_msg, msg);
                 self.bus.publish_outbound(error_msg).await.ok();
                 false
             }
@@ -1626,7 +1655,7 @@ impl AgentLoop {
                     metrics.record_error();
                 }
 
-                let timeout_msg = OutboundMessage::new(
+                let mut timeout_msg = OutboundMessage::new(
                     &msg.channel,
                     &msg.chat_id,
                     &format!(
@@ -1634,6 +1663,7 @@ impl AgentLoop {
                         timeout_secs
                     ),
                 );
+                propagate_routing_metadata(&mut timeout_msg, msg);
                 self.bus.publish_outbound(timeout_msg).await.ok();
                 false
             }
@@ -1733,11 +1763,12 @@ impl AgentLoop {
                                     channel = %msg.channel,
                                     "Rejected unpaired device (pairing enabled)"
                                 );
-                                let rejection = OutboundMessage::new(
+                                let mut rejection = OutboundMessage::new(
                                     &msg.channel,
                                     &msg.chat_id,
                                     "Access denied: device not paired. Use `zeptoclaw pair new` to generate a pairing code.",
                                 );
+                                propagate_routing_metadata(&mut rejection, &msg);
                                 if let Err(e) = self.bus.publish_outbound(rejection).await {
                                     error!("Failed to publish pairing rejection: {}", e);
                                 }
