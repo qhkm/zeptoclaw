@@ -1,9 +1,25 @@
-function App() {
+import { BrowserRouter, Routes, Route } from 'react-router'
+import Layout from './components/Layout'
+import Dashboard from './pages/Dashboard'
+import Logs from './pages/Logs'
+import Sessions from './pages/Sessions'
+import CronRoutines from './pages/CronRoutines'
+import Kanban from './pages/Kanban'
+import Agents from './pages/Agents'
+
+export default function App() {
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center">
-      <h1 className="text-2xl font-bold">ZeptoClaw Panel</h1>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="logs" element={<Logs />} />
+          <Route path="sessions" element={<Sessions />} />
+          <Route path="cron" element={<CronRoutines />} />
+          <Route path="kanban" element={<Kanban />} />
+          <Route path="agents" element={<Agents />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
   )
 }
-
-export default App
