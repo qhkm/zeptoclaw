@@ -35,6 +35,17 @@ pub struct AppState {
     /// holds it for the lifetime of the connection; once the semaphore is
     /// exhausted the handler returns HTTP 503.
     pub ws_semaphore: Arc<tokio::sync::Semaphore>,
+    // ── Real data stores (all optional — set when wired from gateway/CLI) ───
+    /// Session manager for reading and deleting conversation sessions.
+    pub session_manager: Option<Arc<crate::session::SessionManager>>,
+    /// Kanban task store for full CRUD on board tasks.
+    pub task_store: Option<Arc<crate::api::tasks::TaskStore>>,
+    /// Health registry for live component check data.
+    pub health_registry: Option<Arc<crate::health::HealthRegistry>>,
+    /// Lock-free usage counters (requests, tokens, tool calls, errors).
+    pub usage_metrics: Option<Arc<crate::health::UsageMetrics>>,
+    /// Per-tool call stats and token tracking for the current session.
+    pub metrics_collector: Option<Arc<crate::utils::metrics::MetricsCollector>>,
 }
 
 impl AppState {
@@ -48,6 +59,11 @@ impl AppState {
             password_hash: None,
             jwt_secret: uuid::Uuid::new_v4().to_string(),
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(Self::MAX_WS_CONNECTIONS)),
+            session_manager: None,
+            task_store: None,
+            health_registry: None,
+            usage_metrics: None,
+            metrics_collector: None,
         }
     }
 }
