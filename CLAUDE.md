@@ -159,7 +159,11 @@ Skip issue creation only for trivial changes (typo fixes, one-line tweaks).
 ### 3. Session End — Link and close
 
 - If creating a PR: include `Closes #N` in the PR body
-- Merge PRs with: `gh pr merge <number> --squash --delete-branch --admin`
+- **NEVER merge PRs without explicit user approval.** After creating a PR:
+  1. Wait for CI to pass
+  2. Present the PR URL to the user for review
+  3. Only merge after the user explicitly says to merge
+- Merge command (after user approval): `gh pr merge <number> --squash --delete-branch --admin`
 - If committing directly to main: close the issue with `gh issue close N --comment "Done in <commit-sha>"`
 - Update `CLAUDE.md` and `AGENTS.md` per the post-implementation checklist
 

@@ -61,6 +61,64 @@ async fn needs_sequential_execution(
     })
 }
 
+/// Check the loop guard for repeated tool-call patterns.
+///
+/// Returns `true` if the circuit breaker tripped and the caller should break.
+fn check_loop_guard(
+    guard: &mut LoopGuard,
+    tool_calls: &[LLMToolCall],
+    session: &mut crate::session::Session,
+) -> bool {
+    let call_sigs: Vec<ToolCallSig<'_>> = tool_calls
+        .iter()
+        .map(|tc| ToolCallSig {
+            name: tc.name.as_str(),
+            arguments: tc.arguments.as_str(),
+        })
+        .collect();
+    match guard.record_batch(&call_sigs) {
+        LoopGuardDecision::Continue => false,
+        LoopGuardDecision::Warn {
+            hash,
+            occurrences,
+            loops_detected,
+        } => {
+            warn!(
+                hash = %hash,
+                occurrences = occurrences,
+                loops_detected = loops_detected,
+                "Loop guard detected repeated tool-call pattern"
+            );
+            session.add_message(Message::system(&format!(
+                "[LoopGuard] repeated tool-call pattern detected (hash={}, repeats={}, loops_detected={}).",
+                &hash[..8],
+                occurrences,
+                loops_detected
+            )));
+            false
+        }
+        LoopGuardDecision::Break {
+            hash,
+            occurrences,
+            loops_detected,
+        } => {
+            warn!(
+                hash = %hash,
+                occurrences = occurrences,
+                loops_detected = loops_detected,
+                "Loop guard circuit breaker triggered"
+            );
+            session.add_message(Message::system(&format!(
+                "[LoopGuard] circuit breaker tripped after repeated tool loops (hash={}, repeats={}, loops_detected={}).",
+                &hash[..8],
+                occurrences,
+                loops_detected
+            )));
+            true
+        }
+    }
+}
+
 /// Propagate channel-specific routing metadata (e.g. `telegram_thread_id`)
 /// from an inbound message to an outbound message so that the response is
 /// delivered to the correct forum topic / thread.
@@ -931,55 +989,10 @@ impl AgentLoop {
             }
 
             if let Some(guard) = loop_guard.as_mut() {
-                let call_sigs: Vec<ToolCallSig<'_>> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallSig {
-                        name: tc.name.as_str(),
-                        arguments: tc.arguments.as_str(),
-                    })
-                    .collect();
-                match guard.record_batch(&call_sigs) {
-                    LoopGuardDecision::Continue => {}
-                    LoopGuardDecision::Warn {
-                        hash,
-                        occurrences,
-                        loops_detected,
-                    } => {
-                        warn!(
-                            hash = %hash,
-                            occurrences = occurrences,
-                            loops_detected = loops_detected,
-                            "Loop guard detected repeated tool-call pattern"
-                        );
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] repeated tool-call pattern detected (hash={}, repeats={}, loops_detected={}). If this is intentional, change strategy or provide new context.",
-                            &hash[..8],
-                            occurrences,
-                            loops_detected
-                        )));
-                    }
-                    LoopGuardDecision::Break {
-                        hash,
-                        occurrences,
-                        loops_detected,
-                    } => {
-                        warn!(
-                            hash = %hash,
-                            occurrences = occurrences,
-                            loops_detected = loops_detected,
-                            "Loop guard circuit breaker triggered"
-                        );
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] circuit breaker tripped after repeated tool loops (hash={}, repeats={}, loops_detected={}).",
-                            &hash[..8],
-                            occurrences,
-                            loops_detected
-                        )));
-                        response.content =
-                            "Stopped tool loop due to repeated tool-call pattern.".to_string();
-                        break;
-                    }
+                if check_loop_guard(guard, &response.tool_calls, &mut session) {
+                    response.content =
+                        "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                    break;
                 }
             }
 
@@ -1385,55 +1398,10 @@ impl AgentLoop {
             }
 
             if let Some(guard) = loop_guard.as_mut() {
-                let call_sigs: Vec<ToolCallSig<'_>> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallSig {
-                        name: tc.name.as_str(),
-                        arguments: tc.arguments.as_str(),
-                    })
-                    .collect();
-                match guard.record_batch(&call_sigs) {
-                    LoopGuardDecision::Continue => {}
-                    LoopGuardDecision::Warn {
-                        hash,
-                        occurrences,
-                        loops_detected,
-                    } => {
-                        warn!(
-                            hash = %hash,
-                            occurrences = occurrences,
-                            loops_detected = loops_detected,
-                            "Loop guard detected repeated tool-call pattern (streaming)"
-                        );
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] repeated tool-call pattern detected (hash={}, repeats={}, loops_detected={}).",
-                            &hash[..8],
-                            occurrences,
-                            loops_detected
-                        )));
-                    }
-                    LoopGuardDecision::Break {
-                        hash,
-                        occurrences,
-                        loops_detected,
-                    } => {
-                        warn!(
-                            hash = %hash,
-                            occurrences = occurrences,
-                            loops_detected = loops_detected,
-                            "Loop guard circuit breaker triggered (streaming)"
-                        );
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] circuit breaker tripped after repeated tool loops (hash={}, repeats={}, loops_detected={}).",
-                            &hash[..8],
-                            occurrences,
-                            loops_detected
-                        )));
-                        response.content =
-                            "Stopped tool loop due to repeated tool-call pattern.".to_string();
-                        break;
-                    }
+                if check_loop_guard(guard, &response.tool_calls, &mut session) {
+                    response.content =
+                        "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                    break;
                 }
             }
 

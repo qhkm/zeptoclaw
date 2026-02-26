@@ -88,13 +88,22 @@ fn remove_empty_messages(messages: Vec<Message>) -> (Vec<Message>, usize) {
 
 fn fix_role_alternation(messages: Vec<Message>) -> (Vec<Message>, usize) {
     let mut fixed = 0;
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     let mut last_dialog_role: Option<Role> = None;
 
     for msg in messages {
         match msg.role {
             Role::User | Role::Assistant => {
                 if last_dialog_role.as_ref() == Some(&msg.role) {
+                    // Merge content into the previous same-role message instead of dropping
+                    if let Some(prev) = out.iter_mut().rev().find(|m| m.role == msg.role) {
+                        if !msg.content.is_empty() {
+                            if !prev.content.is_empty() {
+                                prev.content.push('\n');
+                            }
+                            prev.content.push_str(&msg.content);
+                        }
+                    }
                     fixed += 1;
                     continue;
                 }
@@ -203,5 +212,8 @@ mod tests {
         let (repaired, stats) = repair_messages(messages);
         assert_eq!(repaired.len(), 2);
         assert_eq!(stats.role_alternation_fixes, 2);
+        // Verify content was merged, not dropped
+        assert_eq!(repaired[0].content, "a\nb");
+        assert_eq!(repaired[1].content, "c\nd");
     }
 }

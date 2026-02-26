@@ -313,6 +313,8 @@ pub enum HandAction {
         /// Hand name
         name: String,
     },
+    /// Deactivate the current hand
+    Deactivate,
     /// Show currently active hand
     Status,
 }

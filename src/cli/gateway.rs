@@ -486,22 +486,24 @@ pub(crate) async fn cmd_gateway(
                     warn!("Config hot-reload for containerized mode is not yet supported");
                 }
 
-                // Rebuild channels to apply channel config changes.
-                if let Err(e) = channel_manager.stop_all().await {
-                    warn!("Failed to stop channels during hot-reload: {}", e);
+                // Rebuild channels only if channel config actually changed.
+                if changed_sections.contains(&"channels") {
+                    if let Err(e) = channel_manager.stop_all().await {
+                        warn!("Failed to stop channels during hot-reload: {}", e);
+                    }
+                    let mut new_manager = ChannelManager::new(bus.clone(), config.clone());
+                    new_manager.set_health_registry(health_registry.clone());
+                    let count = register_configured_channels(&new_manager, bus.clone(), &config).await;
+                    if count == 0 {
+                        warn!("No channels configured after hot-reload");
+                    }
+                    if let Err(e) = new_manager.start_all().await {
+                        config = old_config;
+                        warn!("Failed to start channels after hot-reload, keeping previous config: {}", e);
+                        continue;
+                    }
+                    channel_manager = new_manager;
                 }
-                let mut new_manager = ChannelManager::new(bus.clone(), config.clone());
-                new_manager.set_health_registry(health_registry.clone());
-                let count = register_configured_channels(&new_manager, bus.clone(), &config).await;
-                if count == 0 {
-                    warn!("No channels configured after hot-reload");
-                }
-                if let Err(e) = new_manager.start_all().await {
-                    config = old_config;
-                    warn!("Failed to start channels after hot-reload, keeping previous config: {}", e);
-                    continue;
-                }
-                channel_manager = new_manager;
             }
         }
     }

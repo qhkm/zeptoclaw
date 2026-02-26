@@ -42,6 +42,16 @@ pub(crate) async fn cmd_hand(action: HandAction) -> Result<()> {
             cfg.save().with_context(|| "Failed to save config")?;
             println!("Activated hand: {}", hand.manifest.name);
         }
+        HandAction::Deactivate => {
+            let mut cfg = Config::load().with_context(|| "Failed to load config")?;
+            if cfg.agents.defaults.active_hand.is_none() {
+                println!("No active hand to deactivate.");
+                return Ok(());
+            }
+            let name = cfg.agents.defaults.active_hand.take().unwrap();
+            cfg.save().with_context(|| "Failed to save config")?;
+            println!("Deactivated hand: {}", name);
+        }
         HandAction::Status => {
             let cfg = Config::load().with_context(|| "Failed to load config")?;
             let Some(active) = cfg.agents.defaults.active_hand.as_deref() else {
