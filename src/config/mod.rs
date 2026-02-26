@@ -256,6 +256,24 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_TRANSCRIPTION_ENABLED") {
             self.transcription.enabled = val == "true" || val == "1";
         }
+
+        // Panel
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_ENABLED") {
+            self.panel.enabled = val.to_lowercase() == "true";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_PORT") {
+            if let Ok(v) = val.parse() {
+                self.panel.port = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_API_PORT") {
+            if let Ok(v) = val.parse() {
+                self.panel.api_port = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_BIND") {
+            self.panel.bind = val;
+        }
     }
 
     /// Apply provider-specific environment variable overrides

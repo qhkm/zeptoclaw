@@ -17,6 +17,7 @@ pub mod memory;
 pub mod migrate;
 pub mod onboard;
 pub mod pair;
+pub mod panel;
 pub mod secrets;
 pub mod skills;
 pub mod status;
@@ -173,6 +174,27 @@ enum Commands {
     Pair {
         #[command(subcommand)]
         action: PairAction,
+    },
+    /// Start the control panel (API server + dashboard)
+    Panel {
+        /// Panel subcommand (install, auth, uninstall). Omit to start.
+        #[command(subcommand)]
+        action: Option<panel::PanelAction>,
+        /// Dev mode (API only, run pnpm dev separately)
+        #[arg(long)]
+        dev: bool,
+        /// API server only, no static file serving
+        #[arg(long)]
+        api_only: bool,
+        /// Panel frontend port
+        #[arg(long)]
+        port: Option<u16>,
+        /// Panel API port
+        #[arg(long)]
+        api_port: Option<u16>,
+        /// Regenerate the API token
+        #[arg(long)]
+        rotate_token: bool,
     },
     /// Run system diagnostics
     Doctor {
@@ -544,6 +566,18 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Pair { action }) => {
             pair::cmd_pair(action).await?;
+        }
+        Some(Commands::Panel {
+            action,
+            dev,
+            api_only,
+            port,
+            api_port,
+            rotate_token,
+        }) => {
+            let config = zeptoclaw::config::Config::load()
+                .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+            panel::cmd_panel(config, action, dev, api_only, port, api_port, rotate_token).await?;
         }
         Some(Commands::Doctor { online }) => {
             doctor::cmd_doctor(online).await?;
