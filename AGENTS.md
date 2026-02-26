@@ -34,7 +34,8 @@ Project-level guidance for coding agents working in this repository.
 
 1. **Start of session** — Run `gh issue list --repo qhkm/zeptoclaw --state open --limit 20` and present open issues
 2. **New work** — If no issue exists for the requested work, create one with `gh issue create` before writing code. Use labels: type (`bug`/`feat`/`rfc`/`chore`/`docs`), area (`area:tools`/`area:channels`/etc.), priority (`P1`/`P2`/`P3`)
-3. **End of work** — Close the issue: `Closes #N` in PR body, or `gh issue close N` for direct commits
+3. **End of work** — Create PR with `Closes #N` in body, or `gh issue close N` for direct commits
+4. **NEVER merge PRs** — Only the user merges PRs. After creating a PR, wait for CI, present the URL to the user, and only merge after explicit user approval
 
 Skip issue creation only for trivial changes (typo fixes, one-line tweaks).
 
