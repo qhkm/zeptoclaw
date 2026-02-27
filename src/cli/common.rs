@@ -1165,6 +1165,9 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                 continue;
             }
 
+            // Track client for graceful shutdown when agent stops.
+            agent.register_mcp_client(Arc::clone(&client)).await;
+
             match client.list_tools().await {
                 Ok(tools) => {
                     let mut registered_count = 0usize;

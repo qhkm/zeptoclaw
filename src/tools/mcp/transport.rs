@@ -81,11 +81,21 @@ impl McpTransport for HttpTransport {
 
 /// Stdio transport for MCP — spawns a child process and communicates via
 /// newline-delimited JSON-RPC over stdin/stdout.
+///
+/// Stdin and stdout are guarded by a single mutex to prevent request/response
+/// interleaving when multiple tool calls execute concurrently.
 pub struct StdioTransport {
-    stdin: Arc<Mutex<ChildStdin>>,
-    stdout: Arc<Mutex<BufReader<ChildStdout>>>,
+    /// Combined stdin+stdout lock — serializes the entire send/receive cycle
+    /// so concurrent callers cannot interleave requests and misroute responses.
+    io: Arc<Mutex<StdioIo>>,
     child: Arc<Mutex<Child>>,
     timeout_secs: u64,
+}
+
+/// Bundled stdin/stdout handles protected by a single lock.
+struct StdioIo {
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 impl StdioTransport {
@@ -120,8 +130,10 @@ impl StdioTransport {
             .ok_or_else(|| "Failed to capture child stdout".to_string())?;
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
-            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+            io: Arc::new(Mutex::new(StdioIo {
+                stdin,
+                stdout: BufReader::new(stdout),
+            })),
             child: Arc::new(Mutex::new(child)),
             timeout_secs,
         })
@@ -137,29 +149,27 @@ impl McpTransport for StdioTransport {
 
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
 
-        {
-            let mut stdin = self.stdin.lock().await;
-            tokio::time::timeout(timeout, stdin.write_all(line.as_bytes()))
-                .await
-                .map_err(|_| "Timeout writing to MCP server stdin".to_string())?
-                .map_err(|e| format!("Failed to write to MCP server stdin: {}", e))?;
-            tokio::time::timeout(timeout, stdin.flush())
-                .await
-                .map_err(|_| "Timeout flushing MCP server stdin".to_string())?
-                .map_err(|e| format!("Failed to flush MCP server stdin: {}", e))?;
-        }
+        // Hold a single lock for the entire write→read cycle to prevent
+        // concurrent callers from interleaving requests and misrouting responses.
+        let mut io = self.io.lock().await;
+
+        tokio::time::timeout(timeout, io.stdin.write_all(line.as_bytes()))
+            .await
+            .map_err(|_| "Timeout writing to MCP server stdin".to_string())?
+            .map_err(|e| format!("Failed to write to MCP server stdin: {}", e))?;
+        tokio::time::timeout(timeout, io.stdin.flush())
+            .await
+            .map_err(|_| "Timeout flushing MCP server stdin".to_string())?
+            .map_err(|e| format!("Failed to flush MCP server stdin: {}", e))?;
 
         let mut response_line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
-            let bytes_read = tokio::time::timeout(timeout, stdout.read_line(&mut response_line))
-                .await
-                .map_err(|_| "Timeout reading from MCP server stdout".to_string())?
-                .map_err(|e| format!("Failed to read from MCP server stdout: {}", e))?;
+        let bytes_read = tokio::time::timeout(timeout, io.stdout.read_line(&mut response_line))
+            .await
+            .map_err(|_| "Timeout reading from MCP server stdout".to_string())?
+            .map_err(|e| format!("Failed to read from MCP server stdout: {}", e))?;
 
-            if bytes_read == 0 {
-                return Err("MCP server closed stdout (process may have exited)".to_string());
-            }
+        if bytes_read == 0 {
+            return Err("MCP server closed stdout (process may have exited)".to_string());
         }
 
         serde_json::from_str::<McpResponse>(response_line.trim())

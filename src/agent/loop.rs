@@ -243,6 +243,8 @@ pub struct AgentLoop {
     /// Optional panel event bus for real-time dashboard streaming.
     #[cfg(feature = "panel")]
     event_bus: Option<crate::api::events::EventBus>,
+    /// MCP clients to shut down when the agent stops (prevents zombie child processes).
+    mcp_clients: Arc<tokio::sync::RwLock<Vec<Arc<crate::tools::mcp::client::McpClient>>>>,
 }
 
 impl AgentLoop {
@@ -344,6 +346,7 @@ impl AgentLoop {
             ltm: None,
             #[cfg(feature = "panel")]
             event_bus: None,
+            mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -408,6 +411,7 @@ impl AgentLoop {
             ltm: None,
             #[cfg(feature = "panel")]
             event_bus: None,
+            mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -533,6 +537,15 @@ impl AgentLoop {
     pub async fn register_tool(&self, tool: Box<dyn Tool>) {
         let mut tools = self.tools.write().await;
         tools.register(tool);
+    }
+
+    /// Register an MCP client for lifecycle management.
+    ///
+    /// Registered clients will have `shutdown()` called when the agent stops,
+    /// ensuring stdio child processes are properly reaped.
+    pub async fn register_mcp_client(&self, client: Arc<crate::tools::mcp::client::McpClient>) {
+        let mut clients = self.mcp_clients.write().await;
+        clients.push(client);
     }
 
     /// Get the number of registered tools.
@@ -2041,6 +2054,27 @@ impl AgentLoop {
         self.running.store(false, Ordering::SeqCst);
         // Send shutdown signal to wake up the select! loop
         let _ = self.shutdown_tx.send(true);
+        // Shut down MCP clients (reaps stdio child processes) in the background
+        let mcp_clients = self.mcp_clients.clone();
+        tokio::spawn(async move {
+            Self::shutdown_mcp_clients_inner(&mcp_clients).await;
+        });
+    }
+
+    /// Shut down all registered MCP clients (reaps stdio child processes).
+    async fn shutdown_mcp_clients_inner(
+        clients: &tokio::sync::RwLock<Vec<Arc<crate::tools::mcp::client::McpClient>>>,
+    ) {
+        let clients = clients.read().await;
+        for client in clients.iter() {
+            if let Err(e) = client.shutdown().await {
+                warn!(
+                    server = %client.server_name(),
+                    error = %e,
+                    "Failed to shut down MCP client"
+                );
+            }
+        }
     }
 
     /// Get a reference to the session manager.
