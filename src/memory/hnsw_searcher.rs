@@ -34,6 +34,9 @@
 //! nearest neighbors, and returns cosine-similarity scores mapped back onto the
 //! original chunk slice.
 
+#![allow(clippy::duplicated_attributes)]
+#![cfg(feature = "memory-hnsw")]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

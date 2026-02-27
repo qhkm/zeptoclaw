@@ -18,6 +18,9 @@
 //! then computes cosine similarity between the query embedding and each chunk
 //! embedding.
 
+#![allow(clippy::duplicated_attributes)]
+#![cfg(feature = "memory-embedding")]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

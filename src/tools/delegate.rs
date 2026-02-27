@@ -1032,7 +1032,7 @@ mod tests {
         // Empty tasks array is valid — returns empty concatenation.
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.for_llm.is_empty() || output.for_llm.is_empty());
+        assert!(output.for_llm.is_empty());
     }
 
     /// parallel=false should be the default when the key is absent.
