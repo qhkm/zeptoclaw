@@ -110,7 +110,7 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::null());
 
         for (key, value) in env {
             cmd.env(key, value);
