@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
@@ -80,7 +80,8 @@ impl McpTransport for HttpTransport {
 }
 
 /// Stdio transport for MCP — spawns a child process and communicates via
-/// newline-delimited JSON-RPC over stdin/stdout.
+/// header-framed JSON-RPC over stdin/stdout (Content-Length framing per
+/// the MCP stdio specification).
 ///
 /// Stdin and stdout are guarded by a single mutex to prevent request/response
 /// interleaving when multiple tool calls execute concurrently.
@@ -143,9 +144,11 @@ impl StdioTransport {
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn send(&self, request: &McpRequest) -> Result<McpResponse, String> {
-        let mut line = serde_json::to_string(request)
+        let body = serde_json::to_string(request)
             .map_err(|e| format!("Failed to serialize request: {}", e))?;
-        line.push('\n');
+
+        // MCP stdio framing: Content-Length header + \r\n separator + JSON body.
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
 
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
 
@@ -153,7 +156,8 @@ impl McpTransport for StdioTransport {
         // concurrent callers from interleaving requests and misrouting responses.
         let mut io = self.io.lock().await;
 
-        tokio::time::timeout(timeout, io.stdin.write_all(line.as_bytes()))
+        // --- Write framed request ---
+        tokio::time::timeout(timeout, io.stdin.write_all(frame.as_bytes()))
             .await
             .map_err(|_| "Timeout writing to MCP server stdin".to_string())?
             .map_err(|e| format!("Failed to write to MCP server stdin: {}", e))?;
@@ -162,17 +166,19 @@ impl McpTransport for StdioTransport {
             .map_err(|_| "Timeout flushing MCP server stdin".to_string())?
             .map_err(|e| format!("Failed to flush MCP server stdin: {}", e))?;
 
-        let mut response_line = String::new();
-        let bytes_read = tokio::time::timeout(timeout, io.stdout.read_line(&mut response_line))
+        // --- Read framed response (Content-Length header + body) ---
+        let content_length = tokio::time::timeout(timeout, read_content_length(&mut io.stdout))
             .await
-            .map_err(|_| "Timeout reading from MCP server stdout".to_string())?
-            .map_err(|e| format!("Failed to read from MCP server stdout: {}", e))?;
+            .map_err(|_| "Timeout reading Content-Length from MCP server".to_string())?
+            .map_err(|e| format!("Failed to read Content-Length: {}", e))?;
 
-        if bytes_read == 0 {
-            return Err("MCP server closed stdout (process may have exited)".to_string());
-        }
+        let mut buf = vec![0u8; content_length];
+        tokio::time::timeout(timeout, io.stdout.read_exact(&mut buf))
+            .await
+            .map_err(|_| "Timeout reading response body from MCP server".to_string())?
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        serde_json::from_str::<McpResponse>(response_line.trim())
+        serde_json::from_slice::<McpResponse>(&buf)
             .map_err(|e| format!("Failed to parse MCP stdio response: {}", e))
     }
 
@@ -194,6 +200,39 @@ impl McpTransport for StdioTransport {
     fn transport_type(&self) -> &str {
         "stdio"
     }
+}
+
+/// Read headers from a MCP stdio stream until an empty line, returning the
+/// `Content-Length` value.  Headers follow the pattern `Key: Value\r\n` with
+/// the header block terminated by a bare `\r\n`.
+async fn read_content_length<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<usize, String> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut header_line = String::new();
+        let n = reader
+            .read_line(&mut header_line)
+            .await
+            .map_err(|e| format!("Failed to read header line: {}", e))?;
+        if n == 0 {
+            return Err("MCP server closed stdout while reading headers".to_string());
+        }
+        let trimmed = header_line.trim();
+        if trimmed.is_empty() {
+            // End of headers.
+            break;
+        }
+        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+            content_length = Some(
+                val.trim()
+                    .parse::<usize>()
+                    .map_err(|e| format!("Invalid Content-Length value: {}", e))?,
+            );
+        }
+        // Ignore other headers (per spec, only Content-Length is required).
+    }
+    content_length.ok_or_else(|| "MCP server response missing Content-Length header".to_string())
 }
 
 impl Drop for StdioTransport {
@@ -238,17 +277,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stdio_transport_echo_server() {
-        let transport = StdioTransport::spawn("cat", &[], &HashMap::new(), 10).await;
-        assert!(transport.is_ok(), "cat should spawn: {:?}", transport.err());
+    async fn test_read_content_length_valid() {
+        let input = b"Content-Length: 42\r\n\r\n";
+        let mut reader = BufReader::new(&input[..]);
+        let len = read_content_length(&mut reader).await.unwrap();
+        assert_eq!(len, 42);
+    }
+
+    #[tokio::test]
+    async fn test_read_content_length_missing() {
+        let input = b"X-Custom: foo\r\n\r\n";
+        let mut reader = BufReader::new(&input[..]);
+        let result = read_content_length(&mut reader).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing Content-Length"));
+    }
+
+    #[tokio::test]
+    async fn test_stdio_transport_content_length_framing() {
+        // Spawn a bash script that reads Content-Length framed input and
+        // echoes it back with Content-Length framing (minimal MCP echo).
+        let script = r#"
+while IFS= read -r line; do
+  line="${line%%$'\r'}"
+  if [[ "$line" == Content-Length:* ]]; then
+    cl="${line#Content-Length: }"
+  fi
+  if [[ -z "$line" ]]; then
+    body=$(dd bs=1 count="$cl" 2>/dev/null)
+    printf "Content-Length: %d\r\n\r\n%s" "${#body}" "$body"
+  fi
+done
+"#;
+        let transport = StdioTransport::spawn(
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::new(),
+            10,
+        )
+        .await;
+        assert!(
+            transport.is_ok(),
+            "bash echo should spawn: {:?}",
+            transport.err()
+        );
         let t = transport.unwrap();
         assert_eq!(t.transport_type(), "stdio");
 
         let req = McpRequest::new(1, "initialize", None);
         let resp = t.send(&req).await;
+        // cat-style echo: response parses as valid JSON-RPC (same structure as request).
         assert!(
-            resp.is_ok() || resp.unwrap_err().contains("parse"),
-            "Should get I/O success or parse error, not a crash"
+            resp.is_ok(),
+            "Content-Length framing roundtrip should succeed: {:?}",
+            resp.err()
         );
 
         let _ = t.shutdown().await;

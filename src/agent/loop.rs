@@ -2052,28 +2052,18 @@ impl AgentLoop {
     pub fn stop(&self) {
         info!("Stopping agent loop");
         self.running.store(false, Ordering::SeqCst);
-        // Send shutdown signal to wake up the select! loop
+        // Send shutdown signal to wake up the select! loop.
+        // MCP clients are NOT shut down here so the loop remains restartable.
+        // Call `shutdown_mcp_clients()` for final teardown, or rely on
+        // `StdioTransport::Drop` as a safety net.
         let _ = self.shutdown_tx.send(true);
-        // Shut down MCP clients (reaps stdio child processes) in the background.
-        // Guard against panic when called outside a Tokio runtime (e.g. library
-        // embedding, shutdown hooks) by checking for an active runtime handle first.
-        let mcp_clients = self.mcp_clients.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                Self::shutdown_mcp_clients_inner(&mcp_clients).await;
-            });
-        } else {
-            // No runtime — best-effort synchronous kill via Drop on child processes.
-            // The StdioTransport Drop impl calls start_kill() with try_lock().
-            debug!("No Tokio runtime active; MCP clients will be cleaned up via Drop");
-        }
     }
 
-    /// Shut down all registered MCP clients (reaps stdio child processes).
-    async fn shutdown_mcp_clients_inner(
-        clients: &tokio::sync::RwLock<Vec<Arc<crate::tools::mcp::client::McpClient>>>,
-    ) {
-        let clients = clients.read().await;
+    /// Gracefully shut down all registered MCP clients (reaps stdio child
+    /// processes).  Call this once during final teardown — NOT from `stop()`,
+    /// which must remain restart-safe.
+    pub async fn shutdown_mcp_clients(&self) {
+        let clients = self.mcp_clients.read().await;
         for client in clients.iter() {
             if let Err(e) = client.shutdown().await {
                 warn!(
