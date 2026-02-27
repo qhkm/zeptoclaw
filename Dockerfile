@@ -7,7 +7,7 @@
 # =============================================================================
 # Stage 1: Build
 # =============================================================================
-FROM rust:1.93-slim-trixie AS builder
+FROM rust:1.93-slim-trixie@sha256:7e6fa79cf81be23fd45d857f75f583d80cfdbb11c91fa06180fd747fda37a61d AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -43,7 +43,7 @@ RUN cargo build --release --bin zeptoclaw
 # =============================================================================
 # Stage 2: Runtime (minimal)
 # =============================================================================
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430 AS runtime
 
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \
