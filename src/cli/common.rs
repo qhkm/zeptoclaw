@@ -31,6 +31,11 @@ use zeptoclaw::tools::approval::ApprovalPolicyConfig;
 use zeptoclaw::tools::cron::CronTool;
 use zeptoclaw::tools::delegate::DelegateTool;
 use zeptoclaw::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
+use zeptoclaw::tools::mcp::client::McpClient;
+use zeptoclaw::tools::mcp::discovery::{
+    discover_mcp_servers, DiscoveredMcpServer, McpTransportType,
+};
+use zeptoclaw::tools::mcp::wrapper::McpToolWrapper;
 use zeptoclaw::tools::shell::ShellTool;
 use zeptoclaw::tools::spawn::SpawnTool;
 #[cfg(feature = "google")]
@@ -1085,6 +1090,117 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
         let tool = zeptoclaw::tools::custom::CustomTool::new(tool_def.clone());
         agent.register_tool(Box::new(tool)).await;
         info!(tool = %tool_def.name, "Registered custom CLI tool");
+    }
+
+    // Register MCP server tools (auto-discovered + config-defined).
+    {
+        let workspace = config.workspace_path();
+        let mut all_servers = discover_mcp_servers(Some(&workspace));
+
+        for server_cfg in &config.mcp.servers {
+            let transport = if let Some(url) = server_cfg.url.clone() {
+                McpTransportType::Http { url }
+            } else if let Some(command) = server_cfg.command.clone() {
+                McpTransportType::Stdio {
+                    command,
+                    args: server_cfg.args.clone().unwrap_or_default(),
+                    env: server_cfg.env.clone().unwrap_or_default(),
+                }
+            } else {
+                warn!(
+                    server = %server_cfg.name,
+                    "MCP server config has neither url nor command, skipping"
+                );
+                continue;
+            };
+
+            all_servers.push(DiscoveredMcpServer {
+                name: server_cfg.name.clone(),
+                transport,
+                source: "config".to_string(),
+            });
+        }
+
+        for server in &all_servers {
+            let timeout = config
+                .mcp
+                .servers
+                .iter()
+                .find(|cfg| cfg.name == server.name)
+                .map_or(30, |cfg| cfg.timeout_secs);
+
+            let client_result: Result<McpClient, String> = match &server.transport {
+                McpTransportType::Http { url } => {
+                    Ok(McpClient::new_http(&server.name, url, timeout))
+                }
+                McpTransportType::Stdio { command, args, env } => {
+                    match McpClient::new_stdio(&server.name, command, args, env, timeout).await {
+                        Ok(c) => Ok(c),
+                        Err(e) => {
+                            warn!(
+                                server = %server.name,
+                                error = %e,
+                                "Failed to spawn stdio MCP server, skipping"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let client = match client_result {
+                Ok(c) => Arc::new(c),
+                Err(e) => {
+                    warn!(server = %server.name, error = %e, "Failed to create MCP client");
+                    continue;
+                }
+            };
+
+            if let Err(e) = client.initialize().await {
+                warn!(
+                    server = %server.name,
+                    error = %e,
+                    "MCP server initialize failed, skipping"
+                );
+                continue;
+            }
+
+            match client.list_tools().await {
+                Ok(tools) => {
+                    let mut registered_count = 0usize;
+                    for tool in tools {
+                        let prefixed_name = format!("{}_{}", server.name, tool.name);
+                        if !tool_enabled(&prefixed_name) {
+                            continue;
+                        }
+                        agent
+                            .register_tool(Box::new(McpToolWrapper::new(
+                                &server.name,
+                                &tool.name,
+                                tool.description.as_deref().unwrap_or(""),
+                                tool.input_schema.clone(),
+                                Arc::clone(&client),
+                            )))
+                            .await;
+                        registered_count += 1;
+                    }
+                    info!(
+                        server = %server.name,
+                        transport = client.transport_type(),
+                        tools = registered_count,
+                        source = %server.source,
+                        "Registered MCP server tools"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        server = %server.name,
+                        error = %e,
+                        "Failed to list MCP tools, skipping"
+                    );
+                }
+            }
+        }
     }
 
     info!("Registered {} tools", agent.tool_count().await);

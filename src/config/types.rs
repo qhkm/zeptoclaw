@@ -401,8 +401,14 @@ pub struct McpConfig {
 pub struct McpServerConfig {
     /// Human-readable server name (used as tool name prefix).
     pub name: String,
-    /// Server URL endpoint.
-    pub url: String,
+    /// Server URL endpoint (for HTTP transport).
+    pub url: Option<String>,
+    /// Server command (for stdio transport).
+    pub command: Option<String>,
+    /// Server command arguments (for stdio transport).
+    pub args: Option<Vec<String>>,
+    /// Environment variables for stdio server process.
+    pub env: Option<std::collections::HashMap<String, String>>,
     /// Request timeout in seconds (default: 30).
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
@@ -2533,6 +2539,30 @@ mod tests {
         let config: ProviderConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.api_key.as_deref(), Some("sk-test"));
         assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_stdio_fields() {
+        let json = r#"{
+            "name": "test",
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"KEY": "val"},
+            "timeout_secs": 30
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.command, Some("node".to_string()));
+        assert_eq!(config.args, Some(vec!["server.js".to_string()]));
+        assert_eq!(
+            config
+                .env
+                .as_ref()
+                .and_then(|e| e.get("KEY"))
+                .map(|s| s.as_str()),
+            Some("val")
+        );
+        assert!(config.url.is_none());
     }
 }
 
