@@ -50,6 +50,13 @@ const REGEX_BLOCKED_PATTERNS: &[&str] = &[
     // Environment variable exfiltration
     r"\benv\b.*>\s*/",
     r"\bprintenv\b.*>\s*/",
+    // Destructive git operations (bypass-proof: the safe git tool exists for normal ops)
+    r"git\s+push\s+.*--force",
+    r"git\s+push\s+.*-f\b",
+    r"git\s+reset\s+--hard",
+    r"git\s+clean\s+.*-[a-zA-Z]*f",
+    r"git\s+checkout\s+--\s+\.",
+    r"(?-i)git\s+branch\s+.*-D\b",
 ];
 
 /// Literal substring patterns (credentials, sensitive paths)
@@ -566,6 +573,77 @@ mod tests {
         assert!(config.validate_command("rm -rf /").is_err());
         // rm of a specific file is fine (passes blocklist, in allowlist)
         assert!(config.validate_command("rm file.txt").is_ok());
+    }
+
+    // ==================== DESTRUCTIVE GIT TESTS ====================
+
+    #[test]
+    fn test_git_force_push_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("git push --force origin main")
+            .is_err());
+        assert!(config
+            .validate_command("git push origin main --force")
+            .is_err());
+        assert!(config.validate_command("git push -f origin main").is_err());
+        assert!(config.validate_command("git push origin feat -f").is_err());
+        assert!(config
+            .validate_command("git push --force-with-lease origin main")
+            .is_err());
+    }
+
+    #[test]
+    fn test_git_reset_hard_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git reset --hard HEAD~1").is_err());
+        assert!(config
+            .validate_command("git reset --hard origin/main")
+            .is_err());
+        assert!(config.validate_command("git reset --hard").is_err());
+    }
+
+    #[test]
+    fn test_git_clean_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git clean -fd").is_err());
+        assert!(config.validate_command("git clean -f").is_err());
+        assert!(config.validate_command("git clean -xfd").is_err());
+        assert!(config.validate_command("git clean -df").is_err());
+    }
+
+    #[test]
+    fn test_git_checkout_discard_all_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git checkout -- .").is_err());
+    }
+
+    #[test]
+    fn test_git_branch_force_delete_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("git branch -D feature-branch")
+            .is_err());
+    }
+
+    #[test]
+    fn test_safe_git_operations_allowed() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git status").is_ok());
+        assert!(config.validate_command("git log --oneline").is_ok());
+        assert!(config.validate_command("git diff").is_ok());
+        assert!(config.validate_command("git add .").is_ok());
+        assert!(config.validate_command("git commit -m 'msg'").is_ok());
+        assert!(config.validate_command("git push origin main").is_ok());
+        assert!(config.validate_command("git pull origin main").is_ok());
+        assert!(config.validate_command("git checkout feature").is_ok());
+        assert!(config.validate_command("git branch -d merged").is_ok());
+        assert!(config.validate_command("git reset --soft HEAD~1").is_ok());
+        assert!(config.validate_command("git stash").is_ok());
+        assert!(config.validate_command("git merge feature").is_ok());
+        assert!(config
+            .validate_command("git checkout -- specific-file.rs")
+            .is_ok());
     }
 
     #[test]
