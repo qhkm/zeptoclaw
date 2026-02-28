@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2612, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 122 passed (33 ignored)
+# lib: 2635, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 121 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -112,6 +112,11 @@ cargo fmt
 # Tool discovery
 ./target/release/zeptoclaw tools list
 ./target/release/zeptoclaw tools info web_search
+
+# MCP server discovery (HTTP + stdio)
+# ~/.mcp/servers.json or .mcp.json:
+# {"mcpServers":{"web":{"url":"http://localhost:3000"}}}
+# {"mcpServers":{"fs":{"command":"node","args":["server.js"]}}}
 
 # Watch URLs for changes
 ./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
@@ -324,7 +329,8 @@ src/
 │   ├── reminder.rs    # Persistent reminders (add/complete/snooze/overdue) with cron delivery
 │   └── mcp/           # MCP (Model Context Protocol) client tools
 │       ├── protocol.rs   # JSON-RPC 2.0 types, content blocks
-│       ├── client.rs     # HTTP transport, tools cache
+│       ├── transport.rs  # McpTransport trait + HttpTransport + StdioTransport
+│       ├── client.rs     # Transport-agnostic MCP client, tools cache
 │       └── wrapper.rs    # McpToolWrapper adapts MCP tools to Tool trait
 ├── utils/          # Utility functions (sanitize, metrics, telemetry, cost)
 ├── batch.rs        # Batch mode (load prompts from file, format results)
@@ -532,8 +538,10 @@ Panel web dashboard backend:
 
 ### MCP Client (`src/tools/mcp/`)
 - `protocol.rs` - JSON-RPC 2.0 types: McpRequest, McpResponse, McpTool, ContentBlock (Text/Image/Resource)
-- `client.rs` - McpClient HTTP transport with initialize/list_tools/call_tool; RwLock tools cache
+- `transport.rs` - `McpTransport` trait with `HttpTransport` and `StdioTransport` implementations
+- `client.rs` - Transport-agnostic `McpClient` with initialize/list_tools/call_tool + RwLock tools cache
 - `wrapper.rs` - McpToolWrapper implements Tool trait; prefixed tool names (`{server}_{tool}`)
+- Discovery and registration - `.mcp.json` / `~/.mcp/servers.json` now load both HTTP and stdio servers, and tools are registered in `create_agent()`
 
 ### Routines (`src/routines/`)
 - `Routine` - Trigger enum (Cron/Event/Webhook/Manual), RoutineAction enum (Lightweight/FullJob)

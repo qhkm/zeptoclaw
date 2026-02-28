@@ -448,6 +448,7 @@ pub(crate) async fn cmd_gateway(
                 if !containerized {
                     if let Some(ref running_agent) = agent {
                         running_agent.stop();
+                        running_agent.shutdown_mcp_clients().await;
                     }
                     if let Some(handle) = agent_handle.take() {
                         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -525,6 +526,7 @@ pub(crate) async fn cmd_gateway(
     // Stop agent or proxy
     if let Some(ref agent) = agent {
         agent.stop();
+        agent.shutdown_mcp_clients().await;
     }
     if let Some(ref proxy) = proxy {
         proxy.stop();
