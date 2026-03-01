@@ -30,8 +30,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -239,6 +240,159 @@ impl QuotaStore {
             .lock()
             .expect("quota state lock poisoned")
             .clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QuotaProvider — decorator that enforces per-provider quotas
+// ---------------------------------------------------------------------------
+
+/// A decorator [`LLMProvider`] that enforces per-provider usage quotas.
+///
+/// `QuotaProvider` wraps an inner provider and checks the configured quota
+/// before forwarding each `chat()` / `chat_stream()` call. After a successful
+/// `chat()` call it records the token usage in the shared [`QuotaStore`].
+///
+/// # Quota Actions
+/// - [`QuotaAction::Reject`] / [`QuotaAction::Fallback`] — return
+///   [`crate::error::ZeptoError::QuotaExceeded`] when the quota is exceeded so
+///   that the caller (or a surrounding `FallbackProvider`) can handle it.
+/// - [`QuotaAction::Warn`] — log a warning and allow the request through.
+pub struct QuotaProvider {
+    inner: Box<dyn crate::providers::LLMProvider>,
+    provider_name: String,
+    config: QuotaConfig,
+    store: Arc<QuotaStore>,
+}
+
+impl QuotaProvider {
+    /// Create a new `QuotaProvider` wrapping `inner`.
+    pub fn new(
+        inner: Box<dyn crate::providers::LLMProvider>,
+        provider_name: &str,
+        config: QuotaConfig,
+        store: Arc<QuotaStore>,
+    ) -> Self {
+        Self {
+            inner,
+            provider_name: provider_name.to_string(),
+            config,
+            store,
+        }
+    }
+
+    /// Check whether the current usage is within quota and enforce the
+    /// configured action when it is exceeded.
+    fn check_and_enforce(&self) -> crate::error::Result<()> {
+        match self.store.check(&self.provider_name, &self.config) {
+            QuotaCheckResult::Ok => {}
+            QuotaCheckResult::Warning(pct) => {
+                tracing::warn!(
+                    provider = %self.provider_name,
+                    utilisation = %format!("{:.0}%", pct * 100.0),
+                    "quota warning: approaching limit",
+                );
+            }
+            QuotaCheckResult::Exceeded => match self.config.action {
+                QuotaAction::Warn => {
+                    tracing::warn!(
+                        provider = %self.provider_name,
+                        "quota exceeded (action=warn): allowing request through",
+                    );
+                }
+                // Both Reject and Fallback surface the error — in the Fallback
+                // case a surrounding FallbackProvider should catch it and route
+                // to the secondary provider.
+                QuotaAction::Reject | QuotaAction::Fallback => {
+                    let period = match self.config.period {
+                        QuotaPeriod::Monthly => "monthly",
+                        QuotaPeriod::Daily => "daily",
+                    };
+                    return Err(crate::error::ZeptoError::QuotaExceeded(format!(
+                        "{} {} quota exceeded",
+                        self.provider_name, period
+                    )));
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// Record token usage from a successful `chat()` response.
+    ///
+    /// Uses [`crate::utils::cost::estimate_cost`] to convert token counts to a
+    /// USD cost estimate. Falls back to 0.0 for unknown models (still records
+    /// the token count).
+    fn record_usage(&self, response: &crate::providers::LLMResponse) {
+        let Some(usage) = &response.usage else {
+            return;
+        };
+        let tokens = u64::from(usage.total_tokens);
+        let cost_usd = crate::utils::cost::estimate_cost(
+            self.inner.default_model(),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            &HashMap::new(),
+        )
+        .unwrap_or(0.0);
+
+        if cost_usd > 0.0 || tokens > 0 {
+            self.store
+                .record(&self.provider_name, &self.config.period, cost_usd, tokens);
+        }
+    }
+}
+
+impl std::fmt::Debug for QuotaProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuotaProvider")
+            .field("provider", &self.provider_name)
+            .field("action", &self.config.action)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl crate::providers::LLMProvider for QuotaProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn default_model(&self) -> &str {
+        self.inner.default_model()
+    }
+
+    async fn chat(
+        &self,
+        messages: Vec<crate::session::Message>,
+        tools: Vec<crate::providers::ToolDefinition>,
+        model: Option<&str>,
+        options: crate::providers::ChatOptions,
+    ) -> crate::error::Result<crate::providers::LLMResponse> {
+        self.check_and_enforce()?;
+        let response = self.inner.chat(messages, tools, model, options).await?;
+        self.record_usage(&response);
+        Ok(response)
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<crate::session::Message>,
+        tools: Vec<crate::providers::ToolDefinition>,
+        model: Option<&str>,
+        options: crate::providers::ChatOptions,
+    ) -> crate::error::Result<tokio::sync::mpsc::Receiver<crate::providers::StreamEvent>> {
+        self.check_and_enforce()?;
+        // Stream: pass through without usage recording — the stream receiver
+        // is returned immediately, so there is no response to inspect here.
+        // Usage recording for streaming is deferred to future work.
+        self.inner
+            .chat_stream(messages, tools, model, options)
+            .await
+    }
+
+    async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
+        self.inner.embed(texts).await
     }
 }
 
@@ -611,5 +765,273 @@ mod tests {
             QuotaCheckResult::Warning(_) => {} // 95% → Warning
             other => panic!("expected Warning for openai, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // QuotaProvider tests
+    // ---------------------------------------------------------------------------
+
+    use super::QuotaProvider;
+    use crate::error::{Result, ZeptoError};
+    use crate::providers::{ChatOptions, LLMProvider, LLMResponse, ToolDefinition, Usage};
+    use crate::session::Message;
+    use async_trait::async_trait;
+
+    /// A mock provider that always succeeds, returning a response with the
+    /// given token counts so that `record_usage()` has data to work with.
+    struct AlwaysOkProvider {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    }
+
+    impl AlwaysOkProvider {
+        fn new(prompt_tokens: u32, completion_tokens: u32) -> Self {
+            Self {
+                prompt_tokens,
+                completion_tokens,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for AlwaysOkProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn default_model(&self) -> &str {
+            // Use a known model so estimate_cost can look it up.
+            "claude-sonnet-4-5-20250929"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            let usage = Usage::new(self.prompt_tokens, self.completion_tokens);
+            Ok(LLMResponse::text("ok").with_usage(usage))
+        }
+    }
+
+    /// A mock provider that always fails with a provider error.
+    struct AlwaysErrProvider;
+
+    #[async_trait]
+    impl LLMProvider for AlwaysErrProvider {
+        fn name(&self) -> &str {
+            "mock-err"
+        }
+
+        fn default_model(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            Err(ZeptoError::Provider("inner failure".to_string()))
+        }
+    }
+
+    /// Helper: build a `QuotaProvider` backed by a `QuotaStore` in a tmpdir.
+    fn quota_provider_ok(
+        tmp: &TempDir,
+        config: QuotaConfig,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> (QuotaProvider, Arc<QuotaStore>) {
+        let store = Arc::new(store_in_tmpdir(tmp));
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysOkProvider::new(prompt_tokens, completion_tokens)),
+            "anthropic",
+            config,
+            Arc::clone(&store),
+        );
+        (provider, store)
+    }
+
+    fn quota_provider_err(tmp: &TempDir, config: QuotaConfig) -> (QuotaProvider, Arc<QuotaStore>) {
+        let store = Arc::new(store_in_tmpdir(tmp));
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysErrProvider),
+            "anthropic",
+            config,
+            Arc::clone(&store),
+        );
+        (provider, store)
+    }
+
+    fn empty_messages() -> Vec<Message> {
+        vec![Message::user("hi")]
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_allows_under_limit() {
+        let tmp = TempDir::new().unwrap();
+        // No quota limits configured — all requests must succeed.
+        let (provider, _store) = quota_provider_ok(&tmp, QuotaConfig::default(), 1000, 500);
+
+        let result = provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(result.unwrap().content, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_rejects_when_exceeded_reject_action() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig {
+            max_cost_usd: Some(1.0),
+            action: QuotaAction::Reject,
+            ..Default::default()
+        };
+        let store = Arc::new(store_in_tmpdir(&tmp));
+        // Pre-fill usage so the quota is already exceeded.
+        store.record("anthropic", &cfg.period, 999.0, 0);
+
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysOkProvider::new(100, 50)),
+            "anthropic",
+            cfg,
+            Arc::clone(&store),
+        );
+
+        let result = provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await;
+
+        assert!(result.is_err(), "expected Err, got Ok");
+        match result.unwrap_err() {
+            ZeptoError::QuotaExceeded(msg) => {
+                assert!(
+                    msg.contains("anthropic"),
+                    "error message should name the provider: {msg}"
+                );
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_fallback_action_returns_quota_exceeded() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig {
+            max_cost_usd: Some(1.0),
+            action: QuotaAction::Fallback,
+            ..Default::default()
+        };
+        let store = Arc::new(store_in_tmpdir(&tmp));
+        store.record("anthropic", &cfg.period, 999.0, 0);
+
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysOkProvider::new(100, 50)),
+            "anthropic",
+            cfg,
+            Arc::clone(&store),
+        );
+
+        let result = provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await;
+
+        assert!(
+            matches!(result, Err(ZeptoError::QuotaExceeded(_))),
+            "Fallback action should surface QuotaExceeded so FallbackProvider can catch it, got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_warn_action_allows_through() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig {
+            max_cost_usd: Some(1.0),
+            action: QuotaAction::Warn,
+            ..Default::default()
+        };
+        let store = Arc::new(store_in_tmpdir(&tmp));
+        store.record("anthropic", &cfg.period, 999.0, 0);
+
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysOkProvider::new(100, 50)),
+            "anthropic",
+            cfg,
+            Arc::clone(&store),
+        );
+
+        // Warn action: exceeded quota should still allow the request through.
+        let result = provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Warn action should allow through, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_records_usage_after_success() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig::default(); // no limits, Reject action
+        let (provider, store) = quota_provider_ok(&tmp, cfg.clone(), 1000, 500);
+
+        provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await
+            .expect("chat should succeed");
+
+        let snap = store.snapshot();
+        let usage = snap.get("anthropic").expect("usage should be recorded");
+        // total_tokens = 1000 + 500 = 1500
+        assert!(
+            usage.tokens > 0 || usage.cost_usd > 0.0,
+            "tokens or cost should be > 0 after a successful chat, got {usage:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quota_provider_does_not_record_on_error() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig::default();
+        let (provider, store) = quota_provider_err(&tmp, cfg);
+
+        let result = provider
+            .chat(empty_messages(), vec![], None, ChatOptions::new())
+            .await;
+
+        assert!(result.is_err(), "expected inner provider error");
+        // No usage should have been recorded because the call failed.
+        let snap = store.snapshot();
+        assert!(
+            snap.get("anthropic").is_none(),
+            "no usage should be recorded on error, got {snap:?}",
+        );
+    }
+
+    #[test]
+    fn test_quota_provider_debug_format() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = QuotaConfig {
+            action: QuotaAction::Reject,
+            ..Default::default()
+        };
+        let store = Arc::new(store_in_tmpdir(&tmp));
+        let provider = QuotaProvider::new(
+            Box::new(AlwaysOkProvider::new(0, 0)),
+            "anthropic",
+            cfg,
+            store,
+        );
+        let debug_str = format!("{provider:?}");
+        assert!(debug_str.contains("QuotaProvider"), "{debug_str}");
+        assert!(debug_str.contains("anthropic"), "{debug_str}");
     }
 }

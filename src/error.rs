@@ -360,6 +360,9 @@ mod tests {
     #[test]
     fn test_quota_exceeded_error_display() {
         let err = ZeptoError::QuotaExceeded("anthropic monthly $50.00 exceeded".to_string());
-        assert_eq!(err.to_string(), "Quota exceeded: anthropic monthly $50.00 exceeded");
+        assert_eq!(
+            err.to_string(),
+            "Quota exceeded: anthropic monthly $50.00 exceeded"
+        );
     }
 }
