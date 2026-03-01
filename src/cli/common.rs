@@ -41,9 +41,9 @@ use zeptoclaw::tools::spawn::SpawnTool;
 #[cfg(feature = "google")]
 use zeptoclaw::tools::GoogleTool;
 use zeptoclaw::tools::{
-    DdgSearchTool, EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool, HttpRequestTool,
-    InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
-    R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    DdgSearchTool, DocxReadTool, EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool,
+    HttpRequestTool, InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool,
+    ProjectTool, R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -760,6 +760,15 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
             .register_tool(Box::new(PdfReadTool::new(workspace_str)))
             .await;
         info!("Registered pdf_read tool");
+    }
+
+    // Register DOCX read tool — always available; uses zip + quick-xml (unconditional deps).
+    if tool_enabled("docx_read") {
+        let workspace_str = config.workspace_path().to_string_lossy().into_owned();
+        agent
+            .register_tool(Box::new(DocxReadTool::new(workspace_str)))
+            .await;
+        info!("Registered docx_read tool");
     }
 
     // Register proactive messaging tool.

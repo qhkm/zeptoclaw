@@ -425,4 +425,39 @@ mod tests {
             text
         );
     }
+
+    #[tokio::test]
+    async fn test_execute_extracts_text() {
+        let tmp = TempDir::new().unwrap();
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Integration test content</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+        let docx_bytes = build_test_docx(xml);
+        let docx_path = tmp.path().join("test.docx");
+        std::fs::write(&docx_path, &docx_bytes).unwrap();
+
+        let t = tool(tmp.path().to_str().unwrap());
+        let ctx = ToolContext::default();
+        let result = t
+            .execute(serde_json::json!({"path": "test.docx"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            result.for_llm.contains("Integration test content"),
+            "expected extracted text in for_llm, got: {:?}",
+            result.for_llm
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_path_arg() {
+        let tmp = TempDir::new().unwrap();
+        let t = tool(tmp.path().to_str().unwrap());
+        let ctx = ToolContext::default();
+        let result = t.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err(), "expected error when path arg is missing");
+    }
 }
