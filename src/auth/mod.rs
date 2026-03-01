@@ -196,13 +196,24 @@ pub fn provider_oauth_config(provider: &str) -> Option<ProviderOAuthConfig> {
                 "https://www.googleapis.com/auth/calendar".to_string(),
             ],
         }),
+        "openai" => Some(ProviderOAuthConfig {
+            provider: "openai".to_string(),
+            token_url: "https://auth.openai.com/oauth/token".to_string(),
+            authorize_url: "https://auth.openai.com/oauth/authorize".to_string(),
+            client_name: "ZeptoClaw".to_string(),
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+            ],
+        }),
         _ => None,
     }
 }
 
 /// Returns a list of providers that support OAuth authentication.
 pub fn oauth_supported_providers() -> &'static [&'static str] {
-    &["anthropic", "google"]
+    &["anthropic", "google", "openai"]
 }
 
 // ============================================================================
@@ -356,15 +367,16 @@ mod tests {
 
     #[test]
     fn test_provider_oauth_config_unsupported() {
-        assert!(provider_oauth_config("openai").is_none());
-        assert!(provider_oauth_config("unknown").is_none());
+        assert!(provider_oauth_config("unknown_provider").is_none());
+        assert!(provider_oauth_config("github").is_none());
     }
 
     #[test]
     fn test_oauth_supported_providers() {
         let providers = oauth_supported_providers();
         assert!(providers.contains(&"anthropic"));
-        assert!(!providers.contains(&"openai"));
+        assert!(providers.contains(&"openai"));
+        assert!(!providers.contains(&"github"));
     }
 
     #[test]
@@ -382,5 +394,26 @@ mod tests {
     fn test_oauth_supported_providers_includes_google() {
         let providers = oauth_supported_providers();
         assert!(providers.contains(&"google"));
+    }
+
+    #[test]
+    fn test_provider_oauth_config_openai() {
+        let config = provider_oauth_config("openai").expect("openai should have OAuth config");
+        assert_eq!(config.provider, "openai");
+        assert_eq!(
+            config.authorize_url,
+            "https://auth.openai.com/oauth/authorize"
+        );
+        assert_eq!(config.token_url, "https://auth.openai.com/oauth/token");
+        assert!(!config.scopes.is_empty());
+    }
+
+    #[test]
+    fn test_oauth_supported_providers_includes_openai() {
+        let providers = oauth_supported_providers();
+        assert!(
+            providers.contains(&"openai"),
+            "openai must be in oauth_supported_providers"
+        );
     }
 }
