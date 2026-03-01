@@ -26,7 +26,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::DiscordConfig;
 use crate::error::{Result, ZeptoError};
 
@@ -81,6 +81,22 @@ struct HelloData {
     heartbeat_interval: u64,
 }
 
+/// A file attachment on a Discord message.
+#[derive(Debug, Deserialize)]
+struct DiscordAttachment {
+    /// The CDN URL of the attachment.
+    url: String,
+    /// MIME type (e.g. "image/png"), may be absent for older clients.
+    #[serde(default)]
+    content_type: Option<String>,
+    /// Original filename.
+    #[serde(default)]
+    filename: Option<String>,
+    /// File size in bytes.
+    #[serde(default)]
+    size: Option<u64>,
+}
+
 /// The `d` field of a MESSAGE_CREATE dispatch event.
 #[derive(Debug, Deserialize)]
 struct MessageCreateData {
@@ -93,6 +109,9 @@ struct MessageCreateData {
     author: MessageAuthor,
     /// The unique message ID.
     id: String,
+    /// File attachments on this message (images, etc.).
+    #[serde(default)]
+    attachments: Vec<DiscordAttachment>,
 }
 
 /// Author of a Discord message.
@@ -733,9 +752,34 @@ impl DiscordChannel {
                                                 if let Some(event_name) = payload.t.as_deref() {
                                                     if event_name == "MESSAGE_CREATE" {
                                                         if let Some(ref data) = payload.d {
-                                                            if let Some(inbound) =
+                                                            if let Some(mut inbound) =
                                                                 Self::parse_message_create(data, &allowlist, deny_by_default)
                                                             {
+                                                                // Download image attachments
+                                                                if let Ok(msg_data) = serde_json::from_value::<MessageCreateData>(data.clone()) {
+                                                                    for att in &msg_data.attachments {
+                                                                        if let Some(ref ct) = att.content_type {
+                                                                            if ct.starts_with("image/")
+                                                                                && att.size.is_none_or(|s| s <= 20 * 1024 * 1024)
+                                                                            {
+                                                                                match client.get(&att.url).send().await {
+                                                                                    Ok(resp) => {
+                                                                                        if let Ok(bytes) = resp.bytes().await {
+                                                                                            let mut media = MediaAttachment::new(MediaType::Image)
+                                                                                                .with_data(bytes.to_vec())
+                                                                                                .with_mime_type(ct);
+                                                                                            if let Some(ref name) = att.filename {
+                                                                                                media = media.with_filename(name);
+                                                                                            }
+                                                                                            inbound = inbound.with_media(media);
+                                                                                        }
+                                                                                    }
+                                                                                    Err(e) => warn!("Failed to download Discord attachment: {}", e),
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                                 if let Err(e) =
                                                                     bus.publish_inbound(inbound).await
                                                                 {

@@ -30,7 +30,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::WhatsAppConfig;
 use crate::deps::{DepKind, Dependency, HasDependencies, HealthCheck};
 use crate::error::{Result, ZeptoError};
@@ -83,6 +83,12 @@ struct BridgeMessage {
     #[serde(default)]
     #[allow(dead_code)]
     data: Option<String>,
+    /// Base64-encoded media data (image messages).
+    #[serde(default)]
+    media_base64: Option<String>,
+    /// MIME type of the media (e.g. "image/jpeg").
+    #[serde(default)]
+    media_mime_type: Option<String>,
 }
 
 /// Outbound message to the whatsmeow-rs bridge.
@@ -190,6 +196,22 @@ impl WhatsAppChannel {
         }
         if let Some(ref name) = msg.sender_name {
             inbound = inbound.with_metadata("sender_name", name);
+        }
+
+        // Decode and attach inline image data from the bridge
+        if let Some(ref b64_data) = msg.media_base64 {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64_data) {
+                if bytes.len() <= 20 * 1024 * 1024 {
+                    let mime = msg.media_mime_type.as_deref().unwrap_or("image/jpeg");
+                    if mime.starts_with("image/") {
+                        let media = MediaAttachment::new(MediaType::Image)
+                            .with_data(bytes)
+                            .with_mime_type(mime);
+                        inbound = inbound.with_media(media);
+                    }
+                }
+            }
         }
 
         Some(inbound)
@@ -717,6 +739,8 @@ mod tests {
             sender_name: Some("John".to_string()),
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let inbound = WhatsAppChannel::parse_bridge_message(&msg, &[], false);
@@ -752,6 +776,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let result =
@@ -771,6 +797,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let result =
@@ -790,6 +818,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let result = WhatsAppChannel::parse_bridge_message(&msg, &[], false);
@@ -808,6 +838,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let result = WhatsAppChannel::parse_bridge_message(&msg, &[], false);
@@ -826,6 +858,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let result = WhatsAppChannel::parse_bridge_message(&msg, &[], false);
@@ -844,6 +878,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let inbound = WhatsAppChannel::parse_bridge_message(&msg, &[], false).unwrap();
@@ -862,6 +898,8 @@ mod tests {
             sender_name: None,
             reason: None,
             data: None,
+            media_base64: None,
+            media_mime_type: None,
         };
 
         let inbound = WhatsAppChannel::parse_bridge_message(&msg, &[], false).unwrap();

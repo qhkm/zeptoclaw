@@ -43,7 +43,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::Config;
 use crate::config::TelegramConfig;
 use crate::error::{Result, ZeptoError};
@@ -686,6 +686,53 @@ impl Channel for TelegramChannel {
                                 if let Some(persona_value) = persona_entry {
                                     inbound = inbound
                                         .with_metadata("persona_override", &persona_value);
+                                }
+
+                                // Extract photo attachment if present (largest size)
+                                if let Some(photos) = msg.photo() {
+                                    if let Some(largest) = photos.last() {
+                                        match bot.get_file(largest.file.id.clone()).await {
+                                            Ok(file) => {
+                                                if !file.path.is_empty() {
+                                                    let download_url = format!(
+                                                        "https://api.telegram.org/file/bot{}/{}",
+                                                        bot.token(),
+                                                        file.path
+                                                    );
+                                                    match reqwest::get(&download_url).await {
+                                                        Ok(resp) => {
+                                                            if let Ok(bytes) = resp.bytes().await {
+                                                                if bytes.len()
+                                                                    <= 20 * 1024 * 1024
+                                                                {
+                                                                    let media =
+                                                                        MediaAttachment::new(
+                                                                            MediaType::Image,
+                                                                        )
+                                                                        .with_data(
+                                                                            bytes.to_vec(),
+                                                                        )
+                                                                        .with_mime_type(
+                                                                            "image/jpeg",
+                                                                        );
+                                                                    inbound =
+                                                                        inbound.with_media(media);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => warn!(
+                                                            "Failed to download Telegram photo: {}",
+                                                            e
+                                                        ),
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => warn!(
+                                                "Failed to get Telegram file info: {}",
+                                                e
+                                            ),
+                                        }
+                                    }
                                 }
 
                                 if let Err(e) = bus.publish_inbound(inbound).await {
