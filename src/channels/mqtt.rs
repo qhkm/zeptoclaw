@@ -121,6 +121,13 @@ mod inner {
         }
 
         async fn start(&mut self) -> Result<()> {
+            // Fail fast on mqtts:// — TLS transport is not yet configured.
+            if self.config.broker_url.starts_with("mqtts://") {
+                return Err(ZeptoError::Config(
+                    "mqtts:// requires TLS transport which is not yet supported; use mqtt:// or configure a TLS proxy".to_string(),
+                ));
+            }
+
             // Parse broker URL — rumqttc expects host and port separately.
             let url = &self.config.broker_url;
             let (host, port) = parse_broker_url(url).map_err(|e| {
@@ -201,14 +208,24 @@ mod inner {
                                 continue;
                             }
 
-                            // Derive sender: prefer explicit sender field, fall back to topic device ID.
-                            let sender = if !inbound.sender.is_empty() {
-                                inbound.sender.clone()
-                            } else if let Some(device_id) = extract_device_id(&topic) {
-                                device_id.to_string()
-                            } else {
-                                "mqtt-device".to_string()
+                            // Derive sender from topic (authoritative identity boundary).
+                            let sender = match extract_device_id(&topic).filter(|id| !id.is_empty())
+                            {
+                                Some(device_id) => device_id.to_string(),
+                                None => {
+                                    warn!("MQTT: cannot derive sender from topic '{}'", topic);
+                                    continue;
+                                }
                             };
+
+                            // Payload sender must match topic-derived sender if present.
+                            if !inbound.sender.is_empty() && inbound.sender != sender {
+                                warn!(
+                                    "MQTT: sender mismatch (payload='{}', topic='{}')",
+                                    inbound.sender, sender
+                                );
+                                continue;
+                            }
 
                             // Access control check.
                             let allowed = if allow_from.is_empty() {
@@ -288,7 +305,7 @@ mod inner {
 
             // Publish to the chat_id topic (which is already "prefix/device_id").
             let topic = &msg.chat_id;
-            let qos = QoS::AtLeastOnce;
+            let qos = config_qos(self.config.qos);
 
             client
                 .publish(topic, qos, false, payload.as_bytes())
@@ -488,6 +505,29 @@ mod inner {
             assert_eq!(config.qos, 1);
             assert!(config.username.is_empty());
             assert!(config.password.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_mqtt_start_rejects_mqtts() {
+            let mut ch = make_channel(MqttChannelConfig {
+                broker_url: "mqtts://secure.broker.io:8883".to_string(),
+                ..Default::default()
+            });
+            let result = ch.start().await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(err_msg.contains("mqtts://"));
+        }
+
+        #[test]
+        fn test_mqtt_config_debug_redacts_password() {
+            let config = MqttChannelConfig {
+                password: "super-secret-123".to_string(),
+                ..Default::default()
+            };
+            let debug_output = format!("{:?}", config);
+            assert!(!debug_output.contains("super-secret-123"));
+            assert!(debug_output.contains("[redacted]"));
         }
     }
 }

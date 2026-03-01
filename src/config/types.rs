@@ -770,7 +770,7 @@ impl Default for SerialChannelConfig {
 }
 
 /// MQTT channel configuration for IoT device communication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MqttChannelConfig {
     /// Whether the channel is enabled.
@@ -813,6 +813,23 @@ impl Default for MqttChannelConfig {
             allow_from: Vec::new(),
             deny_by_default: false,
         }
+    }
+}
+
+impl std::fmt::Debug for MqttChannelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttChannelConfig")
+            .field("enabled", &self.enabled)
+            .field("broker_url", &self.broker_url)
+            .field("client_id", &self.client_id)
+            .field("subscribe_topics", &self.subscribe_topics)
+            .field("publish_prefix", &self.publish_prefix)
+            .field("qos", &self.qos)
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("allow_from", &self.allow_from)
+            .field("deny_by_default", &self.deny_by_default)
+            .finish()
     }
 }
 

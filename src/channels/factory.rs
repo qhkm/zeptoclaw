@@ -248,10 +248,13 @@ pub async fn register_configured_channels(
                         bus.clone(),
                     )))
                     .await;
-                info!(
-                    "Registered MQTT channel (broker: {})",
-                    mqtt_config.broker_url
-                );
+                // Redact credentials from broker URL before logging.
+                let broker_display = mqtt_config
+                    .broker_url
+                    .rsplit_once('@')
+                    .map(|(_, host)| host)
+                    .unwrap_or(&mqtt_config.broker_url);
+                info!("Registered MQTT channel (broker: {})", broker_display);
             }
         }
     }
