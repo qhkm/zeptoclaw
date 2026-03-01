@@ -16,7 +16,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::SlackConfig;
 use crate::error::{Result, ZeptoError};
 
@@ -49,6 +49,23 @@ struct SlackSocketPayload {
     event: Option<SlackEvent>,
 }
 
+/// A file shared in a Slack message (Socket Mode events_api).
+#[derive(Debug, Deserialize)]
+struct SlackFile {
+    /// Private download URL (requires bot token auth).
+    #[serde(default)]
+    url_private_download: Option<String>,
+    /// MIME type reported by Slack (e.g. "image/png").
+    #[serde(default)]
+    mimetype: Option<String>,
+    /// Original filename.
+    #[serde(default)]
+    name: Option<String>,
+    /// File size in bytes.
+    #[serde(default)]
+    size: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct SlackEvent {
     #[serde(rename = "type")]
@@ -67,11 +84,16 @@ struct SlackEvent {
     ts: Option<String>,
     #[serde(default)]
     thread_ts: Option<String>,
+    /// Files attached to this message.
+    #[serde(default)]
+    files: Vec<SlackFile>,
 }
 
 struct ParsedSocketMessage {
     ack_message: Option<String>,
     inbound_message: Option<InboundMessage>,
+    /// Files extracted from the event payload for async downloading.
+    files: Vec<SlackFile>,
 }
 
 /// Slack channel implementation backed by Slack Web API and Socket Mode.
@@ -188,11 +210,36 @@ impl SlackChannel {
             .envelope_id
             .as_deref()
             .map(|envelope_id| json!({ "envelope_id": envelope_id }).to_string());
+
+        // Collect image files from the event payload before passing envelope by ref.
+        let files: Vec<SlackFile> = envelope
+            .payload
+            .as_ref()
+            .and_then(|p| p.event.as_ref())
+            .map(|e| {
+                e.files
+                    .iter()
+                    .filter(|f| {
+                        f.mimetype
+                            .as_deref()
+                            .is_some_and(|m| m.starts_with("image/"))
+                    })
+                    .map(|f| SlackFile {
+                        url_private_download: f.url_private_download.clone(),
+                        mimetype: f.mimetype.clone(),
+                        name: f.name.clone(),
+                        size: f.size,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let inbound_message = Self::extract_inbound_message(&envelope, allowlist, deny_by_default);
 
         Ok(ParsedSocketMessage {
             ack_message,
             inbound_message,
+            files,
         })
     }
 
@@ -260,6 +307,7 @@ impl SlackChannel {
     async fn run_socket_mode_loop(
         client: reqwest::Client,
         app_token: String,
+        bot_token: String,
         bus: Arc<MessageBus>,
         allowlist: Vec<String>,
         deny_by_default: bool,
@@ -329,7 +377,40 @@ impl SlackChannel {
                                     }
                                 }
 
-                                if let Some(inbound) = parsed.inbound_message {
+                                if let Some(mut inbound) = parsed.inbound_message {
+                                    // Download image files attached to this message
+                                    for file in &parsed.files {
+                                        if let (Some(ref url), Some(ref mime)) =
+                                            (&file.url_private_download, &file.mimetype)
+                                        {
+                                            if file.size.is_none_or(|s| s <= 20 * 1024 * 1024) {
+                                                match client
+                                                    .get(url)
+                                                    .bearer_auth(&bot_token)
+                                                    .send()
+                                                    .await
+                                                {
+                                                    Ok(resp) => {
+                                                        if let Ok(bytes) = resp.bytes().await {
+                                                            let mut media = MediaAttachment::new(
+                                                                MediaType::Image,
+                                                            )
+                                                            .with_data(bytes.to_vec())
+                                                            .with_mime_type(mime);
+                                                            if let Some(ref name) = file.name {
+                                                                media = media.with_filename(name);
+                                                            }
+                                                            inbound = inbound.with_media(media);
+                                                        }
+                                                    }
+                                                    Err(e) => warn!(
+                                                        "Failed to download Slack file: {}",
+                                                        e
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                    }
                                     if let Err(e) = bus.publish_inbound(inbound).await {
                                         error!("Failed to publish Slack inbound message: {}", e);
                                     }
@@ -405,6 +486,7 @@ impl Channel for SlackChannel {
         info!("Starting Slack channel with Socket Mode inbound");
         let running_clone = Arc::clone(&self.running);
         let client = self.client.clone();
+        let bot_token = self.config.bot_token.clone();
         let bus = Arc::clone(&self.bus);
         let allow_from = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
@@ -412,6 +494,7 @@ impl Channel for SlackChannel {
             Self::run_socket_mode_loop(
                 client,
                 app_token,
+                bot_token,
                 bus,
                 allow_from,
                 deny_by_default,

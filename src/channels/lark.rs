@@ -35,7 +35,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::LarkConfig;
 use crate::error::{Result, ZeptoError};
 
@@ -781,8 +781,8 @@ impl LarkChannel {
                         seen.insert(message_id.clone(), now);
                     }
 
-                    // Decode message text
-                    let text = match message_type {
+                    // Decode message text (image messages use a synthetic description)
+                    let (text, is_image_message) = match message_type {
                         "text" => {
                             let v: serde_json::Value =
                                 match serde_json::from_str(content_str) {
@@ -794,14 +794,23 @@ impl LarkChannel {
                                 .and_then(|t| t.as_str())
                                 .filter(|s| !s.is_empty())
                             {
-                                Some(t) => t.to_string(),
+                                Some(t) => (t.to_string(), false),
                                 None => continue,
                             }
                         }
                         "post" => match parse_post_content(content_str) {
-                            Some(t) => t,
+                            Some(t) => (t, false),
                             None => continue,
                         },
+                        "image" => {
+                            // Image-only message — use placeholder text so the
+                            // agent receives a non-empty InboundMessage, and
+                            // attach the actual bytes separately below.
+                            if chat_type == "group" && !should_respond_in_group(&mentions) {
+                                continue;
+                            }
+                            ("[image]".to_string(), true)
+                        }
                         _ => {
                             debug!(
                                 "Lark WS: skipping unsupported message type '{message_type}'"
@@ -810,24 +819,76 @@ impl LarkChannel {
                         }
                     };
 
-                    // Strip @_user_N placeholders, trim
-                    let text = strip_at_placeholders(&text);
-                    let text = text.trim().to_string();
-                    if text.is_empty() {
+                    // Strip @_user_N placeholders, trim (skip for synthetic image placeholder)
+                    let text = if is_image_message {
+                        text
+                    } else {
+                        let stripped = strip_at_placeholders(&text);
+                        let trimmed = stripped.trim().to_string();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        trimmed
+                    };
+
+                    // Group chat: only reply when @-mentioned (already handled for image above)
+                    if !is_image_message && chat_type == "group" && !should_respond_in_group(&mentions) {
                         continue;
                     }
 
-                    // Group chat: only reply when @-mentioned
-                    if chat_type == "group" && !should_respond_in_group(&mentions) {
-                        continue;
-                    }
-
-                    let inbound = InboundMessage::new(
+                    let mut inbound = InboundMessage::new(
                         self.base_config.name.as_str(),
                         sender_open_id,
                         &chat_id,
                         &text,
                     );
+
+                    // Fetch and attach image data for image-type messages
+                    if is_image_message && !message_id.is_empty() {
+                        if let Ok(content_value) =
+                            serde_json::from_str::<serde_json::Value>(content_str)
+                        {
+                            if let Some(image_key) = content_value["image_key"].as_str() {
+                                match self.get_tenant_token().await {
+                                    Ok(token) => {
+                                        let url = format!(
+                                            "{}/im/v1/messages/{}/resources/{}?type=image",
+                                            self.api_base(),
+                                            message_id,
+                                            image_key
+                                        );
+                                        match reqwest::Client::builder()
+                                            .timeout(Duration::from_secs(30))
+                                            .build()
+                                            .unwrap_or_default()
+                                            .get(&url)
+                                            .bearer_auth(&token)
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                if let Ok(bytes) = resp.bytes().await {
+                                                    if bytes.len() <= 20 * 1024 * 1024 {
+                                                        let media =
+                                                            MediaAttachment::new(MediaType::Image)
+                                                                .with_data(bytes.to_vec())
+                                                                .with_mime_type("image/jpeg");
+                                                        inbound = inbound.with_media(media);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to download Lark image: {}", e)
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Lark: could not get tenant token for image fetch: {}", e)
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     debug!("Lark WS: dispatching message from {sender_open_id} in {chat_id}");
                     if self.bus.publish_inbound(inbound).await.is_err() {

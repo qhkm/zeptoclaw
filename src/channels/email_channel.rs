@@ -34,7 +34,7 @@ use std::sync::{
 use tokio::sync::Mutex;
 
 #[cfg(feature = "channel-email")]
-use crate::bus::InboundMessage;
+use crate::bus::{InboundMessage, MediaAttachment, MediaType};
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::config::EmailConfig;
 use crate::error::{Result, ZeptoError};
@@ -332,9 +332,31 @@ impl EmailChannel {
             let body_text = Self::extract_plain_text(&parsed);
             let content = format!("Subject: {subject}\n\n{body_text}");
 
-            let inbound = InboundMessage::new("email", &from, &from, &content)
+            let mut inbound = InboundMessage::new("email", &from, &from, &content)
                 .with_metadata("message_id", &msg_id)
                 .with_metadata("subject", &subject);
+
+            // Extract image attachments
+            use mail_parser::GetHeader;
+            for part in parsed.attachments() {
+                if let Some(ct) = part.content_type() {
+                    let main_type = ct.c_type.as_ref();
+                    let sub_type = ct.c_subtype.as_deref().unwrap_or("octet-stream");
+                    let mime = format!("{}/{}", main_type, sub_type);
+                    if main_type.eq_ignore_ascii_case("image") {
+                        let bytes = part.contents().to_vec();
+                        if !bytes.is_empty() && bytes.len() <= 20 * 1024 * 1024 {
+                            let mut media = MediaAttachment::new(MediaType::Image)
+                                .with_data(bytes)
+                                .with_mime_type(&mime);
+                            if let Some(name) = part.attachment_name() {
+                                media = media.with_filename(name);
+                            }
+                            inbound = inbound.with_media(media);
+                        }
+                    }
+                }
+            }
 
             if inbound_tx.send(inbound).await.is_err() {
                 return Ok(());
