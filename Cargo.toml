@@ -178,7 +178,7 @@ probe-rs = { version = "0.31", optional = true }
 # XML PARSING (optional, android feature)
 # =============================================================================
 # Fast XML parser for Android uiautomator dump parsing
-quick-xml = { version = "0.36", optional = true }
+quick-xml = "0.36"
 
 # =============================================================================
 # GOOGLE WORKSPACE (optional, --features google)
@@ -233,7 +233,7 @@ peripheral-esp32 = ["hardware"]
 # Debug probe for STM32/Nucleo memory read via USB (adds ~50 deps)
 probe = ["probe-rs"]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)
-android = ["quick-xml"]
+android = []
 # Linux sandbox runtimes (Linux-only, require respective binaries except landlock)
 sandbox-landlock   = ["dep:landlock"]
 sandbox-firejail   = []
