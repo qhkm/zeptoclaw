@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::error::{Result, ZeptoError};
-use crate::session::{Message, Role, ToolCall};
+use crate::session::{ContentPart, ImageSource, Message, Role, ToolCall};
 
 use super::{
     parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage,
@@ -514,6 +514,21 @@ enum ClaudeContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// Image content (base64-encoded)
+    #[serde(rename = "image")]
+    Image { source: ClaudeImageSource },
+}
+
+/// Source descriptor for an image sent to the Claude API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeImageSource {
+    /// Always "base64" for inline images
+    #[serde(rename = "type")]
+    source_type: String,
+    /// MIME type, e.g. "image/jpeg"
+    media_type: String,
+    /// Base64-encoded image bytes
+    data: String,
 }
 
 /// Claude tool definition.
@@ -663,11 +678,42 @@ fn convert_messages(messages: Vec<Message>) -> Result<(Option<String>, Vec<Claud
                     });
                 }
 
-                // Add user message
-                claude_messages.push(ClaudeMessage {
-                    role: "user".to_string(),
-                    content: ClaudeContent::Text(msg.content),
-                });
+                // Add user message — use content blocks when images are present
+                if msg.has_images() {
+                    let blocks: Vec<ClaudeContentBlock> = msg
+                        .content_parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => {
+                                Some(ClaudeContentBlock::Text { text: text.clone() })
+                            }
+                            ContentPart::Image { source, media_type } => {
+                                if let ImageSource::Base64 { data } = source {
+                                    Some(ClaudeContentBlock::Image {
+                                        source: ClaudeImageSource {
+                                            source_type: "base64".to_string(),
+                                            media_type: media_type.clone(),
+                                            data: data.clone(),
+                                        },
+                                    })
+                                } else {
+                                    // FilePath / Url must be resolved to Base64 before
+                                    // reaching the provider layer — skip silently.
+                                    None
+                                }
+                            }
+                        })
+                        .collect();
+                    claude_messages.push(ClaudeMessage {
+                        role: "user".to_string(),
+                        content: ClaudeContent::Blocks(blocks),
+                    });
+                } else {
+                    claude_messages.push(ClaudeMessage {
+                        role: "user".to_string(),
+                        content: ClaudeContent::Text(msg.content),
+                    });
+                }
             }
             Role::Assistant => {
                 // Flush any pending tool results first
@@ -769,6 +815,9 @@ fn convert_response(response: ClaudeResponse) -> LLMResponse {
             ClaudeContentBlock::ToolResult { .. } => {
                 // Tool results shouldn't appear in responses, but handle gracefully
             }
+            ClaudeContentBlock::Image { .. } => {
+                // Images in responses are not expected, but handle gracefully
+            }
         }
     }
 
@@ -797,7 +846,7 @@ fn tool_call_to_llm_tool_call(tc: &ToolCall) -> LLMToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Message;
+    use crate::session::{ContentPart, ImageSource, Message};
 
     #[test]
     fn test_claude_provider_creation() {
@@ -1203,5 +1252,34 @@ mod tests {
             parsed["content_block"]["name"].as_str().unwrap(),
             "web_search"
         );
+    }
+
+    #[test]
+    fn test_convert_user_message_with_image() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc123".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let msg = Message::user_with_images("What is this?", images);
+        let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
+
+        assert_eq!(claude_msgs.len(), 1);
+        assert_eq!(claude_msgs[0].role, "user");
+        if let ClaudeContent::Blocks(blocks) = &claude_msgs[0].content {
+            assert_eq!(blocks.len(), 2); // text + image
+            assert!(matches!(&blocks[0], ClaudeContentBlock::Text { .. }));
+            assert!(matches!(&blocks[1], ClaudeContentBlock::Image { .. }));
+        } else {
+            panic!("Expected Blocks content for image message");
+        }
+    }
+
+    #[test]
+    fn test_convert_text_only_message_unchanged() {
+        let msg = Message::user("Hello");
+        let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
+        assert!(matches!(&claude_msgs[0].content, ClaudeContent::Text(_)));
     }
 }
