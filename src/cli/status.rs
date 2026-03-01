@@ -109,7 +109,7 @@ async fn cmd_auth_login_openai() -> Result<()> {
     const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
     const OPENAI_REDIRECT_PORT: u16 = 1455;
 
-    println!("Warning: OAuth subscription tokens for API access may violate");
+    println!("WARNING: OAuth subscription tokens for API access may violate");
     println!("OpenAI's Terms of Service. If tokens are rejected, set an API key:");
     println!("  export ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=your-key-here");
     println!();
@@ -127,8 +127,9 @@ async fn cmd_auth_login_openai() -> Result<()> {
     println!("Starting browser-based OpenAI OAuth flow...");
     println!();
 
-    let oauth_config =
-        auth::provider_oauth_config("openai").expect("openai oauth config must exist");
+    let oauth_config = auth::provider_oauth_config("openai").ok_or_else(|| {
+        anyhow::anyhow!("OpenAI OAuth config not registered in provider_oauth_config()")
+    })?;
 
     let tokens = auth::oauth::run_oauth_flow_with_port(
         &oauth_config,
