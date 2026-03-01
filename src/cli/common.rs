@@ -245,8 +245,8 @@ fn build_runtime_provider_chain(
 
     for selection in resolve_runtime_providers(config) {
         if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
-            let quota = provider_config_by_name(config, selection.name)
-                .and_then(|pc| pc.quota.clone());
+            let quota =
+                provider_config_by_name(config, selection.name).and_then(|pc| pc.quota.clone());
             let provider =
                 apply_quota_wrapper(provider, selection.name, quota, Arc::clone(&quota_store));
             candidates.push(RuntimeProviderCandidate {
@@ -1785,6 +1785,10 @@ mod tests {
             .expect("provider with None quota should succeed");
 
         assert_eq!(result.content, "ok");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one call should be made");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one call should be made"
+        );
     }
 }

@@ -2571,7 +2571,9 @@ mod tests {
         let decoded: ProviderConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.api_key.as_deref(), Some("sk-test"));
-        let quota = decoded.quota.expect("quota should be present after round-trip");
+        let quota = decoded
+            .quota
+            .expect("quota should be present after round-trip");
         assert_eq!(quota.max_cost_usd, Some(10.0));
         assert!(quota.max_tokens.is_none());
         assert_eq!(quota.period, QuotaPeriod::Monthly);
