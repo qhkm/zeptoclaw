@@ -164,25 +164,19 @@ fn read_from_auth_file(auth_path: &Path) -> Option<OAuthTokenSet> {
     let access_token = tokens.access_token.filter(|s| !s.is_empty())?;
     let refresh_token = tokens.refresh_token.filter(|s| !s.is_empty());
 
-    // Use file mtime for obtained_at, fall back to now
-    let metadata = std::fs::metadata(auth_path).ok()?;
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp());
-
-    let expires_at = mtime + CODEX_TOKEN_LIFETIME_SECS;
+    // No reliable expiry info in auth.json (no timestamp field).
+    // Set obtained_at = now and expires_at = None so ZeptoClaw attempts
+    // to use the token and handles 401 via the refresh flow if expired.
+    let now = chrono::Utc::now().timestamp();
 
     Some(OAuthTokenSet {
         provider: "openai".to_string(),
         access_token,
         refresh_token,
-        expires_at: Some(expires_at),
+        expires_at: None,
         token_type: "Bearer".to_string(),
         scope: None,
-        obtained_at: mtime,
+        obtained_at: now,
         client_id: None,
     })
 }
@@ -231,6 +225,15 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// RAII guard that removes an environment variable on drop.
+    /// Prevents env var leaks between parallel tests.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
     /// Helper: create a temp dir, write auth.json with given content, return (TempDir, auth_path).
     fn write_auth_file(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -242,6 +245,7 @@ mod tests {
 
     #[test]
     fn test_read_from_file_valid() {
+        let now = chrono::Utc::now().timestamp();
         let (_tmp, auth_path) = write_auth_file(
             r#"{"tokens": {"access_token": "oat-abc123", "refresh_token": "ort-def456"}}"#,
         );
@@ -254,17 +258,18 @@ mod tests {
         assert_eq!(ts.access_token, "oat-abc123");
         assert_eq!(ts.refresh_token.as_deref(), Some("ort-def456"));
         assert_eq!(ts.token_type, "Bearer");
-        assert!(ts.expires_at.is_some());
         assert!(ts.scope.is_none());
         assert!(ts.client_id.is_none());
-        // obtained_at should be roughly file mtime (recent)
-        let now = chrono::Utc::now().timestamp();
+        // expires_at is None — no reliable expiry from auth.json
+        assert!(
+            ts.expires_at.is_none(),
+            "expires_at should be None for file import"
+        );
+        // obtained_at should be close to now (not file mtime)
         assert!(
             (ts.obtained_at - now).abs() < 5,
             "obtained_at should be close to now"
         );
-        // expires_at should be obtained_at + 3600
-        assert_eq!(ts.expires_at.unwrap(), ts.obtained_at + 3600);
     }
 
     #[test]
@@ -319,17 +324,13 @@ mod tests {
 
     #[test]
     fn test_resolve_auth_path_uses_codex_home_env() {
-        // Use a temp dir to set CODEX_HOME and verify resolve_auth_path uses it.
-        // Note: env::set_var is inherently racy in parallel tests, but this test
-        // only checks the returned path shape, and all other tests in this module
-        // no longer depend on CODEX_HOME.
         let tmp = tempfile::tempdir().expect("create temp dir");
         let custom_path = tmp.path().to_str().unwrap().to_string();
         std::env::set_var("CODEX_HOME", &custom_path);
+        let _guard = EnvGuard("CODEX_HOME");
         let path = resolve_auth_path();
         assert!(path.is_some());
-        let expected = tmp.path().join("auth.json");
-        assert_eq!(path.unwrap(), expected);
+        assert_eq!(path.unwrap(), tmp.path().join("auth.json"));
     }
 
     #[cfg(target_os = "macos")]
