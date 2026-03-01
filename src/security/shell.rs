@@ -593,9 +593,7 @@ mod tests {
             .validate_command("git push --force-with-lease origin main")
             .is_err());
         // Bundled short options containing -f
-        assert!(config
-            .validate_command("git push -fu origin main")
-            .is_err());
+        assert!(config.validate_command("git push -fu origin main").is_err());
     }
 
     #[test]
@@ -656,9 +654,7 @@ mod tests {
             .validate_command("git checkout -- specific-file.rs")
             .is_ok());
         // Branch name ending in -f should not trigger force-push block
-        assert!(config
-            .validate_command("git push origin release-f")
-            .is_ok());
+        assert!(config.validate_command("git push origin release-f").is_ok());
     }
 
     #[test]
