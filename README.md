@@ -307,6 +307,10 @@ We welcome contributions! Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for
 
 Apache 2.0 — see [LICENSE](LICENSE)
 
+## Disclaimer
+
+ZeptoClaw is a pure open-source software project. It has no token, no cryptocurrency, no blockchain component, and no financial instrument of any kind. This project is not affiliated with any token or financial product.
+
 ---
 
 <p align="center">
