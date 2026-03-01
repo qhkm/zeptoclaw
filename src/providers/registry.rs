@@ -162,7 +162,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         name: "bedrock",
         model_keywords: &["bedrock", "anthropic.claude", "meta.llama", "amazon.titan"],
         runtime_supported: true,
-        default_base_url: Some("https://bedrock-runtime.us-east-1.amazonaws.com/v1"),
+        default_base_url: None, // User must configure api_base pointing to a SigV4 proxy or Bedrock API key endpoint
         backend: "openai",
         default_auth_header: None, // AWS SigV4 required; not yet implemented natively
         default_api_version: None,
@@ -265,11 +265,17 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
         let api_base = user_base.or_else(|| spec.default_base_url.map(String::from));
 
         let effective_auth_header = provider
-            .and_then(|p| p.auth_header.clone())
+            .and_then(|p| p.auth_header.as_deref())
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| h.to_string())
             .or_else(|| spec.default_auth_header.map(String::from));
 
         let effective_api_version = provider
-            .and_then(|p| p.api_version.clone())
+            .and_then(|p| p.api_version.as_deref())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string())
             .or_else(|| spec.default_api_version.map(String::from));
 
         resolved.push(RuntimeProviderSelection {
@@ -687,6 +693,7 @@ mod tests {
         let mut config = Config::default();
         config.providers.bedrock = Some(ProviderConfig {
             api_key: Some("aws-sig-placeholder".to_string()),
+            api_base: Some("https://my-sigv4-proxy.example.com/v1".to_string()),
             ..Default::default()
         });
 
@@ -695,11 +702,10 @@ mod tests {
         assert_eq!(selected.backend, "openai");
         assert!(selected.auth_header.is_none());
         assert!(selected.api_version.is_none());
-        assert!(selected
-            .api_base
-            .as_deref()
-            .unwrap()
-            .contains("bedrock-runtime"));
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://my-sigv4-proxy.example.com/v1")
+        );
     }
 
     #[test]
@@ -720,5 +726,21 @@ mod tests {
     fn test_runtime_supported_constant_includes_azure_and_bedrock() {
         assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"azure"));
         assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"bedrock"));
+    }
+
+    #[test]
+    fn test_empty_auth_header_falls_through_to_spec_default() {
+        let mut config = Config::default();
+        config.providers.azure = Some(ProviderConfig {
+            api_key: Some("my-azure-key".to_string()),
+            api_base: Some("https://myco.openai.azure.com/openai/deployments/gpt-4o".to_string()),
+            auth_header: Some("".to_string()), // empty — should fall through to spec default "api-key"
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("should resolve");
+        assert_eq!(selected.name, "azure");
+        // Empty string should fall through to spec default
+        assert_eq!(selected.auth_header.as_deref(), Some("api-key"));
     }
 }
