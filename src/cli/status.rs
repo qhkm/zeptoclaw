@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 
 use zeptoclaw::auth;
+use zeptoclaw::auth::codex_import;
 use zeptoclaw::config::{Config, ContainerAgentBackend, ProviderConfig};
 use zeptoclaw::providers::{
     configured_unsupported_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
@@ -48,6 +49,12 @@ async fn cmd_auth_login(provider: Option<String>) -> Result<()> {
         "anthropic".to_string()
     });
 
+    // OpenAI: import-first with hardcoded public client ID
+    if provider == "openai" {
+        return cmd_auth_login_openai().await;
+    }
+
+    // All other providers: existing flow (env-var client_id + ephemeral port)
     let oauth_config = auth::provider_oauth_config(&provider).ok_or_else(|| {
         anyhow::anyhow!(
             "Provider '{}' does not support OAuth authentication.\n\
@@ -92,7 +99,50 @@ async fn cmd_auth_login(provider: Option<String>) -> Result<()> {
 
     let tokens = auth::oauth::run_oauth_flow(&oauth_config, &client_id).await?;
 
-    // Store the tokens
+    save_and_print_tokens(&provider, tokens)?;
+
+    Ok(())
+}
+
+/// OpenAI-specific login: try Codex CLI import first, then browser OAuth.
+async fn cmd_auth_login_openai() -> Result<()> {
+    const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+    const OPENAI_REDIRECT_PORT: u16 = 1455;
+
+    println!("Warning: OAuth subscription tokens for API access may violate");
+    println!("OpenAI's Terms of Service. If tokens are rejected, set an API key:");
+    println!("  export ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=your-key-here");
+    println!();
+
+    // 1. Try Codex CLI import
+    println!("Checking for Codex CLI credentials...");
+    if let Some(tokens) = codex_import::read_codex_credentials() {
+        println!("Imported from Codex CLI (~/.codex/auth.json or Keychain)");
+        save_and_print_tokens("openai", tokens)?;
+        return Ok(());
+    }
+
+    // 2. Fall back to native browser OAuth
+    println!("No Codex CLI credentials found.");
+    println!("Starting browser-based OpenAI OAuth flow...");
+    println!();
+
+    let oauth_config =
+        auth::provider_oauth_config("openai").expect("openai oauth config must exist");
+
+    let tokens = auth::oauth::run_oauth_flow_with_port(
+        &oauth_config,
+        OPENAI_CLIENT_ID,
+        OPENAI_REDIRECT_PORT,
+    )
+    .await?;
+
+    save_and_print_tokens("openai", tokens)?;
+    Ok(())
+}
+
+/// Save tokens to the encrypted store and print success information.
+fn save_and_print_tokens(provider: &str, tokens: auth::OAuthTokenSet) -> Result<()> {
     let encryption = zeptoclaw::security::encryption::resolve_master_key(true)
         .map_err(|e| anyhow::anyhow!("Cannot store tokens without encryption key: {}", e))?;
 
