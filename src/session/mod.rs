@@ -33,7 +33,7 @@ pub mod types;
 
 pub use history::ConversationHistory;
 pub use repair::{repair_messages, RepairStats};
-pub use types::{Message, Role, Session, ToolCall};
+pub use types::{ContentPart, ImageSource, Message, Role, Session, ToolCall};
 
 use crate::config::Config;
 use crate::error::Result;
