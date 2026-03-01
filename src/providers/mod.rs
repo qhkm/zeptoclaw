@@ -28,6 +28,7 @@ pub mod fallback;
 pub mod gemini;
 pub mod openai;
 pub mod plugin;
+pub mod quota;
 mod registry;
 pub mod retry;
 pub mod rotation;
@@ -56,6 +57,7 @@ pub use fallback::FallbackProvider;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;
 pub use plugin::ProviderPlugin;
+pub use quota::{QuotaAction, QuotaCheckResult, QuotaConfig, QuotaPeriod, QuotaStore};
 pub use registry::{
     configured_provider_names, configured_unsupported_provider_names, provider_config_by_name,
     resolve_runtime_provider, resolve_runtime_providers, ProviderSpec, RuntimeProviderSelection,
