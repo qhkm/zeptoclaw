@@ -19,6 +19,10 @@ pub struct ProviderSpec {
     pub default_base_url: Option<&'static str>,
     /// The underlying backend ("anthropic" or "openai") for routing.
     pub backend: &'static str,
+    /// Default custom auth header name (e.g. "api-key" for Azure). None = "Authorization: Bearer"
+    pub default_auth_header: Option<&'static str>,
+    /// Default API version query param. None = no query param.
+    pub default_api_version: Option<&'static str>,
 }
 
 /// Runtime-ready provider selection.
@@ -36,6 +40,10 @@ pub struct RuntimeProviderSelection {
     pub credential: ResolvedCredential,
     /// Per-provider model override from config.
     pub model: Option<String>,
+    /// Effective auth header for this provider (user override OR spec default).
+    pub auth_header: Option<String>,
+    /// Effective API version param for this provider.
+    pub api_version: Option<String>,
 }
 
 /// Provider registry in priority order.
@@ -48,6 +56,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: None,
         backend: "anthropic",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "openai",
@@ -55,6 +65,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: None,
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "openrouter",
@@ -62,6 +74,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://openrouter.ai/api/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "groq",
@@ -69,6 +83,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://api.groq.com/openai/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "zhipu",
@@ -76,6 +92,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "vllm",
@@ -83,6 +101,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("http://localhost:8000/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "gemini",
@@ -90,6 +110,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "ollama",
@@ -97,6 +119,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("http://localhost:11434/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "nvidia",
@@ -104,6 +128,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://integrate.api.nvidia.com/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "deepseek",
@@ -111,6 +137,8 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://api.deepseek.com/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
     },
     ProviderSpec {
         name: "kimi",
@@ -118,6 +146,26 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         runtime_supported: true,
         default_base_url: Some("https://api.moonshot.cn/v1"),
         backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+    },
+    ProviderSpec {
+        name: "azure",
+        model_keywords: &["azure"],
+        runtime_supported: true,
+        default_base_url: None, // user MUST set api_base to their deployment URL
+        backend: "openai",
+        default_auth_header: Some("api-key"),
+        default_api_version: Some("2024-08-01-preview"),
+    },
+    ProviderSpec {
+        name: "bedrock",
+        model_keywords: &["bedrock", "anthropic.claude", "meta.llama", "amazon.titan"],
+        runtime_supported: true,
+        default_base_url: Some("https://bedrock-runtime.us-east-1.amazonaws.com/v1"),
+        backend: "openai",
+        default_auth_header: None, // AWS SigV4 required; not yet implemented natively
+        default_api_version: None,
     },
 ];
 
@@ -134,6 +182,8 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "nvidia" => config.providers.nvidia.as_ref(),
         "deepseek" => config.providers.deepseek.as_ref(),
         "kimi" => config.providers.kimi.as_ref(),
+        "azure" => config.providers.azure.as_ref(),
+        "bedrock" => config.providers.bedrock.as_ref(),
         _ => None,
     }
 }
@@ -214,6 +264,14 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
         });
         let api_base = user_base.or_else(|| spec.default_base_url.map(String::from));
 
+        let effective_auth_header = provider
+            .and_then(|p| p.auth_header.clone())
+            .or_else(|| spec.default_auth_header.map(String::from));
+
+        let effective_api_version = provider
+            .and_then(|p| p.api_version.clone())
+            .or_else(|| spec.default_api_version.map(String::from));
+
         resolved.push(RuntimeProviderSelection {
             name: spec.name,
             api_key: api_key_str,
@@ -221,6 +279,8 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
             backend: spec.backend,
             credential,
             model: provider.and_then(|p| p.model.clone()),
+            auth_header: effective_auth_header,
+            api_version: effective_api_version,
         });
     }
 
@@ -585,5 +645,80 @@ mod tests {
         let resolved = resolve_runtime_providers(&config);
         let anthropic = resolved.iter().find(|s| s.name == "anthropic").unwrap();
         assert_eq!(anthropic.model, None);
+    }
+
+    #[test]
+    fn test_azure_provider_resolves_with_auth_header_and_api_version() {
+        let mut config = Config::default();
+        config.providers.azure = Some(ProviderConfig {
+            api_key: Some("my-azure-key".to_string()),
+            api_base: Some("https://myco.openai.azure.com/openai/deployments/gpt-4o".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("should resolve");
+        assert_eq!(selected.name, "azure");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(selected.auth_header.as_deref(), Some("api-key"));
+        assert_eq!(selected.api_version.as_deref(), Some("2024-08-01-preview"));
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://myco.openai.azure.com/openai/deployments/gpt-4o")
+        );
+    }
+
+    #[test]
+    fn test_azure_user_can_override_api_version() {
+        let mut config = Config::default();
+        config.providers.azure = Some(ProviderConfig {
+            api_key: Some("my-azure-key".to_string()),
+            api_version: Some("2025-01-01-preview".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("should resolve");
+        assert_eq!(selected.name, "azure");
+        // User override takes precedence over spec default
+        assert_eq!(selected.api_version.as_deref(), Some("2025-01-01-preview"));
+    }
+
+    #[test]
+    fn test_bedrock_provider_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.bedrock = Some(ProviderConfig {
+            api_key: Some("aws-sig-placeholder".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("should resolve");
+        assert_eq!(selected.name, "bedrock");
+        assert_eq!(selected.backend, "openai");
+        assert!(selected.auth_header.is_none());
+        assert!(selected.api_version.is_none());
+        assert!(selected
+            .api_base
+            .as_deref()
+            .unwrap()
+            .contains("bedrock-runtime"));
+    }
+
+    #[test]
+    fn test_standard_provider_auth_header_is_none() {
+        let mut config = Config::default();
+        config.providers.openai = Some(ProviderConfig {
+            api_key: Some("sk-openai".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("should resolve");
+        assert_eq!(selected.name, "openai");
+        assert!(selected.auth_header.is_none());
+        assert!(selected.api_version.is_none());
+    }
+
+    #[test]
+    fn test_runtime_supported_constant_includes_azure_and_bedrock() {
+        assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"azure"));
+        assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"bedrock"));
     }
 }

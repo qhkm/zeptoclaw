@@ -48,6 +48,8 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "nvidia",
     "deepseek",
     "kimi",
+    "azure",
+    "bedrock",
 ];
 
 use crate::error::ProviderError;

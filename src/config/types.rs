@@ -1201,6 +1201,12 @@ pub struct ProvidersConfig {
     pub deepseek: Option<ProviderConfig>,
     /// Kimi (Moonshot AI) configuration
     pub kimi: Option<ProviderConfig>,
+    /// Azure OpenAI configuration (OpenAI-compatible with api-key header).
+    #[serde(default)]
+    pub azure: Option<ProviderConfig>,
+    /// Amazon Bedrock configuration (OpenAI-compatible endpoint; SigV4 required externally).
+    #[serde(default)]
+    pub bedrock: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
@@ -1232,6 +1238,12 @@ pub struct ProviderConfig {
     /// wrapped in a `QuotaProvider` that enforces the configured limits.
     #[serde(default)]
     pub quota: Option<crate::providers::quota::QuotaConfig>,
+    /// Custom auth header name, e.g. "api-key" for Azure. Overrides spec default.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// API version query param, e.g. "2024-08-01-preview" for Azure.
+    #[serde(default)]
+    pub api_version: Option<String>,
 }
 
 impl ProviderConfig {
@@ -2680,6 +2692,39 @@ mod tests {
             Some("val")
         );
         assert!(config.url.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_auth_header_and_api_version_default_none() {
+        let c = ProviderConfig::default();
+        assert!(c.auth_header.is_none());
+        assert!(c.api_version.is_none());
+    }
+
+    #[test]
+    fn test_providers_config_has_azure_and_bedrock_fields() {
+        let c = ProvidersConfig::default();
+        assert!(c.azure.is_none());
+        assert!(c.bedrock.is_none());
+    }
+
+    #[test]
+    fn test_azure_provider_config_round_trips() {
+        let json = r#"{
+            "providers": {
+                "azure": {
+                    "api_key": "my-azure-key",
+                    "api_base": "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+                    "auth_header": "api-key",
+                    "api_version": "2024-08-01-preview"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let azure = config.providers.azure.as_ref().unwrap();
+        assert_eq!(azure.api_key.as_deref(), Some("my-azure-key"));
+        assert_eq!(azure.auth_header.as_deref(), Some("api-key"));
+        assert_eq!(azure.api_version.as_deref(), Some("2024-08-01-preview"));
     }
 }
 

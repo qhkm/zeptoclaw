@@ -173,11 +173,15 @@ fn provider_from_runtime_selection(
                 return GeminiProvider::from_config(api_key, model, prefer_oauth)
                     .map(|p| Box::new(p) as Box<dyn LLMProvider>);
             }
-            let provider = if let Some(base_url) = selection.api_base.as_deref() {
-                OpenAIProvider::with_base_url(&selection.api_key, base_url)
-            } else {
-                OpenAIProvider::new(&selection.api_key)
-            };
+            let provider = OpenAIProvider::with_config(
+                &selection.api_key,
+                selection
+                    .api_base
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1"),
+                selection.auth_header.clone(),
+                selection.api_version.clone(),
+            );
             Some(Box::new(provider))
         }
         _ => None,
