@@ -235,6 +235,30 @@ pub async fn register_configured_channels(
         }
     }
 
+    // MQTT — requires mqtt feature
+    #[cfg(feature = "mqtt")]
+    if let Some(ref mqtt_config) = config.channels.mqtt {
+        if mqtt_config.enabled {
+            if mqtt_config.broker_url.is_empty() {
+                warn!("MQTT channel enabled but broker_url is empty");
+            } else {
+                manager
+                    .register(Box::new(super::mqtt::MqttChannel::new(
+                        mqtt_config.clone(),
+                        bus.clone(),
+                    )))
+                    .await;
+                // Redact credentials from broker URL before logging.
+                let broker_display = mqtt_config
+                    .broker_url
+                    .rsplit_once('@')
+                    .map(|(_, host)| host)
+                    .unwrap_or(&mqtt_config.broker_url);
+                info!("Registered MQTT channel (broker: {})", broker_display);
+            }
+        }
+    }
+
     // Channel plugins
     let plugin_dir: Option<PathBuf> = config
         .channels

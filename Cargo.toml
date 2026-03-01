@@ -167,6 +167,12 @@ rustls       = { version = "0.23", optional = true }
 webpki-roots = { version = "0.26", optional = true }
 
 # =============================================================================
+# MQTT (optional — feature-gated)
+# =============================================================================
+# Lightweight async MQTT client for IoT device communication
+rumqttc = { version = "0.24", optional = true }
+
+# =============================================================================
 # HARDWARE (optional — feature-gated)
 # =============================================================================
 # Serial port communication for peripherals (STM32, Arduino, ESP32)
@@ -232,6 +238,8 @@ peripheral-rpi = ["rppal"]
 peripheral-esp32 = ["hardware"]
 # Debug probe for STM32/Nucleo memory read via USB (adds ~50 deps)
 probe = ["probe-rs"]
+# MQTT channel for IoT device communication (rumqttc async client)
+mqtt = ["dep:rumqttc"]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)
 android = []
 # Linux sandbox runtimes (Linux-only, require respective binaries except landlock)
