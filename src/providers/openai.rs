@@ -490,12 +490,13 @@ impl OpenAIProvider {
 
     /// Return the correct `(header_name, header_value)` pair for authentication.
     ///
-    /// Returns `("api-key", api_key)` when `auth_key_header` is `Some("api-key")`,
-    /// otherwise returns `("Authorization", "Bearer <api_key>")`.
-    pub(crate) fn auth_header_pair(&self) -> (&str, String) {
+    /// When `auth_key_header` is `Some(name)`, returns `(name, api_key)` for any
+    /// custom header name (e.g. `"api-key"`, `"x-api-key"`, etc.).
+    /// When `None`, returns `("Authorization", "Bearer <api_key>")`.
+    pub(crate) fn auth_header_pair(&self) -> (&'_ str, String) {
         match self.auth_key_header.as_deref() {
-            Some("api-key") => ("api-key", self.api_key.clone()),
-            _ => ("Authorization", format!("Bearer {}", self.api_key)),
+            Some(name) => (name, self.api_key.clone()),
+            None => ("Authorization", format!("Bearer {}", self.api_key)),
         }
     }
 
@@ -1961,6 +1962,19 @@ mod tests {
         let (name, val) = p.auth_header_pair();
         assert_eq!(name, "Authorization");
         assert_eq!(val, "Bearer sk-x");
+    }
+
+    #[test]
+    fn test_with_config_arbitrary_custom_auth_header() {
+        let p = OpenAIProvider::with_config(
+            "mykey",
+            "https://api.example.com/v1",
+            Some("x-api-key".to_string()),
+            None,
+        );
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "x-api-key");
+        assert_eq!(val, "mykey");
     }
 
     #[test]
