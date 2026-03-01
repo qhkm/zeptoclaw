@@ -407,7 +407,7 @@ Containerized agent proxy for full request isolation:
 ### Providers (`src/providers/`)
 LLM provider abstraction via `LLMProvider` trait:
 - `ClaudeProvider` - Anthropic Claude API (120s timeout, SSE streaming)
-- `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot)
+- `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot, Azure OpenAI, Amazon Bedrock); custom auth header via `auth_key_header` field; API version query param via `api_version` field
 - `RetryProvider` - Decorator: exponential backoff on 429/5xx with structured `ProviderError` classification
 - `FallbackProvider` - Decorator: primary → secondary auto-failover with circuit breaker (Closed/Open/HalfOpen)
 - `QuotaProvider` - Decorator: wraps each provider to enforce configurable cost/token quotas; action can reject, failover (triggers FallbackProvider), or warn
@@ -589,6 +589,11 @@ Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_TOKENS` — max token count for OpenAI
 - `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD` — quota period: "monthly" (default) or "daily"
 - `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION` — quota action: "reject" (default), "fallback", "warn"
+- `ZEPTOCLAW_PROVIDERS_AZURE_API_KEY` (or `AZURE_OPENAI_API_KEY`) — Azure OpenAI API key
+- `ZEPTOCLAW_PROVIDERS_AZURE_API_BASE` (or `AZURE_OPENAI_ENDPOINT`) — Azure deployment base URL (e.g. `https://myco.openai.azure.com/openai/deployments/gpt-4o`)
+- `ZEPTOCLAW_PROVIDERS_AZURE_API_VERSION` — Azure API version (default preset: `2024-08-01-preview`)
+- `ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY` (or `AWS_ACCESS_KEY_ID`) — Amazon Bedrock credential placeholder (SigV4 required; use with proxy)
+- `ZEPTOCLAW_PROVIDERS_BEDROCK_API_BASE` — Bedrock regional endpoint (default: `https://bedrock-runtime.us-east-1.amazonaws.com/v1`)
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET` — per-session token budget (default: 0 = unlimited)
 - `ZEPTOCLAW_SAFETY_ENABLED` — enable safety layer (default: true)
 - `ZEPTOCLAW_SAFETY_LEAK_DETECTION_ENABLED` — enable secret leak detection (default: true)
