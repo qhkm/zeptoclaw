@@ -11,11 +11,10 @@ use std::path::Path;
 
 use super::OAuthTokenSet;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-/// Duration (in seconds) that a Codex access token is assumed valid.
-const CODEX_TOKEN_LIFETIME_SECS: i64 = 3600;
+#[cfg(target_os = "macos")]
+use sha2::{Digest, Sha256};
 
 // ============================================================================
 // JSON structures matching Codex CLI's auth file format
@@ -33,6 +32,7 @@ struct CodexTokens {
 }
 
 /// Extended format stored in macOS Keychain (includes `last_refresh` timestamp).
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 struct CodexKeychainData {
     tokens: Option<CodexTokens>,
@@ -76,6 +76,10 @@ pub fn read_codex_credentials() -> Option<OAuthTokenSet> {
 // ============================================================================
 // Keychain reader (macOS only)
 // ============================================================================
+
+/// Duration (in seconds) that a Codex access token is assumed valid.
+#[cfg(target_os = "macos")]
+const CODEX_TOKEN_LIFETIME_SECS: i64 = 3600;
 
 #[cfg(target_os = "macos")]
 fn read_from_keychain(codex_home: &str) -> Option<OAuthTokenSet> {
@@ -208,6 +212,7 @@ pub(crate) fn resolve_auth_path() -> Option<std::path::PathBuf> {
 /// Compute the Keychain account identifier for Codex CLI.
 ///
 /// Format: `cli|<sha256(codex_home_path)[:16]>` (16 hex chars = 8 bytes).
+#[cfg(target_os = "macos")]
 pub(crate) fn keychain_account(codex_home: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(codex_home.as_bytes());
@@ -354,7 +359,8 @@ mod tests {
         );
     }
 
-    // Also test keychain_account on all platforms (not gated) for coverage
+    // keychain_account only exists on macOS
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_keychain_account_deterministic() {
         let a1 = keychain_account("/Users/test/.codex");
