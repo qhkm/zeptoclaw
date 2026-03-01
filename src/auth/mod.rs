@@ -7,6 +7,7 @@
 //! Terms of Service. This module includes graceful fallback to API keys when
 //! OAuth tokens are rejected.
 
+pub mod codex_import;
 pub mod oauth;
 pub mod refresh;
 pub mod store;
