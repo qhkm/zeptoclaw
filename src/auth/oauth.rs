@@ -376,6 +376,14 @@ pub fn open_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
+fn generate_csrf_state() -> String {
+    use chacha20poly1305::aead::rand_core::RngCore;
+    use chacha20poly1305::aead::OsRng;
+    let mut buf = [0u8; 16];
+    OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
 fn validate_oauth_state(returned_state: Option<&str>, expected_state: &str) -> Result<()> {
     let returned_state = returned_state.ok_or_else(|| {
         ZeptoError::Config("OAuth callback missing state parameter — possible CSRF attack".into())
@@ -406,13 +414,7 @@ pub async fn run_oauth_flow(
     let pkce = PkceChallenge::generate();
 
     // Generate random state for CSRF protection
-    let state = {
-        use chacha20poly1305::aead::rand_core::RngCore;
-        use chacha20poly1305::aead::OsRng;
-        let mut buf = [0u8; 16];
-        OsRng.fill_bytes(&mut buf);
-        hex::encode(buf)
-    };
+    let state = generate_csrf_state();
 
     // Start callback server first so we know the port
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -467,14 +469,13 @@ pub async fn run_oauth_flow(
     Ok(tokens)
 }
 
-/// Run the complete OAuth flow for a provider using a fixed redirect port.
+/// Run the OAuth flow with a fixed redirect URI port instead of ephemeral.
 ///
-/// Identical to [`run_oauth_flow`] except the callback server binds to the
-/// given `port` instead of an OS-assigned ephemeral port. This is required by
-/// providers (e.g. OpenAI) whose OAuth apps are registered with a specific
-/// redirect URI containing a fixed port number.
-///
-/// Returns the obtained token set.
+/// Unlike [`run_oauth_flow`], this binds the callback server to a specific port
+/// and constructs the redirect URI as `http://localhost:{port}/auth/callback`.
+/// This format is required for OpenAI's registered application configuration,
+/// which expects `http://localhost:1455/auth/callback` (port 1455, path
+/// `/auth/callback`, host `localhost` not `127.0.0.1`).
 pub async fn run_oauth_flow_with_port(
     config: &ProviderOAuthConfig,
     client_id: &str,
@@ -483,13 +484,7 @@ pub async fn run_oauth_flow_with_port(
     let pkce = PkceChallenge::generate();
 
     // Generate random state for CSRF protection
-    let state = {
-        use chacha20poly1305::aead::rand_core::RngCore;
-        use chacha20poly1305::aead::OsRng;
-        let mut buf = [0u8; 16];
-        OsRng.fill_bytes(&mut buf);
-        hex::encode(buf)
-    };
+    let state = generate_csrf_state();
 
     // Bind callback server to the fixed port
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
