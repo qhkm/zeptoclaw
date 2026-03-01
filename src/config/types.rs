@@ -732,6 +732,8 @@ pub struct ChannelsConfig {
     pub email: Option<EmailConfig>,
     /// Serial (UART) channel configuration. Requires `hardware` feature.
     pub serial: Option<SerialChannelConfig>,
+    /// MQTT channel configuration. Requires `mqtt` feature.
+    pub mqtt: Option<MqttChannelConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -761,6 +763,53 @@ impl Default for SerialChannelConfig {
             enabled: false,
             port: String::new(),
             baud_rate: 115_200,
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+/// MQTT channel configuration for IoT device communication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MqttChannelConfig {
+    /// Whether the channel is enabled.
+    pub enabled: bool,
+    /// MQTT broker URL (e.g., "mqtt://localhost:1883").
+    pub broker_url: String,
+    /// Client ID for the MQTT connection.
+    pub client_id: String,
+    /// Topics to subscribe to for inbound messages (e.g., ["zeptoclaw/inbox/#"]).
+    pub subscribe_topics: Vec<String>,
+    /// Topic prefix for publishing responses (e.g., "zeptoclaw/outbox").
+    pub publish_prefix: String,
+    /// QoS level (0 = at most once, 1 = at least once, 2 = exactly once).
+    pub qos: u8,
+    /// MQTT broker username (optional).
+    #[serde(default)]
+    pub username: String,
+    /// MQTT broker password (optional).
+    #[serde(default)]
+    pub password: String,
+    /// Allow only specific device/sender IDs.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// Deny all senders unless in allowlist.
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+impl Default for MqttChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            broker_url: "mqtt://localhost:1883".to_string(),
+            client_id: "zeptoclaw-agent".to_string(),
+            subscribe_topics: vec!["zeptoclaw/inbox/#".to_string()],
+            publish_prefix: "zeptoclaw/outbox".to_string(),
+            qos: 1,
+            username: String::new(),
+            password: String::new(),
             allow_from: Vec::new(),
             deny_by_default: false,
         }

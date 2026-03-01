@@ -11,6 +11,9 @@ cargo build --release
 # Build with Android device control
 cargo build --release --features android
 
+# Build with MQTT IoT channel
+cargo build --release --features mqtt
+
 # Run tests
 cargo test
 
@@ -242,6 +245,7 @@ src/
 │   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
 │   ├── lark.rs     # Lark/Feishu messaging (WS long-connection)
 │   ├── email_channel.rs # Email channel (IMAP IDLE + SMTP)
+│   ├── mqtt.rs    # MQTT channel for IoT device messaging (feature: mqtt)
 │   └── serial.rs  # Serial (UART) channel for embedded device messaging (feature: hardware)
 ├── cli/            # Clap command parsing + command handlers
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
@@ -417,6 +421,7 @@ Message input channels via `Channel` trait:
 - `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth
 - `WhatsAppChannel` - WhatsApp via whatsmeow-rs bridge (WebSocket JSON protocol)
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
+- `MqttChannel` - MQTT messaging for IoT devices over WiFi/network (rumqttc, feature: mqtt)
 - `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
 - CLI mode via direct agent invocation
 - All channels support `deny_by_default` config option for sender allowlists
@@ -595,6 +600,7 @@ Environment variables override config:
 
 - `android` — Enable Android device control tool via ADB
 - `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
+- `mqtt` — Enable MQTT channel for IoT device communication (rumqttc async client)
 - `memory-bm25` — Enable BM25 keyword scoring for memory search
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
 - `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
@@ -723,6 +729,7 @@ Key crates:
 - `scraper` - HTML parsing for web_fetch
 - `aho-corasick` - Multi-pattern string matching for safety layer
 - `quick-xml` - XML parsing for Android uiautomator dumps (optional, `android` feature)
+- `rumqttc` - Async MQTT client for IoT device communication (optional, `mqtt` feature)
 - `axum` - Web framework for panel API (WebSocket support)
 - `tower-http` - CORS, static file serving, tracing
 - `jsonwebtoken` - JWT generation and validation for panel auth
