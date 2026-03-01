@@ -223,6 +223,7 @@ mod tests {
         let _ = ZeptoError::SecurityViolation("test".into());
         let _ = ZeptoError::Safety("test".into());
         let _ = ZeptoError::Mcp("test".into());
+        let _ = ZeptoError::QuotaExceeded("test".into());
     }
 
     #[test]
