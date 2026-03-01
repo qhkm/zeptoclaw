@@ -241,6 +241,23 @@ impl QuotaStore {
             .expect("quota state lock poisoned")
             .clone()
     }
+
+    /// Reset usage for a single provider and persist the change.
+    pub fn reset_provider(&self, name: &str) {
+        let mut guard = self.state.lock().expect("quota state lock poisoned");
+        guard.remove(name);
+        let snapshot: HashMap<String, QuotaUsage> = guard.clone();
+        drop(guard);
+        persist_state(&self.path, &snapshot);
+    }
+
+    /// Reset usage for all providers and persist the change.
+    pub fn reset_all(&self) {
+        let mut guard = self.state.lock().expect("quota state lock poisoned");
+        guard.clear();
+        drop(guard);
+        persist_state(&self.path, &HashMap::new());
+    }
 }
 
 // ---------------------------------------------------------------------------

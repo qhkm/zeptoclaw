@@ -19,6 +19,7 @@ pub mod onboard;
 pub mod pair;
 #[cfg(feature = "panel")]
 pub mod panel;
+pub mod quota;
 pub mod secrets;
 pub mod skills;
 pub mod status;
@@ -175,6 +176,11 @@ enum Commands {
     Pair {
         #[command(subcommand)]
         action: PairAction,
+    },
+    /// Show or reset per-provider quota usage
+    Quota {
+        #[command(subcommand)]
+        action: QuotaSubcommand,
     },
     #[cfg(feature = "panel")]
     /// Start the control panel (API server + dashboard)
@@ -454,6 +460,17 @@ pub enum PairAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum QuotaSubcommand {
+    /// Show current quota usage for all providers
+    Status,
+    /// Reset quota usage for a specific provider, or all providers if omitted
+    Reset {
+        /// Provider name to reset (e.g., "anthropic"). Omit to reset all.
+        provider: Option<String>,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum HardwareAction {
     /// List discovered USB devices
@@ -568,6 +585,9 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Pair { action }) => {
             pair::cmd_pair(action).await?;
+        }
+        Some(Commands::Quota { action }) => {
+            quota::cmd_quota(action)?;
         }
         #[cfg(feature = "panel")]
         Some(Commands::Panel {
