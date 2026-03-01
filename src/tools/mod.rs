@@ -63,6 +63,7 @@ pub mod composed;
 pub mod cron;
 pub mod custom;
 pub mod delegate;
+pub mod docx_read;
 pub mod filesystem;
 pub mod git;
 #[cfg(feature = "google")]
@@ -100,6 +101,7 @@ pub use binary_plugin::BinaryPluginTool;
 pub use composed::{ComposedTool, CreateToolTool};
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
+pub use docx_read::DocxReadTool;
 pub use git::GitTool;
 #[cfg(feature = "google")]
 pub use google::GoogleTool;

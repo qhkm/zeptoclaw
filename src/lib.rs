@@ -87,8 +87,8 @@ pub use tools::AndroidTool;
 pub use tools::GoogleTool;
 pub use tools::{
     composed::CreateToolTool, cron::CronTool, custom::CustomTool, delegate::DelegateTool,
-    spawn::SpawnTool, BinaryPluginTool, EchoTool, GitTool, GoogleSheetsTool, HardwareTool,
-    HttpRequestTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool, ProjectTool,
-    R8rTool, ReminderTool, StripeTool, Tool, ToolCategory, ToolContext, ToolRegistry, WebFetchTool,
-    WebSearchTool, WhatsAppTool,
+    spawn::SpawnTool, BinaryPluginTool, DocxReadTool, EchoTool, GitTool, GoogleSheetsTool,
+    HardwareTool, HttpRequestTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool,
+    ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolCategory, ToolContext, ToolRegistry,
+    WebFetchTool, WebSearchTool, WhatsAppTool,
 };

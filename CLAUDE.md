@@ -21,7 +21,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2635, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 121 passed (27 ignored)
+# lib: 2680, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 121 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -290,7 +290,7 @@ src/
 ├── migrate/        # OpenClaw migration (config, skills import)
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (29 built-in + MCP + binary plugins + android)
+├── tools/          # Agent tools (30 built-in + MCP + binary plugins + android)
 │   ├── android/     # Android device control via ADB (feature-gated: --features android)
 │   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
 │   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
@@ -305,6 +305,7 @@ src/
 │   ├── git.rs         # Git operations (status, diff, log, commit)
 │   ├── stripe.rs      # Stripe API integration for payment operations
 │   ├── pdf_read.rs    # PDF text extraction (PdfReadTool)
+│   ├── docx_read.rs   # DOCX text extraction (DocxReadTool)
 │   ├── transcribe.rs  # Audio transcription with provider abstraction
 │   ├── http_request.rs # General-purpose HTTP client tool
 │   ├── project.rs     # Project scaffolding and management
@@ -434,7 +435,7 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-29 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
+30 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
 
 **Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
 - `CreateToolTool` — agent tool with create/list/delete/run actions
@@ -592,7 +593,7 @@ Environment variables override config:
 
 ### Cargo Features
 
-- `android` — Enable Android device control tool (adds `quick-xml` dependency)
+- `android` — Enable Android device control tool via ADB
 - `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
 - `memory-bm25` — Enable BM25 keyword scoring for memory search
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
