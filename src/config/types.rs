@@ -1131,6 +1131,10 @@ pub struct ProvidersConfig {
     pub ollama: Option<ProviderConfig>,
     /// Nvidia NIM configuration
     pub nvidia: Option<ProviderConfig>,
+    /// DeepSeek configuration
+    pub deepseek: Option<ProviderConfig>,
+    /// Kimi (Moonshot AI) configuration
+    pub kimi: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers

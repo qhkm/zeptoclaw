@@ -45,6 +45,8 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "gemini",
     "ollama",
     "nvidia",
+    "deepseek",
+    "kimi",
 ];
 
 use crate::error::ProviderError;
