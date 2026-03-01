@@ -347,6 +347,10 @@ pub struct OpenAIProvider {
     client: Client,
     /// Preferred token field by model to avoid repeated fallback retries
     model_token_fields: Mutex<HashMap<String, MaxTokenField>>,
+    /// Custom auth header name, e.g. "api-key" for Azure. None = "Authorization: Bearer"
+    auth_key_header: Option<String>,
+    /// Optional API version query param, e.g. "2024-08-01-preview" for Azure.
+    api_version: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -374,6 +378,8 @@ impl OpenAIProvider {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
         }
     }
 
@@ -400,6 +406,8 @@ impl OpenAIProvider {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
         }
     }
 
@@ -418,6 +426,49 @@ impl OpenAIProvider {
             api_base: api_base.trim_end_matches('/').to_string(),
             client,
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
+        }
+    }
+
+    /// Create a new OpenAI provider with full configuration, including optional
+    /// Azure-style auth header and API version query parameter.
+    ///
+    /// # Arguments
+    /// * `api_key` - API key
+    /// * `api_base` - Base URL for the API (trailing slash will be removed)
+    /// * `auth_key_header` - Custom auth header name. Use `Some("api-key")` for Azure.
+    ///   `None` defaults to `Authorization: Bearer`.
+    /// * `api_version` - Optional `api-version` query parameter, e.g.
+    ///   `Some("2024-08-01-preview")` for Azure OpenAI.
+    ///
+    /// # Example
+    /// ```
+    /// use zeptoclaw::providers::openai::OpenAIProvider;
+    ///
+    /// let provider = OpenAIProvider::with_config(
+    ///     "my-azure-key",
+    ///     "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+    ///     Some("api-key".to_string()),
+    ///     Some("2024-08-01-preview".to_string()),
+    /// );
+    /// ```
+    pub fn with_config(
+        api_key: &str,
+        api_base: &str,
+        auth_key_header: Option<String>,
+        api_version: Option<String>,
+    ) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+            api_base: api_base.trim_end_matches('/').to_string(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header,
+            api_version,
         }
     }
 
@@ -434,6 +485,27 @@ impl OpenAIProvider {
     fn remember_token_field(&self, model: &str, token_field: MaxTokenField) {
         if let Ok(mut fields) = self.model_token_fields.lock() {
             fields.insert(model.to_string(), token_field);
+        }
+    }
+
+    /// Return the correct `(header_name, header_value)` pair for authentication.
+    ///
+    /// Returns `("api-key", api_key)` when `auth_key_header` is `Some("api-key")`,
+    /// otherwise returns `("Authorization", "Bearer <api_key>")`.
+    pub(crate) fn auth_header_pair(&self) -> (&str, String) {
+        match self.auth_key_header.as_deref() {
+            Some("api-key") => ("api-key", self.api_key.clone()),
+            _ => ("Authorization", format!("Bearer {}", self.api_key)),
+        }
+    }
+
+    /// Build the full request URL for `path`, appending `?api-version=<v>` when set.
+    ///
+    /// `path` should be provided **without** a leading slash (e.g. `"chat/completions"`).
+    pub(crate) fn versioned_url(&self, path: &str) -> String {
+        match &self.api_version {
+            Some(v) => format!("{}/{}?api-version={}", self.api_base, path, v),
+            None => format!("{}/{}", self.api_base, path),
         }
     }
 }
@@ -699,10 +771,11 @@ impl LLMProvider for OpenAIProvider {
             let request = build_request(model, &messages, &tools, &options, token_field);
             debug!("OpenAI request to model {} with {:?}", model, token_field);
 
+            let (auth_header_name, auth_header_value) = self.auth_header_pair();
             let response = self
                 .client
-                .post(format!("{}/chat/completions", self.api_base))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .post(self.versioned_url("chat/completions"))
+                .header(auth_header_name, auth_header_value)
                 .header("Content-Type", "application/json")
                 .json(&request)
                 .send()
@@ -782,10 +855,11 @@ impl LLMProvider for OpenAIProvider {
                 model, token_field
             );
 
+            let (auth_header_name, auth_header_value) = self.auth_header_pair();
             let response = self
                 .client
-                .post(format!("{}/chat/completions", self.api_base))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .post(self.versioned_url("chat/completions"))
+                .header(auth_header_name, auth_header_value)
                 .header("Content-Type", "application/json")
                 .json(&request)
                 .send()
@@ -922,16 +996,17 @@ impl LLMProvider for OpenAIProvider {
     }
 
     async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
-        let url = format!("{}/embeddings", self.api_base);
+        let url = self.versioned_url("embeddings");
         let body = serde_json::json!({
             "model": "text-embedding-3-small",
             "input": texts,
         });
 
+        let (auth_header_name, auth_header_value) = self.auth_header_pair();
         let resp = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header(auth_header_name, auth_header_value)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -1861,5 +1936,52 @@ mod tests {
             "Text-only content must be a string for compatibility"
         );
         assert_eq!(json["content"], "Hello world");
+    }
+
+    // ========================================================================
+    // Azure auth header + api_version tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_config_custom_auth_header() {
+        let p = OpenAIProvider::with_config(
+            "mykey",
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+            Some("api-key".to_string()),
+            None,
+        );
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "api-key");
+        assert_eq!(val, "mykey");
+    }
+
+    #[test]
+    fn test_with_config_default_auth_header() {
+        let p = OpenAIProvider::with_config("sk-x", "https://api.openai.com/v1", None, None);
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "Authorization");
+        assert_eq!(val, "Bearer sk-x");
+    }
+
+    #[test]
+    fn test_versioned_url_with_api_version() {
+        let p = OpenAIProvider::with_config(
+            "k",
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+            None,
+            Some("2024-08-01-preview".to_string()),
+        );
+        let url = p.versioned_url("chat/completions");
+        assert_eq!(
+            url,
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+        );
+    }
+
+    #[test]
+    fn test_versioned_url_without_api_version() {
+        let p = OpenAIProvider::with_base_url("k", "https://api.openai.com/v1");
+        let url = p.versioned_url("chat/completions");
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
     }
 }
