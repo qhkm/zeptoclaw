@@ -140,6 +140,16 @@ impl QuotaStore {
         }
     }
 
+    /// Load quota state from a specific directory (used for testing).
+    pub fn load_from_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let path = dir.as_ref().join("usage.json");
+        let state = load_state(&path);
+        Self {
+            state: Mutex::new(state),
+            path,
+        }
+    }
+
     /// Compute the period key for `now()` given a reset cadence.
     ///
     /// Returns `"YYYY-MM"` for `Monthly` and `"YYYY-MM-DD"` for `Daily`.
@@ -165,7 +175,13 @@ impl QuotaStore {
 
         let current_key = Self::current_period_key(&config.period);
 
-        let guard = self.state.lock().expect("quota state lock poisoned");
+        let guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("quota state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         let usage = match guard.get(provider) {
             Some(u) if u.period_key == current_key => u,
             // No entry or stale period → nothing recorded yet.
@@ -206,7 +222,13 @@ impl QuotaStore {
         let cost_usd = cost_usd.max(0.0);
         let current_key = Self::current_period_key(period);
 
-        let mut guard = self.state.lock().expect("quota state lock poisoned");
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("quota state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
 
         let entry = guard
             .entry(provider.to_string())
@@ -236,15 +258,25 @@ impl QuotaStore {
 
     /// Return a point-in-time snapshot of all provider usage entries.
     pub fn snapshot(&self) -> HashMap<String, QuotaUsage> {
-        self.state
-            .lock()
-            .expect("quota state lock poisoned")
-            .clone()
+        let guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("quota state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        guard.clone()
     }
 
     /// Reset usage for a single provider and persist the change.
     pub fn reset_provider(&self, name: &str) {
-        let mut guard = self.state.lock().expect("quota state lock poisoned");
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("quota state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         guard.remove(name);
         let snapshot: HashMap<String, QuotaUsage> = guard.clone();
         drop(guard);
@@ -253,7 +285,13 @@ impl QuotaStore {
 
     /// Reset usage for all providers and persist the change.
     pub fn reset_all(&self) {
-        let mut guard = self.state.lock().expect("quota state lock poisoned");
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("quota state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         guard.clear();
         drop(guard);
         persist_state(&self.path, &HashMap::new());
@@ -271,9 +309,10 @@ impl QuotaStore {
 /// `chat()` call it records the token usage in the shared [`QuotaStore`].
 ///
 /// # Quota Actions
-/// - [`QuotaAction::Reject`] / [`QuotaAction::Fallback`] — return
-///   [`crate::error::ZeptoError::QuotaExceeded`] when the quota is exceeded so
-///   that the caller (or a surrounding `FallbackProvider`) can handle it.
+/// - [`QuotaAction::Reject`] — return [`crate::error::ZeptoError::QuotaRejected`]
+///   (hard stop; `FallbackProvider` will NOT retry on this error).
+/// - [`QuotaAction::Fallback`] — return [`crate::error::ZeptoError::QuotaExceeded`]
+///   so that a surrounding `FallbackProvider` can catch it and route to the secondary.
 /// - [`QuotaAction::Warn`] — log a warning and allow the request through.
 pub struct QuotaProvider {
     inner: Box<dyn crate::providers::LLMProvider>,
@@ -317,10 +356,19 @@ impl QuotaProvider {
                         "quota exceeded (action=warn): allowing request through",
                     );
                 }
-                // Both Reject and Fallback surface the error — in the Fallback
-                // case a surrounding FallbackProvider should catch it and route
-                // to the secondary provider.
-                QuotaAction::Reject | QuotaAction::Fallback => {
+                QuotaAction::Reject => {
+                    let period = match self.config.period {
+                        QuotaPeriod::Monthly => "monthly",
+                        QuotaPeriod::Daily => "daily",
+                    };
+                    return Err(crate::error::ZeptoError::QuotaRejected(format!(
+                        "{} {} quota exceeded (hard reject)",
+                        self.provider_name, period
+                    )));
+                }
+                // Fallback surfaces QuotaExceeded so a surrounding FallbackProvider
+                // can catch it and route to the secondary provider.
+                QuotaAction::Fallback => {
                     let period = match self.config.period {
                         QuotaPeriod::Monthly => "monthly",
                         QuotaPeriod::Daily => "daily",
@@ -927,13 +975,13 @@ mod tests {
 
         assert!(result.is_err(), "expected Err, got Ok");
         match result.unwrap_err() {
-            ZeptoError::QuotaExceeded(msg) => {
+            ZeptoError::QuotaRejected(msg) => {
                 assert!(
                     msg.contains("anthropic"),
                     "error message should name the provider: {msg}"
                 );
             }
-            other => panic!("expected QuotaExceeded, got {other:?}"),
+            other => panic!("expected QuotaRejected, got {other:?}"),
         }
     }
 

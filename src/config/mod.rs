@@ -563,34 +563,40 @@ impl Config {
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_PERIOD") {
             use crate::providers::quota::QuotaPeriod;
-            let period = match val.trim().to_ascii_lowercase().as_str() {
-                "daily" => QuotaPeriod::Daily,
-                _ => QuotaPeriod::Monthly,
+            let maybe_period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => Some(QuotaPeriod::Daily),
+                "monthly" => Some(QuotaPeriod::Monthly),
+                _ => None, // unknown value — skip, don't override config file
             };
-            let provider = self
-                .providers
-                .anthropic
-                .get_or_insert_with(ProviderConfig::default);
-            provider
-                .quota
-                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
-                .period = period;
+            if let Some(period) = maybe_period {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .period = period;
+            }
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION") {
             use crate::providers::quota::QuotaAction;
-            let action = match val.trim().to_ascii_lowercase().as_str() {
-                "fallback" => QuotaAction::Fallback,
-                "warn" => QuotaAction::Warn,
-                _ => QuotaAction::Reject,
+            let maybe_action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => Some(QuotaAction::Fallback),
+                "warn" => Some(QuotaAction::Warn),
+                "reject" => Some(QuotaAction::Reject),
+                _ => None, // unknown value — skip
             };
-            let provider = self
-                .providers
-                .anthropic
-                .get_or_insert_with(ProviderConfig::default);
-            provider
-                .quota
-                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
-                .action = action;
+            if let Some(action) = maybe_action {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .action = action;
+            }
         }
 
         // Per-provider quota overrides — OpenAI
@@ -620,34 +626,40 @@ impl Config {
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD") {
             use crate::providers::quota::QuotaPeriod;
-            let period = match val.trim().to_ascii_lowercase().as_str() {
-                "daily" => QuotaPeriod::Daily,
-                _ => QuotaPeriod::Monthly,
+            let maybe_period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => Some(QuotaPeriod::Daily),
+                "monthly" => Some(QuotaPeriod::Monthly),
+                _ => None, // unknown value — skip, don't override config file
             };
-            let provider = self
-                .providers
-                .openai
-                .get_or_insert_with(ProviderConfig::default);
-            provider
-                .quota
-                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
-                .period = period;
+            if let Some(period) = maybe_period {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .period = period;
+            }
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION") {
             use crate::providers::quota::QuotaAction;
-            let action = match val.trim().to_ascii_lowercase().as_str() {
-                "fallback" => QuotaAction::Fallback,
-                "warn" => QuotaAction::Warn,
-                _ => QuotaAction::Reject,
+            let maybe_action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => Some(QuotaAction::Fallback),
+                "warn" => Some(QuotaAction::Warn),
+                "reject" => Some(QuotaAction::Reject),
+                _ => None, // unknown value — skip
             };
-            let provider = self
-                .providers
-                .openai
-                .get_or_insert_with(ProviderConfig::default);
-            provider
-                .quota
-                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
-                .action = action;
+            if let Some(action) = maybe_action {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .action = action;
+            }
         }
     }
 

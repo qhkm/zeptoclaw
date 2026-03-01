@@ -178,6 +178,10 @@ pub enum ZeptoError {
     /// Provider quota exceeded (cost or token limit).
     #[error("Quota exceeded: {0}")]
     QuotaExceeded(String),
+
+    /// Provider quota exceeded and the configured action is "reject" (no fallback).
+    #[error("Quota rejected: {0}")]
+    QuotaRejected(String),
 }
 
 /// A specialized `Result` type for ZeptoClaw operations.
@@ -224,6 +228,7 @@ mod tests {
         let _ = ZeptoError::Safety("test".into());
         let _ = ZeptoError::Mcp("test".into());
         let _ = ZeptoError::QuotaExceeded("test".into());
+        let _ = ZeptoError::QuotaRejected("test".into());
     }
 
     #[test]
