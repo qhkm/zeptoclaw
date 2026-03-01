@@ -51,12 +51,13 @@ const REGEX_BLOCKED_PATTERNS: &[&str] = &[
     r"\benv\b.*>\s*/",
     r"\bprintenv\b.*>\s*/",
     // Destructive git operations (bypass-proof: the safe git tool exists for normal ops)
-    r"git\s+push\s+.*--force",
-    r"git\s+push\s+.*-f\b",
+    r"git\s+push\b.*\s--force(?:-with-lease)?(?:\s|$)",
+    r"git\s+push\b.*\s-[A-Za-z]*f[A-Za-z]*(?:\s|$)",
     r"git\s+reset\s+--hard",
     r"git\s+clean\s+.*-[a-zA-Z]*f",
+    r"git\s+clean\s+.*--force",
     r"git\s+checkout\s+--\s+\.",
-    r"(?-i)git\s+branch\s+.*-D\b",
+    r"git\s+branch\s+.*-(?-i:D)\b",
 ];
 
 /// Literal substring patterns (credentials, sensitive paths)
@@ -591,6 +592,10 @@ mod tests {
         assert!(config
             .validate_command("git push --force-with-lease origin main")
             .is_err());
+        // Bundled short options containing -f
+        assert!(config
+            .validate_command("git push -fu origin main")
+            .is_err());
     }
 
     #[test]
@@ -610,6 +615,8 @@ mod tests {
         assert!(config.validate_command("git clean -f").is_err());
         assert!(config.validate_command("git clean -xfd").is_err());
         assert!(config.validate_command("git clean -df").is_err());
+        // Long-form --force
+        assert!(config.validate_command("git clean --force -d").is_err());
     }
 
     #[test]
@@ -623,6 +630,10 @@ mod tests {
         let config = ShellSecurityConfig::new();
         assert!(config
             .validate_command("git branch -D feature-branch")
+            .is_err());
+        // Case-insensitive: uppercase GIT should also be blocked
+        assert!(config
+            .validate_command("GIT branch -D feature-branch")
             .is_err());
     }
 
@@ -643,6 +654,10 @@ mod tests {
         assert!(config.validate_command("git merge feature").is_ok());
         assert!(config
             .validate_command("git checkout -- specific-file.rs")
+            .is_ok());
+        // Branch name ending in -f should not trigger force-push block
+        assert!(config
+            .validate_command("git push origin release-f")
             .is_ok());
     }
 
