@@ -12,7 +12,7 @@
 //! calling `summarize_messages`.
 
 use super::context_monitor::CompactionUrgency;
-use crate::session::{Message, Role};
+use crate::session::{ContentPart, Message, Role};
 
 /// Truncate messages to keep only the N most recent.
 ///
@@ -137,7 +137,7 @@ pub fn summarize_messages(
 
     let summary_msg = Message::system(&format!("[Conversation Summary]\n{}", summary_text));
 
-    if has_system_prefix {
+    let mut result = if has_system_prefix {
         let total = messages.len();
         // recent = last `keep_recent` messages (excluding system prefix)
         let skip = (total - 1).saturating_sub(keep_recent);
@@ -158,7 +158,11 @@ pub fn summarize_messages(
             result.push(msg);
         }
         result
-    }
+    };
+
+    // Strip images from kept messages — the LLM already saw them
+    strip_images_from_messages(&mut result);
+    result
 }
 
 /// Shrink tool result messages to reduce context size.
@@ -427,9 +431,50 @@ pub fn build_summary_prompt(messages: &[Message]) -> String {
     )
 }
 
+/// Strip image content parts from a slice of messages, keeping only text parts.
+///
+/// Used during compaction to remove image data from older messages that have
+/// already been seen by the LLM. This reduces context size significantly since
+/// base64-encoded images are very large.
+pub fn strip_images_from_messages(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        if msg.has_images() {
+            msg.content_parts
+                .retain(|p| matches!(p, ContentPart::Text { .. }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{ContentPart, ImageSource};
+
+    // ── strip_images_from_messages ────────────────────────────────────
+
+    #[test]
+    fn test_strip_images_removes_image_parts() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "big_data".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let mut msgs = vec![Message::user_with_images("What is this?", images)];
+        assert!(msgs[0].has_images());
+        strip_images_from_messages(&mut msgs);
+        assert!(!msgs[0].has_images());
+        assert_eq!(msgs[0].content_parts.len(), 1); // only text remains
+        assert_eq!(msgs[0].content, "What is this?");
+    }
+
+    #[test]
+    fn test_strip_images_leaves_text_only_unchanged() {
+        let mut msgs = vec![Message::user("Hello"), Message::assistant("Hi")];
+        strip_images_from_messages(&mut msgs);
+        assert_eq!(msgs[0].content_parts.len(), 1);
+        assert_eq!(msgs[1].content_parts.len(), 1);
+    }
 
     // ── truncate_messages ──────────────────────────────────────────────
 
