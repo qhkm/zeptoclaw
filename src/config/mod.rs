@@ -424,6 +424,38 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // DeepSeek
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_API_KEY") {
+            let provider = self
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_API_BASE") {
+            let provider = self
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
+        // Kimi (Moonshot AI)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_API_KEY") {
+            let provider = self
+                .providers
+                .kimi
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_API_BASE") {
+            let provider = self
+                .providers
+                .kimi
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -476,6 +508,18 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL") {
             self.providers
                 .zhipu
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_MODEL") {
+            self.providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_MODEL") {
+            self.providers
+                .kimi
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }
@@ -1656,6 +1700,8 @@ mod tests {
             ("ZEPTOCLAW_PROVIDERS_OLLAMA_MODEL", "mistral:latest"),
             ("ZEPTOCLAW_PROVIDERS_VLLM_MODEL", "meta-llama/Llama-3"),
             ("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL", "glm-4"),
+            ("ZEPTOCLAW_PROVIDERS_DEEPSEEK_MODEL", "deepseek-chat"),
+            ("ZEPTOCLAW_PROVIDERS_KIMI_MODEL", "moonshot-v1-128k"),
         ];
 
         for (key, val) in &vars {
@@ -1700,6 +1746,14 @@ mod tests {
         assert_eq!(
             config.providers.zhipu.as_ref().unwrap().model,
             Some("glm-4".to_string())
+        );
+        assert_eq!(
+            config.providers.deepseek.as_ref().unwrap().model,
+            Some("deepseek-chat".to_string())
+        );
+        assert_eq!(
+            config.providers.kimi.as_ref().unwrap().model,
+            Some("moonshot-v1-128k".to_string())
         );
 
         // Clean up
