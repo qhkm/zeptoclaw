@@ -27,6 +27,7 @@
 //! ```
 
 pub mod history;
+pub mod media;
 pub mod repair;
 pub mod types;
 
