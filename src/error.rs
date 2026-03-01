@@ -174,6 +174,10 @@ pub enum ZeptoError {
     /// MCP (Model Context Protocol) errors (server communication, tool execution, etc.)
     #[error("MCP error: {0}")]
     Mcp(String),
+
+    /// Provider quota exceeded (cost or token limit).
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(String),
 }
 
 /// A specialized `Result` type for ZeptoClaw operations.
@@ -350,5 +354,11 @@ mod tests {
             err.to_string(),
             "Provider error: Authentication error: invalid key"
         );
+    }
+
+    #[test]
+    fn test_quota_exceeded_error_display() {
+        let err = ZeptoError::QuotaExceeded("anthropic monthly $50.00 exceeded".to_string());
+        assert_eq!(err.to_string(), "Quota exceeded: anthropic monthly $50.00 exceeded");
     }
 }
