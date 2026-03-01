@@ -1228,6 +1228,10 @@ pub struct ProviderConfig {
     /// `agents.defaults.model` when this provider is selected (e.g. in fallback chains).
     #[serde(default)]
     pub model: Option<String>,
+    /// Per-provider usage quota configuration. When set, the provider will be
+    /// wrapped in a `QuotaProvider` that enforces the configured limits.
+    #[serde(default)]
+    pub quota: Option<crate::providers::quota::QuotaConfig>,
 }
 
 impl ProviderConfig {
@@ -2609,6 +2613,49 @@ mod tests {
         let config: ProviderConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.api_key.as_deref(), Some("sk-test"));
         assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_quota_default_is_none() {
+        let config = ProviderConfig::default();
+        assert!(config.quota.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_quota_serde() {
+        use crate::providers::quota::{QuotaAction, QuotaConfig, QuotaPeriod};
+
+        // Serialize a ProviderConfig with a quota set and round-trip it.
+        let original = ProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            quota: Some(QuotaConfig {
+                max_cost_usd: Some(10.0),
+                max_tokens: None,
+                period: QuotaPeriod::Monthly,
+                action: QuotaAction::Reject,
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: ProviderConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.api_key.as_deref(), Some("sk-test"));
+        let quota = decoded
+            .quota
+            .expect("quota should be present after round-trip");
+        assert_eq!(quota.max_cost_usd, Some(10.0));
+        assert!(quota.max_tokens.is_none());
+        assert_eq!(quota.period, QuotaPeriod::Monthly);
+        assert_eq!(quota.action, QuotaAction::Reject);
+
+        // A JSON object with no "quota" key should deserialize with quota: None.
+        let no_quota_json = r#"{"api_key": "sk-test"}"#;
+        let no_quota: ProviderConfig = serde_json::from_str(no_quota_json).unwrap();
+        assert!(
+            no_quota.quota.is_none(),
+            "missing quota key should deserialize as None"
+        );
     }
 
     #[test]

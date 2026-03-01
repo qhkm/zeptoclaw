@@ -240,8 +240,15 @@ fn build_runtime_provider_chain(
     let mut candidates: Vec<RuntimeProviderCandidate> = Vec::new();
     let configured_model = &config.agents.defaults.model;
 
+    // Create a single shared QuotaStore for all providers assembled in this call.
+    let quota_store = Arc::new(zeptoclaw::providers::QuotaStore::load_or_default());
+
     for selection in resolve_runtime_providers(config) {
         if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
+            let quota =
+                provider_config_by_name(config, selection.name).and_then(|pc| pc.quota.clone());
+            let provider =
+                apply_quota_wrapper(provider, selection.name, quota, Arc::clone(&quota_store));
             candidates.push(RuntimeProviderCandidate {
                 name: selection.name,
                 provider,
@@ -305,6 +312,22 @@ fn apply_retry_wrapper(provider: Box<dyn LLMProvider>, config: &Config) -> Box<d
             .with_max_delay_ms(config.providers.retry.max_delay_ms)
             .with_retry_budget_ms(config.providers.retry.retry_budget_ms),
     )
+}
+
+/// Wrap `provider` in a [`zeptoclaw::providers::QuotaProvider`] when a quota
+/// configuration is present, otherwise return `provider` unchanged.
+fn apply_quota_wrapper(
+    provider: Box<dyn LLMProvider>,
+    name: &str,
+    quota: Option<zeptoclaw::providers::QuotaConfig>,
+    store: Arc<zeptoclaw::providers::QuotaStore>,
+) -> Box<dyn LLMProvider> {
+    match quota {
+        Some(config) => Box::new(zeptoclaw::providers::QuotaProvider::new(
+            provider, name, config, store,
+        )),
+        None => provider,
+    }
 }
 
 fn provider_auth_method(config: &Config, name: &str) -> AuthMethod {
@@ -1732,5 +1755,40 @@ mod tests {
 
         assert!(err.to_string().contains("rate limit"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_apply_quota_wrapper_passthrough_when_none() {
+        // When quota is None, apply_quota_wrapper must return the provider unchanged
+        // (i.e. not wrapped in QuotaProvider). We verify this by confirming the
+        // returned provider still responds normally.
+        let calls = Arc::new(AtomicU32::new(0));
+        let store = Arc::new(zeptoclaw::providers::QuotaStore::load_or_default());
+        let wrapped = apply_quota_wrapper(
+            Box::new(FlakyProvider {
+                calls: Arc::clone(&calls),
+                fail_until: 0, // always succeeds
+            }),
+            "test",
+            None, // no quota config
+            store,
+        );
+
+        let result = wrapped
+            .chat(
+                vec![Message::user("hello")],
+                vec![],
+                None,
+                ChatOptions::new(),
+            )
+            .await
+            .expect("provider with None quota should succeed");
+
+        assert_eq!(result.content, "ok");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one call should be made"
+        );
     }
 }

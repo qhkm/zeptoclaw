@@ -141,6 +141,11 @@ cargo release patch --execute  # actually bump, commit, tag, push, publish to cr
 ./target/release/zeptoclaw update --check      # check without downloading
 ./target/release/zeptoclaw update --version v0.5.2  # specific version
 ./target/release/zeptoclaw update --force      # re-download even if current
+
+# Per-provider quota management
+./target/release/zeptoclaw quota status
+./target/release/zeptoclaw quota reset
+./target/release/zeptoclaw quota reset anthropic
 ```
 
 ## Agent Workflow — Task Tracking Protocol
@@ -281,7 +286,8 @@ src/
 │   ├── rpi_i2c.rs        # RPi native I2C tools — scan, read, write via rppal (feature: peripheral-rpi, Linux)
 │   ├── arduino.rs        # Arduino peripheral wrapper (feature: hardware)
 │   └── nucleo.rs         # STM32 Nucleo peripheral wrapper (feature: hardware)
-├── providers/      # LLM providers (Claude, OpenAI, Retry, Fallback)
+├── providers/      # LLM providers (Claude, OpenAI, Retry, Fallback, Quota)
+│   ├── quota.rs       # QuotaProvider decorator + QuotaStore for per-provider cost/token limits
 ├── runtime/        # Container runtimes (Native, Docker, Apple)
 ├── routines/       # Event/webhook/cron triggered automations
 ├── safety/         # Prompt injection detection, secret leak scanning, policy engine, chain alerting
@@ -404,6 +410,7 @@ LLM provider abstraction via `LLMProvider` trait:
 - `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot)
 - `RetryProvider` - Decorator: exponential backoff on 429/5xx with structured `ProviderError` classification
 - `FallbackProvider` - Decorator: primary → secondary auto-failover with circuit breaker (Closed/Open/HalfOpen)
+- `QuotaProvider` - Decorator: wraps each provider to enforce configurable cost/token quotas; action can reject, failover (triggers FallbackProvider), or warn
 - Per-provider model mapping: `ProviderConfig.model` overrides `agents.defaults.model` per provider; `FallbackProvider` swaps model on failover via `with_fallback_model()`
 - `ProviderError` enum: Auth, RateLimit, Billing, ServerError, InvalidRequest, ModelNotFound, Timeout — enables smart retry/fallback
 - Runtime provider assembly in `create_agent()`: resolves configured runtime providers in registry order, builds fallback chain only when `providers.fallback.enabled`, honors `providers.fallback.provider` as preferred first fallback, and optionally wraps the chain with `RetryProvider` (`providers.retry.*`)
@@ -574,6 +581,14 @@ Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_ENABLED` — enable fallback provider (default: false)
 - `ZEPTOCLAW_PROVIDERS_FALLBACK_PROVIDER` — fallback provider name
 - `ZEPTOCLAW_PROVIDERS_<NAME>_MODEL` — per-provider model override (e.g. `ZEPTOCLAW_PROVIDERS_NVIDIA_MODEL=nvidia/llama-3.3-70b`); used instead of `agents.defaults.model` for this provider in fallback chains
+- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD` — max monthly (or daily) cost in USD for Anthropic
+- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_TOKENS` — max token count for Anthropic
+- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_PERIOD` — quota period: "monthly" (default) or "daily"
+- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION` — quota action: "reject" (default), "fallback", "warn"
+- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_COST_USD` — max monthly (or daily) cost in USD for OpenAI
+- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_TOKENS` — max token count for OpenAI
+- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD` — quota period: "monthly" (default) or "daily"
+- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION` — quota action: "reject" (default), "fallback", "warn"
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET` — per-session token budget (default: 0 = unlimited)
 - `ZEPTOCLAW_SAFETY_ENABLED` — enable safety layer (default: true)
 - `ZEPTOCLAW_SAFETY_LEAK_DETECTION_ENABLED` — enable secret leak detection (default: true)

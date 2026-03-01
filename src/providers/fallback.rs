@@ -256,6 +256,7 @@ impl LLMProvider for FallbackProvider {
                 // Don't fallback for auth/billing/invalid request errors
                 let should_fallback = match &primary_err {
                     crate::error::ZeptoError::ProviderTyped(pe) => pe.should_fallback(),
+                    crate::error::ZeptoError::QuotaRejected(_) => false,
                     _ => true, // Legacy errors always fallback
                 };
 
@@ -332,6 +333,7 @@ impl LLMProvider for FallbackProvider {
                 // Don't fallback for auth/billing/invalid request errors
                 let should_fallback = match &primary_err {
                     crate::error::ZeptoError::ProviderTyped(pe) => pe.should_fallback(),
+                    crate::error::ZeptoError::QuotaRejected(_) => false,
                     _ => true, // Legacy errors always fallback
                 };
 
@@ -790,6 +792,54 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "success from fallback");
+    }
+
+    /// Documents that `ZeptoError::QuotaExceeded` is a legacy (non-ProviderTyped) error and
+    /// therefore hits the `_ => true` branch in the `should_fallback` match, triggering
+    /// automatic failover to the secondary provider.  No production code change is needed —
+    /// this test exists solely to pin the behaviour and prevent accidental regression.
+    #[tokio::test]
+    async fn test_quota_exceeded_triggers_fallback() {
+        let provider = FallbackProvider::new(
+            Box::new(TypedFailProvider {
+                name: "primary",
+                error: || ZeptoError::QuotaExceeded("limit reached".into()),
+            }),
+            Box::new(SuccessProvider { name: "fallback" }),
+        );
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        // QuotaExceeded is not a ProviderTyped error, so the `_ => true` branch fires and
+        // the request is transparently retried against the fallback provider.
+        assert!(result.is_ok(), "expected fallback success, got: {result:?}");
+        assert_eq!(result.unwrap().content, "success from fallback");
+    }
+
+    /// Documents that `ZeptoError::QuotaRejected` (action=reject) must NOT trigger
+    /// fallback — the user explicitly chose a hard stop, so the error propagates.
+    #[tokio::test]
+    async fn test_quota_rejected_does_not_trigger_fallback() {
+        let provider = FallbackProvider::new(
+            Box::new(TypedFailProvider {
+                name: "primary",
+                error: || ZeptoError::QuotaRejected("hard reject".into()),
+            }),
+            Box::new(SuccessProvider { name: "fallback" }),
+        );
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        // QuotaRejected must NOT fall through to the fallback provider.
+        assert!(result.is_err(), "expected Err, got Ok");
+        assert!(
+            result.unwrap_err().to_string().contains("Quota rejected"),
+            "error should be QuotaRejected"
+        );
     }
 
     // ====================================================================
