@@ -3,10 +3,99 @@
 //! Provides command filtering to prevent dangerous shell operations.
 //! Uses regex-based pattern matching to prevent bypass attacks.
 
+use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::audit::{log_audit_event, AuditCategory, AuditSeverity};
 use crate::error::{Result, ZeptoError};
+
+/// Git global options that take a value argument (the next token is consumed).
+const GIT_GLOBAL_OPTS_WITH_VALUE: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--config-env",
+];
+
+/// Git global boolean flags (no value argument).
+const GIT_GLOBAL_FLAGS: &[&str] = &[
+    "--bare",
+    "--no-replace-objects",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-optional-locks",
+    "--no-pager",
+    "-p",
+    "--paginate",
+    "--info-path",
+    "--html-path",
+    "--man-path",
+    "--exec-path",
+];
+
+/// Regex to detect if a command starts with `git` (case-insensitive).
+static GIT_CMD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^\s*git\b").unwrap());
+
+/// Normalize a git command by stripping global options so that the
+/// subcommand appears immediately after `git`. This prevents bypasses
+/// like `git -C /tmp push --force`.
+///
+/// Non-git commands are returned unchanged.
+fn normalize_git_command(command: &str) -> String {
+    if !GIT_CMD_RE.is_match(command) {
+        return command.to_string();
+    }
+
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    if tokens.is_empty() {
+        return command.to_string();
+    }
+
+    // tokens[0] is "git" (or path-prefixed variant like /usr/bin/git)
+    let mut result = vec![tokens[0]];
+    let mut i = 1;
+
+    while i < tokens.len() {
+        let tok = tokens[i];
+        let tok_lower = tok.to_lowercase();
+
+        // Check if it's a global option with a value
+        if GIT_GLOBAL_OPTS_WITH_VALUE.iter().any(|o| {
+            tok_lower == o.to_lowercase()
+                || tok_lower.starts_with(&format!("{}=", o.to_lowercase()))
+        }) {
+            if !tok.contains('=') {
+                // Skip the option and its value
+                i += 2;
+            } else {
+                // --opt=val form, skip just this token
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check if it's a boolean global flag
+        if GIT_GLOBAL_FLAGS
+            .iter()
+            .any(|f| tok_lower == f.to_lowercase())
+        {
+            i += 1;
+            continue;
+        }
+
+        // Not a global option — this is the subcommand; keep the rest
+        break;
+    }
+
+    // Append remaining tokens (subcommand + args)
+    result.extend_from_slice(&tokens[i..]);
+    result.join(" ")
+}
 
 /// Regex patterns that are blocked for security reasons.
 /// These are compiled once and matched against commands.
@@ -50,6 +139,14 @@ const REGEX_BLOCKED_PATTERNS: &[&str] = &[
     // Environment variable exfiltration
     r"\benv\b.*>\s*/",
     r"\bprintenv\b.*>\s*/",
+    // Destructive git operations (bypass-proof: the safe git tool exists for normal ops)
+    r"git\s+push\b.*\s--force(?:-with-lease)?(?:\s|$)",
+    r"git\s+push\b.*\s-[A-Za-z]*f[A-Za-z]*(?:\s|$)",
+    r"git\s+reset\s+--hard",
+    r"git\s+clean\s+.*-[a-zA-Z]*f",
+    r"git\s+clean\s+.*--force",
+    r"git\s+checkout\s+--\s+\.($|[\s;|&/])",
+    r"git\s+branch\s+.*-(?-i:D)\b",
 ];
 
 /// Literal substring patterns (credentials, sensitive paths)
@@ -176,11 +273,13 @@ impl ShellSecurityConfig {
             return Ok(());
         }
 
+        // Normalize git commands so global options don't bypass destructive-op patterns
+        let normalized = normalize_git_command(command);
         let command_lower = command.to_lowercase();
 
-        // Check regex patterns
+        // Check regex patterns (against both original and normalized form)
         for pattern in &self.compiled_patterns {
-            if pattern.is_match(command) {
+            if pattern.is_match(command) || pattern.is_match(&normalized) {
                 log_audit_event(
                     AuditCategory::ShellSecurity,
                     AuditSeverity::Critical,
@@ -566,6 +665,119 @@ mod tests {
         assert!(config.validate_command("rm -rf /").is_err());
         // rm of a specific file is fine (passes blocklist, in allowlist)
         assert!(config.validate_command("rm file.txt").is_ok());
+    }
+
+    // ==================== DESTRUCTIVE GIT TESTS ====================
+
+    #[test]
+    fn test_git_force_push_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("git push --force origin main")
+            .is_err());
+        assert!(config
+            .validate_command("git push origin main --force")
+            .is_err());
+        assert!(config.validate_command("git push -f origin main").is_err());
+        assert!(config.validate_command("git push origin feat -f").is_err());
+        assert!(config
+            .validate_command("git push --force-with-lease origin main")
+            .is_err());
+        // Bundled short options containing -f
+        assert!(config.validate_command("git push -fu origin main").is_err());
+    }
+
+    #[test]
+    fn test_git_reset_hard_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git reset --hard HEAD~1").is_err());
+        assert!(config
+            .validate_command("git reset --hard origin/main")
+            .is_err());
+        assert!(config.validate_command("git reset --hard").is_err());
+    }
+
+    #[test]
+    fn test_git_clean_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git clean -fd").is_err());
+        assert!(config.validate_command("git clean -f").is_err());
+        assert!(config.validate_command("git clean -xfd").is_err());
+        assert!(config.validate_command("git clean -df").is_err());
+        // Long-form --force
+        assert!(config.validate_command("git clean --force -d").is_err());
+    }
+
+    #[test]
+    fn test_git_checkout_discard_all_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git checkout -- .").is_err());
+        assert!(config.validate_command("git checkout -- ./").is_err());
+        // Restoring a specific dotfile should be allowed
+        assert!(config
+            .validate_command("git checkout -- .gitignore")
+            .is_ok());
+        assert!(config.validate_command("git checkout -- .env").is_ok());
+    }
+
+    #[test]
+    fn test_git_branch_force_delete_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("git branch -D feature-branch")
+            .is_err());
+        // Case-insensitive: uppercase GIT should also be blocked
+        assert!(config
+            .validate_command("GIT branch -D feature-branch")
+            .is_err());
+    }
+
+    #[test]
+    fn test_git_global_options_bypass_blocked() {
+        let config = ShellSecurityConfig::new();
+        // Global options before subcommand should not bypass destructive checks
+        assert!(config
+            .validate_command("git -C /tmp push --force origin main")
+            .is_err());
+        assert!(config
+            .validate_command("git --git-dir=/tmp/.git push -f origin main")
+            .is_err());
+        assert!(config
+            .validate_command("git -c user.name=x reset --hard")
+            .is_err());
+        assert!(config
+            .validate_command("git --work-tree /tmp clean -fd")
+            .is_err());
+        assert!(config
+            .validate_command("git --no-pager branch -D feat")
+            .is_err());
+        // Safe commands with global options should still be allowed
+        assert!(config.validate_command("git -C /tmp status").is_ok());
+        assert!(config
+            .validate_command("git --no-pager log --oneline")
+            .is_ok());
+    }
+
+    #[test]
+    fn test_safe_git_operations_allowed() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git status").is_ok());
+        assert!(config.validate_command("git log --oneline").is_ok());
+        assert!(config.validate_command("git diff").is_ok());
+        assert!(config.validate_command("git add .").is_ok());
+        assert!(config.validate_command("git commit -m 'msg'").is_ok());
+        assert!(config.validate_command("git push origin main").is_ok());
+        assert!(config.validate_command("git pull origin main").is_ok());
+        assert!(config.validate_command("git checkout feature").is_ok());
+        assert!(config.validate_command("git branch -d merged").is_ok());
+        assert!(config.validate_command("git reset --soft HEAD~1").is_ok());
+        assert!(config.validate_command("git stash").is_ok());
+        assert!(config.validate_command("git merge feature").is_ok());
+        assert!(config
+            .validate_command("git checkout -- specific-file.rs")
+            .is_ok());
+        // Branch name ending in -f should not trigger force-push block
+        assert!(config.validate_command("git push origin release-f").is_ok());
     }
 
     #[test]
