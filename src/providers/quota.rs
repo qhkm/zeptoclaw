@@ -104,8 +104,8 @@ pub struct QuotaUsage {
 pub enum QuotaCheckResult {
     /// Usage is below the warning threshold (80%).
     Ok,
-    /// Usage is at or above 80% of the limit. Inner value is the highest
-    /// utilisation fraction across all configured limits (`0.0..1.0`).
+    /// Usage is at or above 80% of the configured limit. Inner value is the
+    /// utilisation fraction (range: `0.80..1.0`).
     Warning(f64),
     /// At least one limit is at or above 100%.
     Exceeded,
@@ -122,6 +122,9 @@ pub struct QuotaStore {
     /// Path of the JSON file used for persistence.
     path: PathBuf,
 }
+
+/// Fraction of quota utilisation at or above which a warning is issued.
+const WARNING_THRESHOLD: f64 = 0.8;
 
 impl QuotaStore {
     /// Load usage state from `~/.zeptoclaw/quota/usage.json`.
@@ -188,7 +191,7 @@ impl QuotaStore {
 
         if max_pct >= 1.0 {
             QuotaCheckResult::Exceeded
-        } else if max_pct >= 0.8 {
+        } else if max_pct >= WARNING_THRESHOLD {
             QuotaCheckResult::Warning(max_pct)
         } else {
             QuotaCheckResult::Ok
@@ -199,6 +202,7 @@ impl QuotaStore {
     ///
     /// Persists the updated state to disk (best-effort; errors are ignored).
     pub fn record(&self, provider: &str, period: &QuotaPeriod, cost_usd: f64, tokens: u64) {
+        let cost_usd = cost_usd.max(0.0);
         let current_key = Self::current_period_key(period);
 
         let mut guard = self.state.lock().expect("quota state lock poisoned");
@@ -249,7 +253,7 @@ fn dirs_path() -> PathBuf {
 }
 
 /// Load `HashMap<String, QuotaUsage>` from JSON; returns empty map on error.
-fn load_state(path: &PathBuf) -> HashMap<String, QuotaUsage> {
+fn load_state(path: &std::path::Path) -> HashMap<String, QuotaUsage> {
     let data = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return HashMap::new(),
@@ -257,13 +261,25 @@ fn load_state(path: &PathBuf) -> HashMap<String, QuotaUsage> {
     serde_json::from_str(&data).unwrap_or_default()
 }
 
-/// Persist `state` to `path` (best-effort; ignores all errors).
-fn persist_state(path: &PathBuf, state: &HashMap<String, QuotaUsage>) {
+/// Persist `state` to `path` (best-effort; logs warnings on failure).
+fn persist_state(path: &std::path::Path, state: &HashMap<String, QuotaUsage>) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("quota: failed to create dir {}: {}", parent.display(), e);
+            return;
+        }
     }
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, json);
+    match serde_json::to_string_pretty(state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, &json) {
+                tracing::warn!(
+                    "quota: failed to write quota state to {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+        Err(e) => tracing::warn!("quota: failed to serialize quota state: {}", e),
     }
 }
 
