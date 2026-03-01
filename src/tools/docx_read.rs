@@ -460,4 +460,138 @@ mod tests {
         let result = t.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_err(), "expected error when path arg is missing");
     }
+
+    // ---------------------------------------------------------------------------
+    // New gap-filling tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_text_line_break() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t>Line one</w:t></w:r>
+      <w:r><w:br/></w:r>
+      <w:r><w:t>Line two</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+        let bytes = build_test_docx(xml);
+        let text = DocxReadTool::extract_text_from_bytes(&bytes).unwrap();
+        assert!(
+            text.contains("Line one\nLine two"),
+            "<w:br/> should produce a newline between runs, got: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_truncate_output_long() {
+        // 200 000 'a' chars — well above the 50 000 default limit.
+        let long_text = "a".repeat(200_000);
+        let result = DocxReadTool::truncate_output(long_text, DEFAULT_MAX_CHARS);
+        assert!(
+            result.contains("[TRUNCATED]"),
+            "long output should be marked [TRUNCATED], got length {}",
+            result.len()
+        );
+        // The result must be substantially smaller than the original 200 K.
+        assert!(
+            result.len() < 100_000,
+            "truncated output should be well below 100 K chars, got {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn test_truncate_output_short() {
+        let short_text = "hello world".to_string();
+        let result = DocxReadTool::truncate_output(short_text.clone(), DEFAULT_MAX_CHARS);
+        assert_eq!(
+            result, short_text,
+            "short text should pass through unchanged"
+        );
+        assert!(
+            !result.contains("[TRUNCATED]"),
+            "short text must not be marked [TRUNCATED]"
+        );
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte() {
+        // Each '日' is 3 bytes in UTF-8; 100 000 repetitions = 300 000 bytes.
+        let cjk_text = "日".repeat(100_000);
+        let result = DocxReadTool::truncate_output(cjk_text, DEFAULT_MAX_CHARS);
+        assert!(
+            result.contains("[TRUNCATED]"),
+            "CJK text exceeding max_chars should be marked [TRUNCATED]"
+        );
+        // The body before the marker must be exactly DEFAULT_MAX_CHARS chars.
+        let marker = "\n[TRUNCATED]";
+        let body_end = result.find(marker).expect("[TRUNCATED] marker not found");
+        let body = &result[..body_end];
+        let char_count = body.chars().count();
+        assert_eq!(
+            char_count, DEFAULT_MAX_CHARS,
+            "body before [TRUNCATED] must be exactly {DEFAULT_MAX_CHARS} chars, got {char_count}"
+        );
+    }
+
+    #[test]
+    fn test_extract_text_invalid_zip() {
+        let not_a_zip = b"not a zip file";
+        let result = DocxReadTool::extract_text_from_bytes(not_a_zip);
+        assert!(result.is_err(), "non-ZIP bytes should return an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.to_lowercase().contains("zip"),
+            "error message should mention ZIP, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_extract_text_xml_entities() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Tom &amp; Jerry &lt;3</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let bytes = build_test_docx(xml);
+        let text = DocxReadTool::extract_text_from_bytes(&bytes).unwrap();
+        assert!(
+            text.contains("Tom & Jerry <3"),
+            "&amp; and &lt; should be unescaped to & and <, got: {:?}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_empty_docx_returns_message() {
+        let tmp = TempDir::new().unwrap();
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+  </w:body>
+</w:document>"#;
+        let docx_bytes = build_test_docx(xml);
+        let docx_path = tmp.path().join("empty.docx");
+        std::fs::write(&docx_path, &docx_bytes).unwrap();
+
+        let t = tool(tmp.path().to_str().unwrap());
+        let ctx = ToolContext::default();
+        let result = t
+            .execute(serde_json::json!({"path": "empty.docx"}), &ctx)
+            .await;
+        assert!(result.is_ok(), "empty DOCX should not return an Err");
+        let output = result.unwrap();
+        assert!(
+            output.for_llm.contains("No text content"),
+            "empty DOCX should report 'No text content', got: {:?}",
+            output.for_llm
+        );
+    }
 }
