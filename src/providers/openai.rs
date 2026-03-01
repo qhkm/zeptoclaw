@@ -1818,4 +1818,48 @@ mod tests {
         );
         assert_eq!(json["content"], "Hello");
     }
+
+    #[test]
+    fn test_openai_image_json_matches_api_spec() {
+        // Verify the serialized JSON matches OpenAI's exact API format:
+        // [{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "iVBOR".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Describe this", images);
+        let openai_msgs = convert_messages(vec![msg]);
+
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        let content = json["content"].as_array().unwrap();
+
+        // Text part
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this");
+
+        // Image part — must match OpenAI Vision API spec
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBOR"
+        );
+    }
+
+    #[test]
+    fn test_openai_text_only_stays_string_not_array() {
+        // Critical: text-only messages MUST serialize as a string, not array.
+        // Many OpenAI-compatible endpoints (Ollama, vLLM) reject array content for non-vision models.
+        let msg = Message::user("Hello world");
+        let openai_msgs = convert_messages(vec![msg]);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+
+        // Must be a plain string, not an array
+        assert!(
+            json["content"].is_string(),
+            "Text-only content must be a string for compatibility"
+        );
+        assert_eq!(json["content"], "Hello world");
+    }
 }

@@ -1282,4 +1282,82 @@ mod tests {
         let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
         assert!(matches!(&claude_msgs[0].content, ClaudeContent::Text(_)));
     }
+
+    #[test]
+    fn test_claude_image_json_matches_api_spec() {
+        // Verify the serialized JSON matches Claude's exact API format:
+        // {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "iVBOR".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Describe this", images);
+        let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
+
+        let json = serde_json::to_value(&claude_msgs[0]).unwrap();
+        let blocks = json["content"].as_array().unwrap();
+
+        // Text block
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Describe this");
+
+        // Image block — must match Anthropic API spec exactly
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "iVBOR");
+    }
+
+    #[test]
+    fn test_convert_message_with_multiple_images() {
+        let images = vec![
+            ContentPart::Image {
+                source: ImageSource::Base64 {
+                    data: "img1".to_string(),
+                },
+                media_type: "image/jpeg".to_string(),
+            },
+            ContentPart::Image {
+                source: ImageSource::Base64 {
+                    data: "img2".to_string(),
+                },
+                media_type: "image/png".to_string(),
+            },
+        ];
+        let msg = Message::user_with_images("Compare these two images", images);
+        let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
+
+        if let ClaudeContent::Blocks(blocks) = &claude_msgs[0].content {
+            assert_eq!(blocks.len(), 3); // 1 text + 2 images
+            assert!(matches!(&blocks[0], ClaudeContentBlock::Text { .. }));
+            assert!(matches!(&blocks[1], ClaudeContentBlock::Image { .. }));
+            assert!(matches!(&blocks[2], ClaudeContentBlock::Image { .. }));
+        } else {
+            panic!("Expected Blocks content");
+        }
+    }
+
+    #[test]
+    fn test_convert_message_skips_filepath_images() {
+        // FilePath images should have been resolved to Base64 before reaching the provider.
+        // If they somehow slip through, the provider should skip them (not panic).
+        let parts = vec![ContentPart::Image {
+            source: ImageSource::FilePath {
+                path: "media/abc.jpg".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let msg = Message::user_with_images("What is this?", parts);
+        let (_, claude_msgs) = convert_messages(vec![msg]).unwrap();
+
+        // Should still produce a Blocks message, but only with the text block
+        if let ClaudeContent::Blocks(blocks) = &claude_msgs[0].content {
+            assert_eq!(blocks.len(), 1); // only text, image was skipped
+            assert!(matches!(&blocks[0], ClaudeContentBlock::Text { .. }));
+        } else {
+            panic!("Expected Blocks content");
+        }
+    }
 }

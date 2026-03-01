@@ -738,4 +738,37 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["text"], "Hello");
     }
+
+    #[test]
+    fn test_gemini_image_json_matches_api_spec() {
+        // Verify the serialized JSON matches Gemini's exact API format:
+        // {"inlineData":{"mimeType":"image/png","data":"..."}}
+        use crate::session::{ContentPart, ImageSource, Message};
+
+        let provider = GeminiProvider::new_with_key("key", DEFAULT_GEMINI_MODEL);
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "iVBOR".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Describe this", images);
+        let body = provider.build_messages_body(&[msg], &ChatOptions::default());
+
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+
+        // Text part
+        assert_eq!(parts[0]["text"], "Describe this");
+
+        // Image part — must match Gemini API spec exactly
+        assert!(
+            parts[1].get("inlineData").is_some(),
+            "Must use inlineData key"
+        );
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBOR");
+
+        // Must NOT have "text" key on image part
+        assert!(parts[1].get("text").is_none());
+    }
 }

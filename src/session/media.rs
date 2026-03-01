@@ -235,4 +235,21 @@ mod tests {
         let big = vec![0u8; 21 * 1024 * 1024];
         assert!(validate_image(&big, "image/jpeg", MAX_IMAGE_SIZE).is_err());
     }
+
+    #[tokio::test]
+    async fn test_save_then_load_round_trip_matches() {
+        let tmp = TempDir::new().unwrap();
+        let store = MediaStore::new(tmp.path().to_path_buf());
+
+        // Simulate a real JPEG (starts with magic bytes)
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        data.extend_from_slice(&[0u8; 1000]); // pad to realistic size
+
+        let path = store.save(&data, "image/jpeg").await.unwrap();
+        let loaded = store.load(&path).await.unwrap();
+
+        assert_eq!(data, loaded, "Loaded bytes must match saved bytes exactly");
+        assert!(path.starts_with("media/"));
+        assert!(path.ends_with(".jpg"));
+    }
 }

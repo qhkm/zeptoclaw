@@ -649,4 +649,49 @@ mod tests {
         // The text_content() accessor falls back to content field
         assert_eq!(msg.text_content(), "Hello");
     }
+
+    #[test]
+    fn test_backward_compat_old_session_json() {
+        // Old session JSON format doesn't have content_parts field
+        let old_json = r#"{
+            "role": "user",
+            "content": "Hello from old session"
+        }"#;
+        let msg: Message = serde_json::from_str(old_json).unwrap();
+        assert_eq!(msg.content, "Hello from old session");
+        assert!(msg.content_parts.is_empty()); // defaults to empty vec
+        assert!(!msg.has_images());
+        assert_eq!(msg.text_content(), "Hello from old session");
+    }
+
+    #[test]
+    fn test_new_session_json_with_images_round_trips() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let msg = Message::user_with_images("Look at this", images);
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.content, "Look at this");
+        assert!(restored.has_images());
+        assert_eq!(restored.content_parts.len(), 2); // text + image
+
+        // Verify image survived round-trip
+        if let ContentPart::Image { source, media_type } = &restored.content_parts[1] {
+            assert_eq!(media_type, "image/jpeg");
+            if let ImageSource::Base64 { data } = source {
+                assert_eq!(data, "abc");
+            } else {
+                panic!("Expected Base64 source");
+            }
+        } else {
+            panic!("Expected Image content part");
+        }
+    }
 }

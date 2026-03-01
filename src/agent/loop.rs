@@ -3167,6 +3167,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_inbound_to_message_with_media_store() {
+        use crate::bus::{MediaAttachment, MediaType};
+        use crate::session::media::MediaStore;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let store = MediaStore::new(tmp.path().to_path_buf());
+
+        let media = MediaAttachment::new(MediaType::Image)
+            .with_data(vec![0xFF, 0xD8, 0xFF, 0xE0])
+            .with_mime_type("image/jpeg");
+        let msg =
+            InboundMessage::new("telegram", "user1", "chat1", "What is this?").with_media(media);
+
+        let result = inbound_to_message(&msg, Some(&store)).await;
+        assert!(result.has_images());
+
+        // With MediaStore, images should be saved as FilePath, not Base64
+        if let crate::session::ContentPart::Image { source, .. } = &result.content_parts[1] {
+            assert!(
+                matches!(source, crate::session::ImageSource::FilePath { .. }),
+                "Expected FilePath when MediaStore is provided"
+            );
+        } else {
+            panic!("Expected Image content part");
+        }
+    }
+
     #[test]
     fn test_resolve_images_to_base64_resolves_file_path() {
         use crate::session::{ContentPart, ImageSource, Message};
