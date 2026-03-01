@@ -105,6 +105,20 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_base_url: Some("https://integrate.api.nvidia.com/v1"),
         backend: "openai",
     },
+    ProviderSpec {
+        name: "deepseek",
+        model_keywords: &["deepseek"],
+        runtime_supported: true,
+        default_base_url: Some("https://api.deepseek.com/v1"),
+        backend: "openai",
+    },
+    ProviderSpec {
+        name: "kimi",
+        model_keywords: &["kimi", "moonshot"],
+        runtime_supported: true,
+        default_base_url: Some("https://api.moonshot.cn/v1"),
+        backend: "openai",
+    },
 ];
 
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -118,6 +132,8 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "gemini" => config.providers.gemini.as_ref(),
         "ollama" => config.providers.ollama.as_ref(),
         "nvidia" => config.providers.nvidia.as_ref(),
+        "deepseek" => config.providers.deepseek.as_ref(),
+        "kimi" => config.providers.kimi.as_ref(),
         _ => None,
     }
 }

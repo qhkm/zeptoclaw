@@ -101,6 +101,28 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         model: "mistral",
         label: "Mistral (local)",
     },
+    // DeepSeek
+    KnownModel {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        label: "DeepSeek V3",
+    },
+    KnownModel {
+        provider: "deepseek",
+        model: "deepseek-reasoner",
+        label: "DeepSeek R1",
+    },
+    // Kimi (Moonshot AI)
+    KnownModel {
+        provider: "kimi",
+        model: "moonshot-v1-128k",
+        label: "Kimi 128K",
+    },
+    KnownModel {
+        provider: "kimi",
+        model: "moonshot-v1-32k",
+        label: "Kimi 32K",
+    },
 ];
 
 /// Per-chat model override.
@@ -369,6 +391,8 @@ mod tests {
             "nvidia",
             "zhipu",
             "vllm",
+            "deepseek",
+            "kimi",
         ];
         for km in KNOWN_MODELS {
             assert!(
