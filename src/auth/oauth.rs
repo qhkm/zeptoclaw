@@ -384,6 +384,21 @@ fn generate_csrf_state() -> String {
     hex::encode(buf)
 }
 
+/// Returns `true` when running in a headless environment with no display server.
+///
+/// On Linux: headless if neither `$DISPLAY` (X11) nor `$WAYLAND_DISPLAY` (Wayland) is set.
+/// On macOS and Windows: always `false` (graphical session is always present for CLI tools).
+fn is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 fn validate_oauth_state(returned_state: Option<&str>, expected_state: &str) -> Result<()> {
     let returned_state = returned_state.ok_or_else(|| {
         ZeptoError::Config("OAuth callback missing state parameter — possible CSRF attack".into())
@@ -502,15 +517,23 @@ pub async fn run_oauth_flow_with_port(
     // Build authorization URL
     let auth_url = build_authorize_url(config, client_id, &redirect_uri, &pkce, &state);
 
-    // Open browser
-    println!("Opening browser for {} authentication...", config.provider);
-    println!();
-    println!("If the browser doesn't open, visit this URL manually:");
-    println!("  {}", auth_url);
+    // Open browser or print headless/VPS instructions
+    if is_headless() {
+        println!("Headless/VPS environment detected (no display server).");
+        println!();
+        println!("To complete authentication, run this on your LOCAL machine:");
+        println!("  ssh -L {}:localhost:{} <user>@<your-host>", port, port);
+        println!("Then visit this URL in your local browser:");
+        println!("  {}", auth_url);
+    } else {
+        println!("Opening browser for {} authentication...", config.provider);
+        println!();
+        println!("If the browser doesn't open, visit this URL manually:");
+        println!("  {}", auth_url);
+        open_browser(&auth_url)?;
+    }
     println!();
     println!("Waiting for authentication (timeout: 120s)...");
-
-    open_browser(&auth_url)?;
 
     // Wait for callback (120s timeout)
     let callback = tokio::time::timeout(
@@ -740,5 +763,26 @@ mod tests {
         let result = start_callback_server(1).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn test_is_headless_non_linux_always_false() {
+        // On macOS and Windows, is_headless() must always return false
+        // because those platforms always have a graphical session for CLI apps.
+        #[cfg(not(target_os = "linux"))]
+        assert!(!is_headless(), "is_headless() must be false on non-Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_is_headless_matches_display_env() {
+        // On Linux, is_headless() must mirror the absence of $DISPLAY and $WAYLAND_DISPLAY.
+        let expected =
+            std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err();
+        assert_eq!(
+            is_headless(),
+            expected,
+            "is_headless() must match env var state"
+        );
     }
 }
