@@ -456,6 +456,52 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // Azure OpenAI
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY")
+            .or_else(|_| std::env::var("AZURE_OPENAI_API_KEY"))
+        {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_BASE")
+            .or_else(|_| std::env::var("AZURE_OPENAI_ENDPOINT"))
+        {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(v);
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_VERSION") {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_version = Some(v);
+        }
+
+        // Amazon Bedrock
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY") {
+            self.providers
+                .bedrock
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(v);
+        } else if self.providers.bedrock.is_some() {
+            if let Ok(v) = std::env::var("AWS_ACCESS_KEY_ID") {
+                // Only apply AWS_ACCESS_KEY_ID if Bedrock was already explicitly configured
+                self.providers
+                    .bedrock
+                    .get_or_insert_with(ProviderConfig::default)
+                    .api_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_BASE") {
+            self.providers
+                .bedrock
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(v);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -1921,5 +1967,46 @@ mod tests {
             .expect("quota should be set");
         assert_eq!(quota.action, QuotaAction::Fallback);
         std::env::remove_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION");
+    }
+
+    #[test]
+    fn test_azure_env_override_api_key() {
+        // Uses a dedicated env var name to avoid collisions
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY", "test-azure-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .azure
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("test-azure-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY");
+    }
+
+    #[test]
+    fn test_bedrock_aws_key_not_auto_enabled_without_config() {
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY");
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
+        let mut config = Config::default();
+        // Ensure no explicit Bedrock config is present
+        config.providers.bedrock = None;
+        config.apply_env_overrides();
+        // Without explicit Bedrock config, AWS_ACCESS_KEY_ID should NOT activate Bedrock
+        assert!(
+            config.providers.bedrock.is_none()
+                || config.providers.bedrock.as_ref().unwrap().api_key.is_none()
+                || config
+                    .providers
+                    .bedrock
+                    .as_ref()
+                    .unwrap()
+                    .api_key
+                    .as_deref()
+                    != Some("AKIAIOSFODNN7EXAMPLE")
+        );
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
     }
 }
