@@ -535,6 +535,120 @@ impl Config {
                 _ => {}
             }
         }
+
+        // Per-provider quota overrides — Anthropic
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD") {
+            if let Ok(v) = val.parse::<f64>() {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_cost_usd = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_TOKENS") {
+            if let Ok(v) = val.parse::<u64>() {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_tokens = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_PERIOD") {
+            use crate::providers::quota::QuotaPeriod;
+            let period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => QuotaPeriod::Daily,
+                _ => QuotaPeriod::Monthly,
+            };
+            let provider = self
+                .providers
+                .anthropic
+                .get_or_insert_with(ProviderConfig::default);
+            provider
+                .quota
+                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                .period = period;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION") {
+            use crate::providers::quota::QuotaAction;
+            let action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => QuotaAction::Fallback,
+                "warn" => QuotaAction::Warn,
+                _ => QuotaAction::Reject,
+            };
+            let provider = self
+                .providers
+                .anthropic
+                .get_or_insert_with(ProviderConfig::default);
+            provider
+                .quota
+                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                .action = action;
+        }
+
+        // Per-provider quota overrides — OpenAI
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_COST_USD") {
+            if let Ok(v) = val.parse::<f64>() {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_cost_usd = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_TOKENS") {
+            if let Ok(v) = val.parse::<u64>() {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_tokens = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD") {
+            use crate::providers::quota::QuotaPeriod;
+            let period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => QuotaPeriod::Daily,
+                _ => QuotaPeriod::Monthly,
+            };
+            let provider = self
+                .providers
+                .openai
+                .get_or_insert_with(ProviderConfig::default);
+            provider
+                .quota
+                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                .period = period;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION") {
+            use crate::providers::quota::QuotaAction;
+            let action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => QuotaAction::Fallback,
+                "warn" => QuotaAction::Warn,
+                _ => QuotaAction::Reject,
+            };
+            let provider = self
+                .providers
+                .openai
+                .get_or_insert_with(ProviderConfig::default);
+            provider
+                .quota
+                .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                .action = action;
+        }
     }
 
     /// Apply channel-specific environment variable overrides
@@ -1706,5 +1820,40 @@ mod tests {
         for (key, _) in &vars {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn test_env_override_anthropic_quota_max_cost() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD", "5.5");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        let quota = config
+            .providers
+            .anthropic
+            .as_ref()
+            .expect("anthropic provider should be initialized")
+            .quota
+            .as_ref()
+            .expect("quota should be set");
+        assert_eq!(quota.max_cost_usd, Some(5.5));
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD");
+    }
+
+    #[test]
+    fn test_env_override_anthropic_quota_action_fallback() {
+        use crate::providers::quota::QuotaAction;
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION", "fallback");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        let quota = config
+            .providers
+            .anthropic
+            .as_ref()
+            .expect("anthropic provider should be initialized")
+            .quota
+            .as_ref()
+            .expect("quota should be set");
+        assert_eq!(quota.action, QuotaAction::Fallback);
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION");
     }
 }
