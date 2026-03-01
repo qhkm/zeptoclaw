@@ -467,6 +467,84 @@ pub async fn run_oauth_flow(
     Ok(tokens)
 }
 
+/// Run the complete OAuth flow for a provider using a fixed redirect port.
+///
+/// Identical to [`run_oauth_flow`] except the callback server binds to the
+/// given `port` instead of an OS-assigned ephemeral port. This is required by
+/// providers (e.g. OpenAI) whose OAuth apps are registered with a specific
+/// redirect URI containing a fixed port number.
+///
+/// Returns the obtained token set.
+pub async fn run_oauth_flow_with_port(
+    config: &ProviderOAuthConfig,
+    client_id: &str,
+    port: u16,
+) -> Result<OAuthTokenSet> {
+    let pkce = PkceChallenge::generate();
+
+    // Generate random state for CSRF protection
+    let state = {
+        use chacha20poly1305::aead::rand_core::RngCore;
+        use chacha20poly1305::aead::OsRng;
+        let mut buf = [0u8; 16];
+        OsRng.fill_bytes(&mut buf);
+        hex::encode(buf)
+    };
+
+    // Bind callback server to the fixed port
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| {
+            ZeptoError::Config(format!(
+                "Failed to bind callback server on port {}: {} \
+                 (is another process using this port?)",
+                port, e
+            ))
+        })?;
+
+    let redirect_uri = format!("http://localhost:{}/auth/callback", port);
+
+    // Build authorization URL
+    let auth_url = build_authorize_url(config, client_id, &redirect_uri, &pkce, &state);
+
+    // Open browser
+    println!("Opening browser for {} authentication...", config.provider);
+    println!();
+    println!("If the browser doesn't open, visit this URL manually:");
+    println!("  {}", auth_url);
+    println!();
+    println!("Waiting for authentication (timeout: 120s)...");
+
+    open_browser(&auth_url)?;
+
+    // Wait for callback (120s timeout)
+    let callback = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        accept_callback(&listener),
+    )
+    .await
+    .map_err(|_| {
+        ZeptoError::Config(
+            "OAuth callback timed out after 120s. Did you complete the browser sign-in?".into(),
+        )
+    })??;
+
+    validate_oauth_state(callback.state.as_deref(), &state)?;
+
+    // Exchange code for tokens
+    println!("Exchanging authorization code for tokens...");
+    let tokens = exchange_code(
+        config,
+        &callback.code,
+        &pkce.code_verifier,
+        &redirect_uri,
+        client_id,
+    )
+    .await?;
+
+    Ok(tokens)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -626,6 +704,40 @@ mod tests {
 
         let url = build_authorize_url(&config, "cid", "http://localhost:1234/cb", &pkce, "s");
         assert!(!url.contains("scope="));
+    }
+
+    #[test]
+    fn test_build_authorize_url_openai_fixed_port() {
+        let config = super::super::ProviderOAuthConfig {
+            provider: "openai".to_string(),
+            token_url: "https://auth.openai.com/oauth/token".to_string(),
+            authorize_url: "https://auth.openai.com/oauth/authorize".to_string(),
+            client_name: "ZeptoClaw".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+        };
+        let pkce = PkceChallenge {
+            code_verifier: "v".to_string(),
+            code_challenge: "c".to_string(),
+        };
+        let redirect_uri = "http://localhost:1455/auth/callback";
+        let url = build_authorize_url(
+            &config,
+            "app_EMoamEEZ73f0CkXaXp7hrann",
+            redirect_uri,
+            &pkce,
+            "s",
+        );
+
+        assert!(
+            url.contains("https://auth.openai.com/oauth/authorize"),
+            "URL must start with authorize endpoint"
+        );
+        assert!(
+            url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"),
+            "URL must contain client_id"
+        );
+        assert!(url.contains("1455"), "URL must contain port 1455");
+        assert!(url.contains("openid"), "URL must contain openid scope");
     }
 
     #[tokio::test]
