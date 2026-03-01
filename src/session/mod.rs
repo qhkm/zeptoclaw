@@ -398,6 +398,15 @@ impl SessionManager {
         sessions.len()
     }
 
+    /// Return the on-disk sessions directory, if persistence is enabled.
+    ///
+    /// Returns `None` for in-memory-only managers created with `new_memory()`.
+    /// Used by the agent loop to resolve `ImageSource::FilePath` entries to
+    /// absolute paths before forwarding messages to LLM providers.
+    pub fn sessions_dir(&self) -> Option<&std::path::Path> {
+        self.storage_path.as_deref()
+    }
+
     /// Sanitize a session key for use as a filename.
     ///
     /// Uses percent-encoding to ensure the mapping is bijective (one-to-one).
