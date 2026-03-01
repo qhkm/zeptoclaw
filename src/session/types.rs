@@ -119,6 +119,31 @@ impl Session {
     }
 }
 
+/// A content part within a message — either text or an image.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    /// Plain text content.
+    Text { text: String },
+    /// Image content with source and MIME type.
+    Image {
+        source: ImageSource,
+        media_type: String,
+    },
+}
+
+/// Where image data lives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// Base64-encoded image bytes (used when sending to LLM APIs).
+    Base64 { data: String },
+    /// File path relative to sessions dir (used in persistence).
+    FilePath { path: String },
+    /// Remote URL (used during channel download before persistence).
+    Url { url: String },
+}
+
 /// A single message in a conversation.
 ///
 /// Messages can be from users, assistants, system prompts, or tool results.
@@ -128,6 +153,10 @@ pub struct Message {
     pub role: Role,
     /// The text content of the message
     pub content: String,
+    /// Structured content parts (text and/or images); defaults to empty for
+    /// backward-compatible deserialization of old session files.
+    #[serde(default)]
+    pub content_parts: Vec<ContentPart>,
     /// Tool calls made by the assistant (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -153,6 +182,9 @@ impl Message {
         Self {
             role: Role::User,
             content: content.to_string(),
+            content_parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             tool_calls: None,
             tool_call_id: None,
         }
@@ -174,6 +206,9 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: content.to_string(),
+            content_parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             tool_calls: None,
             tool_call_id: None,
         }
@@ -197,6 +232,9 @@ impl Message {
         Self {
             role: Role::System,
             content: content.to_string(),
+            content_parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             tool_calls: None,
             tool_call_id: None,
         }
@@ -222,6 +260,9 @@ impl Message {
         Self {
             role: Role::Tool,
             content: content.to_string(),
+            content_parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
         }
@@ -245,9 +286,47 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: content.to_string(),
+            content_parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             tool_calls: Some(tool_calls),
             tool_call_id: None,
         }
+    }
+
+    /// Create a user message with text and image content parts.
+    pub fn user_with_images(text: &str, images: Vec<ContentPart>) -> Self {
+        let mut parts = vec![ContentPart::Text {
+            text: text.to_string(),
+        }];
+        parts.extend(images);
+        Self {
+            role: Role::User,
+            content: text.to_string(),
+            content_parts: parts,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Check if this message contains any image content parts.
+    pub fn has_images(&self) -> bool {
+        self.content_parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. }))
+    }
+
+    /// Get references to all image content parts.
+    pub fn images(&self) -> Vec<&ContentPart> {
+        self.content_parts
+            .iter()
+            .filter(|p| matches!(p, ContentPart::Image { .. }))
+            .collect()
+    }
+
+    /// Get the text content of this message.
+    pub fn text_content(&self) -> &str {
+        &self.content
     }
 
     /// Check if this message has tool calls.
@@ -492,5 +571,82 @@ mod tests {
         // tool_calls and tool_call_id should not be in JSON when None
         assert!(!json.contains("tool_calls"));
         assert!(!json.contains("tool_call_id"));
+    }
+
+    #[test]
+    fn test_content_part_text_serialization() {
+        let part = ContentPart::Text {
+            text: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        let parsed: ContentPart = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ContentPart::Text { text: t } if t == "hello"));
+    }
+
+    #[test]
+    fn test_content_part_image_serialization() {
+        let part = ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc123".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        let parsed: ContentPart = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(parsed, ContentPart::Image { media_type, .. } if media_type == "image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_image_source_variants() {
+        let b64 = ImageSource::Base64 {
+            data: "data".to_string(),
+        };
+        let file = ImageSource::FilePath {
+            path: "media/abc.jpg".to_string(),
+        };
+        let url = ImageSource::Url {
+            url: "https://example.com/img.png".to_string(),
+        };
+        for source in [b64, file, url] {
+            let json = serde_json::to_string(&source).unwrap();
+            let _: ImageSource = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_message_user_with_images() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Look at this", images);
+        assert_eq!(msg.role, Role::User);
+        assert!(msg.has_images());
+        assert_eq!(msg.text_content(), "Look at this");
+        assert_eq!(msg.images().len(), 1);
+        assert_eq!(msg.content_parts.len(), 2);
+    }
+
+    #[test]
+    fn test_message_user_no_images() {
+        let msg = Message::user("Hello");
+        assert!(!msg.has_images());
+        assert_eq!(msg.text_content(), "Hello");
+        assert_eq!(msg.content_parts.len(), 1);
+        assert!(msg.images().is_empty());
+    }
+
+    #[test]
+    fn test_backward_compat_deserialize_old_session() {
+        let json = r#"{"role":"user","content":"Hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content, "Hello");
+        // content_parts defaults to empty vec via #[serde(default)]
+        // The text_content() accessor falls back to content field
+        assert_eq!(msg.text_content(), "Hello");
     }
 }
