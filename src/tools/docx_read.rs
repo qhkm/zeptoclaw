@@ -5,6 +5,7 @@
 //! are unconditional dependencies as of the DOCX support addition.
 
 use async_trait::async_trait;
+use quick_xml::escape::resolve_xml_entity;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -144,10 +145,17 @@ impl DocxReadTool {
                 }
                 Ok(Event::Text(ref e)) => {
                     if in_t {
-                        let text = e
-                            .unescape()
-                            .map_err(|e| ZeptoError::Tool(format!("XML unescape error: {e}")))?;
-                        output.push_str(&text);
+                        e.xml_content()
+                            .map(|d| output.push_str(&d))
+                            .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
+                    }
+                }
+                Ok(Event::GeneralRef(ref e)) => {
+                    // Remove escaped entities if they can't be resolved
+                    if in_t {
+                        e.xml_content()
+                            .map(|d| resolve_xml_entity(d.as_ref()).map(|r| output.push_str(r)))
+                            .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
                     }
                 }
                 Ok(Event::Eof) => break,

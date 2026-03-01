@@ -903,9 +903,9 @@ mod tests {
         };
 
         let inbound = WhatsAppChannel::parse_bridge_message(&msg, &[], false).unwrap();
-        assert!(inbound.metadata.get("whatsapp_message_id").is_none());
-        assert!(inbound.metadata.get("timestamp").is_none());
-        assert!(inbound.metadata.get("sender_name").is_none());
+        assert!(!inbound.metadata.contains_key("whatsapp_message_id"));
+        assert!(!inbound.metadata.contains_key("timestamp"));
+        assert!(!inbound.metadata.contains_key("sender_name"));
     }
 
     // -----------------------------------------------------------------------

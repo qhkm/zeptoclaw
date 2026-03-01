@@ -28,9 +28,9 @@ tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.0"
 # JSON5 parsing for OpenClaw config migration (comments, trailing commas, unquoted keys)
-json5 = "0.4"
+json5 = "1.3"
 
 # =============================================================================
 # HTTP CLIENT
@@ -65,7 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # =============================================================================
 # thiserror: Define custom error types with Display/Error derives
 # anyhow: Ergonomic error handling with context
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 
 # =============================================================================
@@ -104,7 +104,7 @@ dotenvy = "0.15"
 # Lazy static initialization for global config
 once_cell = "1.19"
 # Platform-specific paths (~/.config/zeptoclaw)
-dirs = "5.0"
+dirs = "6.0"
 
 # =============================================================================
 # SESSION MANAGEMENT
@@ -118,7 +118,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # SCREENSHOT (optional — feature-gated behind "screenshot")
 # =============================================================================
 # Headless Chromium via Chrome DevTools Protocol for web screenshots
-chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
+chromiumoxide = { version = "0.9", optional = true, default-features = false }
 
 # =============================================================================
 # MEMORY BACKENDS (optional — feature-gated)
@@ -130,7 +130,7 @@ instant-distance = { version = "0.6.1", optional = true }
 # PDF (optional — feature-gated behind "tool-pdf")
 # =============================================================================
 # Pure-Rust PDF parser for text extraction
-lopdf = { version = "0.34", optional = true }
+lopdf = { version = "0.39", optional = true }
 
 # =============================================================================
 # CHANNELS
@@ -138,7 +138,7 @@ lopdf = { version = "0.34", optional = true }
 # WebSocket support for future real-time channels
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 # Protobuf decoding for Lark/Feishu pbbp2 WS frames
-prost = "0.13"
+prost = "0.14"
 # Telegram bot SDK (minimal features to reduce bloat)
 teloxide = { version = "0.17", features = ["macros", "rustls"], default-features = false }
 # Integration helpers
@@ -148,29 +148,29 @@ tempfile = "3.10"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
 # Zip archive extraction for ClawHub skill installs
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # =============================================================================
 # EMAIL CHANNEL (optional — feature-gated behind "channel-email")
 # =============================================================================
 # IMAP IDLE client for real-time inbound email
-async-imap   = { version = "0.10", optional = true, default-features = false, features = ["runtime-tokio"] }
+async-imap   = { version = "0.11", optional = true, default-features = false, features = ["runtime-tokio"] }
 # SMTP client for outbound email (STARTTLS, builder API)
 lettre       = { version = "0.11", optional = true, default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 # Fast RFC 5322 / MIME parser (zero-copy)
-mail-parser  = { version = "0.9",  optional = true }
+mail-parser  = { version = "0.11",  optional = true }
 # TLS adapter for Tokio async streams (IMAP over TLS)
 tokio-rustls = { version = "0.26", optional = true }
 # Pure-Rust TLS implementation (shared with reqwest, but needs explicit dep for rustls API)
 rustls       = { version = "0.23", optional = true }
 # Mozilla TLS root certificates for rustls
-webpki-roots = { version = "0.26", optional = true }
+webpki-roots = { version = "1.0", optional = true }
 
 # =============================================================================
 # MQTT (optional — feature-gated)
 # =============================================================================
 # Lightweight async MQTT client for IoT device communication
-rumqttc = { version = "0.24", optional = true }
+rumqttc = { version = "0.25", optional = true }
 
 # =============================================================================
 # HARDWARE (optional — feature-gated)
@@ -184,7 +184,7 @@ probe-rs = { version = "0.31", optional = true }
 # XML PARSING
 # =============================================================================
 # Fast XML parser for DOCX extraction and Android uiautomator dump parsing
-quick-xml = "0.36"
+quick-xml = "0.39"
 
 # =============================================================================
 # GOOGLE WORKSPACE (optional, --features google)
@@ -204,7 +204,7 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = t
 # JWT token generation/validation for panel auth
 jsonwebtoken = { version = "9", optional = true }
 # Password hashing for panel password auth mode
-bcrypt = { version = "0.17", optional = true }
+bcrypt = { version = "0.18", optional = true }
 
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
@@ -254,10 +254,10 @@ panel = ["dep:axum", "dep:tower-http", "dep:jsonwebtoken", "dep:bcrypt"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-mockall = "0.12"
+mockall = "0.14"
 tower = { version = "0.5", features = ["util"] }
 # Benchmarking framework
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "message_bus"

@@ -83,7 +83,7 @@ struct PbHeader {
 
 /// Top-level Lark / Feishu WS frame (pbbp2.proto).
 ///
-/// `method=0` → CONTROL (ping / pong)  
+/// `method=0` → CONTROL (ping / pong)
 /// `method=1` → DATA (events)
 #[derive(Clone, PartialEq, prost::Message)]
 struct PbFrame {
@@ -1387,7 +1387,7 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "app123");
-        assert_eq!(parsed.feishu, false);
+        assert!(!parsed.feishu);
         assert!(parsed.allowed_senders.is_empty());
     }
 }

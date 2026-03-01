@@ -1068,16 +1068,14 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "add", "title": "Task B", "category": "personal"}),
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "list"}), &c)
@@ -1096,8 +1094,7 @@ mod tests {
 
         tool.execute(json!({"action": "add", "title": "Finish report"}), &c)
             .await
-            .unwrap()
-            .for_llm;
+            .unwrap();
 
         let result = tool
             .execute(json!({"action": "complete", "id": "r1"}), &c)
@@ -1122,8 +1119,7 @@ mod tests {
 
         tool.execute(json!({"action": "add", "title": "Temp task"}), &c)
             .await
-            .unwrap()
-            .for_llm;
+            .unwrap();
 
         let result = tool
             .execute(json!({"action": "remove", "id": "r1"}), &c)
@@ -1172,8 +1168,7 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
         let result = tool
             .execute(
                 json!({"action": "snooze", "id": "r1", "due_at": "2026-06-01T09:00:00Z"}),

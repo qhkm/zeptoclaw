@@ -328,7 +328,7 @@ mod tests {
             "k0 had most recent access, should survive LRU"
         );
         assert!(
-            cache.store.entries.get("k1").is_none(),
+            !cache.store.entries.contains_key("k1"),
             "k1 had oldest accessed_at, should be evicted"
         );
         assert_eq!(cache.store.entries.len(), 5, "should stay at max capacity");
@@ -345,7 +345,7 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.total_entries, 2);
         assert_eq!(stats.total_hits, 3);
-        assert_eq!(stats.total_tokens_saved, 100 * 2 + 200 * 1);
+        assert_eq!(stats.total_tokens_saved, 100 * 2 + 200);
     }
 
     #[test]

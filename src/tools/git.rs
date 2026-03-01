@@ -530,6 +530,6 @@ mod tests {
 
     #[test]
     fn test_default_impl() {
-        let _tool = GitTool::default();
+        let _tool = GitTool;
     }
 }

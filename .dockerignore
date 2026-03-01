@@ -33,3 +33,19 @@ tests/
 Dockerfile*
 docker-compose*.yml
 .dockerignore
+
+# Landing pages
+landing/
+
+# Project
+assets/
+deploy/
+examples/
+panel/
+scripts/
+install.sh
+Makefile
+
+# AI
+skills/
+.kimiignore

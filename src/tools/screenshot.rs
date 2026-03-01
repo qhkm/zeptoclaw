@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_default_constructor() {
-        let tool = WebScreenshotTool::default();
+        let tool = WebScreenshotTool;
         assert_eq!(tool.name(), "web_screenshot");
     }
 
