@@ -792,6 +792,30 @@ mod tests {
         assert_eq!(result.unwrap().content, "success from fallback");
     }
 
+    /// Documents that `ZeptoError::QuotaExceeded` is a legacy (non-ProviderTyped) error and
+    /// therefore hits the `_ => true` branch in the `should_fallback` match, triggering
+    /// automatic failover to the secondary provider.  No production code change is needed —
+    /// this test exists solely to pin the behaviour and prevent accidental regression.
+    #[tokio::test]
+    async fn test_quota_exceeded_triggers_fallback() {
+        let provider = FallbackProvider::new(
+            Box::new(TypedFailProvider {
+                name: "primary",
+                error: || ZeptoError::QuotaExceeded("limit reached".into()),
+            }),
+            Box::new(SuccessProvider { name: "fallback" }),
+        );
+
+        let result = provider
+            .chat(vec![], vec![], None, ChatOptions::default())
+            .await;
+
+        // QuotaExceeded is not a ProviderTyped error, so the `_ => true` branch fires and
+        // the request is transparently retried against the fallback provider.
+        assert!(result.is_ok(), "expected fallback success, got: {result:?}");
+        assert_eq!(result.unwrap().content, "success from fallback");
+    }
+
     // ====================================================================
     // Circuit breaker unit tests
     // ====================================================================
