@@ -34,7 +34,7 @@ use std::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{Result, ZeptoError};
-use crate::session::{Message, Role};
+use crate::session::{ContentPart, ImageSource, Message, Role};
 
 use super::{
     parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage,
@@ -87,14 +87,48 @@ struct OpenAIRequest {
     response_format: Option<serde_json::Value>,
 }
 
+/// OpenAI message content — either a plain string or an array of parts for vision.
+///
+/// The `#[serde(untagged)]` attribute means the JSON representation is either a
+/// bare string (for `Text`) or a JSON array (for `Parts`), matching the OpenAI
+/// Chat Completions API spec.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+enum OpenAIContent {
+    /// Plain text content (non-vision messages).
+    Text(String),
+    /// Multi-part content array (vision messages with text + image_url parts).
+    Parts(Vec<OpenAIContentPart>),
+}
+
+/// A single content part inside a vision message.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum OpenAIContentPart {
+    /// A text segment.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// An image URL (supports `data:` URIs for base64-encoded images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+/// The URL payload inside an `image_url` content part.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct OpenAIImageUrl {
+    /// Either an `https://` URL or a `data:<mime>;base64,<data>` URI.
+    url: String,
+}
+
 /// A message in OpenAI's format.
 #[derive(Debug, Clone, Serialize)]
 struct OpenAIMessage {
     /// Role: "system", "user", "assistant", or "tool"
     role: String,
-    /// Message content (can be null for assistant with tool_calls)
+    /// Message content — plain string for text-only, array of parts for vision.
+    /// Omitted when the assistant message contains only tool calls.
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAIContent>,
     /// Tool calls made by the assistant
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAIToolCallRequest>>,
@@ -412,7 +446,7 @@ impl OpenAIProvider {
 fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
     messages
         .into_iter()
-        .map(|msg| {
+        .map(|mut msg| {
             let role = match msg.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -421,7 +455,7 @@ fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
             }
             .to_string();
 
-            let tool_calls = msg.tool_calls.map(|tcs| {
+            let tool_calls = msg.tool_calls.take().map(|tcs| {
                 tcs.into_iter()
                     .map(|tc| OpenAIToolCallRequest {
                         id: tc.id,
@@ -434,13 +468,45 @@ fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
                     .collect()
             });
 
+            let content = if msg.content.is_empty() && tool_calls.is_some() {
+                // Assistant messages that consist solely of tool calls must omit
+                // the content field entirely so OpenAI accepts the request.
+                None
+            } else if msg.has_images() {
+                // Vision message: build a parts array from content_parts.
+                // Only Base64 sources are forwarded; FilePath/Url variants are
+                // skipped because the API requires either an https:// URL or a
+                // data: URI.  FilePath images should have been resolved to
+                // Base64 by the time they reach the provider.
+                let parts: Vec<OpenAIContentPart> = msg
+                    .content_parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => {
+                            Some(OpenAIContentPart::Text { text: text.clone() })
+                        }
+                        ContentPart::Image { source, media_type } => {
+                            if let ImageSource::Base64 { data } = source {
+                                Some(OpenAIContentPart::ImageUrl {
+                                    image_url: OpenAIImageUrl {
+                                        url: format!("data:{};base64,{}", media_type, data),
+                                    },
+                                })
+                            } else {
+                                // Remote URLs and file paths are not forwarded.
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                Some(OpenAIContent::Parts(parts))
+            } else {
+                Some(OpenAIContent::Text(msg.content))
+            };
+
             OpenAIMessage {
                 role,
-                content: if msg.content.is_empty() && tool_calls.is_some() {
-                    None
-                } else {
-                    Some(msg.content)
-                },
+                content,
                 tool_calls,
                 tool_call_id: msg.tool_call_id,
             }
@@ -926,7 +992,7 @@ impl LLMProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Message, ToolCall};
+    use crate::session::{ContentPart, ImageSource, Message, ToolCall};
 
     #[test]
     fn test_openai_provider_creation() {
@@ -1076,11 +1142,20 @@ mod tests {
 
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "system");
-        assert_eq!(converted[0].content, Some("You are helpful".to_string()));
+        assert_eq!(
+            converted[0].content,
+            Some(OpenAIContent::Text("You are helpful".to_string()))
+        );
         assert_eq!(converted[1].role, "user");
-        assert_eq!(converted[1].content, Some("Hello".to_string()));
+        assert_eq!(
+            converted[1].content,
+            Some(OpenAIContent::Text("Hello".to_string()))
+        );
         assert_eq!(converted[2].role, "assistant");
-        assert_eq!(converted[2].content, Some("Hi there!".to_string()));
+        assert_eq!(
+            converted[2].content,
+            Some(OpenAIContent::Text("Hi there!".to_string()))
+        );
     }
 
     #[test]
@@ -1106,7 +1181,10 @@ mod tests {
         // Second message: tool result
         assert_eq!(converted[1].role, "tool");
         assert_eq!(converted[1].tool_call_id, Some("call_1".to_string()));
-        assert_eq!(converted[1].content, Some("Found results".to_string()));
+        assert_eq!(
+            converted[1].content,
+            Some(OpenAIContent::Text("Found results".to_string()))
+        );
     }
 
     #[test]
@@ -1237,7 +1315,7 @@ mod tests {
             model: "gpt-5.1".to_string(),
             messages: vec![OpenAIMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(OpenAIContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             }],
@@ -1297,7 +1375,7 @@ mod tests {
     fn test_openai_message_with_tool_call_id() {
         let msg = OpenAIMessage {
             role: "tool".to_string(),
-            content: Some("Tool result".to_string()),
+            content: Some(OpenAIContent::Text("Tool result".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_123".to_string()),
         };
@@ -1679,5 +1757,65 @@ mod tests {
             .get("data")
             .and_then(serde_json::Value::as_array);
         assert!(data.is_none(), "missing 'data' should return None");
+    }
+
+    // ========================================================================
+    // Vision / image_url content tests
+    // ========================================================================
+
+    /// A user message with a base64 image should produce a Parts array where
+    /// the first element is a text part and the second is an image_url part
+    /// whose URL starts with the correct data-URI prefix.
+    #[test]
+    fn test_convert_user_message_with_image_openai() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc123".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let msg = Message::user_with_images("What is this?", images);
+        let openai_msgs = convert_messages(vec![msg]);
+
+        assert_eq!(openai_msgs.len(), 1);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        let content = &json["content"];
+        assert!(
+            content.is_array(),
+            "Expected array content for vision message, got: {content}"
+        );
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "Expected text part + image_url part");
+        assert_eq!(arr[0]["type"], "text", "First part must be type=text");
+        assert_eq!(
+            arr[1]["type"], "image_url",
+            "Second part must be type=image_url"
+        );
+        let url = arr[1]["image_url"]["url"]
+            .as_str()
+            .expect("image_url.url must be a string");
+        assert!(
+            url.starts_with("data:image/jpeg;base64,"),
+            "URL must start with data:image/jpeg;base64, — got: {url}"
+        );
+        assert!(
+            url.ends_with("abc123"),
+            "URL must end with the base64 payload — got: {url}"
+        );
+    }
+
+    /// A plain text-only user message should serialize `content` as a JSON
+    /// string, not an array, so text-only requests stay compact.
+    #[test]
+    fn test_convert_text_only_message_stays_string_openai() {
+        let msg = Message::user("Hello");
+        let openai_msgs = convert_messages(vec![msg]);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        assert!(
+            json["content"].is_string(),
+            "Text-only messages should serialize as a JSON string, not an array — got: {}",
+            json["content"]
+        );
+        assert_eq!(json["content"], "Hello");
     }
 }
