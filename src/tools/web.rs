@@ -414,14 +414,12 @@ fn validate_searxng_url(url: &str) -> Result<Url> {
 }
 
 /// Parse SearXNG JSON search response into structured results.
-fn parse_searxng_json(body: &str, max_results: usize) -> Vec<SearchResult> {
-    let parsed: Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+fn parse_searxng_json(body: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|e| ZeptoError::Tool(format!("Failed to parse SearXNG response: {}", e)))?;
     let empty = Vec::new();
     let results = parsed["results"].as_array().unwrap_or(&empty);
-    results
+    Ok(results
         .iter()
         .filter_map(|r| {
             let title = r["title"].as_str()?.trim().to_string();
@@ -440,7 +438,7 @@ fn parse_searxng_json(body: &str, max_results: usize) -> Vec<SearchResult> {
             })
         })
         .take(max_results)
-        .collect()
+        .collect())
 }
 
 /// Web search tool backed by a self-hosted SearXNG instance.
@@ -452,26 +450,18 @@ pub struct SearxngSearchTool {
 
 impl SearxngSearchTool {
     /// Create a new SearXNG search tool.
-    ///
-    /// # Panics
-    /// Panics if `api_url` is not a valid http/https URL.
-    pub fn new(api_url: &str) -> Self {
-        let parsed = validate_searxng_url(api_url).expect("invalid SearXNG URL");
-        Self {
-            api_url: parsed,
-            client: Client::new(),
-            max_results: 5,
-        }
+    pub fn new(api_url: &str) -> Result<Self> {
+        Self::with_max_results(api_url, 5)
     }
 
     /// Create with custom max results.
-    pub fn with_max_results(api_url: &str, max_results: usize) -> Self {
-        let parsed = validate_searxng_url(api_url).expect("invalid SearXNG URL");
-        Self {
+    pub fn with_max_results(api_url: &str, max_results: usize) -> Result<Self> {
+        let parsed = validate_searxng_url(api_url)?;
+        Ok(Self {
             api_url: parsed,
             client: Client::new(),
             max_results: max_results.clamp(1, MAX_WEB_SEARCH_COUNT),
-        }
+        })
     }
 }
 
@@ -555,7 +545,7 @@ impl Tool for SearxngSearchTool {
             .await
             .map_err(|e| ZeptoError::Tool(format!("Failed to read SearXNG response: {}", e)))?;
 
-        let results = parse_searxng_json(&body, count);
+        let results = parse_searxng_json(&body, count)?;
 
         if results.is_empty() {
             return Ok(ToolOutput::user_visible(format!(
@@ -2207,19 +2197,19 @@ mod tests {
 
     #[test]
     fn test_searxng_search_tool_name() {
-        let tool = SearxngSearchTool::new("https://search.example.com");
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
         assert_eq!(tool.name(), "web_search");
     }
 
     #[test]
     fn test_searxng_search_tool_description() {
-        let tool = SearxngSearchTool::new("https://search.example.com");
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
         assert!(!tool.description().is_empty());
     }
 
     #[test]
     fn test_searxng_search_tool_parameters() {
-        let tool = SearxngSearchTool::new("https://search.example.com");
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
         let params = tool.parameters();
         assert_eq!(params["type"], "object");
         assert!(params["properties"]["query"].is_object());
@@ -2235,7 +2225,7 @@ mod tests {
             {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "A systems language"},
             {"title": "Cargo", "url": "https://doc.rust-lang.org/cargo", "content": "Rust package manager"}
         ]}"#;
-        let results = parse_searxng_json(json_str, 5);
+        let results = parse_searxng_json(json_str, 5).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].title, "Rust Lang");
         assert_eq!(results[0].url, "https://rust-lang.org");
@@ -2252,14 +2242,14 @@ mod tests {
             {"title": "B", "url": "https://b.com", "content": "b"},
             {"title": "C", "url": "https://c.com", "content": "c"}
         ]}"#;
-        let results = parse_searxng_json(json_str, 2);
+        let results = parse_searxng_json(json_str, 2).unwrap();
         assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn test_parse_searxng_results_empty() {
         let json_str = r#"{"results": []}"#;
-        let results = parse_searxng_json(json_str, 5);
+        let results = parse_searxng_json(json_str, 5).unwrap();
         assert!(results.is_empty());
     }
 
@@ -2268,15 +2258,15 @@ mod tests {
         let json_str = r#"{"results": [
             {"title": "No Content", "url": "https://example.com"}
         ]}"#;
-        let results = parse_searxng_json(json_str, 5);
+        let results = parse_searxng_json(json_str, 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].description, None);
     }
 
     #[test]
     fn test_parse_searxng_results_invalid_json() {
-        let results = parse_searxng_json("not json", 5);
-        assert!(results.is_empty());
+        let result = parse_searxng_json("not json", 5);
+        assert!(result.is_err());
     }
 
     #[test]

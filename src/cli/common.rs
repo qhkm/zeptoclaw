@@ -757,6 +757,7 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
             .unwrap_or_else(|| {
                 if search_cfg
                     .api_url
@@ -765,7 +766,7 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                     .filter(|s| !s.is_empty())
                     .is_some()
                 {
-                    "searxng"
+                    "searxng".to_string()
                 } else if search_cfg
                     .api_key
                     .as_deref()
@@ -773,13 +774,13 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                     .filter(|s| !s.is_empty())
                     .is_some()
                 {
-                    "brave"
+                    "brave".to_string()
                 } else {
-                    "ddg"
+                    "ddg".to_string()
                 }
             });
 
-        match provider {
+        match provider.as_str() {
             "searxng" => {
                 let url = search_cfg
                     .api_url
@@ -790,7 +791,7 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                         anyhow::anyhow!("SearXNG provider requires tools.web.search.api_url")
                     })?;
                 agent
-                    .register_tool(Box::new(SearxngSearchTool::with_max_results(url, max)))
+                    .register_tool(Box::new(SearxngSearchTool::with_max_results(url, max)?))
                     .await;
                 info!("Registered web_search tool (SearXNG)");
             }
@@ -808,11 +809,17 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
                     .await;
                 info!("Registered web_search tool (Brave)");
             }
-            _ => {
+            "ddg" => {
                 agent
                     .register_tool(Box::new(DdgSearchTool::with_max_results(max)))
                     .await;
                 info!("Registered web_search tool (DuckDuckGo fallback)");
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Invalid tools.web.search.provider '{}'. Expected one of: brave, searxng, ddg",
+                    other
+                ));
             }
         }
     }
