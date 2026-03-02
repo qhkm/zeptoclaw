@@ -871,6 +871,13 @@ impl Config {
             }
         }
 
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER") {
+            self.tools.web.search.provider = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL") {
+            self.tools.web.search.api_url = Some(val);
+        }
+
         // WhatsApp tool configuration
         if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_WHATSAPP_PHONE_NUMBER_ID") {
             self.tools.whatsapp.phone_number_id = Some(val);
@@ -2008,5 +2015,24 @@ mod tests {
                     != Some("AKIAIOSFODNN7EXAMPLE")
         );
         std::env::remove_var("AWS_ACCESS_KEY_ID");
+    }
+
+    #[test]
+    fn test_web_search_env_provider_override() {
+        // Use unique env var names to avoid parallel test interference
+        std::env::set_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER", "searxng");
+        std::env::set_var(
+            "ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL",
+            "https://s.example.com",
+        );
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.tools.web.search.provider.as_deref(), Some("searxng"));
+        assert_eq!(
+            cfg.tools.web.search.api_url.as_deref(),
+            Some("https://s.example.com")
+        );
+        std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER");
+        std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL");
     }
 }
