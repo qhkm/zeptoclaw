@@ -1060,7 +1060,19 @@ impl Channel for LarkChannel {
             .await
             .map_err(|e| ZeptoError::Channel(format!("Lark: failed to get tenant token: {e}")))?;
 
-        let url = format!("{}/im/v1/messages?receive_id_type=open_id", self.api_base());
+        // Determine the correct receive_id_type based on the ID prefix.
+        // Lark chat IDs start with "oc_", open IDs start with "ou_".
+        // Using the wrong type causes Feishu error 99992361 "open_id cross app".
+        let receive_id_type = if msg.chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        let url = format!(
+            "{}/im/v1/messages?receive_id_type={}",
+            self.api_base(),
+            receive_id_type
+        );
         let content = serde_json::json!({ "text": msg.content }).to_string();
         let body = serde_json::json!({
             "receive_id": msg.chat_id,
@@ -1389,5 +1401,31 @@ mod tests {
         assert_eq!(parsed.app_id, "app123");
         assert_eq!(parsed.feishu, false);
         assert!(parsed.allowed_senders.is_empty());
+    }
+
+    // ---- receive_id_type routing ----
+
+    #[test]
+    fn test_send_url_uses_chat_id_type_for_group_chat() {
+        // Group chat IDs start with "oc_" — must use receive_id_type=chat_id
+        let chat_id = "oc_abc123def";
+        let receive_id_type = if chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        assert_eq!(receive_id_type, "chat_id");
+    }
+
+    #[test]
+    fn test_send_url_uses_open_id_type_for_p2p_fallback() {
+        // When chat_id falls back to sender open_id (starts with "ou_")
+        let chat_id = "ou_abc123def";
+        let receive_id_type = if chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        assert_eq!(receive_id_type, "open_id");
     }
 }
