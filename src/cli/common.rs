@@ -43,7 +43,8 @@ use zeptoclaw::tools::GoogleTool;
 use zeptoclaw::tools::{
     DdgSearchTool, DocxReadTool, EchoTool, FindSkillsTool, GitTool, GoogleSheetsTool,
     HttpRequestTool, InstallSkillTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool,
-    ProjectTool, R8rTool, TranscribeTool, WebFetchTool, WebSearchTool, WhatsAppTool,
+    ProjectTool, R8rTool, SearxngSearchTool, TranscribeTool, WebFetchTool, WebSearchTool,
+    WhatsAppTool,
 };
 
 /// Read a line from stdin, trimming whitespace.
@@ -747,25 +748,72 @@ Enable runtime.allow_fallback_to_native to opt in to native fallback.",
 
     // Register web tools.
     if tool_enabled("web_search") {
-        let brave_key = config
-            .tools
-            .web
-            .search
-            .api_key
+        let max = config.tools.web.search.max_results as usize;
+        let search_cfg = &config.tools.web.search;
+
+        // Resolve provider: explicit > auto-detect
+        let provider = search_cfg
+            .provider
             .as_deref()
             .map(str::trim)
-            .filter(|k| !k.is_empty());
-        let max = config.tools.web.search.max_results as usize;
-        if let Some(key) = brave_key {
-            agent
-                .register_tool(Box::new(WebSearchTool::with_max_results(key, max)))
-                .await;
-            info!("Registered web_search tool (Brave)");
-        } else {
-            agent
-                .register_tool(Box::new(DdgSearchTool::with_max_results(max)))
-                .await;
-            info!("Registered web_search tool (DuckDuckGo fallback)");
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if search_cfg
+                    .api_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some()
+                {
+                    "searxng"
+                } else if search_cfg
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some()
+                {
+                    "brave"
+                } else {
+                    "ddg"
+                }
+            });
+
+        match provider {
+            "searxng" => {
+                let url = search_cfg
+                    .api_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("SearXNG provider requires tools.web.search.api_url")
+                    })?;
+                agent
+                    .register_tool(Box::new(SearxngSearchTool::with_max_results(url, max)))
+                    .await;
+                info!("Registered web_search tool (SearXNG)");
+            }
+            "brave" => {
+                let key = search_cfg
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Brave provider requires tools.web.search.api_key")
+                    })?;
+                agent
+                    .register_tool(Box::new(WebSearchTool::with_max_results(key, max)))
+                    .await;
+                info!("Registered web_search tool (Brave)");
+            }
+            _ => {
+                agent
+                    .register_tool(Box::new(DdgSearchTool::with_max_results(max)))
+                    .await;
+                info!("Registered web_search tool (DuckDuckGo fallback)");
+            }
         }
     }
     if tool_enabled("web_fetch") {
