@@ -89,6 +89,6 @@ pub use tools::{
     composed::CreateToolTool, cron::CronTool, custom::CustomTool, delegate::DelegateTool,
     spawn::SpawnTool, BinaryPluginTool, DocxReadTool, EchoTool, GitTool, GoogleSheetsTool,
     HardwareTool, HttpRequestTool, MemoryGetTool, MemorySearchTool, MessageTool, PdfReadTool,
-    ProjectTool, R8rTool, ReminderTool, StripeTool, Tool, ToolCategory, ToolContext, ToolRegistry,
-    WebFetchTool, WebSearchTool, WhatsAppTool,
+    ProjectTool, R8rTool, ReminderTool, SearxngSearchTool, StripeTool, Tool, ToolCategory,
+    ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WhatsAppTool,
 };

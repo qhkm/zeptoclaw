@@ -22,6 +22,7 @@
 //! - `ShellTool`: Execute shell commands
 //! - `WebSearchTool`: Search the web via Brave Search API
 //! - `DdgSearchTool`: Free web search via DuckDuckGo HTML scraping (fallback)
+//! - `SearxngSearchTool`: Web search via self-hosted SearXNG instance
 //! - `WebFetchTool`: Fetch URL content and extract text
 //! - `MessageTool`: Send proactive outbound chat messages
 //! - `MemorySearchTool`: Search workspace markdown memory files
@@ -126,7 +127,8 @@ pub use task::TaskTool;
 pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
 pub use web::{
-    is_blocked_host, resolve_and_check_host, DdgSearchTool, WebFetchTool, WebSearchTool,
+    is_blocked_host, resolve_and_check_host, DdgSearchTool, SearxngSearchTool, WebFetchTool,
+    WebSearchTool,
 };
 pub use whatsapp::WhatsAppTool;
 
