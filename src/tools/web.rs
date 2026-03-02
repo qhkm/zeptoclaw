@@ -396,6 +396,190 @@ impl Tool for DdgSearchTool {
     }
 }
 
+/// Validate that a SearXNG instance URL has a valid scheme.
+fn validate_searxng_url(url: &str) -> Result<Url> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(ZeptoError::Tool("SearXNG URL is empty".to_string()));
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|e| ZeptoError::Tool(format!("Invalid SearXNG URL: {}", e)))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => Err(ZeptoError::Tool(format!(
+            "SearXNG URL must use http or https, got: {}",
+            scheme
+        ))),
+    }
+}
+
+/// Parse SearXNG JSON search response into structured results.
+fn parse_searxng_json(body: &str, max_results: usize) -> Vec<SearchResult> {
+    let parsed: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let empty = Vec::new();
+    let results = parsed["results"].as_array().unwrap_or(&empty);
+    results
+        .iter()
+        .filter_map(|r| {
+            let title = r["title"].as_str()?.trim().to_string();
+            let url = r["url"].as_str()?.trim().to_string();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let description = r["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Some(SearchResult {
+                title,
+                url,
+                description,
+            })
+        })
+        .take(max_results)
+        .collect()
+}
+
+/// Web search tool backed by a self-hosted SearXNG instance.
+pub struct SearxngSearchTool {
+    api_url: Url,
+    client: Client,
+    max_results: usize,
+}
+
+impl SearxngSearchTool {
+    /// Create a new SearXNG search tool.
+    ///
+    /// # Panics
+    /// Panics if `api_url` is not a valid http/https URL.
+    pub fn new(api_url: &str) -> Self {
+        let parsed = validate_searxng_url(api_url).expect("invalid SearXNG URL");
+        Self {
+            api_url: parsed,
+            client: Client::new(),
+            max_results: 5,
+        }
+    }
+
+    /// Create with custom max results.
+    pub fn with_max_results(api_url: &str, max_results: usize) -> Self {
+        let parsed = validate_searxng_url(api_url).expect("invalid SearXNG URL");
+        Self {
+            api_url: parsed,
+            client: Client::new(),
+            max_results: max_results.clamp(1, MAX_WEB_SEARCH_COUNT),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SearxngSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web and return result titles, URLs, and snippets."
+    }
+
+    fn compact_description(&self) -> &str {
+        "Web search"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkRead
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of results (1-10)",
+                    "minimum": 1,
+                    "maximum": 10
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ZeptoError::Tool("Missing 'query' parameter".to_string()))?;
+
+        let count = args
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize)
+            .unwrap_or(self.max_results)
+            .clamp(1, MAX_WEB_SEARCH_COUNT);
+
+        let search_url = format!("{}/search", self.api_url.as_str().trim_end_matches('/'));
+
+        let response = self
+            .client
+            .get(&search_url)
+            .header("User-Agent", WEB_USER_AGENT)
+            .query(&[("q", query), ("format", "json"), ("categories", "general")])
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("SearXNG search failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            let detail = detail.trim();
+            return Err(ZeptoError::Tool(if detail.is_empty() {
+                format!("SearXNG API error: {}", status)
+            } else {
+                format!("SearXNG API error: {} ({})", status, detail)
+            }));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to read SearXNG response: {}", e)))?;
+
+        let results = parse_searxng_json(&body, count);
+
+        if results.is_empty() {
+            return Ok(ToolOutput::user_visible(format!(
+                "No web search results found for '{}'.",
+                query
+            )));
+        }
+
+        let mut output = format!("Web search results for '{}':\n\n", query);
+        for (index, item) in results.iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", index + 1, item.title));
+            output.push_str(&format!("   {}\n", item.url));
+            if let Some(desc) = item.description.as_deref().map(str::trim) {
+                if !desc.is_empty() {
+                    output.push_str(&format!("   {}\n", desc));
+                }
+            }
+            output.push('\n');
+        }
+
+        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+    }
+}
+
 /// Web fetch tool for URL content retrieval.
 pub struct WebFetchTool {
     client: Client,
@@ -2017,5 +2201,99 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("query")));
+    }
+
+    // ==================== SEARXNG SEARCH TOOL TESTS ====================
+
+    #[test]
+    fn test_searxng_search_tool_name() {
+        let tool = SearxngSearchTool::new("https://search.example.com");
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn test_searxng_search_tool_description() {
+        let tool = SearxngSearchTool::new("https://search.example.com");
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_searxng_search_tool_parameters() {
+        let tool = SearxngSearchTool::new("https://search.example.com");
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("query")));
+    }
+
+    #[test]
+    fn test_parse_searxng_results_basic() {
+        let json_str = r#"{"results": [
+            {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "A systems language"},
+            {"title": "Cargo", "url": "https://doc.rust-lang.org/cargo", "content": "Rust package manager"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 5);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Lang");
+        assert_eq!(results[0].url, "https://rust-lang.org");
+        assert_eq!(
+            results[0].description,
+            Some("A systems language".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_searxng_results_respects_max() {
+        let json_str = r#"{"results": [
+            {"title": "A", "url": "https://a.com", "content": "a"},
+            {"title": "B", "url": "https://b.com", "content": "b"},
+            {"title": "C", "url": "https://c.com", "content": "c"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_searxng_results_empty() {
+        let json_str = r#"{"results": []}"#;
+        let results = parse_searxng_json(json_str, 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_searxng_results_missing_content() {
+        let json_str = r#"{"results": [
+            {"title": "No Content", "url": "https://example.com"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_searxng_results_invalid_json() {
+        let results = parse_searxng_json("not json", 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_valid() {
+        assert!(validate_searxng_url("https://search.example.com").is_ok());
+        assert!(validate_searxng_url("http://localhost:8888").is_ok());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_invalid_scheme() {
+        assert!(validate_searxng_url("ftp://search.example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_invalid_format() {
+        assert!(validate_searxng_url("not a url").is_err());
+        assert!(validate_searxng_url("").is_err());
+        assert!(validate_searxng_url("   ").is_err());
     }
 }
