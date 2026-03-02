@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::bus::MessageBus;
 use crate::config::{Config, MemoryBackend};
-use crate::providers::configured_provider_names;
+use crate::providers::{configured_provider_models, configured_provider_names};
 
 use super::email_channel::EmailChannel;
 use super::lark::LarkChannel;
@@ -40,6 +40,7 @@ pub async fn register_configured_channels(
                             .into_iter()
                             .map(|name| name.to_string())
                             .collect(),
+                        configured_provider_models(config),
                         !matches!(config.memory.backend, MemoryBackend::Disabled),
                     )))
                     .await;

@@ -32,7 +32,7 @@
 //!     allow_from: vec![],
 //! };
 //! let bus = Arc::new(MessageBus::new());
-//! let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+//! let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], vec![], false);
 //! ```
 
 use async_trait::async_trait;
@@ -72,7 +72,10 @@ struct Allowlist(Vec<String>);
 #[derive(Clone)]
 struct DefaultModel(String);
 #[derive(Clone)]
-struct ConfiguredProviders(Vec<String>);
+struct ConfiguredProviders {
+    names: Vec<String>,
+    models: Vec<(String, String)>,
+}
 /// Bundles both override stores into one DI dependency so that dptree's
 /// 9-parameter arity limit is not exceeded.
 #[derive(Clone)]
@@ -149,6 +152,8 @@ pub struct TelegramChannel {
     default_model: String,
     /// Configured providers (for /model list)
     configured_providers: Vec<String>,
+    /// Per-provider configured models for /model list (provider, model) pairs
+    configured_models: Vec<(String, String)>,
     /// Long-term memory backing store for model overrides (optional)
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
 }
@@ -175,7 +180,7 @@ impl TelegramChannel {
     ///     allow_from: vec!["user123".to_string()],
     /// };
     /// let bus = Arc::new(MessageBus::new());
-    /// let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+    /// let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], vec![], false);
     ///
     /// assert_eq!(channel.name(), "telegram");
     /// assert!(!channel.is_running());
@@ -185,6 +190,7 @@ impl TelegramChannel {
         bus: Arc<MessageBus>,
         default_model: String,
         configured_providers: Vec<String>,
+        configured_models: Vec<(String, String)>,
         memory_enabled: bool,
     ) -> Self {
         let base_config = BaseChannelConfig {
@@ -220,6 +226,7 @@ impl TelegramChannel {
             persona_overrides: persona_switch::new_persona_store(),
             default_model,
             configured_providers,
+            configured_models,
             longterm_memory,
         }
     }
@@ -311,7 +318,10 @@ impl Channel for TelegramChannel {
             persona: self.persona_overrides.clone(),
         };
         let default_model = DefaultModel(self.default_model.clone());
-        let configured_providers = ConfiguredProviders(self.configured_providers.clone());
+        let configured_providers = ConfiguredProviders {
+            names: self.configured_providers.clone(),
+            models: self.configured_models.clone(),
+        };
         let longterm_memory = self.longterm_memory.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
@@ -401,10 +411,12 @@ impl Channel for TelegramChannel {
                          deny_by_default: bool,
                          overrides_dep: OverridesDep,
                          DefaultModel(default_model): DefaultModel,
-                         ConfiguredProviders(configured_providers): ConfiguredProviders,
+                         configured_providers_dep: ConfiguredProviders,
                          longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
+                            let configured_providers = configured_providers_dep.names;
+                            let configured_models = configured_providers_dep.models;
                             // Extract user ID and optional username
                             let user = msg.from.as_ref();
                             let user_id = user
@@ -558,6 +570,7 @@ impl Channel for TelegramChannel {
                                             let reply = format_model_list(
                                                 &configured_providers,
                                                 current.as_ref(),
+                                                &configured_models,
                                             );
                                             let req = bot
                                                 .send_message(
@@ -891,7 +904,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         assert_eq!(channel.name(), "telegram");
         assert!(!channel.is_running());
@@ -908,7 +928,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Empty allowlist should allow anyone
         assert!(channel.is_allowed("anyone"));
@@ -925,7 +952,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         assert!(channel.is_enabled());
         assert_eq!(channel.telegram_config().token, "my-bot-token");
@@ -941,7 +975,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         assert!(!channel.is_enabled());
     }
@@ -959,7 +1000,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         assert!(channel.is_allowed("user1"));
         assert!(channel.is_allowed("user2"));
@@ -995,8 +1043,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel =
-            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let mut channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Should fail with empty token
         let result = channel.start().await;
@@ -1013,8 +1067,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel =
-            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let mut channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Should return Ok but not actually start
         let result = channel.start().await;
@@ -1031,8 +1091,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let mut channel =
-            TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let mut channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Should be ok to stop when not running
         let result = channel.stop().await;
@@ -1048,7 +1114,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Should fail when not running
         let msg = OutboundMessage::new("telegram", "12345", "Hello");
@@ -1065,7 +1138,14 @@ mod tests {
             ..Default::default()
         };
         let bus = Arc::new(MessageBus::new());
-        let channel = TelegramChannel::new(config, bus, "default-model".to_string(), vec![], false);
+        let channel = TelegramChannel::new(
+            config,
+            bus,
+            "default-model".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
 
         // Verify base config is set correctly
         assert_eq!(channel.base_config.name, "telegram");

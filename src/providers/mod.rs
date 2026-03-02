@@ -65,9 +65,9 @@ pub use quota::{
     QuotaAction, QuotaCheckResult, QuotaConfig, QuotaPeriod, QuotaProvider, QuotaStore,
 };
 pub use registry::{
-    configured_provider_names, configured_unsupported_provider_names, provider_config_by_name,
-    resolve_runtime_provider, resolve_runtime_providers, ProviderSpec, RuntimeProviderSelection,
-    PROVIDER_REGISTRY,
+    configured_provider_models, configured_provider_names, configured_unsupported_provider_names,
+    provider_config_by_name, resolve_runtime_provider, resolve_runtime_providers, ProviderSpec,
+    RuntimeProviderSelection, PROVIDER_REGISTRY,
 };
 pub use retry::RetryProvider;
 pub use rotation::{RotationProvider, RotationStrategy};

@@ -198,9 +198,14 @@ pub fn parse_model_command(text: &str) -> Option<ModelCommand> {
 }
 
 /// Format the `/model list` output showing known models with configured status.
+///
+/// `configured_models` contains `(provider, model)` pairs from user config. Any
+/// configured model that isn't already in `KNOWN_MODELS` for its provider is appended
+/// with a `(configured)` tag so users can see and select it.
 pub fn format_model_list(
     configured_providers: &[String],
     current: Option<&ModelOverride>,
+    configured_models: &[(String, String)],
 ) -> String {
     let mut output = String::from("Available models:\n\n");
 
@@ -224,10 +229,46 @@ pub fn format_model_list(
             let marker = if is_current { " (current)" } else { "" };
             output.push_str(&format!("  {} {}{}\n", km.model, km.label, marker));
         }
+        // Append configured models not already in KNOWN_MODELS for this provider.
+        for (cfg_provider, cfg_model) in configured_models {
+            if cfg_provider == *provider && !models.iter().any(|km| km.model == cfg_model.as_str())
+            {
+                let is_current = current.is_some_and(|c| {
+                    c.model == *cfg_model && c.provider.as_deref() == Some(*provider)
+                });
+                let marker = if is_current {
+                    " (configured, current)"
+                } else {
+                    " (configured)"
+                };
+                output.push_str(&format!("  {}{}\n", cfg_model, marker));
+            }
+        }
         if !is_configured {
             output.push_str("  (no API key configured)\n");
         }
         output.push('\n');
+    }
+
+    // Providers that have configured models but no entry in KNOWN_MODELS at all.
+    for (cfg_provider, cfg_model) in configured_models {
+        if !by_provider.iter().any(|(p, _)| *p == cfg_provider.as_str()) {
+            // Only emit each provider header once.
+            if output.contains(&format!("[ok] {}:", cfg_provider)) {
+                continue;
+            }
+            output.push_str(&format!("[ok] {}:\n", cfg_provider));
+            let is_current = current.is_some_and(|c| {
+                c.model == *cfg_model && c.provider.as_deref() == Some(cfg_provider.as_str())
+            });
+            let marker = if is_current {
+                " (configured, current)"
+            } else {
+                " (configured)"
+            };
+            output.push_str(&format!("  {}{}\n", cfg_model, marker));
+            output.push('\n');
+        }
     }
 
     output.trim_end().to_string()
@@ -406,7 +447,7 @@ mod tests {
     #[test]
     fn test_format_model_list_with_configured() {
         let configured = vec!["anthropic".to_string()];
-        let output = format_model_list(&configured, None);
+        let output = format_model_list(&configured, None, &[]);
         assert!(output.contains("anthropic"));
         assert!(output.contains("Claude"));
     }
@@ -418,8 +459,53 @@ mod tests {
             provider: Some("anthropic".to_string()),
             model: "claude-sonnet-4-5-20250929".to_string(),
         };
-        let output = format_model_list(&configured, Some(&current));
+        let output = format_model_list(&configured, Some(&current), &[]);
         assert!(output.contains("current"));
+    }
+
+    #[test]
+    fn test_format_model_list_shows_configured_model_not_in_known() {
+        let configured = vec!["nvidia".to_string()];
+        let configured_models = vec![("nvidia".to_string(), "nvidia/llama-3.3-70b".to_string())];
+        let output = format_model_list(&configured, None, &configured_models);
+        assert!(output.contains("nvidia/llama-3.3-70b"));
+        assert!(output.contains("(configured)"));
+    }
+
+    #[test]
+    fn test_format_model_list_does_not_duplicate_known_model() {
+        let configured = vec!["anthropic".to_string()];
+        // This model is already in KNOWN_MODELS — should NOT appear twice
+        let configured_models = vec![(
+            "anthropic".to_string(),
+            "claude-sonnet-4-5-20250929".to_string(),
+        )];
+        let output = format_model_list(&configured, None, &configured_models);
+        let count = output.matches("claude-sonnet-4-5-20250929").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_format_model_list_configured_model_shows_current() {
+        let configured = vec!["nvidia".to_string()];
+        let configured_models = vec![("nvidia".to_string(), "nvidia/llama-3.3-70b".to_string())];
+        let current = ModelOverride {
+            provider: Some("nvidia".to_string()),
+            model: "nvidia/llama-3.3-70b".to_string(),
+        };
+        let output = format_model_list(&configured, Some(&current), &configured_models);
+        assert!(output.contains("(configured, current)"));
+    }
+
+    #[test]
+    fn test_format_model_list_provider_with_no_known_models() {
+        // Provider not in KNOWN_MODELS at all (e.g. a custom provider)
+        let configured = vec!["zhipu".to_string()];
+        let configured_models = vec![("zhipu".to_string(), "glm-4-flash".to_string())];
+        let output = format_model_list(&configured, None, &configured_models);
+        // zhipu isn't in KNOWN_MODELS by_provider grouping, should appear as a new section
+        assert!(output.contains("zhipu"));
+        assert!(output.contains("glm-4-flash"));
     }
 
     #[tokio::test]

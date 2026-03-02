@@ -204,6 +204,24 @@ pub fn configured_provider_names(config: &Config) -> Vec<&'static str> {
         .collect()
 }
 
+/// Returns `(provider_name, model)` pairs for each configured provider that has an
+/// explicit `model` field set. Useful for showing user-configured models in `/model list`.
+pub fn configured_provider_models(config: &Config) -> Vec<(String, String)> {
+    PROVIDER_REGISTRY
+        .iter()
+        .filter_map(|spec| {
+            let prov = provider_config_by_name(config, spec.name)?;
+            // Only include providers that have both an API key and an explicit model set.
+            configured_api_key(Some(prov))?;
+            let model = prov.model.as_ref()?.clone();
+            if model.is_empty() {
+                return None;
+            }
+            Some((spec.name.to_string(), model))
+        })
+        .collect()
+}
+
 /// Returns configured provider ids that are not yet runtime-supported.
 pub fn configured_unsupported_provider_names(config: &Config) -> Vec<&'static str> {
     PROVIDER_REGISTRY
@@ -726,6 +744,52 @@ mod tests {
     fn test_runtime_supported_constant_includes_azure_and_bedrock() {
         assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"azure"));
         assert!(crate::providers::RUNTIME_SUPPORTED_PROVIDERS.contains(&"bedrock"));
+    }
+
+    #[test]
+    fn test_configured_provider_models_returns_providers_with_model_set() {
+        let mut config = Config::default();
+        config.providers.nvidia = Some(ProviderConfig {
+            api_key: Some("nvapi-test".to_string()),
+            model: Some("nvidia/llama-3.3-70b".to_string()),
+            ..Default::default()
+        });
+        config.providers.anthropic = Some(ProviderConfig {
+            api_key: Some("sk-ant".to_string()),
+            // No model set — should not appear
+            ..Default::default()
+        });
+
+        let models = configured_provider_models(&config);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].0, "nvidia");
+        assert_eq!(models[0].1, "nvidia/llama-3.3-70b");
+    }
+
+    #[test]
+    fn test_configured_provider_models_skips_empty_model() {
+        let mut config = Config::default();
+        config.providers.openai = Some(ProviderConfig {
+            api_key: Some("sk-openai".to_string()),
+            model: Some("".to_string()),
+            ..Default::default()
+        });
+
+        let models = configured_provider_models(&config);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_configured_provider_models_skips_no_api_key() {
+        let mut config = Config::default();
+        config.providers.nvidia = Some(ProviderConfig {
+            model: Some("nvidia/llama-3.3-70b".to_string()),
+            // No API key
+            ..Default::default()
+        });
+
+        let models = configured_provider_models(&config);
+        assert!(models.is_empty());
     }
 
     #[test]
