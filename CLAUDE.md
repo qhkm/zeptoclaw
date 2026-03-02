@@ -311,7 +311,7 @@ src/
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── filesystem.rs  # Read, write, list, edit files (4 tools: read, write, list, edit)
-│   ├── web.rs         # Web search (Brave + DuckDuckGo fallback) and fetch with SSRF protection
+│   ├── web.rs         # Web search (Brave + DuckDuckGo + SearXNG) and fetch with SSRF protection
 │   ├── git.rs         # Git operations (status, diff, log, commit)
 │   ├── stripe.rs      # Stripe API integration for payment operations
 │   ├── pdf_read.rs    # PDF text extraction (PdfReadTool)
@@ -615,6 +615,8 @@ Environment variables override config:
 - `ZEPTOCLAW_PANEL_PORT` — panel frontend port (default: 9092)
 - `ZEPTOCLAW_PANEL_API_PORT` — panel API port (default: 9091)
 - `ZEPTOCLAW_PANEL_BIND` — bind address (default: 127.0.0.1)
+- `ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER` — search provider: "brave", "searxng", "ddg" (default: auto-detect)
+- `ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL` — SearXNG instance URL (required when provider is "searxng")
 
 ### Cargo Features
 
