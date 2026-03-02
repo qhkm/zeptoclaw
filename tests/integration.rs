@@ -233,7 +233,7 @@ fn test_model_list_format() {
     use zeptoclaw::channels::model_switch::*;
 
     let configured = vec!["anthropic".to_string(), "groq".to_string()];
-    let output = format_model_list(&configured, None);
+    let output = format_model_list(&configured, None, &[]);
     let anthropic_section = output
         .split("\n\n")
         .find(|section| section.contains("anthropic"))
