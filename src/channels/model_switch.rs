@@ -251,24 +251,30 @@ pub fn format_model_list(
     }
 
     // Providers that have configured models but no entry in KNOWN_MODELS at all.
-    for (cfg_provider, cfg_model) in configured_models {
-        if !by_provider.iter().any(|(p, _)| *p == cfg_provider.as_str()) {
-            // Only emit each provider header once.
-            if output.contains(&format!("[ok] {}:", cfg_provider)) {
+    // Collect unique extra providers first, then emit all their models.
+    let mut extra_providers: Vec<&str> = configured_models
+        .iter()
+        .filter(|(p, _)| !by_provider.iter().any(|(known, _)| *known == p.as_str()))
+        .map(|(p, _)| p.as_str())
+        .collect();
+    extra_providers.dedup();
+
+    for provider in extra_providers {
+        output.push_str(&format!("[ok] {}:\n", provider));
+        for (cfg_provider, cfg_model) in configured_models {
+            if cfg_provider != provider {
                 continue;
             }
-            output.push_str(&format!("[ok] {}:\n", cfg_provider));
-            let is_current = current.is_some_and(|c| {
-                c.model == *cfg_model && c.provider.as_deref() == Some(cfg_provider.as_str())
-            });
+            let is_current = current
+                .is_some_and(|c| c.model == *cfg_model && c.provider.as_deref() == Some(provider));
             let marker = if is_current {
                 " (configured, current)"
             } else {
                 " (configured)"
             };
             output.push_str(&format!("  {}{}\n", cfg_model, marker));
-            output.push('\n');
         }
+        output.push('\n');
     }
 
     output.trim_end().to_string()
