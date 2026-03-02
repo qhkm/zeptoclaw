@@ -1503,9 +1503,15 @@ pub struct WebToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSearchConfig {
-    /// API key for search service
+    /// Search provider: "brave", "searxng", "ddg" (default: auto-detect)
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// API key for Brave Search
     #[serde(default)]
     pub api_key: Option<String>,
+    /// SearXNG instance URL (e.g. "https://search.example.com")
+    #[serde(default)]
+    pub api_url: Option<String>,
     /// Maximum search results to return
     pub max_results: u32,
 }
@@ -1513,7 +1519,9 @@ pub struct WebSearchConfig {
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             api_key: None,
+            api_url: None,
             max_results: 5,
         }
     }
@@ -2725,6 +2733,23 @@ mod tests {
         assert_eq!(azure.api_key.as_deref(), Some("my-azure-key"));
         assert_eq!(azure.auth_header.as_deref(), Some("api-key"));
         assert_eq!(azure.api_version.as_deref(), Some("2024-08-01-preview"));
+    }
+
+    #[test]
+    fn test_web_search_config_defaults() {
+        let cfg = WebSearchConfig::default();
+        assert_eq!(cfg.provider, None);
+        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.api_url, None);
+        assert_eq!(cfg.max_results, 5);
+    }
+
+    #[test]
+    fn test_web_search_config_deserialize_provider() {
+        let json = r#"{"provider": "searxng", "api_url": "https://search.example.com"}"#;
+        let cfg: WebSearchConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("searxng"));
+        assert_eq!(cfg.api_url.as_deref(), Some("https://search.example.com"));
     }
 }
 
