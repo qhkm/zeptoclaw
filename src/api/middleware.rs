@@ -99,8 +99,6 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> bool {
 /// - `GET /api/csrf-token` — must be public so the caller can bootstrap
 /// - `POST /api/auth/login` — exchanges password for JWT
 /// - Any path starting with `/ws/` — WebSocket upgrade handshake
-/// - `GET /v1/models` — OpenAI-compatible model listing
-/// - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint
 ///
 /// Accepts two token forms:
 /// 1. Static API token configured at startup (`state.api_token`)
@@ -118,14 +116,10 @@ pub async fn auth_middleware(
     let path = request.uri().path();
 
     // Public endpoints that skip auth entirely.
-    // The two `/v1/` routes are the OpenAI-compatible API endpoints which use
-    // their own authentication model (the upstream LLM provider key).
     if path == "/api/health"
         || path == "/api/csrf-token"
         || path == "/api/auth/login"
         || path.starts_with("/ws/")
-        || path == "/v1/chat/completions"
-        || path == "/v1/models"
     {
         return Ok(next.run(request).await);
     }
@@ -154,6 +148,12 @@ pub async fn auth_middleware(
                 *method,
                 axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::DELETE
             ) {
+                // OpenAI-compatible API endpoints are authenticated via Bearer token
+                // but exempt from CSRF (they are not browser-originated).
+                if path.starts_with("/v1/") {
+                    return Ok(next.run(request).await);
+                }
+
                 let csrf_token = request
                     .headers()
                     .get("x-csrf-token")
@@ -256,10 +256,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v1_models_skips_auth() {
+    async fn test_v1_models_requires_auth() {
         let app = make_app(make_state());
         let req = Request::builder()
             .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_v1_models_with_valid_token() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .uri("/v1/models")
+            .header("authorization", "Bearer static-test-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -267,11 +279,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v1_chat_completions_skips_auth() {
+    async fn test_v1_chat_completions_requires_auth() {
         let app = make_app(make_state());
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_v1_chat_completions_with_valid_token() {
+        // POST /v1/chat/completions requires Bearer auth but is exempt from CSRF.
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("authorization", "Bearer static-test-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -280,8 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_v1_unexpected_route_requires_auth() {
-        // Regression: `/v1/` prefix must NOT bypass auth for arbitrary routes.
-        // Only `/v1/models` and `/v1/chat/completions` are exempt.
+        // Regression: all `/v1/` routes require Bearer auth.
         let state = make_state();
         let app = Router::new()
             .route("/v1/unexpected", get(|| async { "should not reach" }))
