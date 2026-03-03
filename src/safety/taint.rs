@@ -126,6 +126,10 @@ struct TaintedSnippet {
     labels: HashSet<TaintLabel>,
     /// The tool that produced this output.
     source_tool: String,
+    /// Short markers extracted from the FULL output for each secret-pattern match.
+    /// Used for sink checks so that secrets beyond the truncated snippet window
+    /// are still detected.
+    secret_markers: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +168,13 @@ const NETWORK_SOURCE_TOOLS: &[&str] = &["web_fetch", "http_request", "web_search
 // ---------------------------------------------------------------------------
 
 /// Simple prefix-based patterns for detecting secrets in output.
-/// These complement the full `LeakDetector` -- just enough to auto-label.
+///
+/// This is an intentional subset of the patterns in [`super::leak_detector::LeakDetector`].
+/// We use lightweight prefix matching here (no regex) for performance in the
+/// hot path of every tool output. The full `LeakDetector` with 22 compiled regex
+/// patterns is used separately for output sanitization. If new critical secret
+/// prefixes are added to `LeakDetector`, consider whether they warrant a
+/// corresponding entry here.
 const SECRET_PREFIXES: &[&str] = &[
     "sk-",         // OpenAI / Anthropic API keys
     "AKIA",        // AWS access key
@@ -178,10 +188,49 @@ const SECRET_PREFIXES: &[&str] = &[
 ];
 
 /// Check if content contains likely secret patterns.
+///
+/// Thin wrapper that checks prefixes without collecting markers. Used in tests
+/// to validate individual prefix matches.
+#[cfg(test)]
 fn content_has_secret_pattern(content: &str) -> bool {
     SECRET_PREFIXES
         .iter()
         .any(|prefix| content.contains(prefix))
+}
+
+/// Collect all secret-pattern markers found in `content`.
+///
+/// Returns short snippets around each match (prefix + up to 20 following chars)
+/// so that sink checks can detect secrets even when the full output was truncated
+/// for the snippet field.
+fn collect_secret_markers(content: &str) -> Vec<String> {
+    let mut markers = Vec::new();
+    for prefix in SECRET_PREFIXES {
+        let mut search_from = 0;
+        while let Some(pos) = content[search_from..].find(prefix) {
+            let abs_pos = search_from + pos;
+            // Capture prefix + up to 20 chars of the secret value
+            let end = content.len().min(abs_pos + prefix.len() + 20);
+            // Use char-boundary-safe slicing
+            let marker = truncate_utf8(&content[abs_pos..], end - abs_pos);
+            markers.push(marker.to_string());
+            search_from = abs_pos + prefix.len();
+        }
+    }
+    markers
+}
+
+/// Truncate a `&str` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. Returns a subslice of the original string.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 // ---------------------------------------------------------------------------
@@ -232,23 +281,21 @@ impl TaintEngine {
             labels.insert(TaintLabel::ExternalNetwork);
         }
 
-        // Secret pattern detection
-        if content_has_secret_pattern(output) {
+        // Secret pattern detection — scan the FULL output, not just the snippet
+        let secret_markers = collect_secret_markers(output);
+        if !secret_markers.is_empty() {
             labels.insert(TaintLabel::Secret);
         }
 
         // Store snippet if we assigned any labels
         if !labels.is_empty() {
-            let snippet = if output.len() > SNIPPET_MAX_LEN {
-                output[..SNIPPET_MAX_LEN].to_string()
-            } else {
-                output.to_string()
-            };
+            let snippet = truncate_utf8(output, SNIPPET_MAX_LEN).to_string();
 
             self.tainted_snippets.push(TaintedSnippet {
                 snippet,
                 labels: labels.clone(),
                 source_tool: tool_name.to_string(),
+                secret_markers,
             });
         }
 
@@ -343,10 +390,23 @@ impl TaintEngine {
         let blocked: HashSet<TaintLabel> = sink.blocked_labels.iter().copied().collect();
 
         for snippet in &self.tainted_snippets {
-            // Check if any of the snippet's labels are blocked by this sink
             for label in &snippet.labels {
-                if blocked.contains(label) && content.contains(&snippet.snippet) {
-                    return Some((snippet.source_tool.clone(), *label));
+                if !blocked.contains(label) {
+                    continue;
+                }
+
+                // For Secret labels, check secret_markers (covers full output)
+                if *label == TaintLabel::Secret {
+                    for marker in &snippet.secret_markers {
+                        if content.contains(marker.as_str()) {
+                            return Some((snippet.source_tool.clone(), *label));
+                        }
+                    }
+                } else {
+                    // For other labels, fall back to snippet substring match
+                    if content.contains(&snippet.snippet) {
+                        return Some((snippet.source_tool.clone(), *label));
+                    }
                 }
             }
         }
@@ -645,4 +705,86 @@ mod tests {
         assert!(!content_has_secret_pattern("just a normal string"));
         assert!(!content_has_secret_pattern(""));
     }
+
+    #[test]
+    fn test_secret_beyond_snippet_window_still_detected() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+
+        // Build output where the secret is beyond the 200-char snippet window
+        let padding = "X".repeat(300);
+        let secret = "sk-abc123456789012345678901234";
+        let output = format!("{padding} here is a key: {secret}");
+        engine.label_output("echo", &output);
+
+        // The snippet is only the first 200 chars (no secret in it)
+        assert!(engine.tainted_snippets[0].snippet.len() <= SNIPPET_MAX_LEN);
+        assert!(!engine.tainted_snippets[0].snippet.contains("sk-"));
+
+        // But secret_markers captured the secret from the full output
+        assert!(!engine.tainted_snippets[0].secret_markers.is_empty());
+
+        // Sink check should still block when the secret marker appears in input
+        let input = json!({"url": format!("https://api.example.com?key={secret}")});
+        let result = engine.check_sink("web_fetch", &input);
+        assert!(result.is_err());
+        let violation = result.unwrap_err();
+        assert_eq!(violation.label, TaintLabel::Secret);
+    }
+
+    #[test]
+    fn test_truncate_utf8_ascii() {
+        assert_eq!(truncate_utf8("hello", 3), "hel");
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_multibyte() {
+        // Each CJK character is 3 bytes in UTF-8
+        let s = "\u{4e16}\u{754c}"; // "世界" = 6 bytes
+        assert_eq!(truncate_utf8(s, 4), "\u{4e16}"); // 3 bytes fits, 4th would split
+        assert_eq!(truncate_utf8(s, 3), "\u{4e16}"); // exact boundary
+        assert_eq!(truncate_utf8(s, 2), ""); // can't fit even one char at 2 bytes
+        assert_eq!(truncate_utf8(s, 6), s); // exact fit
+    }
+
+    #[test]
+    fn test_truncate_utf8_emoji() {
+        // Emoji like 🦀 is 4 bytes
+        let s = "a🦀b";
+        assert_eq!(truncate_utf8(s, 1), "a");
+        assert_eq!(truncate_utf8(s, 2), "a"); // would split emoji
+        assert_eq!(truncate_utf8(s, 5), "a🦀"); // 1 + 4 = 5
+        assert_eq!(truncate_utf8(s, 6), "a🦀b"); // full string
+    }
+
+    #[test]
+    fn test_snippet_truncation_multibyte_safe() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        // Create output with multibyte chars that would split at SNIPPET_MAX_LEN
+        let cjk_char = "\u{4e16}"; // 3 bytes
+        let long_output = cjk_char.repeat(200); // 600 bytes, way past SNIPPET_MAX_LEN
+        engine.label_output("web_fetch", &long_output);
+        let snippet = &engine.tainted_snippets[0].snippet;
+        // Must be valid UTF-8 and <= SNIPPET_MAX_LEN bytes
+        assert!(snippet.len() <= SNIPPET_MAX_LEN);
+        // Must be at a char boundary (valid UTF-8)
+        assert!(snippet.is_char_boundary(snippet.len()));
+    }
+
+    #[test]
+    fn test_collect_secret_markers_multiple() {
+        let content = "key1: sk-aaa111 and key2: sk-bbb222 end";
+        let markers = collect_secret_markers(content);
+        assert_eq!(markers.len(), 2);
+        assert!(markers[0].starts_with("sk-"));
+        assert!(markers[1].starts_with("sk-"));
+    }
+
+    #[test]
+    fn test_collect_secret_markers_empty() {
+        let markers = collect_secret_markers("no secrets here");
+        assert!(markers.is_empty());
+    }
 }
+
