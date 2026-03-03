@@ -729,8 +729,12 @@ async fn cmd_mcp_server(http: Option<String>) -> Result<()> {
     use zeptoclaw::config::Config;
     use zeptoclaw::mcp_server::McpServer;
 
-    let config =
-        Config::load().map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+    // Config::load() performs blocking filesystem I/O; move it off the
+    // async runtime thread to avoid starving other tasks.
+    let config = tokio::task::spawn_blocking(Config::load)
+        .await
+        .map_err(|e| anyhow::anyhow!("Config loader task panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
     let bus = Arc::new(MessageBus::new());
 
     let kernel = zeptoclaw::kernel::ZeptoKernel::boot(config, bus, None, None).await?;

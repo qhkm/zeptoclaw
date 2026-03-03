@@ -26,9 +26,12 @@ const SERVER_NAME: &str = "zeptoclaw";
 /// `id` is `None` for notifications (no response expected by spec, but we
 /// return an empty result for `notifications/initialized` to keep stdio
 /// transports simple).
+///
+/// The `id` is a `serde_json::Value` to preserve the original type sent by
+/// the client (number, string, or null) as required by JSON-RPC 2.0.
 pub async fn handle_request(
     kernel: &ZeptoKernel,
-    id: Option<u64>,
+    id: Option<Value>,
     method: &str,
     params: Option<Value>,
 ) -> McpResponse {
@@ -45,7 +48,7 @@ pub async fn handle_request(
 }
 
 /// `initialize` -- return server info and capabilities.
-fn handle_initialize(id: Option<u64>) -> McpResponse {
+fn handle_initialize(id: Option<Value>) -> McpResponse {
     let result = json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
@@ -66,7 +69,7 @@ fn handle_initialize(id: Option<u64>) -> McpResponse {
 }
 
 /// `notifications/initialized` -- client acknowledges init. No-op.
-fn handle_notifications_initialized(id: Option<u64>) -> McpResponse {
+fn handle_notifications_initialized(id: Option<Value>) -> McpResponse {
     McpResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -76,7 +79,7 @@ fn handle_notifications_initialized(id: Option<u64>) -> McpResponse {
 }
 
 /// `tools/list` -- return all registered tools as MCP tool definitions.
-fn handle_tools_list(kernel: &ZeptoKernel, id: Option<u64>) -> McpResponse {
+fn handle_tools_list(kernel: &ZeptoKernel, id: Option<Value>) -> McpResponse {
     let defs = kernel.tool_definitions();
     let tools: Vec<McpTool> = defs
         .into_iter()
@@ -99,7 +102,7 @@ fn handle_tools_list(kernel: &ZeptoKernel, id: Option<u64>) -> McpResponse {
 /// `tools/call` -- execute a tool and return the result.
 async fn handle_tools_call(
     kernel: &ZeptoKernel,
-    id: Option<u64>,
+    id: Option<Value>,
     params: Option<Value>,
 ) -> McpResponse {
     let params = match params {
@@ -170,7 +173,7 @@ async fn handle_tools_call(
 }
 
 /// Build an error response.
-fn make_error(id: Option<u64>, code: i64, message: String) -> McpResponse {
+fn make_error(id: Option<Value>, code: i64, message: String) -> McpResponse {
     McpResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -218,9 +221,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_initialize() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(1), "initialize", None).await;
+        let resp = handle_request(&kernel, Some(json!(1)), "initialize", None).await;
 
-        assert_eq!(resp.id, Some(1));
+        assert_eq!(resp.id, Some(json!(1)));
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
@@ -231,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_initialize_has_version() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(1), "initialize", None).await;
+        let resp = handle_request(&kernel, Some(json!(1)), "initialize", None).await;
         let result = resp.result.unwrap();
         let version = result["serverInfo"]["version"].as_str().unwrap();
         assert!(!version.is_empty());
@@ -249,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_list() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(2), "tools/list", None).await;
+        let resp = handle_request(&kernel, Some(json!(2)), "tools/list", None).await;
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
@@ -261,16 +264,16 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_list_has_description() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(3), "tools/list", None).await;
+        let resp = handle_request(&kernel, Some(json!(3)), "tools/list", None).await;
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(tools[0]["description"].as_str().unwrap().len() > 0);
+        assert!(!tools[0]["description"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn test_handle_tools_list_has_input_schema() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(4), "tools/list", None).await;
+        let resp = handle_request(&kernel, Some(json!(4)), "tools/list", None).await;
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
         assert!(tools[0]["inputSchema"].is_object());
@@ -286,7 +289,7 @@ mod tests {
             }
         });
 
-        let resp = handle_request(&kernel, Some(5), "tools/call", Some(params)).await;
+        let resp = handle_request(&kernel, Some(json!(5)), "tools/call", Some(params)).await;
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
@@ -300,7 +303,7 @@ mod tests {
         let kernel = test_kernel();
         let params = json!({ "arguments": {} });
 
-        let resp = handle_request(&kernel, Some(6), "tools/call", Some(params)).await;
+        let resp = handle_request(&kernel, Some(json!(6)), "tools/call", Some(params)).await;
 
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
@@ -312,7 +315,7 @@ mod tests {
     async fn test_handle_tools_call_missing_params() {
         let kernel = test_kernel();
 
-        let resp = handle_request(&kernel, Some(7), "tools/call", None).await;
+        let resp = handle_request(&kernel, Some(json!(7)), "tools/call", None).await;
 
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
@@ -327,7 +330,7 @@ mod tests {
             "arguments": {}
         });
 
-        let resp = handle_request(&kernel, Some(8), "tools/call", Some(params)).await;
+        let resp = handle_request(&kernel, Some(json!(8)), "tools/call", Some(params)).await;
 
         // Tool-not-found is returned as a tool result with is_error=true,
         // not as a JSON-RPC error.
@@ -343,7 +346,7 @@ mod tests {
         let kernel = test_kernel();
         let params = json!({ "name": "echo" });
 
-        let resp = handle_request(&kernel, Some(9), "tools/call", Some(params)).await;
+        let resp = handle_request(&kernel, Some(json!(9)), "tools/call", Some(params)).await;
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
@@ -355,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_unknown_method() {
         let kernel = test_kernel();
-        let resp = handle_request(&kernel, Some(10), "unknown/method", None).await;
+        let resp = handle_request(&kernel, Some(json!(10)), "unknown/method", None).await;
 
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
@@ -365,9 +368,9 @@ mod tests {
 
     #[test]
     fn test_make_error() {
-        let resp = make_error(Some(99), -32600, "Bad request".to_string());
+        let resp = make_error(Some(json!(99)), -32600, "Bad request".to_string());
 
-        assert_eq!(resp.id, Some(99));
+        assert_eq!(resp.id, Some(json!(99)));
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
         assert_eq!(err.code, -32600);
@@ -396,11 +399,20 @@ mod tests {
             ltm: None,
         };
 
-        let resp = handle_request(&kernel, Some(11), "tools/list", None).await;
+        let resp = handle_request(&kernel, Some(json!(11)), "tools/list", None).await;
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
         assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_with_string_id() {
+        let kernel = test_kernel();
+        let resp = handle_request(&kernel, Some(json!("abc-123")), "initialize", None).await;
+
+        assert_eq!(resp.id, Some(json!("abc-123")));
+        assert!(resp.error.is_none());
     }
 }

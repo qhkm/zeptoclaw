@@ -25,10 +25,13 @@ impl McpRequest {
 }
 
 /// JSON-RPC 2.0 response.
+///
+/// `id` is a `serde_json::Value` to preserve the original type sent by the
+/// client (number, string, or null) as required by the JSON-RPC 2.0 spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResponse {
     pub jsonrpc: String,
-    pub id: Option<u64>,
+    pub id: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,7 +183,7 @@ mod tests {
         let resp: McpResponse = serde_json::from_value(raw).unwrap();
 
         assert_eq!(resp.jsonrpc, "2.0");
-        assert_eq!(resp.id, Some(1));
+        assert_eq!(resp.id, Some(json!(1)));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }
@@ -197,7 +200,7 @@ mod tests {
         });
         let resp: McpResponse = serde_json::from_value(raw).unwrap();
 
-        assert_eq!(resp.id, Some(2));
+        assert_eq!(resp.id, Some(json!(2)));
         assert!(resp.result.is_none());
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
@@ -209,7 +212,7 @@ mod tests {
     fn test_mcp_response_is_error() {
         let success = McpResponse {
             jsonrpc: "2.0".to_string(),
-            id: Some(1),
+            id: Some(json!(1)),
             result: Some(json!({})),
             error: None,
         };
@@ -218,7 +221,7 @@ mod tests {
 
         let failure = McpResponse {
             jsonrpc: "2.0".to_string(),
-            id: Some(2),
+            id: Some(json!(2)),
             result: None,
             error: Some(McpError {
                 code: -32600,

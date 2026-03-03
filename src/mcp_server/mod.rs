@@ -61,12 +61,31 @@ impl McpServer {
         let processor_kernel = Arc::clone(&kernel);
         tokio::spawn(async move {
             while let Some((body, reply_tx)) = rx.recv().await {
-                let id = body.get("id").and_then(|v| v.as_u64());
-                let method = body
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let id = body
+                    .get("id")
+                    .and_then(|v| if v.is_null() { None } else { Some(v.clone()) });
+
+                // Return Invalid Request (-32600) immediately when "method"
+                // is absent or not a string, matching the stdio transport.
+                let method = match body.get("method").and_then(|v| v.as_str()) {
+                    Some(m) => m.to_string(),
+                    None => {
+                        let resp = McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: None,
+                            error: Some(crate::tools::mcp::protocol::McpError {
+                                code: -32600,
+                                message: "Invalid request: missing or non-string 'method' field"
+                                    .to_string(),
+                                data: None,
+                            }),
+                        };
+                        let _ = reply_tx.send(resp);
+                        continue;
+                    }
+                };
+
                 let params = body.get("params").cloned();
 
                 let resp = handler::handle_request(&processor_kernel, id, &method, params).await;
@@ -83,7 +102,9 @@ impl McpServer {
             if body.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
                 let resp = McpResponse {
                     jsonrpc: "2.0".to_string(),
-                    id: body.get("id").and_then(|v| v.as_u64()),
+                    id: body
+                        .get("id")
+                        .and_then(|v| if v.is_null() { None } else { Some(v.clone()) }),
                     result: None,
                     error: Some(crate::tools::mcp::protocol::McpError {
                         code: -32600,

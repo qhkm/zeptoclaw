@@ -28,7 +28,15 @@ pub async fn run_stdio(kernel: &ZeptoKernel) -> anyhow::Result<()> {
             continue;
         }
 
-        debug!(line = %line, "MCP stdin: received");
+        // Log only safe metadata (size, method, id) -- never the full payload
+        // which may contain secrets in tool arguments.
+        let (log_method, log_id) = extract_log_metadata(&line);
+        debug!(
+            size = line.len(),
+            method = %log_method,
+            id = %log_id,
+            "MCP stdin: received"
+        );
 
         let resp = process_line(kernel, &line).await;
         let output = serde_json::to_string(&resp).unwrap_or_else(|e| {
@@ -84,11 +92,35 @@ async fn process_line(kernel: &ZeptoKernel, line: &str) -> McpResponse {
     handler::handle_request(kernel, id, &method, params).await
 }
 
+/// Extract safe metadata (method, id) from a raw JSON line for logging.
+///
+/// Best-effort: parses the JSON and extracts only the "method" and "id"
+/// fields. Returns placeholders if parsing fails.
+fn extract_log_metadata(line: &str) -> (String, String) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return ("<invalid-json>".to_string(), "null".to_string());
+    };
+    let method = v
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("<missing>")
+        .to_string();
+    let id = v
+        .get("id")
+        .map(|i| i.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    (method, id)
+}
+
 /// Extract the `id` field from a JSON-RPC envelope.
 ///
+/// Returns the raw `serde_json::Value` to preserve the original type
+/// (number, string, or null) as required by JSON-RPC 2.0.
 /// Returns `None` for notifications (missing or null id).
-fn extract_id(value: &Value) -> Option<u64> {
-    value.get("id").and_then(|v| v.as_u64())
+fn extract_id(value: &Value) -> Option<Value> {
+    value
+        .get("id")
+        .and_then(|v| if v.is_null() { None } else { Some(v.clone()) })
 }
 
 /// JSON-RPC parse error (-32700).
@@ -106,7 +138,7 @@ fn make_parse_error() -> McpResponse {
 }
 
 /// JSON-RPC invalid request (-32600).
-fn make_invalid_request(id: Option<u64>, message: String) -> McpResponse {
+fn make_invalid_request(id: Option<Value>, message: String) -> McpResponse {
     McpResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -154,7 +186,7 @@ mod tests {
     #[test]
     fn test_extract_id_present() {
         let v = json!({"id": 42, "jsonrpc": "2.0", "method": "test"});
-        assert_eq!(extract_id(&v), Some(42));
+        assert_eq!(extract_id(&v), Some(json!(42)));
     }
 
     #[test]
@@ -171,9 +203,9 @@ mod tests {
 
     #[test]
     fn test_extract_id_string() {
-        // MCP spec uses numeric IDs; string IDs return None from as_u64
+        // JSON-RPC 2.0 allows string IDs; extract_id preserves them
         let v = json!({"id": "abc", "jsonrpc": "2.0", "method": "test"});
-        assert_eq!(extract_id(&v), None);
+        assert_eq!(extract_id(&v), Some(json!("abc")));
     }
 
     #[test]
@@ -187,8 +219,8 @@ mod tests {
 
     #[test]
     fn test_make_invalid_request_with_id() {
-        let resp = make_invalid_request(Some(5), "bad request".to_string());
-        assert_eq!(resp.id, Some(5));
+        let resp = make_invalid_request(Some(json!(5)), "bad request".to_string());
+        assert_eq!(resp.id, Some(json!(5)));
         let err = resp.error.unwrap();
         assert_eq!(err.code, -32600);
         assert_eq!(err.message, "bad request");
@@ -207,7 +239,7 @@ mod tests {
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         let resp = process_line(&kernel, line).await;
 
-        assert_eq!(resp.id, Some(1));
+        assert_eq!(resp.id, Some(json!(1)));
         assert!(resp.error.is_none());
         assert!(resp.result.is_some());
     }
@@ -270,5 +302,38 @@ mod tests {
 
         assert!(resp.error.is_none());
         assert!(resp.id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_line_string_id_preserved() {
+        let kernel = test_kernel();
+        let line = r#"{"jsonrpc":"2.0","id":"req-abc","method":"initialize"}"#;
+        let resp = process_line(&kernel, line).await;
+
+        assert_eq!(resp.id, Some(json!("req-abc")));
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_extract_log_metadata_valid() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#;
+        let (method, id) = extract_log_metadata(line);
+        assert_eq!(method, "tools/call");
+        assert_eq!(id, "1");
+    }
+
+    #[test]
+    fn test_extract_log_metadata_invalid_json() {
+        let (method, id) = extract_log_metadata("not json");
+        assert_eq!(method, "<invalid-json>");
+        assert_eq!(id, "null");
+    }
+
+    #[test]
+    fn test_extract_log_metadata_missing_fields() {
+        let line = r#"{"jsonrpc":"2.0"}"#;
+        let (method, id) = extract_log_metadata(line);
+        assert_eq!(method, "<missing>");
+        assert_eq!(id, "null");
     }
 }
