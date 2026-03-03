@@ -21,6 +21,8 @@ pub mod pair;
 pub mod panel;
 pub mod quota;
 pub mod secrets;
+#[cfg(feature = "panel")]
+pub mod serve;
 pub mod skills;
 pub mod status;
 pub mod template;
@@ -240,6 +242,16 @@ enum Commands {
     Hardware {
         #[command(subcommand)]
         action: HardwareAction,
+    },
+    #[cfg(feature = "panel")]
+    /// Start an OpenAI-compatible API server (no panel UI)
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
     },
 }
 
@@ -620,6 +632,10 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Hardware { action }) => {
             cmd_hardware(action);
+        }
+        #[cfg(feature = "panel")]
+        Some(Commands::Serve { port, bind }) => {
+            serve::cmd_serve(port, bind).await?;
         }
     }
 
