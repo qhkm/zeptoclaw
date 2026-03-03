@@ -55,11 +55,20 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "compact_tools",
     "tool_profile",
     "active_hand",
-    "loop_guard_enabled",
-    "loop_guard_window",
-    "loop_guard_repetition_threshold",
-    "loop_guard_max_hits",
+    "loop_guard",
     "max_tool_result_bytes",
+];
+
+const KNOWN_LOOP_GUARD: &[&str] = &[
+    "enabled",
+    "warn_threshold",
+    "block_threshold",
+    "global_circuit_breaker",
+    "ping_pong_min_repeats",
+    "poll_multiplier",
+    "outcome_warn_threshold",
+    "outcome_block_threshold",
+    "window_size",
 ];
 
 #[allow(dead_code)]
@@ -191,6 +200,27 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
                         path: format!("agents.defaults.{}", key),
                         message: msg,
                     });
+                }
+            }
+
+            // Check agents.defaults.loop_guard nested keys
+            if let Some(lg) = defaults.get("loop_guard").and_then(|v| v.as_object()) {
+                let lg_known: HashSet<&str> = KNOWN_LOOP_GUARD.iter().copied().collect();
+                for key in lg.keys() {
+                    if !lg_known.contains(key.as_str()) {
+                        has_unknown = true;
+                        let suggestion = suggest_field(key, KNOWN_LOOP_GUARD).unwrap_or_default();
+                        let msg = if suggestion.is_empty() {
+                            format!("Unknown field '{}'", key)
+                        } else {
+                            format!("Unknown field '{}' \u{2014} {}", key, suggestion)
+                        };
+                        diagnostics.push(Diagnostic {
+                            level: DiagnosticLevel::Warn,
+                            path: format!("agents.defaults.loop_guard.{}", key),
+                            message: msg,
+                        });
+                    }
                 }
             }
         }
@@ -456,5 +486,63 @@ mod tests {
         let json = json!({"agents": {"defaults": {"compact_tools": true}}});
         let diags = validate_config(&json);
         assert!(!diags.iter().any(|d| d.message.contains("compact_tools")));
+    }
+
+    #[test]
+    fn test_validate_loop_guard_known_keys() {
+        let json = json!({
+            "agents": {"defaults": {"loop_guard": {
+                "enabled": true,
+                "warn_threshold": 3,
+                "block_threshold": 5,
+                "global_circuit_breaker": 30,
+                "ping_pong_min_repeats": 3,
+                "poll_multiplier": 3,
+                "outcome_warn_threshold": 2,
+                "outcome_block_threshold": 3
+            }}}
+        });
+        let diags = validate_config(&json);
+        assert!(
+            !diags.iter().any(|d| d.path.contains("loop_guard")),
+            "Expected no loop_guard diagnostics, got: {:?}",
+            diags
+                .iter()
+                .filter(|d| d.path.contains("loop_guard"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_validate_loop_guard_unknown_key() {
+        let json = json!({
+            "agents": {"defaults": {"loop_guard": {
+                "enabled": true,
+                "max_retries": 5
+            }}}
+        });
+        let diags = validate_config(&json);
+        assert!(
+            diags.iter().any(|d| {
+                d.path.contains("loop_guard.max_retries") && d.level == DiagnosticLevel::Warn
+            }),
+            "Expected warning for unknown loop_guard key 'max_retries'"
+        );
+    }
+
+    #[test]
+    fn test_validate_loop_guard_typo_suggestion() {
+        let json = json!({
+            "agents": {"defaults": {"loop_guard": {
+                "enbled": true
+            }}}
+        });
+        let diags = validate_config(&json);
+        assert!(
+            diags
+                .iter()
+                .any(|d| { d.path.contains("loop_guard.enbled") && d.message.contains("enabled") }),
+            "Expected suggestion for typo 'enbled'"
+        );
     }
 }

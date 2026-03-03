@@ -565,6 +565,56 @@ pub struct AgentConfig {
     pub defaults: AgentDefaults,
 }
 
+/// Configuration for the multi-layered tool loop guard.
+///
+/// Controls ping-pong detection, outcome-aware blocking, poll relaxation,
+/// graduated responses, and backoff scheduling for repeated tool calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopGuardConfig {
+    /// Master switch to enable/disable the loop guard.
+    pub enabled: bool,
+    /// Number of identical call hashes before emitting a warning.
+    pub warn_threshold: u32,
+    /// Number of identical call hashes before blocking the call.
+    pub block_threshold: u32,
+    /// Total repetitions across all hashes before tripping the circuit breaker.
+    pub global_circuit_breaker: u32,
+    /// Minimum repeated cycles required to detect ping-pong oscillation (period 2 or 3).
+    pub ping_pong_min_repeats: u32,
+    /// Threshold multiplier for commands matching poll/status patterns.
+    pub poll_multiplier: u32,
+    /// Number of identical outcome hashes before emitting a warning.
+    pub outcome_warn_threshold: u32,
+    /// Number of identical outcome hashes before blocking the call.
+    pub outcome_block_threshold: u32,
+    /// Sliding window size for recent call tracking. When the call sequence
+    /// exceeds this limit, older entries are pruned and counters rebuilt to
+    /// prevent unbounded memory growth and false-positive warnings.
+    #[serde(default = "default_window_size")]
+    pub window_size: u32,
+}
+
+fn default_window_size() -> u32 {
+    200
+}
+
+impl Default for LoopGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            warn_threshold: 3,
+            block_threshold: 5,
+            global_circuit_breaker: 30,
+            ping_pong_min_repeats: 3,
+            poll_multiplier: 3,
+            outcome_warn_threshold: 2,
+            outcome_block_threshold: 3,
+            window_size: default_window_size(),
+        }
+    }
+}
+
 /// Default agent settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -601,18 +651,9 @@ pub struct AgentDefaults {
     /// Defaults to system local timezone, falls back to "UTC".
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    /// Enable SHA256-based repeated tool-call loop detection.
-    #[serde(default = "default_true")]
-    pub loop_guard_enabled: bool,
-    /// Sliding window size for loop guard hash history.
-    #[serde(default = "default_loop_guard_window")]
-    pub loop_guard_window: usize,
-    /// Number of repeated hashes required before warning.
-    #[serde(default = "default_loop_guard_repetition_threshold")]
-    pub loop_guard_repetition_threshold: usize,
-    /// Number of detected loops before forcing turn stop.
-    #[serde(default = "default_loop_guard_max_hits")]
-    pub loop_guard_max_hits: usize,
+    /// Loop guard configuration for repeated tool-call detection.
+    #[serde(default)]
+    pub loop_guard: LoopGuardConfig,
     /// Maximum bytes allowed per tool result before truncation.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
@@ -637,18 +678,6 @@ fn default_timezone() -> String {
         }
     }
     "UTC".to_string()
-}
-
-fn default_loop_guard_window() -> usize {
-    10
-}
-
-fn default_loop_guard_repetition_threshold() -> usize {
-    3
-}
-
-fn default_loop_guard_max_hits() -> usize {
-    2
 }
 
 fn default_max_tool_result_bytes() -> usize {
@@ -678,10 +707,7 @@ impl Default for AgentDefaults {
             tool_profile: None,
             active_hand: None,
             timezone: default_timezone(),
-            loop_guard_enabled: true,
-            loop_guard_window: default_loop_guard_window(),
-            loop_guard_repetition_threshold: default_loop_guard_repetition_threshold(),
-            loop_guard_max_hits: default_loop_guard_max_hits(),
+            loop_guard: LoopGuardConfig::default(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
         }
     }

@@ -138,22 +138,53 @@ impl Config {
             self.agents.defaults.timezone = val;
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED") {
-            self.agents.defaults.loop_guard_enabled = val == "true" || val == "1";
+            self.agents.defaults.loop_guard.enabled = val == "true" || val == "1";
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD") {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_window = v;
+                self.agents.defaults.loop_guard.warn_threshold = v;
             }
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_REPETITION_THRESHOLD")
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.block_threshold = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER")
         {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_repetition_threshold = v;
+                self.agents.defaults.loop_guard.global_circuit_breaker = v;
             }
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_MAX_HITS") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS")
+        {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_max_hits = v;
+                self.agents.defaults.loop_guard.ping_pong_min_repeats = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.poll_multiplier = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD")
+        {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.outcome_warn_threshold = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD")
+        {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.outcome_block_threshold = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.window_size = v;
             }
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_BYTES") {
@@ -2034,5 +2065,54 @@ mod tests {
         );
         std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER");
         std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL");
+    }
+
+    #[test]
+    fn test_env_override_loop_guard_all_fields() {
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED", "false");
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD", "10");
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD", "20");
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER",
+            "50",
+        );
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS",
+            "5",
+        );
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER", "4");
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD",
+            "7",
+        );
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD",
+            "9",
+        );
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE", "300");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        let lg = &config.agents.defaults.loop_guard;
+        assert!(!lg.enabled);
+        assert_eq!(lg.warn_threshold, 10);
+        assert_eq!(lg.block_threshold, 20);
+        assert_eq!(lg.global_circuit_breaker, 50);
+        assert_eq!(lg.ping_pong_min_repeats, 5);
+        assert_eq!(lg.poll_multiplier, 4);
+        assert_eq!(lg.outcome_warn_threshold, 7);
+        assert_eq!(lg.outcome_block_threshold, 9);
+        assert_eq!(lg.window_size, 300);
+
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE");
     }
 }
