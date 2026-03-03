@@ -331,6 +331,19 @@ impl LoopGuard {
 // Hashing helpers
 // ---------------------------------------------------------------------------
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a
+/// multi-byte UTF-8 character.  Always returns a valid `&str`.
+pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Hash a batch of tool call signatures (name + normalized params).
 fn hash_call_batch(batch: &[ToolCallSig<'_>]) -> String {
     let mut hasher = Sha256::new();
@@ -349,19 +362,11 @@ fn hash_outcome(name: &str, params: &str, result_prefix: &str) -> String {
     hasher.update(name.as_bytes());
     hasher.update(b"\n");
     // Truncate params to 2KB for the hash to avoid massive allocations.
-    let params_truncated = if params.len() > 2048 {
-        &params[..2048]
-    } else {
-        params
-    };
+    let params_truncated = truncate_utf8(params, 2048);
     hasher.update(normalize_args(params_truncated).as_bytes());
     hasher.update(b"\n--\n");
     // Use first 1000 bytes of result.
-    let prefix = if result_prefix.len() > 1000 {
-        &result_prefix[..1000]
-    } else {
-        result_prefix
-    };
+    let prefix = truncate_utf8(result_prefix, 1000);
     hasher.update(prefix.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -759,5 +764,48 @@ mod tests {
         assert_eq!(config.poll_multiplier, 3);
         assert_eq!(config.outcome_warn_threshold, 2);
         assert_eq!(config.outcome_block_threshold, 3);
+    }
+
+    #[test]
+    fn test_truncate_utf8_ascii() {
+        assert_eq!(truncate_utf8("hello", 3), "hel");
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_multibyte() {
+        // Each CJK character is 3 bytes in UTF-8.
+        let s = "\u{4f60}\u{597d}\u{4e16}\u{754c}"; // 12 bytes total
+        assert_eq!(truncate_utf8(s, 6), "\u{4f60}\u{597d}"); // exactly 2 chars
+                                                             // Cutting at byte 7 must back up to byte 6 (char boundary).
+        assert_eq!(truncate_utf8(s, 7), "\u{4f60}\u{597d}");
+        assert_eq!(truncate_utf8(s, 8), "\u{4f60}\u{597d}");
+        assert_eq!(truncate_utf8(s, 9), "\u{4f60}\u{597d}\u{4e16}");
+    }
+
+    #[test]
+    fn test_truncate_utf8_empty() {
+        assert_eq!(truncate_utf8("", 0), "");
+        assert_eq!(truncate_utf8("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_utf8_emoji() {
+        // Emoji like \u{1f600} is 4 bytes in UTF-8.
+        let s = "\u{1f600}abc"; // 4 + 3 = 7 bytes
+        assert_eq!(truncate_utf8(s, 3), ""); // 3 bytes into emoji -> backs up to 0
+        assert_eq!(truncate_utf8(s, 4), "\u{1f600}");
+        assert_eq!(truncate_utf8(s, 5), "\u{1f600}a");
+    }
+
+    #[test]
+    fn test_hash_outcome_multibyte_no_panic() {
+        // Ensure hash_outcome does not panic on multibyte strings exceeding limits.
+        let long_params = "\u{4f60}\u{597d}".repeat(1500); // 9000 bytes > 2048
+        let long_result = "\u{1f600}".repeat(500); // 2000 bytes > 1000
+                                                   // Should not panic.
+        let h = hash_outcome("tool", &long_params, &long_result);
+        assert!(!h.is_empty());
     }
 }

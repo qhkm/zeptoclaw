@@ -11,7 +11,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor};
-use crate::agent::loop_guard::{LoopGuard, LoopGuardAction, ToolCallSig};
+use crate::agent::loop_guard::{truncate_utf8, LoopGuard, LoopGuardAction, ToolCallSig};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::cache::ResponseCache;
 use crate::config::Config;
@@ -126,11 +126,7 @@ fn check_loop_guard_outcomes(
 
     for (id, result) in results {
         if let Some((name, args)) = call_map.get(id.as_str()) {
-            let prefix = if result.len() > 1000 {
-                &result[..1000]
-            } else {
-                result.as_str()
-            };
+            let prefix = truncate_utf8(result, 1000);
             if let Some(action) = guard.record_outcome(name, args, prefix) {
                 match action {
                     LoopGuardAction::Block { reason } => {
