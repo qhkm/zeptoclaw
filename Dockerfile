@@ -7,7 +7,7 @@
 # =============================================================================
 # Stage 1: Build
 # =============================================================================
-FROM rust:1.93-slim-trixie@sha256:7e6fa79cf81be23fd45d857f75f583d80cfdbb11c91fa06180fd747fda37a61d AS builder
+FROM rust:1.93-slim-trixie@sha256:c0a38f5662afdb298898da1d70b909af4bda4e0acff2dc52aea6360a9b9c6956 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
