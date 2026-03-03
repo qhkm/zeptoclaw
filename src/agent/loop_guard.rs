@@ -720,6 +720,35 @@ mod tests {
     }
 
     #[test]
+    fn test_no_false_ping_pong_on_varied_calls() {
+        let config = LoopGuardConfig {
+            ping_pong_min_repeats: 2,
+            warn_threshold: 100,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        // A, B, C, D — no repeating pattern.
+        guard.check(&[sig("tool_a", r#"{"x":1}"#)]);
+        guard.check(&[sig("tool_b", r#"{"x":2}"#)]);
+        guard.check(&[sig("tool_c", r#"{"x":3}"#)]);
+
+        let action = guard.check(&[sig("tool_d", r#"{"x":4}"#)]);
+        assert_eq!(action, LoopGuardAction::Allow);
+        assert_eq!(guard.stats().ping_pong_detections, 0);
+    }
+
+    #[test]
+    fn test_backoff_delay_caps_at_30s() {
+        // Verify backoff caps at 30 seconds (30_000ms).
+        assert_eq!(backoff_delay(100, 2), 30_000);
+        assert_eq!(backoff_delay(50, 2), 30_000);
+        // Small exponents should not be capped.
+        assert_eq!(backoff_delay(3, 2), 2_000); // 2^(3-2) * 1000 = 2000
+        assert_eq!(backoff_delay(2, 2), 1_000); // 2^(2-2) * 1000 = 1000
+    }
+
+    #[test]
     fn test_config_defaults() {
         let config = LoopGuardConfig::default();
         assert!(config.enabled);

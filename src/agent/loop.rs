@@ -109,6 +109,67 @@ fn check_loop_guard(
     }
 }
 
+/// Record tool outcomes with the loop guard and check for repeated identical results.
+///
+/// Returns `true` if the circuit breaker tripped and the caller should break.
+fn check_loop_guard_outcomes(
+    guard: &mut LoopGuard,
+    tool_calls: &[LLMToolCall],
+    results: &[(String, String)],
+    session: &mut crate::session::Session,
+) -> bool {
+    // Build a lookup from tool call id -> (name, arguments).
+    let call_map: std::collections::HashMap<&str, (&str, &str)> = tool_calls
+        .iter()
+        .map(|tc| (tc.id.as_str(), (tc.name.as_str(), tc.arguments.as_str())))
+        .collect();
+
+    for (id, result) in results {
+        if let Some((name, args)) = call_map.get(id.as_str()) {
+            let prefix = if result.len() > 1000 {
+                &result[..1000]
+            } else {
+                result.as_str()
+            };
+            if let Some(action) = guard.record_outcome(name, args, prefix) {
+                match action {
+                    LoopGuardAction::Block { reason } => {
+                        warn!(reason = %reason, "Loop guard blocked repeated outcome");
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] blocked: {reason}.",
+                        )));
+                        return true;
+                    }
+                    LoopGuardAction::CircuitBreak { total_repetitions } => {
+                        warn!(
+                            total_repetitions = total_repetitions,
+                            "Loop guard circuit breaker triggered via outcome"
+                        );
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] circuit breaker tripped ({total_repetitions} total repetitions).",
+                        )));
+                        return true;
+                    }
+                    LoopGuardAction::Warn {
+                        reason,
+                        suggested_delay_ms,
+                    } => {
+                        warn!(reason = %reason, "Loop guard outcome warning");
+                        let delay_hint = suggested_delay_ms
+                            .map(|ms| format!(" (suggested delay: {}ms)", ms))
+                            .unwrap_or_default();
+                        session.add_message(Message::system(&format!(
+                            "[LoopGuard] {reason}{delay_hint}.",
+                        )));
+                    }
+                    LoopGuardAction::Allow => {}
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Propagate channel-specific routing metadata (e.g. `telegram_thread_id`)
 /// from an inbound message to an outbound message so that the response is
 /// delivered to the correct forum topic / thread.
@@ -1202,14 +1263,22 @@ impl AgentLoop {
                 .collect();
             chain_tracker.record(&tool_names);
 
-            for (id, result) in results {
-                session.add_message(Message::tool_result(&id, &result));
+            let results: Vec<(String, String)> = results;
+            for (id, result) in &results {
+                session.add_message(Message::tool_result(id, result));
             }
 
             if let Some(guard) = loop_guard.as_mut() {
                 if check_loop_guard(guard, &response.tool_calls, &mut session) {
                     response.content =
                         "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                    break;
+                }
+
+                // Record outcomes for outcome-aware blocking.
+                if check_loop_guard_outcomes(guard, &response.tool_calls, &results, &mut session) {
+                    response.content =
+                        "Stopped tool loop due to repeated identical outcomes.".to_string();
                     break;
                 }
             }
@@ -1652,14 +1721,22 @@ impl AgentLoop {
                 .map(|tc| tc.name.clone())
                 .collect();
             chain_tracker.record(&tool_names);
-            for (id, result) in results {
-                session.add_message(Message::tool_result(&id, &result));
+            let results: Vec<(String, String)> = results;
+            for (id, result) in &results {
+                session.add_message(Message::tool_result(id, result));
             }
 
             if let Some(guard) = loop_guard.as_mut() {
                 if check_loop_guard(guard, &response.tool_calls, &mut session) {
                     response.content =
                         "Stopped tool loop due to repeated tool-call pattern.".to_string();
+                    break;
+                }
+
+                // Record outcomes for outcome-aware blocking.
+                if check_loop_guard_outcomes(guard, &response.tool_calls, &results, &mut session) {
+                    response.content =
+                        "Stopped tool loop due to repeated identical outcomes.".to_string();
                     break;
                 }
             }
