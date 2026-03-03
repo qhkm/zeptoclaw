@@ -150,15 +150,18 @@ pub struct ModelObject {
 // ---------------------------------------------------------------------------
 
 /// Convert OpenAI-format messages into ZeptoClaw `Message` values.
-pub fn messages_from_openai(msgs: &[ChatMessage]) -> Vec<Message> {
+///
+/// Returns an error if any message has an unrecognized role.
+pub fn messages_from_openai(msgs: &[ChatMessage]) -> Result<Vec<Message>, String> {
     msgs.iter()
         .map(|m| {
             let role = match m.role.as_str() {
-                "system" => Role::System,
-                "assistant" => Role::Assistant,
-                _ => Role::User,
-            };
-            Message {
+                "system" => Ok(Role::System),
+                "user" => Ok(Role::User),
+                "assistant" => Ok(Role::Assistant),
+                other => Err(format!("unsupported message role: {other}")),
+            }?;
+            Ok(Message {
                 role,
                 content: m.content.clone(),
                 content_parts: vec![crate::session::ContentPart::Text {
@@ -166,7 +169,7 @@ pub fn messages_from_openai(msgs: &[ChatMessage]) -> Vec<Message> {
                 }],
                 tool_calls: None,
                 tool_call_id: None,
-            }
+            })
         })
         .collect()
 }
@@ -317,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_messages_from_openai_empty() {
-        let msgs = messages_from_openai(&[]);
+        let msgs = messages_from_openai(&[]).unwrap();
         assert!(msgs.is_empty());
     }
 
@@ -337,7 +340,7 @@ mod tests {
                 content: "Hi!".into(),
             },
         ];
-        let msgs = messages_from_openai(&openai_msgs);
+        let msgs = messages_from_openai(&openai_msgs).unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[0].content, "You are helpful.");
@@ -346,13 +349,14 @@ mod tests {
     }
 
     #[test]
-    fn test_messages_from_openai_unknown_role_becomes_user() {
+    fn test_messages_from_openai_unknown_role_returns_error() {
         let openai_msgs = vec![ChatMessage {
             role: "function".into(),
             content: "result".into(),
         }];
-        let msgs = messages_from_openai(&openai_msgs);
-        assert_eq!(msgs[0].role, Role::User);
+        let result = messages_from_openai(&openai_msgs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("function"));
     }
 
     // -----------------------------------------------------------------------

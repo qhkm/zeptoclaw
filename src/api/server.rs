@@ -176,7 +176,7 @@ pub fn build_router(
         )
         // WebSocket
         .route("/ws/events", get(super::routes::ws::ws_events))
-        // OpenAI-compatible API (no panel auth — uses own Bearer token pattern)
+        // OpenAI-compatible API (auth skipped by auth_middleware for /v1/ prefix)
         .route(
             "/v1/chat/completions",
             post(super::routes::openai::chat_completions),

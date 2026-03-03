@@ -52,13 +52,16 @@ pub async fn cmd_serve(port: u16, bind: String) -> Result<()> {
     info!("Try: curl http://{addr}/v1/models");
 
     // Graceful shutdown on ctrl-c.
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             info!("Shutting down serve...");
         })
-        .await?;
+        .await;
 
+    // Always shut down kernel subsystems (MCP clients, etc.), even on error.
     kernel.shutdown().await;
+
+    serve_result?;
     Ok(())
 }

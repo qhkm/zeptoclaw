@@ -12,6 +12,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::stream::unfold;
+use tracing::error;
 
 use super::super::openai_types::{self, ChatCompletionRequest, ModelObject, ModelsResponse};
 use super::super::server::AppState;
@@ -38,7 +39,12 @@ pub async fn chat_completions(
         }
     };
 
-    let messages = openai_types::messages_from_openai(&req.messages);
+    let messages = match openai_types::messages_from_openai(&req.messages) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(error_body(&e))).into_response();
+        }
+    };
     let mut options = crate::providers::ChatOptions::new();
     if let Some(max) = req.max_tokens {
         options = options.with_max_tokens(max);
@@ -68,11 +74,14 @@ async fn non_stream_response(
             let resp = openai_types::response_from_llm(&llm_resp, &model);
             Json(resp).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body(&e.to_string())),
-        )
-            .into_response(),
+        Err(e) => {
+            error!(error = %e, "Non-streaming chat completion failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_body("Internal server error")),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -89,9 +98,10 @@ async fn stream_response(
     {
         Ok(rx) => rx,
         Err(e) => {
+            error!(error = %e, "Failed to start streaming chat completion");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error_body(&e.to_string())),
+                Json(error_body("Internal server error")),
             )
                 .into_response();
         }
@@ -103,56 +113,66 @@ async fn stream_response(
         .unwrap_or_default()
         .as_secs();
 
-    // State: (receiver, sent_first_chunk, done).
-    let initial_state = (rx, false, false);
+    // State: (receiver, sent_first_chunk, done, sent_done_sentinel).
+    let initial_state = (rx, false, false, false);
 
-    let stream = unfold(initial_state, move |(mut rx, sent_first, done)| {
-        let model = model.clone();
-        let id = id.clone();
-        async move {
-            if done {
-                return None;
-            }
+    let stream = unfold(
+        initial_state,
+        move |(mut rx, sent_first, done, sent_done_sentinel)| {
+            let model = model.clone();
+            let id = id.clone();
+            async move {
+                // Already sent [DONE] — terminate the stream.
+                if sent_done_sentinel {
+                    return None;
+                }
 
-            // Emit the role-only first chunk before any content.
-            if !sent_first {
-                let first = openai_types::first_chunk(&model, &id, created);
-                let data = serde_json::to_string(&first).unwrap_or_default();
-                let event = Event::default().data(data);
-                return Some((Ok::<_, Infallible>(event), (rx, true, false)));
-            }
+                // Emit the [DONE] sentinel after the stop chunk has been sent.
+                if done {
+                    let sse = Event::default().data("[DONE]");
+                    return Some((Ok::<_, Infallible>(sse), (rx, true, true, true)));
+                }
 
-            // Await the next stream event from the provider.
-            match rx.recv().await {
-                Some(event) => {
-                    // Check if this is a Done event so we can send [DONE] after.
-                    let is_done = matches!(event, crate::providers::StreamEvent::Done { .. });
+                // Emit the role-only first chunk before any content.
+                if !sent_first {
+                    let first = openai_types::first_chunk(&model, &id, created);
+                    let data = serde_json::to_string(&first).unwrap_or_default();
+                    let event = Event::default().data(data);
+                    return Some((Ok::<_, Infallible>(event), (rx, true, false, false)));
+                }
 
-                    if let Some(chunk) =
-                        openai_types::chunk_from_stream_event(&event, &model, &id, created)
-                    {
-                        let data = serde_json::to_string(&chunk).unwrap_or_default();
-                        let sse = Event::default().data(data);
-                        if is_done {
-                            // The stop chunk was emitted; next poll emits [DONE].
-                            Some((Ok(sse), (rx, true, true)))
+                // Await the next stream event from the provider.
+                match rx.recv().await {
+                    Some(event) => {
+                        // Check if this is a Done event so we can send [DONE] after.
+                        let is_done = matches!(event, crate::providers::StreamEvent::Done { .. });
+
+                        if let Some(chunk) =
+                            openai_types::chunk_from_stream_event(&event, &model, &id, created)
+                        {
+                            let data = serde_json::to_string(&chunk).unwrap_or_default();
+                            let sse = Event::default().data(data);
+                            if is_done {
+                                // The stop chunk was emitted; next poll emits [DONE].
+                                Some((Ok(sse), (rx, true, true, false)))
+                            } else {
+                                Some((Ok(sse), (rx, true, false, false)))
+                            }
                         } else {
-                            Some((Ok(sse), (rx, true, false)))
+                            // Skip events that don't produce chunks (e.g., ToolCalls).
+                            let sse = Event::default().comment("skip");
+                            Some((Ok(sse), (rx, true, false, false)))
                         }
-                    } else {
-                        // Skip events that don't produce chunks (e.g., ToolCalls).
-                        let sse = Event::default().comment("skip");
-                        Some((Ok(sse), (rx, true, false)))
+                    }
+                    None => {
+                        // Channel closed — emit [DONE] sentinel and stop.
+                        let sse = Event::default().data("[DONE]");
+                        Some((Ok(sse), (rx, true, true, true)))
                     }
                 }
-                None => {
-                    // Channel closed — emit [DONE] sentinel and stop.
-                    let sse = Event::default().data("[DONE]");
-                    Some((Ok(sse), (rx, true, true)))
-                }
             }
-        }
-    });
+        },
+    );
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -381,6 +401,42 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(ct.contains("text/event-stream"), "Expected SSE, got: {ct}");
+
+        // Consume the SSE body and verify chunk ordering + [DONE] sentinel.
+        let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+
+        // Extract all `data:` lines from the SSE body.
+        let data_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("data:"))
+            .map(|l| l.trim_start_matches("data:").trim())
+            .collect();
+
+        // Must have at least: first chunk (role), content chunk(s), stop chunk, [DONE].
+        assert!(
+            data_lines.len() >= 3,
+            "Expected at least 3 data events, got {}: {:?}",
+            data_lines.len(),
+            data_lines,
+        );
+
+        // The last data line must be [DONE].
+        assert_eq!(
+            data_lines.last().copied(),
+            Some("[DONE]"),
+            "Last SSE data event must be [DONE], got: {:?}",
+            data_lines.last(),
+        );
+
+        // All data lines before [DONE] must be valid JSON chunks.
+        for line in &data_lines[..data_lines.len() - 1] {
+            let json: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|_| panic!("Invalid JSON chunk: {line}"));
+            assert_eq!(json["object"], "chat.completion.chunk");
+        }
     }
 
     // -----------------------------------------------------------------------
