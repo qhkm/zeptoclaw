@@ -99,6 +99,8 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> bool {
 /// - `GET /api/csrf-token` — must be public so the caller can bootstrap
 /// - `POST /api/auth/login` — exchanges password for JWT
 /// - Any path starting with `/ws/` — WebSocket upgrade handshake
+/// - `GET /v1/models` — OpenAI-compatible model listing
+/// - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint
 ///
 /// Accepts two token forms:
 /// 1. Static API token configured at startup (`state.api_token`)
@@ -116,13 +118,14 @@ pub async fn auth_middleware(
     let path = request.uri().path();
 
     // Public endpoints that skip auth entirely.
-    // The `/v1/` prefix covers OpenAI-compatible API routes which use their
-    // own authentication model (the upstream LLM provider key).
+    // The two `/v1/` routes are the OpenAI-compatible API endpoints which use
+    // their own authentication model (the upstream LLM provider key).
     if path == "/api/health"
         || path == "/api/csrf-token"
         || path == "/api/auth/login"
         || path.starts_with("/ws/")
-        || path.starts_with("/v1/")
+        || path == "/v1/chat/completions"
+        || path == "/v1/models"
     {
         return Ok(next.run(request).await);
     }
@@ -273,6 +276,22 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_unexpected_route_requires_auth() {
+        // Regression: `/v1/` prefix must NOT bypass auth for arbitrary routes.
+        // Only `/v1/models` and `/v1/chat/completions` are exempt.
+        let state = make_state();
+        let app = Router::new()
+            .route("/v1/unexpected", get(|| async { "should not reach" }))
+            .layer(axum_mw::from_fn_with_state(state, auth_middleware));
+        let req = Request::builder()
+            .uri("/v1/unexpected")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // -----------------------------------------------------------------------
