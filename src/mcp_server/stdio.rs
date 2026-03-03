@@ -198,6 +198,7 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: None,
         }
     }
 

@@ -24,6 +24,7 @@ use crate::memory::factory::create_searcher_with_provider;
 use crate::memory::longterm::LongTermMemory;
 use crate::providers::LLMProvider;
 use crate::runtime::{create_runtime, ContainerRuntime, NativeRuntime};
+use crate::safety::taint::TaintEngine;
 use crate::safety::SafetyLayer;
 use crate::tools::mcp::client::McpClient;
 use crate::tools::ToolRegistry;
@@ -51,6 +52,10 @@ pub struct ZeptoKernel {
     pub mcp_clients: Vec<Arc<McpClient>>,
     /// Shared long-term memory for both per-message injection and tool access.
     pub ltm: Option<Arc<tokio::sync::Mutex<LongTermMemory>>>,
+    /// Taint tracking engine for data-flow-aware security.
+    /// `None` when taint tracking is disabled. Uses `std::sync::Mutex`
+    /// because `TaintEngine` methods are synchronous.
+    pub taint: Option<std::sync::Mutex<TaintEngine>>,
 }
 
 impl ZeptoKernel {
@@ -87,6 +92,15 @@ impl ZeptoKernel {
         // 3. Safety layer
         let safety = if config.safety.enabled {
             Some(SafetyLayer::new(config.safety.clone()))
+        } else {
+            None
+        };
+
+        // 3b. Taint engine (data-flow tracking)
+        let taint = if config.safety.enabled && config.safety.taint.enabled {
+            Some(std::sync::Mutex::new(TaintEngine::new(
+                config.safety.taint.clone(),
+            )))
         } else {
             None
         };
@@ -174,6 +188,7 @@ impl ZeptoKernel {
             hooks,
             mcp_clients,
             ltm,
+            taint,
         })
     }
 
@@ -220,6 +235,13 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: if config.safety.enabled && config.safety.taint.enabled {
+                Some(std::sync::Mutex::new(TaintEngine::new(
+                    config.safety.taint.clone(),
+                )))
+            } else {
+                None
+            },
         }
     }
 
@@ -262,6 +284,7 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: None,
         };
         assert!(kernel.safety.is_none());
     }
@@ -279,6 +302,9 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: Some(std::sync::Mutex::new(TaintEngine::new(
+                config.safety.taint.clone(),
+            ))),
         };
         assert!(kernel.safety.is_some());
     }

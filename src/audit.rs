@@ -25,6 +25,8 @@ pub enum AuditCategory {
     PluginIntegrity,
     /// Dangerous tool call sequence detected.
     ToolChainAlert,
+    /// Taint tracking: data-flow policy violation.
+    TaintViolation,
 }
 
 impl std::fmt::Display for AuditCategory {
@@ -38,6 +40,7 @@ impl std::fmt::Display for AuditCategory {
             Self::MountSecurity => write!(f, "mount_security"),
             Self::PluginIntegrity => write!(f, "plugin_integrity"),
             Self::ToolChainAlert => write!(f, "tool_chain_alert"),
+            Self::TaintViolation => write!(f, "taint_violation"),
         }
     }
 }
@@ -136,6 +139,7 @@ mod tests {
             AuditCategory::ToolChainAlert.to_string(),
             "tool_chain_alert"
         );
+        assert_eq!(AuditCategory::TaintViolation.to_string(), "taint_violation");
     }
 
     #[test]

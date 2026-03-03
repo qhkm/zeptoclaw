@@ -7,6 +7,7 @@ pub mod chain_alert;
 pub mod leak_detector;
 pub mod policy;
 pub mod sanitizer;
+pub mod taint;
 pub mod validator;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,8 @@ pub struct SafetyConfig {
     pub leak_detection_enabled: bool,
     /// Maximum tool output length in bytes before truncation.
     pub max_output_length: usize,
+    /// Taint tracking configuration.
+    pub taint: taint::TaintConfig,
 }
 
 impl Default for SafetyConfig {
@@ -43,6 +46,7 @@ impl Default for SafetyConfig {
             injection_check_enabled: true,
             leak_detection_enabled: true,
             max_output_length: 100_000,
+            taint: taint::TaintConfig::default(),
         }
     }
 }

@@ -1119,6 +1119,12 @@ impl Config {
                 self.safety.max_output_length = v.clamp(1_000, 10_000_000);
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_ENABLED") {
+            self.safety.taint.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_BLOCK_ON_VIOLATION") {
+            self.safety.taint.block_on_violation = val.eq_ignore_ascii_case("true") || val == "1";
+        }
     }
 
     /// Apply context-compaction environment variable overrides.

@@ -145,6 +145,7 @@ async fn handle_tools_call(
         &ctx,
         kernel.safety.as_ref(),
         &kernel.metrics,
+        kernel.taint.as_ref(),
     )
     .await;
 
@@ -223,6 +224,7 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: None,
         }
     }
 
@@ -405,6 +407,7 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
+            taint: None,
         };
 
         let resp = handle_request(&kernel, Some(json!(11)), "tools/list", None).await;
