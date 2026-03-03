@@ -93,11 +93,33 @@ impl McpServer {
             }
         });
 
-        // Axum route handler
+        // Axum route handler — accepts raw `String` body instead of `Json<Value>`
+        // so we can return a proper JSON-RPC -32700 parse error for malformed JSON
+        // (Axum's `Json` extractor would reject it with its own 422 response).
         async fn mcp_handler(
             State(tx): State<mpsc::Sender<ReqMsg>>,
-            Json(body): Json<Value>,
-        ) -> (StatusCode, Json<McpResponse>) {
+            body: String,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+
+            // Parse JSON manually to return JSON-RPC -32700 on failure.
+            let body: Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = McpResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: None,
+                        result: None,
+                        error: Some(crate::tools::mcp::protocol::McpError {
+                            code: -32700,
+                            message: "Parse error: invalid JSON".to_string(),
+                            data: None,
+                        }),
+                    };
+                    return (StatusCode::OK, Json(resp)).into_response();
+                }
+            };
+
             // Validate jsonrpc field
             if body.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
                 let resp = McpResponse {
@@ -112,8 +134,16 @@ impl McpServer {
                         data: None,
                     }),
                 };
-                return (StatusCode::OK, Json(resp));
+                return (StatusCode::OK, Json(resp)).into_response();
             }
+
+            // Detect notifications early — if this is a notification, process
+            // it but return 204 No Content (JSON-RPC 2.0 forbids replies).
+            let is_notification = body
+                .get("method")
+                .and_then(|v| v.as_str())
+                .map(handler::is_notification)
+                .unwrap_or(false);
 
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if tx.send((body, reply_tx)).await.is_err() {
@@ -127,11 +157,17 @@ impl McpServer {
                         data: None,
                     }),
                 };
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(resp));
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(resp)).into_response();
+            }
+
+            // For notifications, consume the reply but return 204 No Content.
+            if is_notification {
+                let _ = reply_rx.await;
+                return StatusCode::NO_CONTENT.into_response();
             }
 
             match reply_rx.await {
-                Ok(resp) => (StatusCode::OK, Json(resp)),
+                Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(_) => {
                     let resp = McpResponse {
                         jsonrpc: "2.0".to_string(),
@@ -143,7 +179,7 @@ impl McpServer {
                             data: None,
                         }),
                     };
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(resp))
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(resp)).into_response()
                 }
             }
         }

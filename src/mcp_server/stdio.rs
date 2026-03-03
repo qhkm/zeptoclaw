@@ -39,6 +39,14 @@ pub async fn run_stdio(kernel: &ZeptoKernel) -> anyhow::Result<()> {
         );
 
         let resp = process_line(kernel, &line).await;
+
+        // JSON-RPC 2.0 spec: notifications (no id) MUST NOT receive a
+        // response.  Detect via the method name extracted from the raw line.
+        if resp.is_none() {
+            continue;
+        }
+        let resp = resp.unwrap();
+
         let output = serde_json::to_string(&resp).unwrap_or_else(|e| {
             // Fallback: emit a parse-error response as raw JSON.
             format!(
@@ -57,39 +65,49 @@ pub async fn run_stdio(kernel: &ZeptoKernel) -> anyhow::Result<()> {
 }
 
 /// Process a single JSON line into an MCP response.
-async fn process_line(kernel: &ZeptoKernel, line: &str) -> McpResponse {
+///
+/// Returns `None` for notifications (methods starting with `notifications/`)
+/// since the JSON-RPC 2.0 spec forbids replying to them.
+async fn process_line(kernel: &ZeptoKernel, line: &str) -> Option<McpResponse> {
     // Parse JSON
     let parsed: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "MCP: JSON parse error");
-            return make_parse_error();
+            return Some(make_parse_error());
         }
     };
 
     // Validate jsonrpc field
     if parsed.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
-        return make_invalid_request(
+        return Some(make_invalid_request(
             extract_id(&parsed),
             "Missing or invalid 'jsonrpc' field (expected \"2.0\")".to_string(),
-        );
+        ));
     }
 
     // Extract method
     let method = match parsed.get("method").and_then(|v| v.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return make_invalid_request(
+            return Some(make_invalid_request(
                 extract_id(&parsed),
                 "Missing or invalid 'method' field".to_string(),
-            );
+            ));
         }
     };
 
     let id = extract_id(&parsed);
     let params = parsed.get("params").cloned();
 
-    handler::handle_request(kernel, id, &method, params).await
+    let resp = handler::handle_request(kernel, id, &method, params).await;
+
+    // Suppress responses for notifications per JSON-RPC 2.0 spec.
+    if handler::is_notification(&method) {
+        return None;
+    }
+
+    Some(resp)
 }
 
 /// Extract safe metadata (method, id) from a raw JSON line for logging.
@@ -237,7 +255,9 @@ mod tests {
     async fn test_process_line_valid_initialize() {
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert_eq!(resp.id, Some(json!(1)));
         assert!(resp.error.is_none());
@@ -247,7 +267,9 @@ mod tests {
     #[tokio::test]
     async fn test_process_line_invalid_json() {
         let kernel = test_kernel();
-        let resp = process_line(&kernel, "not json at all").await;
+        let resp = process_line(&kernel, "not json at all")
+            .await
+            .expect("parse errors still produce a response");
 
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
@@ -257,7 +279,9 @@ mod tests {
     async fn test_process_line_missing_jsonrpc() {
         let kernel = test_kernel();
         let line = r#"{"id":1,"method":"initialize"}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32600);
@@ -267,7 +291,9 @@ mod tests {
     async fn test_process_line_wrong_jsonrpc_version() {
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32600);
@@ -277,7 +303,9 @@ mod tests {
     async fn test_process_line_missing_method() {
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"2.0","id":1}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32600);
@@ -287,7 +315,9 @@ mod tests {
     async fn test_process_line_tools_call() {
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"test"}}}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
@@ -295,23 +325,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_line_notification() {
+    async fn test_process_line_notification_returns_none() {
+        // JSON-RPC 2.0 spec: notifications MUST NOT receive a response.
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         let resp = process_line(&kernel, line).await;
 
-        assert!(resp.error.is_none());
-        assert!(resp.id.is_none());
+        assert!(
+            resp.is_none(),
+            "notifications should not produce a response"
+        );
     }
 
     #[tokio::test]
     async fn test_process_line_string_id_preserved() {
         let kernel = test_kernel();
         let line = r#"{"jsonrpc":"2.0","id":"req-abc","method":"initialize"}"#;
-        let resp = process_line(&kernel, line).await;
+        let resp = process_line(&kernel, line)
+            .await
+            .expect("should return response");
 
         assert_eq!(resp.id, Some(json!("req-abc")));
         assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_line_malformed_json_returns_parse_error() {
+        // Ensures garbled input gets a proper -32700 response (not a
+        // transport-level HTTP error).
+        let kernel = test_kernel();
+        for bad_input in &["{invalid", "}{", "", "null", "42", r#""string""#] {
+            let resp = process_line(&kernel, bad_input).await;
+            // Only truly un-parseable JSON returns -32700; valid JSON values
+            // like "null", "42", or a string are valid JSON but fail later
+            // checks. We only assert the first two here.
+            if bad_input == &"{invalid" || bad_input == &"}{" {
+                let resp = resp.expect("parse errors produce a response");
+                assert_eq!(
+                    resp.error.as_ref().unwrap().code,
+                    -32700,
+                    "input {bad_input:?} should produce -32700"
+                );
+            }
+        }
     }
 
     #[test]

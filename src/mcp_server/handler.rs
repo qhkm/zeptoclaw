@@ -21,11 +21,19 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Server name reported during initialization.
 const SERVER_NAME: &str = "zeptoclaw";
 
+/// Check whether a JSON-RPC method is a notification (no response expected).
+///
+/// Per JSON-RPC 2.0, notifications are requests without an `id`. MCP uses
+/// the convention that notification method names start with `notifications/`.
+pub fn is_notification(method: &str) -> bool {
+    method.starts_with("notifications/")
+}
+
 /// Handle a parsed JSON-RPC 2.0 request and return a response.
 ///
-/// `id` is `None` for notifications (no response expected by spec, but we
-/// return an empty result for `notifications/initialized` to keep stdio
-/// transports simple).
+/// For notifications (`is_notification()` returns true), callers should
+/// discard the response — the JSON-RPC 2.0 spec forbids replying to
+/// notifications.
 ///
 /// The `id` is a `serde_json::Value` to preserve the original type sent by
 /// the client (number, string, or null) as required by JSON-RPC 2.0.
@@ -414,5 +422,21 @@ mod tests {
 
         assert_eq!(resp.id, Some(json!("abc-123")));
         assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_is_notification_true() {
+        assert!(is_notification("notifications/initialized"));
+        assert!(is_notification("notifications/cancelled"));
+        assert!(is_notification("notifications/progress"));
+    }
+
+    #[test]
+    fn test_is_notification_false() {
+        assert!(!is_notification("initialize"));
+        assert!(!is_notification("tools/list"));
+        assert!(!is_notification("tools/call"));
+        assert!(!is_notification(""));
+        assert!(!is_notification("notification")); // no trailing slash prefix match
     }
 }
