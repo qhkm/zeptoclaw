@@ -1149,6 +1149,10 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
+                        // TODO(thin-kernel): Route through `kernel::execute_tool()` instead
+                        // of calling `execute_with_context` directly, so that taint tracking
+                        // and kernel-level safety gates apply here too. Currently taint is
+                        // only enforced on the MCP server path. See `kernel/gate.rs` docs.
                         let (result, success) = {
                             let tools_guard = tools.read().await;
                             match tools_guard.execute_with_context(&name, args, &ctx).await {

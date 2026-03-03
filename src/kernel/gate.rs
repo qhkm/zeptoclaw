@@ -1,6 +1,20 @@
 //! Security-gated tool execution for ZeptoKernel.
 //!
-//! `execute_tool()` wraps core execution (safety check + lookup + run + metrics).
+//! `execute_tool()` wraps core execution (safety check + lookup + run + metrics)
+//! and is the **only** path that enforces taint tracking. Currently called from:
+//!
+//! - `mcp_server/handler.rs` — MCP server `tools/call` requests (external clients)
+//!
+//! **Not yet called from:**
+//!
+//! - `agent/loop.rs` — The main agent loop calls `ToolRegistry::execute_with_context`
+//!   directly, bypassing taint checks. This is acceptable for the initial release
+//!   because agent loop tool calls are LLM-generated (trusted path), while MCP
+//!   server mode serves untrusted external clients.
+//!
+//! **TODO:** Converge the agent loop onto `kernel::execute_tool` as part of the
+//! thin-kernel plan so that taint tracking applies uniformly.
+//!
 //! The agent loop's per-session gates (hooks, approval, dry-run, streaming feedback)
 //! stay in `agent/loop.rs` as a wrapper around this.
 

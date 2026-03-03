@@ -369,10 +369,13 @@ pub async fn register_all_tools(
         }
     }
 
+    // NOTE: Google Workspace tool (feature = "google") is NOT registered here.
+    // It requires async OAuth token resolution that depends on stored credentials,
+    // which is handled in `cli/common.rs` after kernel boot. See the
+    // `resolve_google_token()` + `GoogleTool::new()` block in `create_agent_with_template()`.
     #[cfg(feature = "google")]
     if filter.is_enabled("google") {
-        // Google Workspace tool needs OAuth token resolution — deferred to caller
-        // since it requires async provider resolution not available here.
+        info!("Google Workspace tool deferred — registered in create_agent_with_template() after OAuth resolution");
     }
 
     // --- Group 9: Memory tools ---
