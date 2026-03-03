@@ -138,22 +138,23 @@ impl Config {
             self.agents.defaults.timezone = val;
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED") {
-            self.agents.defaults.loop_guard_enabled = val == "true" || val == "1";
+            self.agents.defaults.loop_guard.enabled = val == "true" || val == "1";
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD") {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_window = v;
+                self.agents.defaults.loop_guard.warn_threshold = v;
             }
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_REPETITION_THRESHOLD")
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.block_threshold = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER")
         {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_repetition_threshold = v;
-            }
-        }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_MAX_HITS") {
-            if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_max_hits = v;
+                self.agents.defaults.loop_guard.global_circuit_breaker = v;
             }
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_BYTES") {

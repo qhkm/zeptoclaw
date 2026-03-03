@@ -55,10 +55,7 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "compact_tools",
     "tool_profile",
     "active_hand",
-    "loop_guard_enabled",
-    "loop_guard_window",
-    "loop_guard_repetition_threshold",
-    "loop_guard_max_hits",
+    "loop_guard",
     "max_tool_result_bytes",
 ];
 
