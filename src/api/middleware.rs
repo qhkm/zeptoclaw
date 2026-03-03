@@ -116,10 +116,13 @@ pub async fn auth_middleware(
     let path = request.uri().path();
 
     // Public endpoints that skip auth entirely.
+    // The `/v1/` prefix covers OpenAI-compatible API routes which use their
+    // own authentication model (the upstream LLM provider key).
     if path == "/api/health"
         || path == "/api/csrf-token"
         || path == "/api/auth/login"
         || path.starts_with("/ws/")
+        || path.starts_with("/v1/")
     {
         return Ok(next.run(request).await);
     }
@@ -195,6 +198,8 @@ mod tests {
             .route("/api/protected", post(|| async { "mutate" }))
             .route("/api/auth/login", post(|| async { "login" }))
             .route("/ws/events", get(|| async { "ws" }))
+            .route("/v1/models", get(|| async { "models" }))
+            .route("/v1/chat/completions", post(|| async { "completions" }))
             .layer(axum_mw::from_fn_with_state(state, auth_middleware))
     }
 
@@ -241,6 +246,29 @@ mod tests {
         let app = make_app(make_state());
         let req = Request::builder()
             .uri("/ws/events")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_models_skips_auth() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_chat_completions_skips_auth() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
