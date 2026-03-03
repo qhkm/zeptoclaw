@@ -353,6 +353,14 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// Drain all tools from `other` into this registry, consuming the other registry.
+    ///
+    /// Tools in `other` that have the same name as tools in `self` will replace
+    /// the existing tool.
+    pub fn merge(&mut self, other: ToolRegistry) {
+        self.tools.extend(other.tools);
+    }
 }
 
 impl Default for ToolRegistry {

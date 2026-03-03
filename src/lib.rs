@@ -20,6 +20,7 @@ pub mod hardware;
 pub mod health;
 pub mod heartbeat;
 pub mod hooks;
+pub mod kernel;
 pub mod memory;
 pub mod migrate;
 pub mod peripherals;

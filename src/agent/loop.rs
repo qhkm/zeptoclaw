@@ -577,6 +577,12 @@ impl AgentLoop {
         *p = Some(Arc::from(provider));
     }
 
+    /// Set the provider from an already-assembled Arc (used by kernel boot).
+    pub async fn set_provider_arc(&self, provider: Arc<dyn LLMProvider>) {
+        let mut p = self.provider.write().await;
+        *p = Some(provider);
+    }
+
     /// Register a named provider in the runtime registry (for /model switching).
     pub async fn set_provider_in_registry(&self, name: &str, provider: Box<dyn LLMProvider>) {
         let mut reg = self.provider_registry.write().await;
@@ -659,6 +665,25 @@ impl AgentLoop {
     pub async fn register_tool(&self, tool: Box<dyn Tool>) {
         let mut tools = self.tools.write().await;
         tools.register(tool);
+    }
+
+    /// Merge all tools from a kernel ToolRegistry and register MCP clients.
+    ///
+    /// Used by `create_agent_with_template()` to transfer pre-assembled kernel
+    /// tools into this agent in bulk, instead of one-by-one registration.
+    pub async fn merge_kernel_tools(
+        &self,
+        registry: ToolRegistry,
+        mcp_clients: Vec<Arc<crate::tools::mcp::client::McpClient>>,
+    ) {
+        {
+            let mut tools = self.tools.write().await;
+            tools.merge(registry);
+        }
+        {
+            let mut clients = self.mcp_clients.write().await;
+            clients.extend(mcp_clients);
+        }
     }
 
     /// Register an MCP client for lifecycle management.

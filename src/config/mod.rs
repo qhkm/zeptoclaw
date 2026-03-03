@@ -1417,7 +1417,7 @@ fn decrypt_config_values(
 }
 
 /// Expand ~ to home directory in a path string
-fn expand_home(path: &str) -> PathBuf {
+pub fn expand_home(path: &str) -> PathBuf {
     if path.is_empty() {
         return PathBuf::from(path);
     }
