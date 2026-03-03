@@ -21,6 +21,7 @@ pub mod health;
 pub mod heartbeat;
 pub mod hooks;
 pub mod kernel;
+pub mod mcp_server;
 pub mod memory;
 pub mod migrate;
 pub mod peripherals;

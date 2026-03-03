@@ -253,6 +253,12 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
     },
+    /// Start MCP server (expose tools to Claude Desktop, VS Code, Cursor)
+    McpServer {
+        /// Listen on HTTP address instead of stdio (e.g., ":3000", "127.0.0.1:3000")
+        #[arg(long)]
+        http: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -637,6 +643,9 @@ pub async fn run() -> Result<()> {
         Some(Commands::Serve { port, bind }) => {
             serve::cmd_serve(port, bind).await?;
         }
+        Some(Commands::McpServer { http }) => {
+            cmd_mcp_server(http).await?;
+        }
     }
 
     Ok(())
@@ -710,4 +719,44 @@ fn cmd_hardware(action: HardwareAction) {
             }
         },
     }
+}
+
+/// Start MCP server, exposing registered tools via JSON-RPC 2.0.
+async fn cmd_mcp_server(http: Option<String>) -> Result<()> {
+    use std::sync::Arc;
+
+    use zeptoclaw::bus::MessageBus;
+    use zeptoclaw::config::Config;
+    use zeptoclaw::mcp_server::McpServer;
+
+    let config =
+        Config::load().map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+    let bus = Arc::new(MessageBus::new());
+
+    let kernel = zeptoclaw::kernel::ZeptoKernel::boot(config, bus, None, None).await?;
+    let kernel = Arc::new(kernel);
+    let server = McpServer::new(kernel);
+
+    match http {
+        Some(addr) => {
+            #[cfg(feature = "panel")]
+            {
+                server.start_http(&addr).await?;
+            }
+            #[cfg(not(feature = "panel"))]
+            {
+                let _ = addr;
+                anyhow::bail!(
+                    "HTTP transport requires the 'panel' feature. \
+                     Build with: cargo build --features panel\n\
+                     Or use stdio transport (default): zeptoclaw mcp-server"
+                );
+            }
+        }
+        None => {
+            server.start_stdio().await?;
+        }
+    }
+
+    Ok(())
 }
