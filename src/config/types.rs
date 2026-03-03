@@ -588,6 +588,15 @@ pub struct LoopGuardConfig {
     pub outcome_warn_threshold: u32,
     /// Number of identical outcome hashes before blocking the call.
     pub outcome_block_threshold: u32,
+    /// Sliding window size for recent call tracking. When the call sequence
+    /// exceeds this limit, older entries are pruned and counters rebuilt to
+    /// prevent unbounded memory growth and false-positive warnings.
+    #[serde(default = "default_window_size")]
+    pub window_size: u32,
+}
+
+fn default_window_size() -> u32 {
+    200
 }
 
 impl Default for LoopGuardConfig {
@@ -601,6 +610,7 @@ impl Default for LoopGuardConfig {
             poll_multiplier: 3,
             outcome_warn_threshold: 2,
             outcome_block_threshold: 3,
+            window_size: default_window_size(),
         }
     }
 }

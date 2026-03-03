@@ -73,6 +73,9 @@ pub struct LoopGuard {
     /// Ordered sequence of call hashes for ping-pong detection.
     call_sequence: Vec<String>,
 
+    /// Ordered sequence of outcome hashes for window pruning.
+    outcome_sequence: Vec<String>,
+
     /// Running total of all repetitions across all hashes (for global breaker).
     total_repetitions: u32,
 
@@ -98,6 +101,7 @@ impl LoopGuard {
             call_counts: HashMap::new(),
             outcome_counts: HashMap::new(),
             call_sequence: Vec::new(),
+            outcome_sequence: Vec::new(),
             total_repetitions: 0,
             stats: LoopGuardStats::default(),
         }
@@ -119,6 +123,12 @@ impl LoopGuard {
 
         // Record in sequence for ping-pong detection.
         self.call_sequence.push(call_hash.clone());
+
+        // Prune call window if it exceeds the configured size.
+        let window = self.config.window_size as usize;
+        if window > 0 && self.call_sequence.len() > window {
+            self.prune_call_window(window);
+        }
 
         // Increment per-hash counter.
         let count = self.call_counts.entry(call_hash.clone()).or_insert(0);
@@ -197,6 +207,13 @@ impl LoopGuard {
 
         let outcome_hash = hash_outcome(name, params, result_prefix);
 
+        // Track outcome sequence for window pruning.
+        self.outcome_sequence.push(outcome_hash.clone());
+        let window = self.config.window_size as usize;
+        if window > 0 && self.outcome_sequence.len() > window {
+            self.prune_outcome_window(window);
+        }
+
         let count = self.outcome_counts.entry(outcome_hash).or_insert(0);
         *count += 1;
         let count = *count;
@@ -241,6 +258,35 @@ impl LoopGuard {
     }
 
     // --- Private helpers ---
+
+    /// Prune the call sequence to the most recent `keep` entries and rebuild
+    /// `call_counts` from the remaining window.  Session-level metrics
+    /// (`total_repetitions`, `stats`) are intentionally preserved.
+    fn prune_call_window(&mut self, keep: usize) {
+        let half = keep / 2;
+        let drain_count = self.call_sequence.len() - half;
+        self.call_sequence.drain(..drain_count);
+
+        // Rebuild call_counts from the surviving window.
+        self.call_counts.clear();
+        for hash in &self.call_sequence {
+            *self.call_counts.entry(hash.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// Prune the outcome sequence to the most recent `keep/2` entries and
+    /// rebuild `outcome_counts` from the remaining window.
+    fn prune_outcome_window(&mut self, keep: usize) {
+        let half = keep / 2;
+        let drain_count = self.outcome_sequence.len() - half;
+        self.outcome_sequence.drain(..drain_count);
+
+        // Rebuild outcome_counts from the surviving window.
+        self.outcome_counts.clear();
+        for hash in &self.outcome_sequence {
+            *self.outcome_counts.entry(hash.clone()).or_insert(0) += 1;
+        }
+    }
 
     /// Detect period-2 and period-3 oscillation patterns.
     fn check_ping_pong(&mut self) -> Option<LoopGuardAction> {
@@ -775,6 +821,7 @@ mod tests {
         assert_eq!(config.poll_multiplier, 3);
         assert_eq!(config.outcome_warn_threshold, 2);
         assert_eq!(config.outcome_block_threshold, 3);
+        assert_eq!(config.window_size, 200);
     }
 
     #[test]
@@ -858,5 +905,137 @@ mod tests {
                                                    // Should not panic.
         let h = hash_outcome("tool", &long_params, &long_result);
         assert!(!h.is_empty());
+    }
+
+    #[test]
+    fn test_window_pruning_prevents_unbounded_growth() {
+        // After 300 distinct calls with window_size=100, internal sequences
+        // must stay bounded.
+        let config = LoopGuardConfig {
+            window_size: 100,
+            warn_threshold: 200, // high to avoid interference
+            block_threshold: 300,
+            global_circuit_breaker: 1000,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        for i in 0..300 {
+            let name = format!("tool_{i}");
+            guard.check(&[sig(&name, r#"{}"#)]);
+            guard.record_outcome(&name, r#"{}"#, &format!("result_{i}"));
+        }
+
+        // call_sequence should have been pruned: at most window_size entries.
+        assert!(
+            guard.call_sequence.len() <= 100,
+            "call_sequence len {} exceeds window_size 100",
+            guard.call_sequence.len()
+        );
+        assert!(
+            guard.outcome_sequence.len() <= 100,
+            "outcome_sequence len {} exceeds window_size 100",
+            guard.outcome_sequence.len()
+        );
+        // call_counts should only have entries for the surviving window.
+        assert!(
+            guard.call_counts.len() <= 100,
+            "call_counts len {} exceeds window_size 100",
+            guard.call_counts.len()
+        );
+        assert!(
+            guard.outcome_counts.len() <= 100,
+            "outcome_counts len {} exceeds window_size 100",
+            guard.outcome_counts.len()
+        );
+    }
+
+    #[test]
+    fn test_window_pruning_resets_false_positives() {
+        // A command repeated once every 50 calls across 500 total calls should
+        // NOT trigger warnings after pruning. Without the window, the cumulative
+        // count would exceed warn_threshold.
+        let config = LoopGuardConfig {
+            window_size: 100,
+            warn_threshold: 3,
+            block_threshold: 5,
+            global_circuit_breaker: 1000,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        let target_call = [sig("target_tool", r#"{"q":"test"}"#)];
+
+        for batch in 0..10 {
+            // One target call per batch.
+            let action = guard.check(&target_call);
+            // After window pruning, count resets. The first few batches might
+            // accumulate before the first prune, but once pruning kicks in
+            // (after 100 calls), subsequent single occurrences per 50-call
+            // gap should never hit warn_threshold (3).
+            if batch >= 3 {
+                // After enough pruning cycles, the target call count within
+                // the window should be low (1 or 2 occurrences in 100 entries).
+                assert!(
+                    !matches!(action, LoopGuardAction::Block { .. }),
+                    "target_tool should not be blocked at batch {batch}"
+                );
+            }
+
+            // Interleave 49 distinct filler calls.
+            for j in 0..49 {
+                let filler = format!("filler_{}_{}", batch, j);
+                guard.check(&[sig(&filler, r#"{}"#)]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_size_zero_disables_pruning() {
+        // When window_size is 0, pruning should be disabled and all entries
+        // kept (original behavior).
+        let config = LoopGuardConfig {
+            window_size: 0,
+            warn_threshold: 200,
+            block_threshold: 300,
+            global_circuit_breaker: 1000,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        for i in 0..150 {
+            let name = format!("tool_{i}");
+            guard.check(&[sig(&name, r#"{}"#)]);
+        }
+
+        // No pruning: all 150 entries should remain.
+        assert_eq!(guard.call_sequence.len(), 150);
+    }
+
+    #[test]
+    fn test_outcome_window_pruning() {
+        // Verify that outcome_counts are rebuilt correctly after pruning.
+        let config = LoopGuardConfig {
+            window_size: 20,
+            outcome_warn_threshold: 5,
+            outcome_block_threshold: 10,
+            global_circuit_breaker: 1000,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        // Record 25 distinct outcomes to trigger pruning.
+        for i in 0..25 {
+            guard.record_outcome("tool", &format!(r#"{{"i":{i}}}"#), &format!("res_{i}"));
+        }
+
+        // After pruning, outcome_sequence should have ~10 entries (window/2).
+        assert!(
+            guard.outcome_sequence.len() <= 20,
+            "outcome_sequence len {} exceeds window 20",
+            guard.outcome_sequence.len()
+        );
+        // Each distinct outcome appears at most once, so no warn/block.
+        assert_eq!(guard.stats().outcome_blocks, 0);
     }
 }

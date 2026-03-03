@@ -68,6 +68,7 @@ const KNOWN_LOOP_GUARD: &[&str] = &[
     "poll_multiplier",
     "outcome_warn_threshold",
     "outcome_block_threshold",
+    "window_size",
 ];
 
 #[allow(dead_code)]

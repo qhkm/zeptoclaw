@@ -182,6 +182,11 @@ impl Config {
                 self.agents.defaults.loop_guard.outcome_block_threshold = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.window_size = v;
+            }
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_BYTES") {
             if let Ok(v) = val.parse() {
                 self.agents.defaults.max_tool_result_bytes = v;
@@ -2084,6 +2089,7 @@ mod tests {
             "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD",
             "9",
         );
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE", "300");
 
         let mut config = Config::default();
         config.apply_env_overrides();
@@ -2097,6 +2103,7 @@ mod tests {
         assert_eq!(lg.poll_multiplier, 4);
         assert_eq!(lg.outcome_warn_threshold, 7);
         assert_eq!(lg.outcome_block_threshold, 9);
+        assert_eq!(lg.window_size, 300);
 
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED");
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD");
@@ -2106,5 +2113,6 @@ mod tests {
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER");
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD");
         std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE");
     }
 }
