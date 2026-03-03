@@ -244,6 +244,11 @@ impl LoopGuard {
 
     /// Detect period-2 and period-3 oscillation patterns.
     fn check_ping_pong(&mut self) -> Option<LoopGuardAction> {
+        // Treat ping_pong_min_repeats == 0 as "disabled".
+        if self.config.ping_pong_min_repeats == 0 {
+            return None;
+        }
+
         let seq = &self.call_sequence;
         let min_repeats = self.config.ping_pong_min_repeats as usize;
 
@@ -301,6 +306,12 @@ impl LoopGuard {
     /// sequence (A-A-A-A) is not a ping-pong; it is already caught by the
     /// per-hash graduated response.
     fn has_periodic_pattern(seq: &[String], period: usize, min_repeats: usize) -> bool {
+        // Defensive: zero period or min_repeats makes detection meaningless
+        // and would cause a panic on the `tail[..period]` slice below.
+        if period == 0 || min_repeats == 0 {
+            return false;
+        }
+
         let needed = period * min_repeats;
         if seq.len() < needed {
             return false;
@@ -797,6 +808,46 @@ mod tests {
         assert_eq!(truncate_utf8(s, 3), ""); // 3 bytes into emoji -> backs up to 0
         assert_eq!(truncate_utf8(s, 4), "\u{1f600}");
         assert_eq!(truncate_utf8(s, 5), "\u{1f600}a");
+    }
+
+    #[test]
+    fn test_ping_pong_min_repeats_zero_no_panic() {
+        // When ping_pong_min_repeats is 0, ping-pong detection should be
+        // disabled entirely -- no panics, no false detections.
+        let config = LoopGuardConfig {
+            ping_pong_min_repeats: 0,
+            warn_threshold: 100,
+            block_threshold: 200,
+            global_circuit_breaker: 1000,
+            ..default_config()
+        };
+        let mut guard = LoopGuard::new(config);
+
+        let call_a = [sig("read_file", r#"{"path":"a.txt"}"#)];
+        let call_b = [sig("write_file", r#"{"path":"b.txt"}"#)];
+
+        // Feed an obvious A-B-A-B pattern that would normally trigger
+        // ping-pong detection. With min_repeats == 0 it must be skipped.
+        for _ in 0..10 {
+            assert_eq!(guard.check(&call_a), LoopGuardAction::Allow);
+            assert_eq!(guard.check(&call_b), LoopGuardAction::Allow);
+        }
+
+        assert_eq!(guard.stats().ping_pong_detections, 0);
+    }
+
+    #[test]
+    fn test_has_periodic_pattern_zero_period() {
+        // Directly verify has_periodic_pattern returns false for zero period.
+        let seq: Vec<String> = vec!["a".into(), "b".into(), "a".into(), "b".into()];
+        assert!(!LoopGuard::has_periodic_pattern(&seq, 0, 2));
+    }
+
+    #[test]
+    fn test_has_periodic_pattern_zero_min_repeats() {
+        // Directly verify has_periodic_pattern returns false for zero min_repeats.
+        let seq: Vec<String> = vec!["a".into(), "b".into(), "a".into(), "b".into()];
+        assert!(!LoopGuard::has_periodic_pattern(&seq, 2, 0));
     }
 
     #[test]
