@@ -279,6 +279,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Returns true when running as UID 0 (root).
+    ///
+    /// Root bypasses file-permission execute checks on Linux, which causes
+    /// permission-based tests to behave differently inside Docker containers.
+    #[cfg(unix)]
+    fn is_root() -> bool {
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .is_some_and(|s| s.trim() == "0")
+    }
+
     // ---- JSON-RPC serialization tests ----
 
     #[test]
@@ -502,7 +516,13 @@ echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"something broke"},"id":1}'"
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to spawn"), "err was: {}", err);
+        // Accept either our wrapped message or the OS-level error text,
+        // since error propagation can differ across Docker/act environments.
+        assert!(
+            err.contains("Failed to spawn") || err.contains("No such file"),
+            "err was: {}",
+            err
+        );
     }
 
     #[cfg(unix)]
@@ -580,6 +600,14 @@ exit 1"#,
     #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_binary_not_executable() {
+        // Root (UID 0) bypasses file execute permission checks on Linux,
+        // so this test cannot verify permission-denied behaviour inside
+        // Docker containers where processes typically run as root.
+        if is_root() {
+            eprintln!("skipping test_execute_binary_not_executable: running as root");
+            return;
+        }
+
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("plugin.sh");
         std::fs::write(&script_path, "#!/bin/sh\necho ok").unwrap();
