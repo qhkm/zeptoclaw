@@ -404,16 +404,43 @@ pub async fn wake_screen(adb: &AdbExecutor) -> Result<String> {
     Ok("Screen woken".into())
 }
 
-/// Check if a command starts with `rm` and contains both `-r` and `-f` flags
+fn token_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+/// Returns the argument slice for an `rm` invocation, supporting:
+/// - `rm ...`
+/// - `/system/bin/rm ...`
+/// - `busybox rm ...` / `toybox rm ...` (including path-prefixed busybox/toybox)
+fn rm_invocation_args<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let first = token_basename(tokens[0]);
+    if first == "rm" {
+        return Some(&tokens[1..]);
+    }
+
+    if (first == "busybox" || first == "toybox")
+        && tokens.get(1).is_some_and(|sub| token_basename(sub) == "rm")
+    {
+        return Some(&tokens[2..]);
+    }
+
+    None
+}
+
+/// Check if a command invokes `rm` and contains both `-r` and `-f` flags
 /// in any order or combination (e.g., `rm -rf`, `rm -fr`, `rm -r -f`,
 /// `rm --recursive --force`, `rm -r --force`, etc.).
 fn is_rm_recursive_force(tokens: &[&str]) -> bool {
-    if tokens.is_empty() || tokens[0] != "rm" {
+    let Some(rm_args) = rm_invocation_args(tokens) else {
         return false;
-    }
+    };
     let mut has_r = false;
     let mut has_f = false;
-    for &tok in &tokens[1..] {
+    for &tok in rm_args {
         if tok.starts_with("--") {
             match tok {
                 "--recursive" => has_r = true,
@@ -463,8 +490,8 @@ pub async fn device_shell(adb: &AdbExecutor, cmd: &str) -> Result<String> {
     }
 
     // Also block `rm -r` without `-f` (still dangerous on a device)
-    if lower_tokens.first() == Some(&"rm") {
-        let has_r = lower_tokens.iter().skip(1).any(|t| {
+    if let Some(rm_args) = rm_invocation_args(&lower_tokens) {
+        let has_r = rm_args.iter().any(|t| {
             *t == "--recursive" || (t.starts_with('-') && !t.starts_with("--") && t.contains('r'))
         });
         if has_r {
@@ -627,6 +654,9 @@ mod tests {
             vec!["rm", "--recursive", "--force", "/"],
             vec!["rm", "--recursive", "-f", "/"],
             vec!["rm", "-r", "--force", "/"],
+            vec!["/system/bin/rm", "-rf", "/"],
+            vec!["busybox", "rm", "-rf", "/"],
+            vec!["toybox", "rm", "-r", "-f", "/"],
         ];
         for tokens in &cases {
             assert!(
@@ -642,6 +672,7 @@ mod tests {
             vec!["rm", "-f", "file.txt"], // force without recursive is ok
             vec!["ls", "-rf"],            // not rm
             vec!["echo", "rm", "-rf"],    // rm is not first token
+            vec!["busybox", "ls", "-rf"], // busybox subcommand is not rm
         ];
         for tokens in &safe_cases {
             assert!(
@@ -864,6 +895,14 @@ mod tests {
         // rm --recursive --force (long flags)
         let result = device_shell(&adb, "rm --recursive --force /sdcard").await;
         assert!(result.is_err(), "rm --recursive --force should be blocked");
+
+        // path-prefixed rm
+        let result = device_shell(&adb, "/system/bin/rm -rf /sdcard").await;
+        assert!(result.is_err(), "/system/bin/rm -rf should be blocked");
+
+        // busybox rm
+        let result = device_shell(&adb, "busybox rm -rf /sdcard").await;
+        assert!(result.is_err(), "busybox rm -rf should be blocked");
 
         // rm -r alone (still dangerous on device)
         let result = device_shell(&adb, "rm -r /sdcard").await;
