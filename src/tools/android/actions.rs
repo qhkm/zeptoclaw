@@ -404,15 +404,78 @@ pub async fn wake_screen(adb: &AdbExecutor) -> Result<String> {
     Ok("Screen woken".into())
 }
 
+/// Check if a command starts with `rm` and contains both `-r` and `-f` flags
+/// in any order or combination (e.g., `rm -rf`, `rm -fr`, `rm -r -f`,
+/// `rm --recursive --force`, `rm -r --force`, etc.).
+fn is_rm_recursive_force(tokens: &[&str]) -> bool {
+    if tokens.is_empty() || tokens[0] != "rm" {
+        return false;
+    }
+    let mut has_r = false;
+    let mut has_f = false;
+    for &tok in &tokens[1..] {
+        if tok.starts_with("--") {
+            match tok {
+                "--recursive" => has_r = true,
+                "--force" => has_f = true,
+                _ => {}
+            }
+        } else if tok.starts_with('-') && !tok.starts_with("--") {
+            // Short flags: `-rf`, `-r`, `-f`, `-fr`, `-r -f`, etc.
+            let flags = &tok[1..];
+            if flags.contains('r') {
+                has_r = true;
+            }
+            if flags.contains('f') {
+                has_f = true;
+            }
+        }
+    }
+    has_r && has_f
+}
+
 /// Run an arbitrary shell command on the device.
 pub async fn device_shell(adb: &AdbExecutor, cmd: &str) -> Result<String> {
+    // Block shell metacharacters that enable command chaining.
+    // Check this FIRST — before normalization — to prevent bypass via
+    // metacharacters that the tokenizer would otherwise split on.
+    let dangerous_chars = [';', '|', '`', '$', '&', '\n'];
+    for ch in &dangerous_chars {
+        if cmd.contains(*ch) {
+            return Err(ZeptoError::Tool(format!(
+                "Blocked shell metacharacter '{}' in command. Use specific actions instead of raw shell.",
+                ch
+            )));
+        }
+    }
+
     // Normalize whitespace for blocklist check
-    let normalized: String = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let normalized = tokens.join(" ");
     let lower = normalized.to_lowercase();
 
-    let blocked = [
-        "rm -rf",
-        "rm -r",
+    // Flag-aware check for rm with recursive + force (any order/combination)
+    let lower_tokens: Vec<&str> = lower.split_whitespace().collect();
+    if is_rm_recursive_force(&lower_tokens) {
+        return Err(ZeptoError::Tool(
+            "Blocked dangerous command: rm with recursive + force flags".to_string(),
+        ));
+    }
+
+    // Also block `rm -r` without `-f` (still dangerous on a device)
+    if lower_tokens.first() == Some(&"rm") {
+        let has_r = lower_tokens.iter().skip(1).any(|t| {
+            *t == "--recursive" || (t.starts_with('-') && !t.starts_with("--") && t.contains('r'))
+        });
+        if has_r {
+            return Err(ZeptoError::Tool(
+                "Blocked dangerous command: rm with recursive flag".to_string(),
+            ));
+        }
+    }
+
+    // Literal keyword blocklist (whole-command substring match)
+    let blocked_keywords = [
         "reboot",
         "factory_reset",
         "wipe",
@@ -422,22 +485,11 @@ pub async fn device_shell(adb: &AdbExecutor, cmd: &str) -> Result<String> {
         "flash",
         "fastboot",
     ];
-    for pattern in &blocked {
+    for pattern in &blocked_keywords {
         if lower.contains(pattern) {
             return Err(ZeptoError::Tool(format!(
                 "Blocked dangerous command containing '{}'",
                 pattern
-            )));
-        }
-    }
-
-    // Block shell metacharacters that enable command chaining
-    let dangerous_chars = [';', '|', '`', '$', '&', '\n'];
-    for ch in &dangerous_chars {
-        if cmd.contains(*ch) {
-            return Err(ZeptoError::Tool(format!(
-                "Blocked shell metacharacter '{}' in command. Use specific actions instead of raw shell.",
-                ch
             )));
         }
     }
@@ -551,11 +603,52 @@ mod tests {
         // Can't actually run these without ADB, but test the blocking logic
         let blocked_cmds = vec!["rm -rf /", "reboot", "factory_reset data"];
         for cmd in blocked_cmds {
-            // device_shell is async, so we test the pattern matching directly
             let lower = cmd.to_lowercase();
-            let patterns = ["rm -rf", "reboot", "factory_reset", "wipe", "format"];
-            let is_blocked = patterns.iter().any(|p| lower.contains(p));
-            assert!(is_blocked, "Command '{}' should be blocked", cmd);
+            let keywords = ["reboot", "factory_reset", "wipe", "format"];
+            let has_keyword = keywords.iter().any(|p| lower.contains(p));
+            let tokens: Vec<&str> = lower.split_whitespace().collect();
+            let has_rm_rf = is_rm_recursive_force(&tokens);
+            assert!(
+                has_keyword || has_rm_rf,
+                "Command '{}' should be blocked",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_rm_recursive_force_variants() {
+        // All of these should be detected as rm with recursive + force
+        let cases = vec![
+            vec!["rm", "-rf", "/"],
+            vec!["rm", "-fr", "/"],
+            vec!["rm", "-r", "-f", "/"],
+            vec!["rm", "-f", "-r", "/"],
+            vec!["rm", "--recursive", "--force", "/"],
+            vec!["rm", "--recursive", "-f", "/"],
+            vec!["rm", "-r", "--force", "/"],
+        ];
+        for tokens in &cases {
+            assert!(
+                is_rm_recursive_force(tokens),
+                "Should detect rm -rf in: {:?}",
+                tokens
+            );
+        }
+
+        // These should NOT be detected as rm with recursive + force
+        let safe_cases = vec![
+            vec!["rm", "file.txt"],
+            vec!["rm", "-f", "file.txt"], // force without recursive is ok
+            vec!["ls", "-rf"],            // not rm
+            vec!["echo", "rm", "-rf"],    // rm is not first token
+        ];
+        for tokens in &safe_cases {
+            assert!(
+                !is_rm_recursive_force(tokens),
+                "Should NOT detect rm -rf in: {:?}",
+                tokens
+            );
         }
     }
 
@@ -748,6 +841,42 @@ mod tests {
         // Extra whitespace between "rm" and "-rf" should still be caught
         let result = device_shell(&adb, "rm   -rf /sdcard").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("rm -rf"));
+        assert!(result.unwrap_err().to_string().contains("recursive"));
+    }
+
+    /// GHSA-hhjv-jq77-cmvx: rm flag permutation bypass
+    #[tokio::test]
+    async fn test_device_shell_blocks_rm_flag_permutations() {
+        let adb = AdbExecutor::default();
+
+        // rm -r -f (split flags)
+        let result = device_shell(&adb, "rm -r -f /sdcard").await;
+        assert!(result.is_err(), "rm -r -f should be blocked");
+
+        // rm -fr (reversed combined flags)
+        let result = device_shell(&adb, "rm -fr /sdcard").await;
+        assert!(result.is_err(), "rm -fr should be blocked");
+
+        // rm -f -r (reversed split flags)
+        let result = device_shell(&adb, "rm -f -r /sdcard").await;
+        assert!(result.is_err(), "rm -f -r should be blocked");
+
+        // rm --recursive --force (long flags)
+        let result = device_shell(&adb, "rm --recursive --force /sdcard").await;
+        assert!(result.is_err(), "rm --recursive --force should be blocked");
+
+        // rm -r alone (still dangerous on device)
+        let result = device_shell(&adb, "rm -r /sdcard").await;
+        assert!(result.is_err(), "rm -r should be blocked");
+
+        // rm without recursive flags should be fine
+        let result = device_shell(&adb, "rm /sdcard/temp.txt").await;
+        // This will fail due to no ADB, but should NOT be blocked by our guard
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.contains("recursive") && !err_msg.contains("Blocked dangerous"),
+            "rm of a single file should not be blocked: {}",
+            err_msg
+        );
     }
 }
