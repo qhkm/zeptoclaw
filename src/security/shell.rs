@@ -374,7 +374,7 @@ impl ShellSecurityConfig {
             // because subsequent commands can be anything.
             let has_chaining_metachar = command_lower
                 .chars()
-                .any(|c| matches!(c, ';' | '|' | '`' | '\n'))
+                .any(|c| matches!(c, ';' | '|' | '`' | '\n' | '&'))
                 || command_lower.contains("$(");
 
             if has_chaining_metachar {
@@ -886,6 +886,18 @@ mod tests {
                 .validate_command("git status $(cat /etc/shadow)")
                 .is_err(),
             "Subshell injection should be blocked in Strict mode"
+        );
+    }
+
+    #[test]
+    fn test_allowlist_blocks_command_injection_via_ampersand() {
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        assert!(
+            config
+                .validate_command("git status & python3 -c 'evil'")
+                .is_err(),
+            "Ampersand chaining should be blocked in Strict mode"
         );
     }
 
