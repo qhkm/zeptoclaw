@@ -1233,6 +1233,12 @@ pub struct ProvidersConfig {
     /// Amazon Bedrock configuration (OpenAI-compatible endpoint; SigV4 required externally).
     #[serde(default)]
     pub bedrock: Option<ProviderConfig>,
+    /// xAI (Grok) configuration (OpenAI-compatible).
+    #[serde(default)]
+    pub xai: Option<ProviderConfig>,
+    /// Baidu Qianfan configuration (OpenAI-compatible v2 endpoint).
+    #[serde(default)]
+    pub qianfan: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers

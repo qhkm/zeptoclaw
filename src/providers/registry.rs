@@ -167,6 +167,24 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_auth_header: None, // AWS SigV4 required; not yet implemented natively
         default_api_version: None,
     },
+    ProviderSpec {
+        name: "xai",
+        model_keywords: &["xai", "grok"],
+        runtime_supported: true,
+        default_base_url: Some("https://api.x.ai/v1"),
+        backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+    },
+    ProviderSpec {
+        name: "qianfan",
+        model_keywords: &["qianfan", "ernie", "baidu"],
+        runtime_supported: true,
+        default_base_url: Some("https://qianfan.baidubce.com/v2"),
+        backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+    },
 ];
 
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -184,6 +202,8 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "kimi" => config.providers.kimi.as_ref(),
         "azure" => config.providers.azure.as_ref(),
         "bedrock" => config.providers.bedrock.as_ref(),
+        "xai" => config.providers.xai.as_ref(),
+        "qianfan" => config.providers.qianfan.as_ref(),
         _ => None,
     }
 }
@@ -742,5 +762,54 @@ mod tests {
         assert_eq!(selected.name, "azure");
         // Empty string should fall through to spec default
         assert_eq!(selected.auth_header.as_deref(), Some("api-key"));
+    }
+
+    #[test]
+    fn test_xai_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.xai = Some(ProviderConfig {
+            api_key: Some("xai-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "xai");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(selected.api_base.as_deref(), Some("https://api.x.ai/v1"));
+    }
+
+    #[test]
+    fn test_qianfan_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.qianfan = Some(ProviderConfig {
+            api_key: Some("qf-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "qianfan");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://qianfan.baidubce.com/v2")
+        );
+    }
+
+    #[test]
+    fn test_xai_and_qianfan_in_fallback_chain() {
+        let mut config = Config::default();
+        config.providers.xai = Some(ProviderConfig {
+            api_key: Some("xai-key".to_string()),
+            ..Default::default()
+        });
+        config.providers.qianfan = Some(ProviderConfig {
+            api_key: Some("qf-key".to_string()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_runtime_providers(&config);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].name, "xai");
+        assert_eq!(resolved[1].name, "qianfan");
     }
 }

@@ -533,6 +533,44 @@ impl Config {
                 .api_base = Some(v);
         }
 
+        // xAI (Grok)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        } else if let Ok(val) = std::env::var("XAI_API_KEY") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_API_BASE") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
+        // Baidu Qianfan
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        } else if let Ok(val) = std::env::var("QIANFAN_API_KEY") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_BASE") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -597,6 +635,18 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_MODEL") {
             self.providers
                 .kimi
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_MODEL") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_MODEL") {
+            self.providers
+                .qianfan
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }
@@ -2052,6 +2102,38 @@ mod tests {
                     != Some("AKIAIOSFODNN7EXAMPLE")
         );
         std::env::remove_var("AWS_ACCESS_KEY_ID");
+    }
+
+    #[test]
+    fn test_xai_env_override_api_key() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY", "xai-test-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .xai
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("xai-test-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY");
+    }
+
+    #[test]
+    fn test_qianfan_env_override_api_key() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY", "qf-test-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .qianfan
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("qf-test-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY");
     }
 
     #[test]

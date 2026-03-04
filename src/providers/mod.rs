@@ -50,6 +50,8 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "kimi",
     "azure",
     "bedrock",
+    "xai",
+    "qianfan",
 ];
 
 use crate::error::ProviderError;
