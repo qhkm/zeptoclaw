@@ -23,6 +23,7 @@ impl Severity {
     }
 }
 
+#[derive(Debug)]
 pub struct DiagItem {
     pub severity: Severity,
     pub category: &'static str,
@@ -350,9 +351,15 @@ mod tests {
 
     #[test]
     fn test_check_binary_missing() {
+        // Use a long random-looking name to avoid collisions with binaries
+        // that might exist in unusual Docker/CI environments.
         let mut diags = Vec::new();
-        check_binary("nonexistent_binary_xyz_12345", &mut diags);
-        assert!(diags.iter().any(|d| d.severity == Severity::Warn));
+        check_binary("zeptoclaw_nonexistent_a8f3e2d1b9c7", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warn),
+            "expected Warn for missing binary, got: {:?}",
+            diags
+        );
     }
 
     #[test]

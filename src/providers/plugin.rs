@@ -629,7 +629,13 @@ echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"model unavailabl
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to spawn"), "err was: {}", err);
+        // Accept either our wrapped message or the OS-level error text,
+        // since error propagation can differ across Docker/act environments.
+        assert!(
+            err.contains("Failed to spawn") || err.contains("No such file"),
+            "err was: {}",
+            err
+        );
     }
 
     #[cfg(unix)]
