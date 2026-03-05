@@ -146,32 +146,54 @@ impl Tool for BinaryPluginTool {
             ZeptoError::Tool(format!("Failed to serialize JSON-RPC request: {}", e))
         })?;
 
-        // Spawn binary — no shell
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        // Spawn binary — no shell. Retry a few times on ETXTBSY (os error 26),
+        // which can happen on some Linux CI filesystems immediately after script creation.
+        let mut spawn_error = None;
+        let mut child = loop {
+            let mut cmd = Command::new(&self.binary_path);
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
 
-        // Set working directory from context
-        if let Some(workspace) = &ctx.workspace {
-            cmd.current_dir(workspace);
-        }
-
-        // Set environment variables from tool def
-        if let Some(env_vars) = &self.def.env {
-            for (key, value) in env_vars {
-                cmd.env(key, value);
+            // Set working directory from context
+            if let Some(workspace) = &ctx.workspace {
+                cmd.current_dir(workspace);
             }
-        }
 
-        let mut child = cmd.spawn().map_err(|e| {
-            ZeptoError::Tool(format!(
-                "Failed to spawn binary plugin '{}' ({}): {}",
-                self.plugin_name,
-                self.binary_path.display(),
-                e
-            ))
-        })?;
+            // Set environment variables from tool def
+            if let Some(env_vars) = &self.def.env {
+                for (key, value) in env_vars {
+                    cmd.env(key, value);
+                }
+            }
+
+            match cmd.spawn() {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && spawn_error.is_none() => {
+                    spawn_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    break cmd.spawn().map_err(|final_err| {
+                        ZeptoError::Tool(format!(
+                            "Failed to spawn binary plugin '{}' ({}) after ETXTBSY retries: {}",
+                            self.plugin_name,
+                            self.binary_path.display(),
+                            final_err
+                        ))
+                    })?;
+                }
+                Err(e) => {
+                    return Err(ZeptoError::Tool(format!(
+                        "Failed to spawn binary plugin '{}' ({}): {}",
+                        self.plugin_name,
+                        self.binary_path.display(),
+                        e
+                    )));
+                }
+            }
+        };
 
         // Write request to stdin and close
         if let Some(mut stdin) = child.stdin.take() {
