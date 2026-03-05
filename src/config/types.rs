@@ -1796,6 +1796,13 @@ pub struct ClawHubConfig {
     /// Optional Bearer token for authenticated registry access.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Hostnames explicitly allowed to bypass SSRF checks.
+    ///
+    /// Use this for self-hosted skill registries on private networks
+    /// (e.g., `["registry.internal.corp"]`). Public registries like
+    /// `clawhub.ai` do not need to be listed here.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 fn default_clawhub_url() -> String {
@@ -1808,6 +1815,7 @@ impl Default for ClawHubConfig {
             enabled: true,
             base_url: default_clawhub_url(),
             auth_token: None,
+            allowed_hosts: Vec::new(),
         }
     }
 }
