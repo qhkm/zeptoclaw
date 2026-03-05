@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 
 use zeptoclaw::bus::{InboundMessage, MessageBus};
 use zeptoclaw::config::Config;
+use zeptoclaw::gateway::ipc::UsageSnapshot;
+use zeptoclaw::health::UsageMetrics;
 use zeptoclaw::providers::{
     configured_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
 };
@@ -260,6 +262,10 @@ pub(crate) async fn cmd_agent_stdin() -> Result<()> {
     let bus = Arc::new(MessageBus::new());
     let agent = create_agent(config, bus.clone()).await?;
 
+    // Set up usage metrics so the agent loop tracks tokens and tool calls.
+    let usage_metrics = Arc::new(UsageMetrics::new());
+    agent.set_usage_metrics(Arc::clone(&usage_metrics)).await;
+
     // Seed provided session state before processing.
     if let Some(ref seed_session) = session {
         agent.session_manager().save(seed_session).await?;
@@ -270,10 +276,14 @@ pub(crate) async fn cmd_agent_stdin() -> Result<()> {
         Ok(content) => {
             let updated_session = agent.session_manager().get(&message.session_key).await?;
             zeptoclaw::gateway::AgentResponse::success(&request_id, &content, updated_session)
+                .with_usage(UsageSnapshot::from_metrics(&usage_metrics))
         }
-        Err(e) => {
-            zeptoclaw::gateway::AgentResponse::error(&request_id, &e.to_string(), "PROCESS_ERROR")
-        }
+        Err(e) => zeptoclaw::gateway::AgentResponse::error(
+            &request_id,
+            &e.to_string(),
+            "PROCESS_ERROR",
+        )
+        .with_usage(UsageSnapshot::from_metrics(&usage_metrics)),
     };
 
     // Write response with markers to stdout
