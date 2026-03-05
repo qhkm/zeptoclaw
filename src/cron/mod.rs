@@ -92,6 +92,23 @@ const ERROR_BACKOFF_SCHEDULE_MS: [i64; 5] = [
     60 * 60_000, // 5th+ error -> 60m
 ];
 
+fn dispatch_timeout_ms(timeout_secs: Option<u64>) -> u64 {
+    timeout_secs
+        .map(|secs| secs.saturating_mul(1000))
+        .unwrap_or(DEFAULT_DISPATCH_TIMEOUT_MS)
+}
+
+fn should_skip_missed_dispatch(job: &CronJob, next_run_at_ms: i64) -> bool {
+    let Some(last_run_at_ms) = job.state.last_run_at_ms else {
+        return false;
+    };
+    if job.state.last_status.as_deref() != Some("ok") {
+        return false;
+    }
+    let delta_ms = i128::from(last_run_at_ms) - i128::from(next_run_at_ms);
+    delta_ms >= 0 && delta_ms < i128::from(DEDUP_WINDOW_MS)
+}
+
 fn error_backoff_ms(consecutive_errors: u32) -> i64 {
     if consecutive_errors == 0 {
         return 0;
@@ -268,11 +285,7 @@ impl CronService {
                                     // Dedup guard: if job was already dispatched
                                     // recently (crash between dispatch and save),
                                     // skip to avoid duplicate delivery.
-                                    let already_ran = job
-                                        .state
-                                        .last_run_at_ms
-                                        .map(|lr| (next - lr).abs() < DEDUP_WINDOW_MS)
-                                        .unwrap_or(false);
+                                    let already_ran = should_skip_missed_dispatch(job, next);
                                     if already_ran {
                                         info!(
                                             job_id = %job.id,
@@ -482,10 +495,7 @@ async fn tick(
         if jitter_ms > 0 {
             tokio::time::sleep(jitter_delay(jitter_ms)).await;
         }
-        let timeout_ms = job
-            .timeout_secs
-            .map(|s| s * 1000)
-            .unwrap_or(DEFAULT_DISPATCH_TIMEOUT_MS);
+        let timeout_ms = dispatch_timeout_ms(job.timeout_secs);
         let send_result = tokio::time::timeout(
             std::time::Duration::from_millis(timeout_ms),
             bus.publish_inbound(inbound),
@@ -1137,5 +1147,68 @@ mod tests {
     #[test]
     fn test_dedup_window_constant() {
         assert_eq!(DEDUP_WINDOW_MS, 60_000, "dedup window should be 60 seconds");
+    }
+
+    #[test]
+    fn test_dispatch_timeout_ms_default() {
+        assert_eq!(dispatch_timeout_ms(None), DEFAULT_DISPATCH_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_dispatch_timeout_ms_saturates_on_large_value() {
+        assert_eq!(dispatch_timeout_ms(Some(u64::MAX)), u64::MAX);
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_requires_last_run_after_next() {
+        let job = CronJob {
+            id: "dedup3".to_string(),
+            name: "fast schedule".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 30_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: Some(70_000),
+                last_status: Some("ok".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(
+            !should_skip_missed_dispatch(&job, 100_000),
+            "dedup guard should not skip when last_run is before next_run"
+        );
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_near_next_with_success() {
+        let job = CronJob {
+            id: "dedup4".to_string(),
+            name: "near next".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 60_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: Some(100_010),
+                last_status: Some("ok".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(should_skip_missed_dispatch(&job, 100_000));
     }
 }
