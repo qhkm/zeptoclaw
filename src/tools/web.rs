@@ -28,6 +28,7 @@ const MAX_WEB_SEARCH_COUNT: usize = 10;
 const DEFAULT_MAX_FETCH_CHARS: usize = 50_000;
 const MAX_FETCH_CHARS: usize = 200_000;
 const MIN_FETCH_CHARS: usize = 256;
+const MAX_WEB_FETCH_REDIRECTS: usize = 5;
 /// Maximum bytes to read from a response body before truncating.
 /// Uses a 4x multiplier over MAX_FETCH_CHARS to account for multi-byte UTF-8.
 const MAX_FETCH_BYTES: usize = MAX_FETCH_CHARS * 4;
@@ -580,7 +581,7 @@ impl WebFetchTool {
     /// Create a new web fetch tool.
     pub fn new() -> Self {
         let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(web_fetch_redirect_policy())
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
@@ -728,7 +729,7 @@ impl Tool for WebFetchTool {
         // (potentially private) address.
         let client = if let Some((host, addr)) = pinned {
             Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(5))
+                .redirect(web_fetch_redirect_policy())
                 .timeout(Duration::from_secs(30))
                 .resolve(&host, addr)
                 .build()
@@ -744,15 +745,8 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ZeptoError::Tool(format!("Web fetch failed: {}", e)))?;
 
-        // SSRF redirect check: after reqwest follows redirects, validate
-        // that the final destination URL is not a blocked host.
-        if is_blocked_host(response.url()) {
-            return Err(ZeptoError::SecurityViolation(format!(
-                "Redirect destination is blocked (local or private network): {}",
-                response.url()
-            )));
-        }
-        resolve_and_check_host(response.url()).await?;
+        // Defense in depth: validate the final destination URL as well.
+        validate_redirect_target(response.url()).await?;
 
         resolve_and_check_host(&parsed).await?;
 
@@ -1108,6 +1102,49 @@ fn dom_walk(element: ElementRef<'_>, output: &mut String) {
     }
 }
 
+fn web_fetch_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > MAX_WEB_FETCH_REDIRECTS {
+            return attempt.error(format!(
+                "Too many redirects (max {})",
+                MAX_WEB_FETCH_REDIRECTS
+            ));
+        }
+
+        match validate_redirect_target_basic(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(err) => attempt.error(err),
+        }
+    })
+}
+
+fn validate_redirect_target_basic(url: &Url) -> Result<()> {
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Redirect destination scheme is blocked: {}",
+                url.scheme()
+            )));
+        }
+    }
+
+    if is_blocked_host(url) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Redirect destination is blocked (local or private network): {}",
+            url
+        )));
+    }
+
+    Ok(())
+}
+
+async fn validate_redirect_target(url: &Url) -> Result<()> {
+    validate_redirect_target_basic(url)?;
+    resolve_and_check_host(url).await?;
+    Ok(())
+}
+
 /// Collect all descendant text from an element, stripping inner tags.
 fn collect_inline_text(element: ElementRef<'_>) -> String {
     element
@@ -1444,8 +1481,7 @@ mod tests {
 
     #[test]
     fn test_blocked_redirect_destination() {
-        // Simulate a redirect landing on a private IP — `is_blocked_host`
-        // must catch these when called on the final response URL.
+        // Redirect targets to local/private addresses must be blocked.
         let cloud_metadata = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
         assert!(is_blocked_host(&cloud_metadata));
 
@@ -1464,6 +1500,47 @@ mod tests {
         // Public URLs should not be blocked after redirect.
         let public = Url::parse("https://cdn.example.com/page").unwrap();
         assert!(!is_blocked_host(&public));
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_private_host() {
+        let private_target = Url::parse("http://127.0.0.1:8080/admin").unwrap();
+        let result = validate_redirect_target_basic(&private_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("blocked (local or private network)"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_non_http_scheme() {
+        let ftp_target = Url::parse("ftp://example.com/resource").unwrap();
+        let result = validate_redirect_target_basic(&ftp_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("scheme is blocked"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_allows_public_https() {
+        let public_target = Url::parse("https://example.com/article").unwrap();
+        assert!(validate_redirect_target_basic(&public_target).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_redirect_target_async_blocks_dns_private_resolution() {
+        let localhost_target = Url::parse("https://localhost:443/").unwrap();
+        let result = validate_redirect_target(&localhost_target).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
