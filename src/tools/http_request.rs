@@ -93,7 +93,7 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 
 fn http_request_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() > MAX_HTTP_REQUEST_REDIRECTS {
+        if attempt.previous().len() >= MAX_HTTP_REQUEST_REDIRECTS {
             return attempt.error(format!(
                 "Too many redirects (max {})",
                 MAX_HTTP_REQUEST_REDIRECTS

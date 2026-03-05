@@ -1102,7 +1102,7 @@ fn dom_walk(element: ElementRef<'_>, output: &mut String) {
 
 fn web_fetch_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() > MAX_WEB_FETCH_REDIRECTS {
+        if attempt.previous().len() >= MAX_WEB_FETCH_REDIRECTS {
             return attempt.error(format!(
                 "Too many redirects (max {})",
                 MAX_WEB_FETCH_REDIRECTS
