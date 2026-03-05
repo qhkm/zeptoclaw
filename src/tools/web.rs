@@ -748,8 +748,6 @@ impl Tool for WebFetchTool {
         // Defense in depth: validate the final destination URL as well.
         validate_redirect_target(response.url()).await?;
 
-        resolve_and_check_host(&parsed).await?;
-
         let status = response.status();
         let final_url = response.url().to_string();
 
