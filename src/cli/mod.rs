@@ -19,6 +19,7 @@ pub mod onboard;
 pub mod pair;
 #[cfg(feature = "panel")]
 pub mod panel;
+pub mod provider;
 pub mod quota;
 pub mod secrets;
 #[cfg(feature = "panel")]
@@ -183,6 +184,11 @@ enum Commands {
     Quota {
         #[command(subcommand)]
         action: QuotaSubcommand,
+    },
+    /// Inspect provider chain configuration
+    Provider {
+        #[command(subcommand)]
+        action: ProviderSubcommand,
     },
     #[cfg(feature = "panel")]
     /// Start the control panel (API server + dashboard)
@@ -489,6 +495,12 @@ pub enum QuotaSubcommand {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ProviderSubcommand {
+    /// Show resolved provider chain, wrappers, and configuration
+    Status,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum HardwareAction {
     /// List discovered USB devices
@@ -606,6 +618,9 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Quota { action }) => {
             quota::cmd_quota(action)?;
+        }
+        Some(Commands::Provider { action }) => {
+            provider::cmd_provider(action)?;
         }
         #[cfg(feature = "panel")]
         Some(Commands::Panel {

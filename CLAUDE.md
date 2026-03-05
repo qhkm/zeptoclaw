@@ -146,6 +146,9 @@ cargo release patch --execute  # actually bump, commit, tag, push, publish to cr
 ./target/release/zeptoclaw quota status
 ./target/release/zeptoclaw quota reset
 ./target/release/zeptoclaw quota reset anthropic
+
+# Provider chain status
+./target/release/zeptoclaw provider status
 ```
 
 ## Agent Workflow — Task Tracking Protocol
@@ -256,6 +259,7 @@ src/
 │   ├── memory.rs   # Memory list/search/set/delete/stats commands
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
 │   ├── hand.rs     # Hands-lite list/activate/deactivate/status commands
+│   ├── provider.rs # Provider chain status introspection (resolved providers, wrappers, quota)
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
 ├── hands/          # HAND.toml manifest parsing + built-in hands registry
