@@ -236,11 +236,26 @@ impl DiscordChannel {
         Ok(format!("{}/?v=10&encoding=json", url))
     }
 
+    /// Returns a copy of `proxy_url` with any userinfo (username + password) stripped,
+    /// so the result is safe to include in log messages and error strings.
+    fn sanitize_proxy_url(proxy_url: &str) -> String {
+        match reqwest::Url::parse(proxy_url) {
+            Ok(mut u) => {
+                let _ = u.set_password(None);
+                let _ = u.set_username("");
+                u.to_string()
+            }
+            // URL is not parseable at all; don't echo the raw string.
+            Err(_) => "<invalid proxy URL>".to_string(),
+        }
+    }
+
     fn parse_proxy_url(proxy_url: &str) -> Result<(String, u16, Option<String>)> {
         let parsed = reqwest::Url::parse(proxy_url).map_err(|e| {
             ZeptoError::Config(format!(
                 "Invalid Discord gateway proxy URL '{}': {}",
-                proxy_url, e
+                Self::sanitize_proxy_url(proxy_url),
+                e
             ))
         })?;
 
@@ -298,9 +313,18 @@ impl DiscordChannel {
     fn nono_proxy_auth_header() -> Option<String> {
         if let Ok(token) = std::env::var("NONO_PROXY_TOKEN") {
             let trimmed = token.trim();
-            if !trimmed.is_empty() {
-                return Some(format!("Proxy-Authorization: Bearer {}\r\n", trimmed));
+            if trimmed.is_empty() {
+                return None;
             }
+            // Reject tokens containing CR or LF to prevent HTTP header injection.
+            if trimmed.contains('\r') || trimmed.contains('\n') {
+                warn!(
+                    "NONO_PROXY_TOKEN contains CR or LF characters; \
+                     ignoring to prevent HTTP header injection"
+                );
+                return None;
+            }
+            return Some(format!("Proxy-Authorization: Bearer {}\r\n", trimmed));
         }
         None
     }
@@ -487,7 +511,7 @@ impl DiscordChannel {
                     "Discord gateway: proxy URL '{}' does not use http:// scheme; \
                      HTTP CONNECT tunnelling requires a plain TCP connection to the proxy. \
                      Falling back to direct WebSocket connect.",
-                    proxy_url
+                    Self::sanitize_proxy_url(&proxy_url)
                 );
             }
         }
