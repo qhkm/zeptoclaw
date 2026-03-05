@@ -262,8 +262,10 @@ impl DiscordChannel {
             None
         } else {
             use base64::Engine as _;
-            let username = parsed.username();
-            let password = parsed.password().unwrap_or("");
+            // Decode percent-encoding so that special characters (e.g. %40 → @) are
+            // transmitted correctly in the Basic auth credential string.
+            let username = Self::percent_decode(parsed.username());
+            let password = Self::percent_decode(parsed.password().unwrap_or(""));
             let creds = format!("{}:{}", username, password);
             let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
             Some(format!("Proxy-Authorization: Basic {}\r\n", encoded))
@@ -308,14 +310,41 @@ impl DiscordChannel {
         target_port: u16,
         auth_header: Option<&str>,
     ) -> String {
+        // RFC 7231 §4.3.6: IPv6 literals must be bracketed in the request-target and Host header.
+        let authority = if target_host.contains(':') {
+            format!("[{}]:{}", target_host, target_port)
+        } else {
+            format!("{}:{}", target_host, target_port)
+        };
         let mut request = format!(
-            "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nProxy-Connection: Keep-Alive\r\n"
+            "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
         );
         if let Some(auth) = auth_header {
             request.push_str(auth);
         }
         request.push_str("\r\n");
         request
+    }
+
+    /// Decodes percent-encoded bytes (e.g. `%40` → `@`) from a URL component.
+    fn percent_decode(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push(((hi << 4) | lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     fn parse_connect_response_ok(response: &[u8]) -> Result<bool> {
@@ -326,7 +355,10 @@ impl DiscordChannel {
             ))
         })?;
         let status_line = text.lines().next().unwrap_or_default();
-        if status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200") {
+        let mut parts = status_line.split_whitespace();
+        let version = parts.next().unwrap_or_default();
+        let code = parts.next().unwrap_or_default();
+        if (version == "HTTP/1.1" || version == "HTTP/1.0") && code == "200" {
             return Ok(true);
         }
         Ok(false)
@@ -350,46 +382,65 @@ impl DiscordChannel {
         if proxy_auth_header.is_none() {
             proxy_auth_header = Self::nono_proxy_auth_header();
         }
-        let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
-        let mut stream = TcpStream::connect(&proxy_addr).await.map_err(|e| {
+        let io_timeout = Duration::from_secs(15);
+        let mut stream = tokio::time::timeout(
+            io_timeout,
+            TcpStream::connect((proxy_host.as_str(), proxy_port)),
+        )
+        .await
+        .map_err(|_| ZeptoError::Channel("Timed out connecting to HTTP CONNECT proxy".to_string()))?
+        .map_err(|e| {
             ZeptoError::Channel(format!(
-                "Failed to connect to Discord HTTP CONNECT proxy '{}': {}",
-                proxy_addr, e
+                "Failed to connect to Discord HTTP CONNECT proxy '{}:{}': {}",
+                proxy_host, proxy_port, e
             ))
         })?;
 
         let connect_request =
             Self::build_connect_request(target_host, target_port, proxy_auth_header.as_deref());
-        stream
-            .write_all(connect_request.as_bytes())
+        tokio::time::timeout(io_timeout, stream.write_all(connect_request.as_bytes()))
             .await
+            .map_err(|_| ZeptoError::Channel("Timed out writing HTTP CONNECT request".to_string()))?
             .map_err(|e| {
                 ZeptoError::Channel(format!("Failed to write HTTP CONNECT request: {}", e))
             })?;
-        stream.flush().await.map_err(|e| {
-            ZeptoError::Channel(format!("Failed to flush HTTP CONNECT request: {}", e))
-        })?;
+        tokio::time::timeout(io_timeout, stream.flush())
+            .await
+            .map_err(|_| {
+                ZeptoError::Channel("Timed out flushing HTTP CONNECT request".to_string())
+            })?
+            .map_err(|e| {
+                ZeptoError::Channel(format!("Failed to flush HTTP CONNECT request: {}", e))
+            })?;
 
         let mut buf = Vec::with_capacity(1024);
         let mut chunk = [0u8; 1024];
         loop {
-            let n = stream.read(&mut chunk).await.map_err(|e| {
-                ZeptoError::Channel(format!("Failed reading HTTP CONNECT proxy response: {}", e))
-            })?;
+            let n = tokio::time::timeout(io_timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| {
+                    ZeptoError::Channel("Timed out reading HTTP CONNECT proxy response".to_string())
+                })?
+                .map_err(|e| {
+                    ZeptoError::Channel(format!(
+                        "Failed reading HTTP CONNECT proxy response: {}",
+                        e
+                    ))
+                })?;
             if n == 0 {
                 return Err(ZeptoError::Channel(
                     "HTTP CONNECT proxy closed before sending response headers".to_string(),
                 ));
             }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-            if buf.len() > MAX_PROXY_CONNECT_RESPONSE_BYTES {
+            if buf.len() + n > MAX_PROXY_CONNECT_RESPONSE_BYTES {
                 return Err(ZeptoError::Channel(format!(
                     "HTTP CONNECT proxy response too large (>{} bytes)",
                     MAX_PROXY_CONNECT_RESPONSE_BYTES
                 )));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
             }
         }
 
@@ -408,16 +459,37 @@ impl DiscordChannel {
                 ws_url, e
             ))
         })?;
-        let (ws_stream, _) = client_async_tls(request, stream)
+        let tls_timeout = Duration::from_secs(30);
+        let (ws_stream, _) = tokio::time::timeout(tls_timeout, client_async_tls(request, stream))
             .await
+            .map_err(|_| {
+                ZeptoError::Channel(
+                    "Timed out during TLS/WebSocket handshake over proxy tunnel".to_string(),
+                )
+            })?
             .map_err(|e| ZeptoError::Channel(format!("Discord WebSocket connect failed: {}", e)))?;
         Ok(ws_stream)
     }
 
     async fn connect_gateway(ws_url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         if let Some(proxy_url) = Self::gateway_proxy_from_env(ws_url) {
-            info!("Discord gateway connecting via HTTP CONNECT proxy from env");
-            return Self::connect_via_http_proxy(ws_url, &proxy_url).await;
+            let scheme = reqwest::Url::parse(&proxy_url)
+                .ok()
+                .map(|u| u.scheme().to_string());
+            if scheme.as_deref() == Some("http") {
+                info!("Discord gateway connecting via HTTP CONNECT proxy from env");
+                return Self::connect_via_http_proxy(ws_url, &proxy_url).await;
+            } else {
+                // CONNECT tunnelling requires a plain-TCP connection to the proxy; an
+                // https:// proxy URL would require a nested TLS session which is not
+                // supported.  Fall through to a direct connect and warn the operator.
+                warn!(
+                    "Discord gateway: proxy URL '{}' does not use http:// scheme; \
+                     HTTP CONNECT tunnelling requires a plain TCP connection to the proxy. \
+                     Falling back to direct WebSocket connect.",
+                    proxy_url
+                );
+            }
         }
 
         let (ws_stream, _) = connect_async(ws_url)
@@ -1600,6 +1672,53 @@ mod tests {
         let resp = b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n";
         let ok = DiscordChannel::parse_connect_response_ok(resp).expect("parse should succeed");
         assert!(!ok);
+    }
+
+    #[test]
+    fn test_parse_connect_response_rejects_2000() {
+        // "HTTP/1.1 200" prefix match would incorrectly accept "2000"; exact token check must not.
+        let resp = b"HTTP/1.1 2000 OK\r\n\r\n";
+        let ok = DiscordChannel::parse_connect_response_ok(resp).expect("parse should succeed");
+        assert!(!ok, "status code 2000 must not be accepted as a 200");
+    }
+
+    #[test]
+    fn test_build_connect_request_ipv6_brackets() {
+        let req = DiscordChannel::build_connect_request("::1", 443, None);
+        assert!(
+            req.starts_with("CONNECT [::1]:443 HTTP/1.1"),
+            "IPv6 literal must be bracketed in CONNECT request-target: {}",
+            req.lines().next().unwrap_or_default()
+        );
+        assert!(
+            req.contains("Host: [::1]:443"),
+            "Host header must also bracket IPv6"
+        );
+    }
+
+    #[test]
+    fn test_build_connect_request_ipv4_no_brackets() {
+        let req = DiscordChannel::build_connect_request("127.0.0.1", 80, None);
+        assert!(req.starts_with("CONNECT 127.0.0.1:80 HTTP/1.1"));
+    }
+
+    #[test]
+    fn test_parse_proxy_url_percent_encoded_credentials() {
+        // %40 = '@', %3A = ':'
+        let (_, _, auth) =
+            DiscordChannel::parse_proxy_url("http://user%40corp:p%40ss@127.0.0.1:3128")
+                .expect("should parse");
+        let auth_line = auth.expect("auth header expected");
+        // Decode the Base64 payload and verify the raw credentials are correct.
+        use base64::Engine as _;
+        let b64 = auth_line
+            .trim_start_matches("Proxy-Authorization: Basic ")
+            .trim_end_matches("\r\n");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("valid base64");
+        let creds = String::from_utf8(decoded).expect("valid utf8");
+        assert_eq!(creds, "user@corp:p@ss");
     }
 
     // -----------------------------------------------------------------------
