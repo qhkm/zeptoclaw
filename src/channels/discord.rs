@@ -305,11 +305,12 @@ impl DiscordChannel {
                 if trimmed.is_empty() {
                     continue;
                 }
-                // Only return URLs with a parseable http or https scheme; skip
-                // entries like "socks5://..." or malformed values and try the
-                // next candidate instead of surfacing them to the caller.
+                // Only return URLs whose scheme is "http": HTTP CONNECT
+                // tunnelling requires a plain TCP connection to the proxy, so
+                // https:// entries are skipped and the next candidate is tried.
+                // Malformed or unsupported-scheme values are also skipped.
                 match reqwest::Url::parse(trimmed) {
-                    Ok(u) if matches!(u.scheme(), "http" | "https") => {
+                    Ok(u) if u.scheme() == "http" => {
                         return Some(trimmed.to_string());
                     }
                     _ => continue,
@@ -505,24 +506,11 @@ impl DiscordChannel {
     }
 
     async fn connect_gateway(ws_url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        // gateway_proxy_from_env only returns http:// proxy URLs, so we can use
+        // the result directly for HTTP CONNECT tunnelling.
         if let Some(proxy_url) = Self::gateway_proxy_from_env(ws_url) {
-            let scheme = reqwest::Url::parse(&proxy_url)
-                .ok()
-                .map(|u| u.scheme().to_string());
-            if scheme.as_deref() == Some("http") {
-                info!("Discord gateway connecting via HTTP CONNECT proxy from env");
-                return Self::connect_via_http_proxy(ws_url, &proxy_url).await;
-            } else {
-                // CONNECT tunnelling requires a plain-TCP connection to the proxy; an
-                // https:// proxy URL would require a nested TLS session which is not
-                // supported.  Fall through to a direct connect and warn the operator.
-                warn!(
-                    "Discord gateway: proxy URL '{}' does not use http:// scheme; \
-                     HTTP CONNECT tunnelling requires a plain TCP connection to the proxy. \
-                     Falling back to direct WebSocket connect.",
-                    Self::sanitize_proxy_url(&proxy_url)
-                );
-            }
+            info!("Discord gateway connecting via HTTP CONNECT proxy from env");
+            return Self::connect_via_http_proxy(ws_url, &proxy_url).await;
         }
 
         let (ws_stream, _) = connect_async(ws_url)
@@ -1752,6 +1740,49 @@ mod tests {
             .expect("valid base64");
         let creds = String::from_utf8(decoded).expect("valid utf8");
         assert_eq!(creds, "user@corp:p@ss");
+    }
+
+    #[test]
+    fn test_gateway_proxy_env_candidate_fallback() {
+        // When HTTPS_PROXY holds an https:// URL (unusable for CONNECT) and
+        // HTTP_PROXY holds a valid http:// URL, gateway_proxy_from_env must
+        // skip the https entry and return the http one.
+        //
+        // Note: std::env::set_var is inherently not thread-safe; this test
+        // must not run concurrently with other tests that touch the same vars.
+        let https_key = "HTTPS_PROXY";
+        let http_key = "HTTP_PROXY";
+        // Save any pre-existing values so we can restore them afterwards.
+        let saved_https = std::env::var(https_key).ok();
+        let saved_http = std::env::var(http_key).ok();
+
+        unsafe {
+            std::env::set_var(https_key, "https://proxy.example.com:3128");
+            std::env::set_var(http_key, "http://proxy.example.com:3128");
+        }
+
+        // Discord gateway uses wss://, so HTTPS_PROXY is tried first.
+        let result =
+            DiscordChannel::gateway_proxy_from_env("wss://gateway.discord.gg/?v=10&encoding=json");
+
+        // Restore env before asserting (ensures cleanup even on panic via
+        // the assert macro, which unwinds through this scope).
+        unsafe {
+            match &saved_https {
+                Some(v) => std::env::set_var(https_key, v),
+                None => std::env::remove_var(https_key),
+            }
+            match &saved_http {
+                Some(v) => std::env::set_var(http_key, v),
+                None => std::env::remove_var(http_key),
+            }
+        }
+
+        assert_eq!(
+            result.as_deref(),
+            Some("http://proxy.example.com:3128"),
+            "https:// HTTPS_PROXY must be skipped; http:// HTTP_PROXY must be returned"
+        );
     }
 
     // -----------------------------------------------------------------------
