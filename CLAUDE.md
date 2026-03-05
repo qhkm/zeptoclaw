@@ -407,7 +407,7 @@ Containerized agent proxy for full request isolation:
 ### Providers (`src/providers/`)
 LLM provider abstraction via `LLMProvider` trait:
 - `ClaudeProvider` - Anthropic Claude API (120s timeout, SSE streaming)
-- `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot, Azure OpenAI, Amazon Bedrock, xAI/Grok, Baidu Qianfan); custom auth header via `auth_key_header` field; API version query param via `api_version` field
+- `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot, Azure OpenAI, Amazon Bedrock, xAI/Grok, Baidu Qianfan); custom auth header via `auth_header` config field; API version query param via `api_version` field
 - `RetryProvider` - Decorator: exponential backoff on 429/5xx with structured `ProviderError` classification
 - `FallbackProvider` - Decorator: primary → secondary auto-failover with circuit breaker (Closed/Open/HalfOpen)
 - `QuotaProvider` - Decorator: wraps each provider to enforce configurable cost/token quotas; action can reject, failover (triggers FallbackProvider), or warn
