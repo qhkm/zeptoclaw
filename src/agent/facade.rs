@@ -239,7 +239,7 @@ impl ZeptoAgent {
 
 /// Builder for `ZeptoAgent`.
 pub struct ZeptoAgentBuilder {
-    provider: Option<Box<dyn LLMProvider>>,
+    provider: Option<Arc<dyn LLMProvider>>,
     tools: Vec<Box<dyn Tool>>,
     system_prompt: Option<String>,
     max_iterations: usize,
@@ -260,7 +260,13 @@ impl ZeptoAgentBuilder {
 
     /// Set the LLM provider (required).
     pub fn provider(mut self, provider: impl LLMProvider + 'static) -> Self {
-        self.provider = Some(Box::new(provider));
+        self.provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set the LLM provider from a pre-existing `Arc` (for shared providers).
+    pub fn provider_arc(mut self, provider: Arc<dyn LLMProvider>) -> Self {
+        self.provider = Some(provider);
         self
     }
 
@@ -309,7 +315,7 @@ impl ZeptoAgentBuilder {
             .unwrap_or_else(|| "You are a helpful AI assistant.".into());
 
         Ok(ZeptoAgent {
-            provider: Arc::from(provider),
+            provider,
             tools: self.tools,
             system_prompt,
             max_iterations: self.max_iterations,
