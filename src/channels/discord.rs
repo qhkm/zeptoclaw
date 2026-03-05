@@ -302,8 +302,17 @@ impl DiscordChannel {
         for key in candidates {
             if let Ok(value) = std::env::var(key) {
                 let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Only return URLs with a parseable http or https scheme; skip
+                // entries like "socks5://..." or malformed values and try the
+                // next candidate instead of surfacing them to the caller.
+                match reqwest::Url::parse(trimmed) {
+                    Ok(u) if matches!(u.scheme(), "http" | "https") => {
+                        return Some(trimmed.to_string());
+                    }
+                    _ => continue,
                 }
             }
         }
