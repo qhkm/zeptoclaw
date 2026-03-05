@@ -1,19 +1,10 @@
 //! Security-gated tool execution for ZeptoKernel.
 //!
 //! `execute_tool()` wraps core execution (safety check + lookup + run + metrics)
-//! and is the **only** path that enforces taint tracking. Currently called from:
+//! and is the shared path that enforces taint tracking. Called from:
 //!
 //! - `mcp_server/handler.rs` — MCP server `tools/call` requests (external clients)
-//!
-//! **Not yet called from:**
-//!
-//! - `agent/loop.rs` — The main agent loop calls `ToolRegistry::execute_with_context`
-//!   directly, bypassing taint checks. This is acceptable for the initial release
-//!   because agent loop tool calls are LLM-generated (trusted path), while MCP
-//!   server mode serves untrusted external clients.
-//!
-//! **TODO:** Converge the agent loop onto `kernel::execute_tool` as part of the
-//! thin-kernel plan so that taint tracking applies uniformly.
+//! - `agent/loop.rs` — Main agent loop tool execution (LLM-generated calls)
 //!
 //! The agent loop's per-session gates (hooks, approval, dry-run, streaming feedback)
 //! stay in `agent/loop.rs` as a wrapper around this.
@@ -24,6 +15,7 @@ use std::time::Instant;
 
 use crate::error::Result;
 use crate::safety::taint::TaintEngine;
+use crate::safety::CheckDirection;
 use crate::safety::SafetyLayer;
 use crate::tools::{ToolContext, ToolOutput, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
@@ -54,7 +46,7 @@ pub async fn execute_tool(
     // Step 1: Safety check on input
     if let Some(safety_layer) = safety {
         let input_str = serde_json::to_string(&input).unwrap_or_default();
-        let result = safety_layer.check_tool_output(&input_str);
+        let result = safety_layer.scan(&input_str, CheckDirection::Input);
         if result.blocked {
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(ToolOutput::error(format!(
@@ -89,7 +81,7 @@ pub async fn execute_tool(
 
     // Step 4: Safety check on output
     if let Some(safety_layer) = safety {
-        let result = safety_layer.check_tool_output(&output.for_llm);
+        let result = safety_layer.scan(&output.for_llm, CheckDirection::Output);
         if result.blocked {
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(ToolOutput::error(format!(
