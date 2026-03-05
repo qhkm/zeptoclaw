@@ -5,6 +5,12 @@
 mod cli;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    cli::run().await
+async fn main() {
+    match cli::run().await {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    }
 }

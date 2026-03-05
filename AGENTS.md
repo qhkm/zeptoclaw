@@ -20,6 +20,7 @@ Project-level guidance for coding agents working in this repository.
 - Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
+- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
@@ -30,12 +31,14 @@ Project-level guidance for coding agents working in this repository.
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
+- Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
-- Tests: 2635 lib + 97 main + 23 cli_smoke + 13 e2e + 70 integration + 121 doc (27 ignored)
+- Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
+- Tests: 2956 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 126 doc (27 ignored)
 
 ## Task Tracking Protocol
 

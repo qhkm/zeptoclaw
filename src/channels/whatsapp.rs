@@ -20,7 +20,7 @@
 //! ```
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -496,16 +496,23 @@ impl Channel for WhatsAppChannel {
         let allow_from = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
         tokio::spawn(async move {
-            Self::run_bridge_loop(
-                bridge_url,
-                bridge_token,
-                bus,
-                allow_from,
-                deny_by_default,
-                shutdown_rx,
-                outbound_rx,
-            )
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                Self::run_bridge_loop(
+                    bridge_url,
+                    bridge_token,
+                    bus,
+                    allow_from,
+                    deny_by_default,
+                    shutdown_rx,
+                    outbound_rx,
+                )
+                .await;
+            })
+            .catch_unwind()
             .await;
+            if task_result.is_err() {
+                error!("WhatsApp bridge task panicked");
+            }
             running_clone.store(false, Ordering::SeqCst);
         });
 

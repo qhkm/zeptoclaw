@@ -24,7 +24,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2680, main: 97, cli_smoke: 23, e2e: 13, integration: 70, doc: 121 passed (27 ignored)
+# lib: 2956, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 126 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -220,7 +220,7 @@ cargo fmt && cargo clippy -- -D warnings && cargo test --lib && cargo fmt -- --c
 
 ```
 src/
-├── agent/          # Agent loop, context builder, token budget, context compaction
+├── agent/          # Agent loop, context builder, token budget, context compaction, per-tool timeout/panic isolation
 ├── api/            # Panel API server (axum)
 │   ├── auth.rs         # Token generation, JWT, bcrypt password hashing
 │   ├── config.rs       # PanelConfig with AuthMode enum
@@ -240,7 +240,7 @@ src/
 │   └── tasks.rs        # KanbanTask model + TaskStore persistence
 ├── auth/           # OAuth (PKCE), token refresh, encrypted token store
 ├── bus/            # Async message bus (pub/sub)
-├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.)
+├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.) with spawned-task panic isolation
 │   ├── factory.rs  # Channel factory/registry
 │   ├── manager.rs  # Channel lifecycle management
 │   ├── model_switch.rs # /model command parsing + model registry + persistence

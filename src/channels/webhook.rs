@@ -48,6 +48,7 @@
 //! ```
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -506,32 +507,46 @@ impl Channel for WebhookChannel {
         let running = Arc::clone(&self.running);
 
         tokio::spawn(async move {
-            // Convert the oneshot into a future we can select against
-            let mut shutdown_rx = shutdown_rx;
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                // Convert the oneshot into a future we can select against
+                let mut shutdown_rx = shutdown_rx;
 
-            loop {
-                tokio::select! {
-                    accept_result = listener.accept() => {
-                        match accept_result {
-                            Ok((stream, addr)) => {
-                                debug!("Webhook: accepted connection from {}", addr);
-                                let cfg = config.clone();
-                                let bc = base_config.clone();
-                                let bus_ref = Arc::clone(&bus);
-                                tokio::spawn(async move {
-                                    Self::handle_connection(stream, &cfg, &bc, &bus_ref).await;
-                                });
-                            }
-                            Err(e) => {
-                                warn!("Webhook: failed to accept connection: {}", e);
+                loop {
+                    tokio::select! {
+                        accept_result = listener.accept() => {
+                            match accept_result {
+                                Ok((stream, addr)) => {
+                                    debug!("Webhook: accepted connection from {}", addr);
+                                    let cfg = config.clone();
+                                    let bc = base_config.clone();
+                                    let bus_ref = Arc::clone(&bus);
+                                    tokio::spawn(async move {
+                                        let conn_result = std::panic::AssertUnwindSafe(async move {
+                                            Self::handle_connection(stream, &cfg, &bc, &bus_ref).await;
+                                        })
+                                        .catch_unwind()
+                                        .await;
+                                        if conn_result.is_err() {
+                                            error!("Webhook connection handler panicked");
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("Webhook: failed to accept connection: {}", e);
+                                }
                             }
                         }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("Webhook channel shutdown signal received");
-                        break;
+                        _ = &mut shutdown_rx => {
+                            info!("Webhook channel shutdown signal received");
+                            break;
+                        }
                     }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if task_result.is_err() {
+                error!("Webhook listener task panicked");
             }
 
             running.store(false, Ordering::SeqCst);

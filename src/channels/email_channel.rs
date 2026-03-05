@@ -23,6 +23,8 @@
 //! ```
 
 #[cfg(feature = "channel-email")]
+use futures::FutureExt;
+#[cfg(feature = "channel-email")]
 use tracing::{error, info, warn};
 
 use async_trait::async_trait;
@@ -406,26 +408,35 @@ impl Channel for EmailChannel {
             let this_running = Arc::clone(&self.running);
 
             tokio::spawn(async move {
-                let channel = EmailChannel {
-                    config,
-                    base_config: BaseChannelConfig::new("email"),
-                    bus,
-                    running: Arc::clone(&this_running),
-                    seen_ids,
-                };
+                let task_result = std::panic::AssertUnwindSafe(async move {
+                    let channel = EmailChannel {
+                        config,
+                        base_config: BaseChannelConfig::new("email"),
+                        bus,
+                        running: Arc::clone(&this_running),
+                        seen_ids,
+                    };
 
-                let mut backoff = std::time::Duration::from_secs(1);
-                let max_backoff = std::time::Duration::from_secs(60);
+                    let mut backoff = std::time::Duration::from_secs(1);
+                    let max_backoff = std::time::Duration::from_secs(60);
 
-                while this_running.load(Ordering::SeqCst) {
-                    match channel.run_idle_session().await {
-                        Ok(()) => break,
-                        Err(e) => {
-                            error!("Email IMAP session error: {e}. Reconnecting in {backoff:?}…");
-                            tokio::time::sleep(backoff).await;
-                            backoff = std::cmp::min(backoff * 2, max_backoff);
+                    while this_running.load(Ordering::SeqCst) {
+                        match channel.run_idle_session().await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                error!(
+                                    "Email IMAP session error: {e}. Reconnecting in {backoff:?}…"
+                                );
+                                tokio::time::sleep(backoff).await;
+                                backoff = std::cmp::min(backoff * 2, max_backoff);
+                            }
                         }
                     }
+                })
+                .catch_unwind()
+                .await;
+                if task_result.is_err() {
+                    error!("Email channel task panicked");
                 }
 
                 this_running.store(false, Ordering::SeqCst);

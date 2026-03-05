@@ -39,6 +39,7 @@ mod inner {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use futures::FutureExt;
     use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
     use serde::{Deserialize, Serialize};
     use tracing::{debug, error, info, warn};
@@ -167,102 +168,113 @@ mod inner {
             let deny_by_default = self.config.deny_by_default;
 
             tokio::spawn(async move {
-                loop {
-                    let event = tokio::select! {
-                        event = eventloop.poll() => event,
-                        _ = &mut shutdown_rx => {
-                            info!("MQTT channel shutdown signal received");
-                            break;
-                        }
-                    };
+                let task_result = std::panic::AssertUnwindSafe(async move {
+                    loop {
+                        let event = tokio::select! {
+                            event = eventloop.poll() => event,
+                            _ = &mut shutdown_rx => {
+                                info!("MQTT channel shutdown signal received");
+                                break;
+                            }
+                        };
 
-                    match event {
-                        Ok(Event::Incoming(Packet::Publish(publish))) => {
-                            let topic = publish.topic.clone();
-                            let payload = match std::str::from_utf8(&publish.payload) {
-                                Ok(s) => s.to_string(),
-                                Err(e) => {
-                                    warn!("MQTT: invalid UTF-8 payload on {}: {}", topic, e);
+                        match event {
+                            Ok(Event::Incoming(Packet::Publish(publish))) => {
+                                let topic = publish.topic.clone();
+                                let payload = match std::str::from_utf8(&publish.payload) {
+                                    Ok(s) => s.to_string(),
+                                    Err(e) => {
+                                        warn!("MQTT: invalid UTF-8 payload on {}: {}", topic, e);
+                                        continue;
+                                    }
+                                };
+
+                                let trimmed = payload.trim();
+                                if trimmed.is_empty() {
                                     continue;
                                 }
-                            };
 
-                            let trimmed = payload.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
+                                let inbound: MqttInbound = match serde_json::from_str(trimmed) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        warn!(
+                                            "MQTT: failed to parse JSON from {}: {} — {:?}",
+                                            topic, e, trimmed
+                                        );
+                                        continue;
+                                    }
+                                };
 
-                            let inbound: MqttInbound = match serde_json::from_str(trimmed) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    warn!(
-                                        "MQTT: failed to parse JSON from {}: {} — {:?}",
-                                        topic, e, trimmed
+                                if inbound.msg_type != "message" {
+                                    debug!(
+                                        "MQTT: ignoring non-message type '{}'",
+                                        inbound.msg_type
                                     );
                                     continue;
                                 }
-                            };
 
-                            if inbound.msg_type != "message" {
-                                debug!("MQTT: ignoring non-message type '{}'", inbound.msg_type);
-                                continue;
-                            }
+                                // Derive sender from topic (authoritative identity boundary).
+                                let sender = match extract_device_id(&topic)
+                                    .filter(|id| !id.is_empty())
+                                {
+                                    Some(device_id) => device_id.to_string(),
+                                    None => {
+                                        warn!("MQTT: cannot derive sender from topic '{}'", topic);
+                                        continue;
+                                    }
+                                };
 
-                            // Derive sender from topic (authoritative identity boundary).
-                            let sender = match extract_device_id(&topic).filter(|id| !id.is_empty())
-                            {
-                                Some(device_id) => device_id.to_string(),
-                                None => {
-                                    warn!("MQTT: cannot derive sender from topic '{}'", topic);
+                                // Payload sender must match topic-derived sender if present.
+                                if !inbound.sender.is_empty() && inbound.sender != sender {
+                                    warn!(
+                                        "MQTT: sender mismatch (payload='{}', topic='{}')",
+                                        inbound.sender, sender
+                                    );
                                     continue;
                                 }
-                            };
 
-                            // Payload sender must match topic-derived sender if present.
-                            if !inbound.sender.is_empty() && inbound.sender != sender {
-                                warn!(
-                                    "MQTT: sender mismatch (payload='{}', topic='{}')",
-                                    inbound.sender, sender
+                                // Access control check.
+                                let allowed = if allow_from.is_empty() {
+                                    !deny_by_default
+                                } else {
+                                    allow_from.contains(&sender)
+                                };
+
+                                if !allowed {
+                                    warn!("MQTT: message from '{}' denied by allowlist", sender);
+                                    continue;
+                                }
+
+                                // Use publish_prefix/sender as chat_id for response routing.
+                                let chat_id = format!("{}/{}", publish_prefix, sender);
+                                let msg = InboundMessage::new(
+                                    &channel_name,
+                                    &sender,
+                                    &chat_id,
+                                    &inbound.text,
                                 );
-                                continue;
+
+                                if let Err(e) = bus.publish_inbound(msg).await {
+                                    error!("MQTT: failed to publish inbound message: {}", e);
+                                }
                             }
-
-                            // Access control check.
-                            let allowed = if allow_from.is_empty() {
-                                !deny_by_default
-                            } else {
-                                allow_from.contains(&sender)
-                            };
-
-                            if !allowed {
-                                warn!("MQTT: message from '{}' denied by allowlist", sender);
-                                continue;
+                            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                                info!("MQTT: connected to broker");
                             }
-
-                            // Use publish_prefix/sender as chat_id for response routing.
-                            let chat_id = format!("{}/{}", publish_prefix, sender);
-                            let msg = InboundMessage::new(
-                                &channel_name,
-                                &sender,
-                                &chat_id,
-                                &inbound.text,
-                            );
-
-                            if let Err(e) = bus.publish_inbound(msg).await {
-                                error!("MQTT: failed to publish inbound message: {}", e);
+                            Ok(_) => {
+                                // Other events (PingResp, SubAck, etc.) — ignore.
                             }
-                        }
-                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                            info!("MQTT: connected to broker");
-                        }
-                        Ok(_) => {
-                            // Other events (PingResp, SubAck, etc.) — ignore.
-                        }
-                        Err(e) => {
-                            error!("MQTT connection error: {}", e);
-                            // rumqttc auto-reconnects, so we continue the loop.
+                            Err(e) => {
+                                error!("MQTT connection error: {}", e);
+                                // rumqttc auto-reconnects, so we continue the loop.
+                            }
                         }
                     }
+                })
+                .catch_unwind()
+                .await;
+                if task_result.is_err() {
+                    error!("MQTT event loop task panicked");
                 }
 
                 running.store(false, Ordering::SeqCst);

@@ -15,7 +15,7 @@
 //! 7. Reconnect with exponential backoff on disconnection.
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -977,26 +977,33 @@ impl DiscordChannel {
             tokio::spawn({
                 let mut shutdown = heartbeat_shutdown;
                 async move {
-                    let interval = Duration::from_millis(heartbeat_interval);
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.changed() => {
-                                debug!("Discord heartbeat task shutting down");
-                                return;
-                            }
-                            _ = tokio::time::sleep(interval) => {
-                                let s = if seq_valid_clone.load(Ordering::SeqCst) {
-                                    Some(seq_clone.load(Ordering::SeqCst))
-                                } else {
-                                    None
-                                };
-                                let payload = Self::build_heartbeat_payload(s);
-                                if heartbeat_tx.send(payload).await.is_err() {
-                                    debug!("Discord heartbeat channel closed");
+                    let task_result = std::panic::AssertUnwindSafe(async move {
+                        let interval = Duration::from_millis(heartbeat_interval);
+                        loop {
+                            tokio::select! {
+                                _ = shutdown.changed() => {
+                                    debug!("Discord heartbeat task shutting down");
                                     return;
+                                }
+                                _ = tokio::time::sleep(interval) => {
+                                    let s = if seq_valid_clone.load(Ordering::SeqCst) {
+                                        Some(seq_clone.load(Ordering::SeqCst))
+                                    } else {
+                                        None
+                                    };
+                                    let payload = Self::build_heartbeat_payload(s);
+                                    if heartbeat_tx.send(payload).await.is_err() {
+                                        debug!("Discord heartbeat channel closed");
+                                        return;
+                                    }
                                 }
                             }
                         }
+                    })
+                    .catch_unwind()
+                    .await;
+                    if task_result.is_err() {
+                        error!("Discord heartbeat task panicked");
                     }
                 }
             });
@@ -1199,15 +1206,22 @@ impl Channel for DiscordChannel {
         let allow_from = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
         tokio::spawn(async move {
-            Self::run_gateway_loop(
-                http_client,
-                token,
-                bus,
-                allow_from,
-                deny_by_default,
-                shutdown_rx,
-            )
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                Self::run_gateway_loop(
+                    http_client,
+                    token,
+                    bus,
+                    allow_from,
+                    deny_by_default,
+                    shutdown_rx,
+                )
+                .await;
+            })
+            .catch_unwind()
             .await;
+            if task_result.is_err() {
+                error!("Discord gateway task panicked");
+            }
             running_clone.store(false, Ordering::SeqCst);
         });
 

@@ -13,6 +13,7 @@
 //! Sends replies via `https://graph.facebook.com/v18.0/{phone_number_id}/messages`
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -685,33 +686,47 @@ impl Channel for WhatsAppCloudChannel {
         let http_client = self.client.clone();
 
         tokio::spawn(async move {
-            let mut shutdown_rx = shutdown_rx;
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                let mut shutdown_rx = shutdown_rx;
 
-            loop {
-                tokio::select! {
-                    accept_result = listener.accept() => {
-                        match accept_result {
-                            Ok((stream, addr)) => {
-                                debug!("WhatsApp Cloud: accepted connection from {}", addr);
-                                let cfg = config.clone();
-                                let bc = base_config.clone();
-                                let bus_ref = Arc::clone(&bus);
-                                let tx = transcriber.clone();
-                                let cl = http_client.clone();
-                                tokio::spawn(async move {
-                                    Self::handle_connection(stream, &cfg, &bc, &bus_ref, tx.as_deref(), &cl).await;
-                                });
-                            }
-                            Err(e) => {
-                                warn!("WhatsApp Cloud: failed to accept connection: {}", e);
+                loop {
+                    tokio::select! {
+                        accept_result = listener.accept() => {
+                            match accept_result {
+                                Ok((stream, addr)) => {
+                                    debug!("WhatsApp Cloud: accepted connection from {}", addr);
+                                    let cfg = config.clone();
+                                    let bc = base_config.clone();
+                                    let bus_ref = Arc::clone(&bus);
+                                    let tx = transcriber.clone();
+                                    let cl = http_client.clone();
+                                    tokio::spawn(async move {
+                                        let conn_result = std::panic::AssertUnwindSafe(async move {
+                                            Self::handle_connection(stream, &cfg, &bc, &bus_ref, tx.as_deref(), &cl).await;
+                                        })
+                                        .catch_unwind()
+                                        .await;
+                                        if conn_result.is_err() {
+                                            error!("WhatsApp Cloud connection handler panicked");
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("WhatsApp Cloud: failed to accept connection: {}", e);
+                                }
                             }
                         }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("WhatsApp Cloud channel shutdown signal received");
-                        break;
+                        _ = &mut shutdown_rx => {
+                            info!("WhatsApp Cloud channel shutdown signal received");
+                            break;
+                        }
                     }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if task_result.is_err() {
+                error!("WhatsApp Cloud listener task panicked");
             }
 
             running.store(false, Ordering::SeqCst);

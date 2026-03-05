@@ -24,7 +24,7 @@
 //! any connection failure or heartbeat timeout.
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -904,46 +904,53 @@ impl LarkChannel {
                         let app_secret = self.config.app_secret.clone();
                         let msg_id = message_id.clone();
                         let _reaction = tokio::spawn(async move {
-                            match fetch_tenant_token_cached(
-                                api_base_str,
-                                &app_id,
-                                &app_secret,
-                                &token_cache,
-                            )
-                            .await
-                            {
-                                Ok(token) => {
-                                    let url = format!(
-                                        "{}/im/v1/messages/{}/reactions",
-                                        api_base_str, msg_id
-                                    );
-                                    match reqwest::Client::builder()
-                                        .timeout(Duration::from_secs(30))
-                                        .build()
-                                        .unwrap_or_default()
-                                        .post(&url)
-                                        .bearer_auth(&token)
-                                        .json(&serde_json::json!({
-                                            "reaction_type": { "emoji_type": "OK" }
-                                        }))
-                                        .send()
-                                        .await
-                                    {
-                                        Ok(resp) if resp.status().is_success() => {
-                                            debug!("Lark: reaction ack sent for {msg_id}");
-                                        }
-                                        Ok(resp) => {
-                                            let body = resp.text().await.unwrap_or_default();
-                                            warn!("Failed to send Lark reaction: {body}");
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to send Lark reaction: {e}");
+                            let reaction_result = std::panic::AssertUnwindSafe(async move {
+                                match fetch_tenant_token_cached(
+                                    api_base_str,
+                                    &app_id,
+                                    &app_secret,
+                                    &token_cache,
+                                )
+                                .await
+                                {
+                                    Ok(token) => {
+                                        let url = format!(
+                                            "{}/im/v1/messages/{}/reactions",
+                                            api_base_str, msg_id
+                                        );
+                                        match reqwest::Client::builder()
+                                            .timeout(Duration::from_secs(30))
+                                            .build()
+                                            .unwrap_or_default()
+                                            .post(&url)
+                                            .bearer_auth(&token)
+                                            .json(&serde_json::json!({
+                                                "reaction_type": { "emoji_type": "OK" }
+                                            }))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                debug!("Lark: reaction ack sent for {msg_id}");
+                                            }
+                                            Ok(resp) => {
+                                                let body = resp.text().await.unwrap_or_default();
+                                                warn!("Failed to send Lark reaction: {body}");
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to send Lark reaction: {e}");
+                                            }
                                         }
                                     }
+                                    Err(e) => {
+                                        warn!("Failed to send Lark reaction (token error): {e}");
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to send Lark reaction (token error): {e}");
-                                }
+                            })
+                            .catch_unwind()
+                            .await;
+                            if reaction_result.is_err() {
+                                error!("Lark reaction task panicked");
                             }
                         });
                     }
@@ -1006,40 +1013,47 @@ impl Channel for LarkChannel {
         // Spawn the reconnect loop as a background task
         let running_clone = Arc::clone(&running);
         tokio::spawn(async move {
-            // Build a temporary channel clone for the async task
-            let base_config = BaseChannelConfig {
-                name: if config.feishu {
-                    "feishu".to_string()
-                } else {
-                    "lark".to_string()
-                },
-                allowlist: config.allowed_senders.clone(),
-                deny_by_default: config.deny_by_default,
-            };
-            let ch = LarkChannel {
-                config,
-                base_config,
-                bus,
-                running: Arc::clone(&running),
-                tenant_token,
-                ws_seen_ids,
-            };
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                // Build a temporary channel clone for the async task
+                let base_config = BaseChannelConfig {
+                    name: if config.feishu {
+                        "feishu".to_string()
+                    } else {
+                        "lark".to_string()
+                    },
+                    allowlist: config.allowed_senders.clone(),
+                    deny_by_default: config.deny_by_default,
+                };
+                let ch = LarkChannel {
+                    config,
+                    base_config,
+                    bus,
+                    running: Arc::clone(&running),
+                    tenant_token,
+                    ws_seen_ids,
+                };
 
-            let mut delay_secs = BASE_RECONNECT_DELAY_SECS;
+                let mut delay_secs = BASE_RECONNECT_DELAY_SECS;
 
-            while running.load(Ordering::SeqCst) {
-                match ch.listen_ws_once().await {
-                    Ok(()) => {
-                        // clean disconnect — reset backoff
-                        delay_secs = BASE_RECONNECT_DELAY_SECS;
-                    }
-                    Err(e) => {
-                        error!("Lark WS error: {e}");
-                        warn!("Lark: reconnecting in {delay_secs}s");
-                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                        delay_secs = (delay_secs * 2).min(MAX_RECONNECT_DELAY_SECS);
+                while running.load(Ordering::SeqCst) {
+                    match ch.listen_ws_once().await {
+                        Ok(()) => {
+                            // clean disconnect — reset backoff
+                            delay_secs = BASE_RECONNECT_DELAY_SECS;
+                        }
+                        Err(e) => {
+                            error!("Lark WS error: {e}");
+                            warn!("Lark: reconnecting in {delay_secs}s");
+                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                            delay_secs = (delay_secs * 2).min(MAX_RECONNECT_DELAY_SECS);
+                        }
                     }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if task_result.is_err() {
+                error!("Lark channel task panicked");
             }
             running_clone.store(false, Ordering::SeqCst);
             info!("Lark channel stopped");

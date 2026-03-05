@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use futures::FutureExt;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
@@ -1049,6 +1050,12 @@ impl AgentLoop {
 
             let run_sequential =
                 needs_sequential_execution(&self.tools, &response.tool_calls).await;
+            let tool_timeout_secs = if self.config.agents.defaults.tool_timeout_secs > 0 {
+                self.config.agents.defaults.tool_timeout_secs
+            } else {
+                self.config.agents.defaults.agent_timeout_secs
+            };
+            let tool_timeout = std::time::Duration::from_secs(tool_timeout_secs.max(1));
 
             // Clone inbound metadata for routing propagation in tool `for_user` messages.
             let inbound_metadata = msg.metadata.clone();
@@ -1155,9 +1162,9 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
-                        let (result, success, tool_output) = {
+                        let execution = std::panic::AssertUnwindSafe(async {
                             let tools_guard = tools.read().await;
-                            match crate::kernel::execute_tool(
+                            crate::kernel::execute_tool(
                                 &tools_guard,
                                 &name,
                                 args,
@@ -1167,15 +1174,24 @@ impl AgentLoop {
                                 taint.as_ref().map(|t| t.as_ref()),
                             )
                             .await
-                            {
-                                Ok(output) => {
-                                    let success = !output.is_error;
-                                    let for_llm = output.for_llm.clone();
-                                    (for_llm, success, Some(output))
-                                }
-                                Err(e) => {
-                                    (format!("Error: {}", e), false, None)
-                                }
+                        })
+                        .catch_unwind();
+                        let (result, success, tool_output) = match tokio::time::timeout(tool_timeout, execution).await {
+                            Ok(Ok(Ok(output))) => {
+                                let success = !output.is_error;
+                                let for_llm = output.for_llm.clone();
+                                (for_llm, success, Some(output))
+                            }
+                            Ok(Ok(Err(e))) => {
+                                (format!("Error: {}", e), false, None)
+                            }
+                            Ok(Err(_panic)) => {
+                                error!(tool = %name, "Tool panicked during execution");
+                                (format!("Error: Tool '{}' panicked during execution", name), false, None)
+                            }
+                            Err(_) => {
+                                error!(tool = %name, timeout_secs = tool_timeout.as_secs(), "Tool execution timed out");
+                                (format!("Error: Tool '{}' timed out after {}s", name, tool_timeout.as_secs()), false, None)
                             }
                         };
 
@@ -1540,6 +1556,12 @@ impl AgentLoop {
 
             let run_sequential =
                 needs_sequential_execution(&self.tools, &response.tool_calls).await;
+            let tool_timeout_secs = if self.config.agents.defaults.tool_timeout_secs > 0 {
+                self.config.agents.defaults.tool_timeout_secs
+            } else {
+                self.config.agents.defaults.agent_timeout_secs
+            };
+            let tool_timeout = std::time::Duration::from_secs(tool_timeout_secs.max(1));
 
             // Clone inbound metadata for routing propagation in tool `for_user` messages.
             let inbound_metadata_stream = msg.metadata.clone();
@@ -1630,9 +1652,9 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
-                        let (result, success, tool_output) = {
+                        let execution = std::panic::AssertUnwindSafe(async {
                             let tools_guard = tools.read().await;
-                            match crate::kernel::execute_tool(
+                            crate::kernel::execute_tool(
                                 &tools_guard,
                                 &name,
                                 args,
@@ -1642,13 +1664,22 @@ impl AgentLoop {
                                 taint.as_ref().map(|t| t.as_ref()),
                             )
                             .await
-                            {
-                                Ok(output) => {
-                                    let success = !output.is_error;
-                                    let for_llm = output.for_llm.clone();
-                                    (for_llm, success, Some(output))
-                                }
-                                Err(e) => (format!("Error: {}", e), false, None),
+                        })
+                        .catch_unwind();
+                        let (result, success, tool_output) = match tokio::time::timeout(tool_timeout, execution).await {
+                            Ok(Ok(Ok(output))) => {
+                                let success = !output.is_error;
+                                let for_llm = output.for_llm.clone();
+                                (for_llm, success, Some(output))
+                            }
+                            Ok(Ok(Err(e))) => (format!("Error: {}", e), false, None),
+                            Ok(Err(_panic)) => {
+                                error!(tool = %name, "Tool panicked during execution");
+                                (format!("Error: Tool '{}' panicked during execution", name), false, None)
+                            }
+                            Err(_) => {
+                                error!(tool = %name, timeout_secs = tool_timeout.as_secs(), "Tool execution timed out");
+                                (format!("Error: Tool '{}' timed out after {}s", name, tool_timeout.as_secs()), false, None)
                             }
                         };
                         if let Some(output) = tool_output {

@@ -32,6 +32,7 @@ mod inner {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use futures::FutureExt;
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;
@@ -126,94 +127,105 @@ mod inner {
             let deny_by_default = self.config.deny_by_default;
 
             tokio::spawn(async move {
-                let mut shutdown_rx = shutdown_rx;
+                let task_result = std::panic::AssertUnwindSafe(async move {
+                    let mut shutdown_rx = shutdown_rx;
 
-                // Acquire the lock once for the read loop. The BufReader persists
-                // across iterations so its internal buffer is never discarded (C2 fix).
-                // Outbound `send()` will block on the Mutex while the read loop holds
-                // it; this is acceptable for half-duplex serial where inbound messages
-                // and outbound responses do not overlap.
-                let mut guard = port.lock().await;
-                let mut reader = BufReader::new(&mut *guard);
+                    // Acquire the lock once for the read loop. The BufReader persists
+                    // across iterations so its internal buffer is never discarded (C2 fix).
+                    // Outbound `send()` will block on the Mutex while the read loop holds
+                    // it; this is acceptable for half-duplex serial where inbound messages
+                    // and outbound responses do not overlap.
+                    let mut guard = port.lock().await;
+                    let mut reader = BufReader::new(&mut *guard);
 
-                loop {
-                    let mut buf = String::new();
+                    loop {
+                        let mut buf = String::new();
 
-                    let read_result = tokio::select! {
-                        result = reader.read_line(&mut buf) => result,
-                        _ = &mut shutdown_rx => {
-                            info!("Serial channel shutdown signal received");
-                            break;
+                        let read_result = tokio::select! {
+                            result = reader.read_line(&mut buf) => result,
+                            _ = &mut shutdown_rx => {
+                                info!("Serial channel shutdown signal received");
+                                break;
+                            }
+                        };
+
+                        match read_result {
+                            Ok(0) => {
+                                // EOF — port closed.
+                                info!("Serial channel: port closed (EOF)");
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("Serial read error: {}", e);
+                                break;
+                            }
                         }
-                    };
 
-                    match read_result {
-                        Ok(0) => {
-                            // EOF — port closed.
-                            info!("Serial channel: port closed (EOF)");
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("Serial read error: {}", e);
-                            break;
-                        }
-                    }
-
-                    let trimmed = buf.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    let inbound: SerialInbound = match serde_json::from_str(trimmed) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!(
-                                "Serial: failed to parse inbound JSON: {} — {:?}",
-                                e, trimmed
-                            );
+                        let trimmed = buf.trim();
+                        if trimmed.is_empty() {
                             continue;
                         }
-                    };
 
-                    if inbound.msg_type != "message" {
-                        debug!("Serial: ignoring non-message type '{}'", inbound.msg_type);
-                        continue;
+                        let inbound: SerialInbound = match serde_json::from_str(trimmed) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!(
+                                    "Serial: failed to parse inbound JSON: {} — {:?}",
+                                    e, trimmed
+                                );
+                                continue;
+                            }
+                        };
+
+                        if inbound.msg_type != "message" {
+                            debug!("Serial: ignoring non-message type '{}'", inbound.msg_type);
+                            continue;
+                        }
+
+                        let sender = if inbound.sender.is_empty() {
+                            "serial-device".to_string()
+                        } else {
+                            inbound.sender.clone()
+                        };
+
+                        // Access control check.
+                        let allowed = if allow_from.is_empty() {
+                            !deny_by_default
+                        } else {
+                            allow_from.contains(&sender)
+                        };
+
+                        if !allowed {
+                            warn!("Serial: message from '{}' denied by allowlist", sender);
+                            continue;
+                        }
+
+                        let msg = InboundMessage::new(
+                            &channel_name,
+                            &sender,
+                            &channel_name,
+                            &inbound.text,
+                        );
+
+                        // Drop the Mutex guard temporarily so send() can acquire it
+                        // for outbound writes while we publish.
+                        // NOTE: For half-duplex serial this is not strictly needed, but
+                        // we release it here so bus.publish_inbound() doesn't deadlock
+                        // if the handler tries to send() a response synchronously.
+                        // In practice the bus is async and the send() path is separate,
+                        // so holding the lock is fine. Keeping the simpler single-lock
+                        // approach avoids split() complexity on SerialStream.
+
+                        if let Err(e) = bus.publish_inbound(msg).await {
+                            error!("Serial: failed to publish inbound message: {}", e);
+                        }
                     }
-
-                    let sender = if inbound.sender.is_empty() {
-                        "serial-device".to_string()
-                    } else {
-                        inbound.sender.clone()
-                    };
-
-                    // Access control check.
-                    let allowed = if allow_from.is_empty() {
-                        !deny_by_default
-                    } else {
-                        allow_from.contains(&sender)
-                    };
-
-                    if !allowed {
-                        warn!("Serial: message from '{}' denied by allowlist", sender);
-                        continue;
-                    }
-
-                    let msg =
-                        InboundMessage::new(&channel_name, &sender, &channel_name, &inbound.text);
-
-                    // Drop the Mutex guard temporarily so send() can acquire it
-                    // for outbound writes while we publish.
-                    // NOTE: For half-duplex serial this is not strictly needed, but
-                    // we release it here so bus.publish_inbound() doesn't deadlock
-                    // if the handler tries to send() a response synchronously.
-                    // In practice the bus is async and the send() path is separate,
-                    // so holding the lock is fine. Keeping the simpler single-lock
-                    // approach avoids split() complexity on SerialStream.
-
-                    if let Err(e) = bus.publish_inbound(msg).await {
-                        error!("Serial: failed to publish inbound message: {}", e);
-                    }
+                })
+                .catch_unwind()
+                .await;
+                if task_result.is_err() {
+                    error!("Serial read loop task panicked");
                 }
 
                 running.store(false, Ordering::SeqCst);

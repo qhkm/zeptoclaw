@@ -5,7 +5,7 @@
 //! - inbound messaging via Slack Socket Mode (`apps.connections.open`)
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -491,16 +491,23 @@ impl Channel for SlackChannel {
         let allow_from = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
         tokio::spawn(async move {
-            Self::run_socket_mode_loop(
-                client,
-                app_token,
-                bot_token,
-                bus,
-                allow_from,
-                deny_by_default,
-                shutdown_rx,
-            )
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                Self::run_socket_mode_loop(
+                    client,
+                    app_token,
+                    bot_token,
+                    bus,
+                    allow_from,
+                    deny_by_default,
+                    shutdown_rx,
+                )
+                .await;
+            })
+            .catch_unwind()
             .await;
+            if task_result.is_err() {
+                error!("Slack socket mode task panicked");
+            }
             running_clone.store(false, Ordering::SeqCst);
         });
 
