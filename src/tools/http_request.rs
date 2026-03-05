@@ -196,6 +196,7 @@ impl Tool for HttpRequestTool {
                 "Redirect to private/local host blocked".into(),
             ));
         }
+        resolve_and_check_host(response.url()).await?;
 
         let status = response.status().as_u16();
         let body_bytes = response

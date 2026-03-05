@@ -752,6 +752,9 @@ impl Tool for WebFetchTool {
                 response.url()
             )));
         }
+        resolve_and_check_host(response.url()).await?;
+
+        resolve_and_check_host(&parsed).await?;
 
         let status = response.status();
         let final_url = response.url().to_string();
