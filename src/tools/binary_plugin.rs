@@ -148,7 +148,7 @@ impl Tool for BinaryPluginTool {
 
         // Spawn binary — no shell. Retry a few times on ETXTBSY (os error 26),
         // which can happen on some Linux CI filesystems immediately after script creation.
-        let mut spawn_error = None;
+        let mut retries: u8 = 0;
         let mut child = loop {
             let mut cmd = Command::new(&self.binary_path);
             cmd.stdin(std::process::Stdio::piped())
@@ -169,8 +169,8 @@ impl Tool for BinaryPluginTool {
 
             match cmd.spawn() {
                 Ok(child) => break child,
-                Err(e) if e.raw_os_error() == Some(26) && spawn_error.is_none() => {
-                    spawn_error = Some(e);
+                Err(e) if e.raw_os_error() == Some(26) && retries == 0 => {
+                    retries += 1;
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 Err(e) if e.raw_os_error() == Some(26) => {

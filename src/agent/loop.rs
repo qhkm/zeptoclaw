@@ -1155,7 +1155,7 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
-                        let (result, tool_output) = {
+                        let (result, success, tool_output) = {
                             let tools_guard = tools.read().await;
                             match crate::kernel::execute_tool(
                                 &tools_guard,
@@ -1169,18 +1169,36 @@ impl AgentLoop {
                             .await
                             {
                                 Ok(output) => {
+                                    let success = !output.is_error;
                                     let for_llm = output.for_llm.clone();
-                                    (for_llm, Some(output))
+                                    (for_llm, success, Some(output))
                                 }
                                 Err(e) => {
-                                    (format!("Error: {}", e), None)
+                                    (format!("Error: {}", e), false, None)
                                 }
                             }
                         };
 
                         let elapsed = tool_start.elapsed();
                         let latency_ms = elapsed.as_millis() as u64;
-                        if let Some(output) = tool_output {
+                        // Send to user if tool opted in
+                        if let Some(ref output) = tool_output {
+                            if let Some(ref user_msg) = output.for_user {
+                                let mut outbound = crate::bus::OutboundMessage::new(
+                                    ctx.channel.as_deref().unwrap_or(""),
+                                    ctx.chat_id.as_deref().unwrap_or(""),
+                                    user_msg,
+                                );
+                                // Propagate routing metadata (e.g. telegram_thread_id)
+                                if let Some(tid) = inbound_meta.get("telegram_thread_id") {
+                                    outbound
+                                        .metadata
+                                        .insert("telegram_thread_id".to_string(), tid.clone());
+                                }
+                                let _ = bus_for_tools.publish_outbound(outbound).await;
+                            }
+                        }
+                        if success {
                             debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
                             hooks.after_tool(&name, &result, elapsed, channel_name, chat_id);
                             if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
@@ -1195,21 +1213,6 @@ impl AgentLoop {
                                     tool: name.clone(),
                                     duration_ms: latency_ms,
                                 });
-                            }
-                            // Send to user if tool opted in
-                            if let Some(ref user_msg) = output.for_user {
-                                let mut outbound = crate::bus::OutboundMessage::new(
-                                    ctx.channel.as_deref().unwrap_or(""),
-                                    ctx.chat_id.as_deref().unwrap_or(""),
-                                    user_msg,
-                                );
-                                // Propagate routing metadata (e.g. telegram_thread_id)
-                                if let Some(tid) = inbound_meta.get("telegram_thread_id") {
-                                    outbound
-                                        .metadata
-                                        .insert("telegram_thread_id".to_string(), tid.clone());
-                                }
-                                let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
                         } else {
                             error!(tool = %name, latency_ms = latency_ms, error = %result, "Tool execution failed");

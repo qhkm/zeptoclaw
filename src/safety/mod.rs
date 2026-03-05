@@ -101,7 +101,7 @@ impl SafetyLayer {
         }
     }
 
-    /// Run the full safety pipeline on tool output.
+    /// Run the full safety pipeline on tool input or output.
     ///
     /// Pipeline order:
     /// 1. Length check / truncation
@@ -109,6 +109,11 @@ impl SafetyLayer {
     /// 3. Leak detection (API keys, tokens, PEM keys)
     /// 4. Policy checks (system file access, SQL injection, shell injection)
     /// 5. Prompt injection detection
+    ///
+    /// The `direction` parameter indicates whether we are scanning tool input
+    /// (before execution) or tool output (after execution). Currently both
+    /// directions run the same pipeline; the parameter is reserved for future
+    /// differentiation.
     ///
     /// Returns a [`SafetyResult`] describing what happened.
     pub fn scan(&self, text: &str, _direction: CheckDirection) -> SafetyResult {
