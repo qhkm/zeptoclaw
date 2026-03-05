@@ -302,6 +302,10 @@ pub(crate) async fn create_agent_with_template(
         agent_loop.set_ltm(ltm.clone());
         info!("Wired shared LTM into agent for per-message memory injection");
     }
+    if let Some(ref taint) = kernel.taint {
+        agent_loop.set_taint(Arc::clone(taint));
+        info!("Wired shared taint engine into agent loop");
+    }
     let agent = Arc::new(agent_loop);
 
     // Transfer kernel tools + MCP clients into agent

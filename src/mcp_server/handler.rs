@@ -145,7 +145,7 @@ async fn handle_tools_call(
         &ctx,
         kernel.safety.as_ref(),
         &kernel.metrics,
-        kernel.taint.as_ref(),
+        kernel.taint.as_ref().map(|t| t.as_ref()),
     )
     .await;
 

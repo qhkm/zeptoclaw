@@ -7,19 +7,12 @@
 //!
 //! # Current scope
 //!
-//! Taint tracking is currently enforced on the **MCP server execution path**
-//! only (`kernel::gate::execute_tool`), where untrusted external clients call
-//! tools via JSON-RPC. The main **agent loop** (`agent/loop.rs`) calls
-//! `ToolRegistry::execute_with_context` directly and does **not** pass through
-//! the taint gate yet.
+//! Taint tracking is enforced on both tool execution paths:
+//! - MCP server `tools/call` requests (`mcp_server/handler.rs`)
+//! - Main agent loop tool calls (`agent/loop.rs`)
 //!
-//! This is intentional for the initial release: MCP server mode is the
-//! higher-risk path (external clients, no user in the loop), whereas the agent
-//! loop processes LLM-generated tool calls that are already mediated by the
-//! safety layer, approval gate, and hook engine.
-//!
-//! **TODO:** Integrate taint checks into the agent loop tool execution path
-//! as part of the thin-kernel convergence (see `docs/plans/2026-03-03-thin-kernel-design.md`).
+//! Both paths route through `kernel::gate::execute_tool`, so sink checks and
+//! output labeling are applied consistently.
 //!
 //! # Example
 //!

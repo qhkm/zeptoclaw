@@ -409,6 +409,8 @@ pub struct AgentLoop {
     pairing: Option<Arc<std::sync::Mutex<crate::security::PairingManager>>>,
     /// Optional long-term memory handle for per-message memory injection.
     ltm: Option<Arc<tokio::sync::Mutex<crate::memory::longterm::LongTermMemory>>>,
+    /// Taint tracking engine shared with kernel gate for uniform data-flow security.
+    taint: Option<Arc<std::sync::RwLock<crate::safety::taint::TaintEngine>>>,
     /// Optional panel event bus for real-time dashboard streaming.
     #[cfg(feature = "panel")]
     event_bus: Option<crate::api::events::EventBus>,
@@ -513,6 +515,7 @@ impl AgentLoop {
             cache,
             pairing,
             ltm: None,
+            taint: None,
             #[cfg(feature = "panel")]
             event_bus: None,
             mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -578,6 +581,7 @@ impl AgentLoop {
             cache,
             pairing,
             ltm: None,
+            taint: None,
             #[cfg(feature = "panel")]
             event_bus: None,
             mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -1020,6 +1024,7 @@ impl AgentLoop {
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer = self.safety_layer.clone();
+            let taint_engine = self.taint.clone();
             let hook_engine = Arc::new(
                 crate::hooks::HookEngine::new(self.config.hooks.clone())
                     .with_bus(Arc::clone(&self.bus)),
@@ -1062,6 +1067,7 @@ impl AgentLoop {
                     let gate = Arc::clone(&approval_gate);
                     let hooks = Arc::clone(&hook_engine);
                     let safety = safety_layer.clone();
+                    let taint = taint_engine.clone();
                     let budget = result_budget;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     #[cfg(feature = "panel")]
@@ -1149,96 +1155,91 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
-                        // TODO(thin-kernel): Route through `kernel::execute_tool()` instead
-                        // of calling `execute_with_context` directly, so that taint tracking
-                        // and kernel-level safety gates apply here too. Currently taint is
-                        // only enforced on the MCP server path. See `kernel/gate.rs` docs.
-                        let (result, success) = {
+                        let (result, tool_output) = {
                             let tools_guard = tools.read().await;
-                            match tools_guard.execute_with_context(&name, args, &ctx).await {
+                            match crate::kernel::execute_tool(
+                                &tools_guard,
+                                &name,
+                                args,
+                                &ctx,
+                                safety.as_ref().map(|s| s.as_ref()),
+                                &metrics_collector,
+                                taint.as_ref().map(|t| t.as_ref()),
+                            )
+                            .await
+                            {
                                 Ok(output) => {
-                                    let elapsed = tool_start.elapsed();
-                                    let latency_ms = elapsed.as_millis() as u64;
-                                    debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
-                                    hooks.after_tool(&name, &output.for_llm, elapsed, channel_name, chat_id);
-                                    if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                                        let _ = tx.send(ToolFeedback {
-                                            tool_name: name.clone(),
-                                            phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
-                                        });
-                                    }
-                                    #[cfg(feature = "panel")]
-                                    if let Some(bus) = &event_bus {
-                                        bus.send(crate::api::events::PanelEvent::ToolDone {
-                                            tool: name.clone(),
-                                            duration_ms: latency_ms,
-                                        });
-                                    }
-                                    // Send to user if tool opted in
-                                    if let Some(ref user_msg) = output.for_user {
-                                        let mut outbound = crate::bus::OutboundMessage::new(
-                                            ctx.channel.as_deref().unwrap_or(""),
-                                            ctx.chat_id.as_deref().unwrap_or(""),
-                                            user_msg,
-                                        );
-                                        // Propagate routing metadata (e.g. telegram_thread_id)
-                                        if let Some(tid) = inbound_meta.get("telegram_thread_id") {
-                                            outbound.metadata.insert("telegram_thread_id".to_string(), tid.clone());
-                                        }
-                                        let _ = bus_for_tools.publish_outbound(outbound).await;
-                                    }
-                                    (output.for_llm, !output.is_error)
+                                    let for_llm = output.for_llm.clone();
+                                    (for_llm, Some(output))
                                 }
                                 Err(e) => {
-                                    let elapsed = tool_start.elapsed();
-                                    let latency_ms = elapsed.as_millis() as u64;
-                                    error!(tool = %name, latency_ms = latency_ms, error = %e, "Tool execution failed");
-                                    hooks.on_error(&name, &e.to_string(), channel_name, chat_id);
-                                    if let Some(metrics) = usage_metrics.as_ref() {
-                                        metrics.record_error();
-                                    }
-                                    if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                                        let _ = tx.send(ToolFeedback {
-                                            tool_name: name.clone(),
-                                            phase: ToolFeedbackPhase::Failed {
-                                                elapsed_ms: latency_ms,
-                                                error: e.to_string(),
-                                            },
-                                        });
-                                    }
-                                    #[cfg(feature = "panel")]
-                                    if let Some(bus) = &event_bus {
-                                        bus.send(crate::api::events::PanelEvent::ToolFailed {
-                                            tool: name.clone(),
-                                            error: e.to_string(),
-                                        });
-                                    }
-                                    (format!("Error: {}", e), false)
+                                    (format!("Error: {}", e), None)
                                 }
                             }
                         };
-                        metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
+
+                        let elapsed = tool_start.elapsed();
+                        let latency_ms = elapsed.as_millis() as u64;
+                        if let Some(output) = tool_output {
+                            debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
+                            hooks.after_tool(&name, &result, elapsed, channel_name, chat_id);
+                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                                let _ = tx.send(ToolFeedback {
+                                    tool_name: name.clone(),
+                                    phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
+                                });
+                            }
+                            #[cfg(feature = "panel")]
+                            if let Some(bus) = &event_bus {
+                                bus.send(crate::api::events::PanelEvent::ToolDone {
+                                    tool: name.clone(),
+                                    duration_ms: latency_ms,
+                                });
+                            }
+                            // Send to user if tool opted in
+                            if let Some(ref user_msg) = output.for_user {
+                                let mut outbound = crate::bus::OutboundMessage::new(
+                                    ctx.channel.as_deref().unwrap_or(""),
+                                    ctx.chat_id.as_deref().unwrap_or(""),
+                                    user_msg,
+                                );
+                                // Propagate routing metadata (e.g. telegram_thread_id)
+                                if let Some(tid) = inbound_meta.get("telegram_thread_id") {
+                                    outbound
+                                        .metadata
+                                        .insert("telegram_thread_id".to_string(), tid.clone());
+                                }
+                                let _ = bus_for_tools.publish_outbound(outbound).await;
+                            }
+                        } else {
+                            error!(tool = %name, latency_ms = latency_ms, error = %result, "Tool execution failed");
+                            hooks.on_error(&name, &result, channel_name, chat_id);
+                            if let Some(metrics) = usage_metrics.as_ref() {
+                                metrics.record_error();
+                            }
+                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
+                                let _ = tx.send(ToolFeedback {
+                                    tool_name: name.clone(),
+                                    phase: ToolFeedbackPhase::Failed {
+                                        elapsed_ms: latency_ms,
+                                        error: result.clone(),
+                                    },
+                                });
+                            }
+                            #[cfg(feature = "panel")]
+                            if let Some(bus) = &event_bus {
+                                bus.send(crate::api::events::PanelEvent::ToolFailed {
+                                    tool: name.clone(),
+                                    error: result.clone(),
+                                });
+                            }
+                        }
 
                         // Sanitize the result with dynamic budget
                         let sanitized = crate::utils::sanitize::sanitize_tool_result(
                             &result,
                             budget,
                         );
-
-                        // Apply safety layer if enabled
-                        let sanitized = if let Some(ref safety) = safety {
-                            let safety_result = safety.check_tool_output(&sanitized);
-                            if safety_result.blocked {
-                                format!(
-                                    "[Safety blocked]: {}",
-                                    safety_result.block_reason.unwrap_or_default()
-                                )
-                            } else {
-                                safety_result.content
-                            }
-                        } else {
-                            sanitized
-                        };
 
                         (id, sanitized)
                     }
@@ -1515,6 +1516,7 @@ impl AgentLoop {
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer_stream = self.safety_layer.clone();
+            let taint_engine_stream = self.taint.clone();
 
             // Compute dynamic tool result budget based on remaining context space
             let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
@@ -1551,6 +1553,7 @@ impl AgentLoop {
                     let metrics_collector = Arc::clone(&metrics_collector);
                     let gate = Arc::clone(&approval_gate);
                     let safety = safety_layer_stream.clone();
+                    let taint = taint_engine_stream.clone();
                     let budget = result_budget_stream;
                     let tool_feedback_tx = tool_feedback_tx.clone();
                     #[cfg(feature = "panel")]
@@ -1624,29 +1627,44 @@ impl AgentLoop {
                             });
                         }
                         let tool_start = std::time::Instant::now();
-                        let (result, success) = {
+                        let (result, success, tool_output) = {
                             let tools_guard = tools.read().await;
-                            match tools_guard.execute_with_context(&name, args, &ctx).await {
+                            match crate::kernel::execute_tool(
+                                &tools_guard,
+                                &name,
+                                args,
+                                &ctx,
+                                safety.as_ref().map(|s| s.as_ref()),
+                                &metrics_collector,
+                                taint.as_ref().map(|t| t.as_ref()),
+                            )
+                            .await
+                            {
                                 Ok(output) => {
-                                    // Send to user if tool opted in
-                                    if let Some(ref user_msg) = output.for_user {
-                                        let mut outbound = crate::bus::OutboundMessage::new(
-                                            ctx.channel.as_deref().unwrap_or(""),
-                                            ctx.chat_id.as_deref().unwrap_or(""),
-                                            user_msg,
-                                        );
-                                        // Propagate routing metadata (e.g. telegram_thread_id)
-                                        if let Some(tid) = inbound_meta.get("telegram_thread_id") {
-                                            outbound.metadata.insert("telegram_thread_id".to_string(), tid.clone());
-                                        }
-                                        let _ = bus_for_tools.publish_outbound(outbound).await;
-                                    }
-                                    (output.for_llm, !output.is_error)
+                                    let success = !output.is_error;
+                                    let for_llm = output.for_llm.clone();
+                                    (for_llm, success, Some(output))
                                 }
-                                Err(e) => (format!("Error: {}", e), false),
+                                Err(e) => (format!("Error: {}", e), false, None),
                             }
                         };
-                        metrics_collector.record_tool_call(&name, tool_start.elapsed(), success);
+                        if let Some(output) = tool_output {
+                            // Send to user if tool opted in
+                            if let Some(ref user_msg) = output.for_user {
+                                let mut outbound = crate::bus::OutboundMessage::new(
+                                    ctx.channel.as_deref().unwrap_or(""),
+                                    ctx.chat_id.as_deref().unwrap_or(""),
+                                    user_msg,
+                                );
+                                // Propagate routing metadata (e.g. telegram_thread_id)
+                                if let Some(tid) = inbound_meta.get("telegram_thread_id") {
+                                    outbound
+                                        .metadata
+                                        .insert("telegram_thread_id".to_string(), tid.clone());
+                                }
+                                let _ = bus_for_tools.publish_outbound(outbound).await;
+                            }
+                        }
                         // Send tool done/failed feedback
                         let latency_ms = tool_start.elapsed().as_millis() as u64;
                         if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
@@ -1683,21 +1701,6 @@ impl AgentLoop {
                         }
                         let sanitized =
                             crate::utils::sanitize::sanitize_tool_result(&result, budget);
-
-                        // Apply safety layer if enabled
-                        let sanitized = if let Some(ref safety) = safety {
-                            let safety_result = safety.check_tool_output(&sanitized);
-                            if safety_result.blocked {
-                                format!(
-                                    "[Safety blocked]: {}",
-                                    safety_result.block_reason.unwrap_or_default()
-                                )
-                            } else {
-                                safety_result.content
-                            }
-                        } else {
-                            sanitized
-                        };
 
                         (id, sanitized)
                     }
@@ -2384,6 +2387,11 @@ impl AgentLoop {
         ltm: Arc<tokio::sync::Mutex<crate::memory::longterm::LongTermMemory>>,
     ) {
         self.ltm = Some(ltm);
+    }
+
+    /// Set the taint engine (shared with kernel for uniform taint tracking).
+    pub fn set_taint(&mut self, taint: Arc<std::sync::RwLock<crate::safety::taint::TaintEngine>>) {
+        self.taint = Some(taint);
     }
 
     /// Set the panel event bus for real-time dashboard events.

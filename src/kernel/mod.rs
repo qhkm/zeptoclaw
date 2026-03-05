@@ -53,10 +53,8 @@ pub struct ZeptoKernel {
     /// Shared long-term memory for both per-message injection and tool access.
     pub ltm: Option<Arc<tokio::sync::Mutex<LongTermMemory>>>,
     /// Taint tracking engine for data-flow-aware security.
-    /// `None` when taint tracking is disabled. Uses `std::sync::RwLock`
-    /// because sink checks (read path) are far more frequent than label
-    /// mutations (write path), so readers should not block each other.
-    pub taint: Option<std::sync::RwLock<TaintEngine>>,
+    /// `None` when taint tracking is disabled.
+    pub taint: Option<Arc<std::sync::RwLock<TaintEngine>>>,
 }
 
 impl ZeptoKernel {
@@ -99,9 +97,9 @@ impl ZeptoKernel {
 
         // 3b. Taint engine (data-flow tracking)
         let taint = if config.safety.enabled && config.safety.taint.enabled {
-            Some(std::sync::RwLock::new(TaintEngine::new(
+            Some(Arc::new(std::sync::RwLock::new(TaintEngine::new(
                 config.safety.taint.clone(),
-            )))
+            ))))
         } else {
             None
         };
@@ -237,9 +235,9 @@ mod tests {
             mcp_clients: vec![],
             ltm: None,
             taint: if config.safety.enabled && config.safety.taint.enabled {
-                Some(std::sync::RwLock::new(TaintEngine::new(
+                Some(Arc::new(std::sync::RwLock::new(TaintEngine::new(
                     config.safety.taint.clone(),
-                )))
+                ))))
             } else {
                 None
             },
@@ -303,9 +301,9 @@ mod tests {
             hooks: Arc::new(HookEngine::new(config.hooks.clone())),
             mcp_clients: vec![],
             ltm: None,
-            taint: Some(std::sync::RwLock::new(TaintEngine::new(
+            taint: Some(Arc::new(std::sync::RwLock::new(TaintEngine::new(
                 config.safety.taint.clone(),
-            ))),
+            )))),
         };
         assert!(kernel.safety.is_some());
     }
