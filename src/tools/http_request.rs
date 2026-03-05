@@ -2,7 +2,12 @@
 //! Requires `tools.http_request.allowed_domains` in config.
 
 use crate::error::{Result, ZeptoError};
-use crate::tools::web::{is_blocked_host, resolve_and_check_host};
+#[cfg(test)]
+use crate::tools::web::validate_redirect_target_basic;
+use crate::tools::web::{
+    is_blocked_host, resolve_and_check_host, validate_redirect_target,
+    validate_redirect_target_for_policy,
+};
 use crate::tools::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
@@ -95,38 +100,11 @@ fn http_request_redirect_policy() -> reqwest::redirect::Policy {
             ));
         }
 
-        match validate_redirect_target_basic(attempt.url()) {
+        match validate_redirect_target_for_policy(attempt.url()) {
             Ok(()) => attempt.follow(),
             Err(err) => attempt.error(err),
         }
     })
-}
-
-fn validate_redirect_target_basic(url: &Url) -> Result<()> {
-    match url.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ZeptoError::Tool(format!(
-                "Redirect destination scheme is blocked: {}",
-                url.scheme()
-            )));
-        }
-    }
-
-    if is_blocked_host(url) {
-        return Err(ZeptoError::Tool(format!(
-            "Redirect to private/local host blocked: {}",
-            url
-        )));
-    }
-
-    Ok(())
-}
-
-async fn validate_redirect_target(url: &Url) -> Result<()> {
-    validate_redirect_target_basic(url)?;
-    resolve_and_check_host(url).await?;
-    Ok(())
 }
 
 #[async_trait]
@@ -350,12 +328,12 @@ mod tests {
         let private_target = Url::parse("http://127.0.0.1:8080/admin").unwrap();
         let result = validate_redirect_target_basic(&private_target);
 
-        assert!(matches!(result, Err(ZeptoError::Tool(_))));
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
         match result {
-            Err(ZeptoError::Tool(msg)) => {
-                assert!(msg.contains("private/local host blocked"));
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("blocked (local or private network)"));
             }
-            other => panic!("expected Tool error, got {other:?}"),
+            other => panic!("expected SecurityViolation, got {other:?}"),
         }
     }
 
@@ -364,12 +342,12 @@ mod tests {
         let ftp_target = Url::parse("ftp://api.example.com/resource").unwrap();
         let result = validate_redirect_target_basic(&ftp_target);
 
-        assert!(matches!(result, Err(ZeptoError::Tool(_))));
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
         match result {
-            Err(ZeptoError::Tool(msg)) => {
+            Err(ZeptoError::SecurityViolation(msg)) => {
                 assert!(msg.contains("scheme is blocked"));
             }
-            other => panic!("expected Tool error, got {other:?}"),
+            other => panic!("expected SecurityViolation, got {other:?}"),
         }
     }
 

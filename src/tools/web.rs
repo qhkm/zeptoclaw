@@ -1109,14 +1109,14 @@ fn web_fetch_redirect_policy() -> reqwest::redirect::Policy {
             ));
         }
 
-        match validate_redirect_target_basic(attempt.url()) {
+        match validate_redirect_target_for_policy(attempt.url()) {
             Ok(()) => attempt.follow(),
             Err(err) => attempt.error(err),
         }
     })
 }
 
-fn validate_redirect_target_basic(url: &Url) -> Result<()> {
+pub fn validate_redirect_target_basic(url: &Url) -> Result<()> {
     match url.scheme() {
         "http" | "https" => {}
         _ => {
@@ -1137,7 +1137,36 @@ fn validate_redirect_target_basic(url: &Url) -> Result<()> {
     Ok(())
 }
 
-async fn validate_redirect_target(url: &Url) -> Result<()> {
+pub fn validate_redirect_target_for_policy(url: &Url) -> Result<()> {
+    validate_redirect_target_basic(url)?;
+
+    let url_for_check = url.clone();
+    let join = std::thread::spawn(move || -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                ZeptoError::Tool(format!(
+                    "Failed to create runtime for redirect DNS check: {}",
+                    e
+                ))
+            })?;
+
+        runtime
+            .block_on(async { resolve_and_check_host(&url_for_check).await })
+            .map(|_| ())
+    })
+    .join();
+
+    match join {
+        Ok(result) => result,
+        Err(_) => Err(ZeptoError::Tool(
+            "Redirect DNS validation thread panicked".to_string(),
+        )),
+    }
+}
+
+pub async fn validate_redirect_target(url: &Url) -> Result<()> {
     validate_redirect_target_basic(url)?;
     resolve_and_check_host(url).await?;
     Ok(())
@@ -1532,6 +1561,13 @@ mod tests {
     fn test_validate_redirect_target_allows_public_https() {
         let public_target = Url::parse("https://example.com/article").unwrap();
         assert!(validate_redirect_target_basic(&public_target).is_ok());
+    }
+
+    #[test]
+    fn test_validate_redirect_target_for_policy_blocks_dns_private_resolution() {
+        let localhost_target = Url::parse("https://localhost:443/").unwrap();
+        let result = validate_redirect_target_for_policy(&localhost_target);
+        assert!(result.is_err());
     }
 
     #[tokio::test]
