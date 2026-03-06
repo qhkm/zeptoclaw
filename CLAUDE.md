@@ -213,7 +213,7 @@ cargo fmt -- --check
 
 **Quick one-liner for CI parity:**
 ```bash
-cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo fmt -- --check
+cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo test --doc && cargo fmt -- --check
 ```
 
 ## Architecture
