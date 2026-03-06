@@ -4,7 +4,7 @@
 //! via the Chrome DevTools Protocol. Includes full SSRF protection by
 //! reusing the validation from [`super::web`].
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,6 +44,9 @@ const MIN_DIMENSION: u32 = 100;
 
 /// Maximum viewport dimension.
 const MAX_DIMENSION: u32 = 3840;
+
+/// Maximum allowed redirect hops for the main document navigation.
+const MAX_SCREENSHOT_REDIRECT_HOPS: usize = 5;
 
 /// Web screenshot tool that captures full-page screenshots of URLs.
 ///
@@ -93,12 +96,9 @@ fn validate_browser_request_target_basic(url: &Url) -> Result<()> {
 
 /// Validate a browser-request URL including DNS safety checks.
 ///
-/// Hostnames are cached in `dns_allow_cache` once resolved and verified so
-/// repeated requests to the same host do not trigger redundant DNS lookups.
-async fn validate_browser_request_url(
-    raw_url: &str,
-    dns_allow_cache: &mut HashMap<String, ()>,
-) -> Result<()> {
+/// DNS is re-checked for every intercepted request to narrow the DNS-rebinding
+/// window across redirect chains.
+async fn validate_browser_request_url(raw_url: &str) -> Result<()> {
     let parsed = Url::parse(raw_url).map_err(|e| {
         ZeptoError::SecurityViolation(format!(
             "Blocked browser request with invalid URL '{}': {}",
@@ -108,12 +108,7 @@ async fn validate_browser_request_url(
 
     validate_browser_request_target_basic(&parsed)?;
 
-    if let Some(host) = parsed.host_str().map(|h| h.to_ascii_lowercase()) {
-        if let std::collections::hash_map::Entry::Vacant(entry) = dns_allow_cache.entry(host) {
-            resolve_and_check_host(&parsed).await?;
-            entry.insert(());
-        }
-    }
+    resolve_and_check_host(&parsed).await?;
 
     Ok(())
 }
@@ -125,12 +120,11 @@ async fn validate_browser_request_url(
 async fn handle_paused_browser_request(
     page: &chromiumoxide::Page,
     event: &EventRequestPaused,
-    dns_allow_cache: &mut HashMap<String, ()>,
 ) -> Result<()> {
     let request_id = event.request_id.clone();
     let request_url = event.request.url.clone();
 
-    match validate_browser_request_url(&request_url, dns_allow_cache).await {
+    match validate_browser_request_url(&request_url).await {
         Ok(()) => {
             page.execute(ContinueRequestParams::new(request_id))
                 .await
@@ -252,13 +246,6 @@ impl Tool for WebScreenshotTool {
         // Initial DNS SSRF check for the entry URL.
         resolve_and_check_host(&parsed).await?;
 
-        // Pre-populate cache with the entry host to avoid redundant lookup
-        // for the first intercepted browser request.
-        let mut dns_allow_cache: HashMap<String, ()> = HashMap::new();
-        if let Some(host) = parsed.host_str() {
-            dns_allow_cache.insert(host.to_ascii_lowercase(), ());
-        }
-
         // ---- Parse optional parameters ----
         let output_path = args
             .get("output_path")
@@ -314,6 +301,11 @@ impl Tool for WebScreenshotTool {
                 .await
                 .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?;
 
+            let main_frame_id = page
+                .mainframe()
+                .await
+                .map_err(|e| ZeptoError::Tool(format!("Failed to resolve main frame: {}", e)))?;
+
             let mut paused_events = page
                 .event_listener::<EventRequestPaused>()
                 .await
@@ -350,6 +342,10 @@ impl Tool for WebScreenshotTool {
             };
             tokio::pin!(screenshot_future);
 
+            let mut document_redirect_hops: usize = 0;
+            let mut seen_document_redirect_urls: HashSet<String> = HashSet::new();
+            seen_document_redirect_urls.insert(url_str.to_string());
+
             let capture_result = loop {
                 tokio::select! {
                     captured = &mut screenshot_future => {
@@ -362,7 +358,54 @@ impl Tool for WebScreenshotTool {
                             ));
                         };
 
-                        handle_paused_browser_request(&page, event.as_ref(), &mut dns_allow_cache).await?;
+                        let event_ref = event.as_ref();
+                        let is_main_frame = match &main_frame_id {
+                            Some(frame_id) => event_ref.frame_id == *frame_id,
+                            None => true,
+                        };
+
+                        if event_ref.redirected_request_id.is_some()
+                            && is_main_frame
+                            && matches!(
+                                event_ref.resource_type,
+                                chromiumoxide::cdp::browser_protocol::network::ResourceType::Document
+                            )
+                        {
+                            document_redirect_hops += 1;
+                            if document_redirect_hops > MAX_SCREENSHOT_REDIRECT_HOPS {
+                                let _ = page
+                                    .execute(FailRequestParams::new(
+                                        event_ref.request_id.clone(),
+                                        ErrorReason::AccessDenied,
+                                    ))
+                                    .await;
+                                break Err(ZeptoError::SecurityViolation(format!(
+                                    "Exceeded maximum redirect hops ({})",
+                                    MAX_SCREENSHOT_REDIRECT_HOPS
+                                )));
+                            }
+
+                            let redirected_url = event_ref.request.url.clone();
+                            if !seen_document_redirect_urls.insert(redirected_url.clone()) {
+                                let _ = page
+                                    .execute(FailRequestParams::new(
+                                        event_ref.request_id.clone(),
+                                        ErrorReason::AccessDenied,
+                                    ))
+                                    .await;
+                                break Err(ZeptoError::SecurityViolation(format!(
+                                    "Detected redirect loop while capturing screenshot: {}",
+                                    redirected_url
+                                )));
+                            }
+                        }
+
+                        if let Err(err) =
+                            handle_paused_browser_request(&page, event_ref)
+                                .await
+                        {
+                            break Err(err);
+                        }
                     }
                 }
             };
@@ -372,17 +415,17 @@ impl Tool for WebScreenshotTool {
 
             capture_result
         })
-        .await
-        .map_err(|_| {
+        .await;
+
+        drop(browser);
+        handler_handle.abort();
+
+        let screenshot_result = screenshot_result.map_err(|_| {
             ZeptoError::Tool(format!(
                 "Screenshot timed out after {}s for '{}'",
                 timeout_secs, url_str
             ))
         })??;
-
-        // Clean up browser resources.
-        drop(browser);
-        handler_handle.abort();
 
         // ---- Output: save or encode ----
         let result = if let Some(path) = output_path {
@@ -679,8 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_browser_request_url_blocks_private_host() {
-        let mut cache = HashMap::new();
-        let result = validate_browser_request_url("http://192.168.1.10/admin", &mut cache).await;
+        let result = validate_browser_request_url("http://192.168.1.10/admin").await;
         assert!(result.is_err());
     }
 
