@@ -644,9 +644,9 @@ impl ShellSecurityConfig {
 
         // Pass 1: Regex blocklist on the FULL command string and its git-normalized
         // form. Some patterns are inherently cross-segment (e.g. `curl ... | sh`),
-        // so we must check the whole string before splitting. We also re-check each
-        // segment individually so that per-segment normalization catches git global
-        // option bypasses within a single segment.
+        // so we must check the whole string before splitting.
+        // Git global option bypasses within segments are caught by
+        // check_structured_policy() in Pass 2.
         let full_normalized = normalize_git_command(command);
         for pattern in &self.compiled_patterns {
             if pattern.is_match(command) || pattern.is_match(&full_normalized) {
