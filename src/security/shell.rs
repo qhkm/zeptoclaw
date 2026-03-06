@@ -464,13 +464,25 @@ fn check_structured_policy(seg: &CommandSegment) -> Result<()> {
 
     // Destructive git operations (structural check)
     if bin == "git" {
-        // Skip global options (e.g. -C, --git-dir) to find the real subcommand
-        let subcommand = seg
-            .args
-            .iter()
-            .find(|a| !a.starts_with('-'))
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        // Skip global options (e.g. -C, --git-dir) to find the real subcommand.
+        // Some global options consume the next arg as a value — skip those too.
+        const GIT_OPTS_WITH_VALUE: &[&str] =
+            &["-C", "-c", "--git-dir", "--work-tree", "--namespace"];
+        let subcommand = {
+            let mut iter = seg.args.iter();
+            loop {
+                match iter.next() {
+                    None => break "",
+                    Some(a) if a.starts_with('-') => {
+                        let base = a.split('=').next().unwrap_or(a);
+                        if GIT_OPTS_WITH_VALUE.contains(&base) && !a.contains('=') {
+                            iter.next(); // skip the value argument
+                        }
+                    }
+                    Some(a) => break a.as_str(),
+                }
+            }
+        };
         match subcommand {
             "push" => {
                 let has_force = seg.args.iter().any(|a| {
@@ -1484,6 +1496,54 @@ mod tests {
                 "--force".into(),
             ],
             raw: "git push origin main --force".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_git_global_option_bypass() {
+        // git -C <path> push --force should still be caught
+        let seg = CommandSegment {
+            binary: "git".into(),
+            args: vec![
+                "-C".into(),
+                "/tmp".into(),
+                "push".into(),
+                "--force".into(),
+                "origin".into(),
+                "main".into(),
+            ],
+            raw: "git -C /tmp push --force origin main".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_git_reset_hard() {
+        let seg = CommandSegment {
+            binary: "git".into(),
+            args: vec!["reset".into(), "--hard".into()],
+            raw: "git reset --hard".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_git_clean_force() {
+        let seg = CommandSegment {
+            binary: "git".into(),
+            args: vec!["clean".into(), "-fd".into()],
+            raw: "git clean -fd".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_git_branch_force_delete() {
+        let seg = CommandSegment {
+            binary: "git".into(),
+            args: vec!["branch".into(), "-D".into(), "feature".into()],
+            raw: "git branch -D feature".into(),
         };
         assert!(check_structured_policy(&seg).is_err());
     }
