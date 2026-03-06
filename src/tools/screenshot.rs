@@ -233,6 +233,13 @@ impl Tool for WebScreenshotTool {
         // Initial DNS SSRF check for the entry URL.
         resolve_and_check_host(&parsed).await?;
 
+        // Pre-populate cache with the entry host to avoid redundant lookup
+        // for the first intercepted browser request.
+        let mut dns_allow_cache: HashMap<String, ()> = HashMap::new();
+        if let Some(host) = parsed.host_str() {
+            dns_allow_cache.insert(host.to_ascii_lowercase(), ());
+        }
+
         // ---- Parse optional parameters ----
         let output_path = args
             .get("output_path")
@@ -324,7 +331,6 @@ impl Tool for WebScreenshotTool {
             };
             tokio::pin!(screenshot_future);
 
-            let mut dns_allow_cache: HashMap<String, ()> = HashMap::new();
             let capture_result = loop {
                 tokio::select! {
                     captured = &mut screenshot_future => {
