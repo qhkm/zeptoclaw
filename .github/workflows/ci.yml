@@ -20,16 +20,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo test --lib
-      - run: cargo test --bin zeptoclaw
-      - run: cargo test --test cli_smoke
-      - run: cargo test --test integration
-      - run: cargo test --test e2e
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo nextest run --lib
+      - run: cargo nextest run --bin zeptoclaw
+      - run: cargo nextest run --test cli_smoke
+      - run: cargo nextest run --test integration
+      - run: cargo nextest run --test e2e
       - run: cargo test --doc
       - name: Test with memory-bm25 feature
-        run: cargo test --lib --features memory-bm25
+        run: cargo nextest run --lib --features memory-bm25
       - name: Test with hardware features (ESP32)
-        run: cargo test --lib --features peripheral-esp32
+        run: cargo nextest run --lib --features peripheral-esp32
 
   clippy:
     name: Clippy
