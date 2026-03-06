@@ -148,6 +148,38 @@ async fn handle_paused_browser_request(
     }
 }
 
+/// Normalize a redirect URL string for stable loop tracking comparisons.
+fn normalize_redirect_tracking_url(raw_url: &str) -> String {
+    Url::parse(raw_url)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| raw_url.to_string())
+}
+
+/// Update redirect hop and loop-tracking state for a document redirect.
+fn track_document_redirect(
+    document_redirect_hops: &mut usize,
+    seen_document_redirect_urls: &mut HashSet<String>,
+    raw_redirect_url: &str,
+) -> Result<()> {
+    *document_redirect_hops += 1;
+    if *document_redirect_hops > MAX_SCREENSHOT_REDIRECT_HOPS {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Exceeded maximum redirect hops ({})",
+            MAX_SCREENSHOT_REDIRECT_HOPS
+        )));
+    }
+
+    let redirected_url = normalize_redirect_tracking_url(raw_redirect_url);
+    if !seen_document_redirect_urls.insert(redirected_url.clone()) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Detected redirect loop while capturing screenshot: {}",
+            redirected_url
+        )));
+    }
+
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for WebScreenshotTool {
     /// Return the tool name.
@@ -245,6 +277,8 @@ impl Tool for WebScreenshotTool {
 
         // Initial DNS SSRF check for the entry URL.
         resolve_and_check_host(&parsed).await?;
+
+        let normalized_entry_url = parsed.to_string();
 
         // ---- Parse optional parameters ----
         let output_path = args
@@ -344,7 +378,7 @@ impl Tool for WebScreenshotTool {
 
             let mut document_redirect_hops: usize = 0;
             let mut seen_document_redirect_urls: HashSet<String> = HashSet::new();
-            seen_document_redirect_urls.insert(url_str.to_string());
+            seen_document_redirect_urls.insert(normalized_entry_url.clone());
 
             let capture_result = loop {
                 tokio::select! {
@@ -371,32 +405,18 @@ impl Tool for WebScreenshotTool {
                                 chromiumoxide::cdp::browser_protocol::network::ResourceType::Document
                             )
                         {
-                            document_redirect_hops += 1;
-                            if document_redirect_hops > MAX_SCREENSHOT_REDIRECT_HOPS {
+                            if let Err(err) = track_document_redirect(
+                                &mut document_redirect_hops,
+                                &mut seen_document_redirect_urls,
+                                &event_ref.request.url,
+                            ) {
                                 let _ = page
                                     .execute(FailRequestParams::new(
                                         event_ref.request_id.clone(),
                                         ErrorReason::AccessDenied,
                                     ))
                                     .await;
-                                break Err(ZeptoError::SecurityViolation(format!(
-                                    "Exceeded maximum redirect hops ({})",
-                                    MAX_SCREENSHOT_REDIRECT_HOPS
-                                )));
-                            }
-
-                            let redirected_url = event_ref.request.url.clone();
-                            if !seen_document_redirect_urls.insert(redirected_url.clone()) {
-                                let _ = page
-                                    .execute(FailRequestParams::new(
-                                        event_ref.request_id.clone(),
-                                        ErrorReason::AccessDenied,
-                                    ))
-                                    .await;
-                                break Err(ZeptoError::SecurityViolation(format!(
-                                    "Detected redirect loop while capturing screenshot: {}",
-                                    redirected_url
-                                )));
+                                break Err(err);
                             }
                         }
 
@@ -724,6 +744,46 @@ mod tests {
     async fn test_validate_browser_request_url_blocks_private_host() {
         let result = validate_browser_request_url("http://192.168.1.10/admin").await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_track_document_redirect_exceeds_hop_limit() {
+        let mut redirect_hops = MAX_SCREENSHOT_REDIRECT_HOPS;
+        let mut seen_urls = HashSet::new();
+        seen_urls.insert("https://example.com/".to_string());
+
+        let result = track_document_redirect(
+            &mut redirect_hops,
+            &mut seen_urls,
+            "https://example.com/next",
+        );
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("Exceeded maximum redirect hops"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_track_document_redirect_detects_normalized_loop() {
+        let mut redirect_hops = 0;
+        let mut seen_urls = HashSet::new();
+        seen_urls.insert("https://example.com/".to_string());
+
+        let result =
+            track_document_redirect(&mut redirect_hops, &mut seen_urls, "HTTPS://EXAMPLE.COM");
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("Detected redirect loop while capturing screenshot"));
+                assert!(msg.contains("https://example.com/"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
     }
 
     // ---- Parameter parsing / defaults tests ----
