@@ -113,6 +113,11 @@ impl Config {
                 self.agents.defaults.agent_timeout_secs = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_TIMEOUT_SECS") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.tool_timeout_secs = v;
+            }
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET") {
             if let Ok(v) = val.parse() {
                 self.agents.defaults.token_budget = v;

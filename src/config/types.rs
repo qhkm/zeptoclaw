@@ -631,6 +631,8 @@ pub struct AgentDefaults {
     pub max_tool_iterations: u32,
     /// Maximum wall-clock time (seconds) for a single agent run.
     pub agent_timeout_secs: u64,
+    /// Maximum wall-clock time (seconds) for a single tool call. 0 = use agent_timeout_secs.
+    pub tool_timeout_secs: u64,
     /// How to handle messages arriving during an active run.
     pub message_queue_mode: MessageQueueMode,
     /// Whether to stream the final LLM response token-by-token in CLI mode.
@@ -700,6 +702,7 @@ impl Default for AgentDefaults {
             temperature: 0.7,
             max_tool_iterations: 20,
             agent_timeout_secs: 300,
+            tool_timeout_secs: 0,
             message_queue_mode: MessageQueueMode::default(),
             streaming: false,
             token_budget: 0,
