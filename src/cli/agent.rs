@@ -278,12 +278,10 @@ pub(crate) async fn cmd_agent_stdin() -> Result<()> {
             zeptoclaw::gateway::AgentResponse::success(&request_id, &content, updated_session)
                 .with_usage(UsageSnapshot::from_metrics(&usage_metrics))
         }
-        Err(e) => zeptoclaw::gateway::AgentResponse::error(
-            &request_id,
-            &e.to_string(),
-            "PROCESS_ERROR",
-        )
-        .with_usage(UsageSnapshot::from_metrics(&usage_metrics)),
+        Err(e) => {
+            zeptoclaw::gateway::AgentResponse::error(&request_id, &e.to_string(), "PROCESS_ERROR")
+                .with_usage(UsageSnapshot::from_metrics(&usage_metrics))
+        }
     };
 
     // Write response with markers to stdout
