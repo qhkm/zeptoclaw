@@ -1,4 +1,4 @@
-.PHONY: build build-release install clean test lint fmt check all deploy deploy-zeptoclaw deploy-r8r
+.PHONY: build build-release install clean test lint fmt check all deploy deploy-zeptoclaw deploy-r8r setup
 
 BINARY_NAME := zeptoclaw
 BUILD_DIR := target
@@ -26,13 +26,18 @@ uninstall:
 	rm -f $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Removed $(BINARY_NAME) from $(INSTALL_DIR)"
 
+# Install required dev tools (idempotent)
+setup:
+	@which cargo-nextest > /dev/null 2>&1 && echo "cargo-nextest already installed" || \
+		(echo "Installing cargo-nextest..." && cargo install cargo-nextest --locked)
+
 # Run all tests
-test:
-	cargo test
+test: setup
+	cargo nextest run
 
 # Run tests with output
-test-verbose:
-	cargo test -- --nocapture
+test-verbose: setup
+	cargo nextest run --no-capture
 
 # Lint with clippy
 lint:
@@ -93,8 +98,11 @@ help:
 	@echo "  make run            - Run agent with test message"
 	@echo "  make run-interactive- Run interactive agent"
 	@echo ""
+	@echo "Setup:"
+	@echo "  make setup          - Install required dev tools (cargo-nextest)"
+	@echo ""
 	@echo "Quality:"
-	@echo "  make test           - Run all tests"
+	@echo "  make test           - Run all tests (installs nextest if needed)"
 	@echo "  make lint           - Run clippy linter"
 	@echo "  make fmt            - Format code"
 	@echo "  make check          - Full quality check"
