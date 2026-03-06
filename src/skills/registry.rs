@@ -1,10 +1,18 @@
 //! ClawHub skill registry client with in-memory search cache.
+//!
+//! All outbound HTTP requests are guarded against SSRF attacks by reusing the
+//! same `is_blocked_host` / `resolve_and_check_host` checks that protect
+//! `web_fetch`. Self-hosted registries on private networks can opt in via
+//! `ClawHubConfig::allowed_hosts`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
+
+use crate::tools::web::{is_blocked_host, resolve_and_check_host};
 
 /// A single skill entry returned from a ClawHub search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,12 +131,107 @@ fn validate_slug(slug: &str) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// Check whether `host` is in the allowed-hosts bypass list (case-insensitive).
+fn is_allowed_host(host: &str, allowed_hosts: &[String]) -> bool {
+    let host_lower = host.to_ascii_lowercase();
+    allowed_hosts
+        .iter()
+        .any(|ah| ah.to_ascii_lowercase() == host_lower)
+}
+
+/// Validate that a URL does not target a private/local/link-local address.
+///
+/// Returns the pinned `(hostname, SocketAddr)` from DNS resolution so the
+/// caller can build a reqwest client with `.resolve()`, eliminating the DNS
+/// rebinding window between this check and the actual HTTP request.
+///
+/// If the URL's host is in `allowed_hosts`, the check is skipped (opt-in
+/// override for self-hosted registries on private networks).
+async fn check_ssrf(
+    url_str: &str,
+    allowed_hosts: &[String],
+) -> crate::error::Result<Option<(String, std::net::SocketAddr)>> {
+    let parsed = Url::parse(url_str).map_err(|e| {
+        crate::error::ZeptoError::SecurityViolation(format!("Invalid URL '{}': {}", url_str, e))
+    })?;
+
+    // Only allow http/https schemes.
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(crate::error::ZeptoError::SecurityViolation(
+                "Only http/https URLs are allowed for skill downloads".to_string(),
+            ));
+        }
+    }
+
+    // If the host is explicitly allowed, skip SSRF checks.
+    if let Some(host) = parsed.host_str() {
+        if is_allowed_host(host, allowed_hosts) {
+            return Ok(None);
+        }
+    }
+
+    // Hostname / IP blocklist (localhost, private ranges, link-local, etc.)
+    if is_blocked_host(&parsed) {
+        return Err(crate::error::ZeptoError::SecurityViolation(format!(
+            "Skill URL targets a blocked host (local or private network): {}",
+            url_str
+        )));
+    }
+
+    // DNS resolution check — catches hostnames that resolve to private IPs
+    // (e.g., `metadata.attacker.com` → 169.254.169.254).
+    // Returns the first safe resolved address for connection pinning.
+    let pinned = resolve_and_check_host(&parsed).await?;
+
+    Ok(pinned)
+}
+
+/// Validate that a response's final URL (after redirects) is not a blocked host.
+///
+/// Reuses the same `is_blocked_host` check and `allowed_hosts` bypass as
+/// `check_ssrf`, ensuring consistent SSRF protection across pre-request
+/// and post-redirect validation.
+fn check_redirect_ssrf(final_url: &Url, allowed_hosts: &[String]) -> crate::error::Result<()> {
+    if is_blocked_host(final_url) {
+        if let Some(host) = final_url.host_str() {
+            if is_allowed_host(host, allowed_hosts) {
+                return Ok(());
+            }
+        }
+        return Err(crate::error::ZeptoError::SecurityViolation(format!(
+            "Request redirected to blocked host: {}",
+            final_url
+        )));
+    }
+    Ok(())
+}
+
+/// Build a reqwest client that pins DNS resolution to a pre-validated IP,
+/// preventing DNS rebinding attacks between the SSRF check and the actual
+/// HTTP connection.
+fn build_pinned_client(
+    pinned: Option<(String, std::net::SocketAddr)>,
+) -> crate::error::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    if let Some((host, addr)) = pinned {
+        builder = builder.resolve(&host, addr);
+    }
+    builder
+        .build()
+        .map_err(|e| crate::error::ZeptoError::Tool(format!("HTTP client error: {}", e)))
+}
+
 /// HTTP client for the ClawHub REST API.
 pub struct ClawHubRegistry {
     base_url: String,
     auth_token: Option<String>,
-    client: reqwest::Client,
     cache: Arc<SearchCache>,
+    /// Hostnames allowed to bypass SSRF checks (for self-hosted registries).
+    allowed_hosts: Vec<String>,
 }
 
 impl ClawHubRegistry {
@@ -141,11 +244,26 @@ impl ClawHubRegistry {
         Self {
             base_url: base_url.into(),
             auth_token,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
             cache,
+            allowed_hosts: Vec::new(),
+        }
+    }
+
+    /// Create a new registry client with an explicit SSRF-bypass allowlist.
+    ///
+    /// Hosts in `allowed_hosts` are exempt from the private/local IP check,
+    /// enabling self-hosted registries on internal networks.
+    pub fn with_allowed_hosts(
+        base_url: impl Into<String>,
+        auth_token: Option<String>,
+        cache: Arc<SearchCache>,
+        allowed_hosts: Vec<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            auth_token,
+            cache,
+            allowed_hosts,
         }
     }
 
@@ -170,7 +288,13 @@ impl ClawHubRegistry {
             percent_encode(query),
             limit
         );
-        let mut req = self.client.get(&url);
+
+        // SSRF guard: validate the URL and pin DNS resolution to the
+        // validated IP, preventing rebinding between check and request.
+        let pinned = check_ssrf(&url, &self.allowed_hosts).await?;
+        let client = build_pinned_client(pinned)?;
+
+        let mut req = client.get(&url);
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);
         }
@@ -179,6 +303,9 @@ impl ClawHubRegistry {
             .send()
             .await
             .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?;
+
+        // Post-redirect SSRF check: block redirects to private hosts.
+        check_redirect_ssrf(resp.url(), &self.allowed_hosts)?;
 
         if !resp.status().is_success() {
             return Err(crate::error::ZeptoError::Tool(format!(
@@ -208,7 +335,13 @@ impl ClawHubRegistry {
         validate_slug(slug)?;
 
         let url = format!("{}/api/v1/download/{}", self.base_url, slug);
-        let mut req = self.client.get(&url);
+
+        // SSRF guard: validate the URL and pin DNS resolution to the
+        // validated IP, preventing rebinding between check and request.
+        let pinned = check_ssrf(&url, &self.allowed_hosts).await?;
+        let client = build_pinned_client(pinned)?;
+
+        let mut req = client.get(&url);
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);
         }
@@ -217,6 +350,9 @@ impl ClawHubRegistry {
             .send()
             .await
             .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?;
+
+        // Post-redirect SSRF check: block redirects to private hosts.
+        check_redirect_ssrf(resp.url(), &self.allowed_hosts)?;
 
         if !resp.status().is_success() {
             return Err(crate::error::ZeptoError::Tool(format!(
@@ -457,5 +593,215 @@ mod tests {
         assert!(validate_slug("skill;rm -rf").is_err());
         assert!(validate_slug("skill<script>").is_err());
         assert!(validate_slug("skill%20encoded").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // is_allowed_host helper
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_allowed_host_match() {
+        let hosts = vec!["registry.internal.corp".to_string()];
+        assert!(is_allowed_host("registry.internal.corp", &hosts));
+    }
+
+    #[test]
+    fn test_is_allowed_host_case_insensitive() {
+        let hosts = vec!["Registry.Internal.Corp".to_string()];
+        assert!(is_allowed_host("registry.internal.corp", &hosts));
+        assert!(is_allowed_host("REGISTRY.INTERNAL.CORP", &hosts));
+    }
+
+    #[test]
+    fn test_is_allowed_host_no_match() {
+        let hosts = vec!["other.corp".to_string()];
+        assert!(!is_allowed_host("registry.internal.corp", &hosts));
+    }
+
+    #[test]
+    fn test_is_allowed_host_empty_list() {
+        assert!(!is_allowed_host("anything", &[]));
+    }
+
+    // -------------------------------------------------------------------------
+    // check_redirect_ssrf helper
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_check_redirect_ssrf_blocks_private() {
+        let url = Url::parse("http://192.168.1.1/secret").unwrap();
+        assert!(check_redirect_ssrf(&url, &[]).is_err());
+    }
+
+    #[test]
+    fn test_check_redirect_ssrf_allows_public() {
+        let url = Url::parse("https://clawhub.ai/download").unwrap();
+        assert!(check_redirect_ssrf(&url, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_check_redirect_ssrf_allows_listed_private() {
+        let url = Url::parse("http://10.0.0.5/download").unwrap();
+        let allowed = vec!["10.0.0.5".to_string()];
+        assert!(check_redirect_ssrf(&url, &allowed).is_ok());
+    }
+
+    #[test]
+    fn test_check_redirect_ssrf_blocks_unlisted_private() {
+        let url = Url::parse("http://10.0.0.99/download").unwrap();
+        let allowed = vec!["10.0.0.5".to_string()];
+        assert!(check_redirect_ssrf(&url, &allowed).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // build_pinned_client
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_pinned_client_none() {
+        let client = build_pinned_client(None);
+        assert!(client.is_ok(), "Should build client without pinning");
+    }
+
+    #[test]
+    fn test_build_pinned_client_with_addr() {
+        let addr: std::net::SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let client = build_pinned_client(Some(("example.com".to_string(), addr)));
+        assert!(client.is_ok(), "Should build client with pinned address");
+    }
+
+    // -------------------------------------------------------------------------
+    // SSRF guardrails (check_ssrf)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_localhost() {
+        let result = check_ssrf("http://localhost:8080/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "localhost should be blocked");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocked") || err.contains("private") || err.contains("local"),
+            "Error should mention blocking: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_private_ipv4() {
+        let result = check_ssrf("http://192.168.1.1/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "192.168.x.x should be blocked");
+
+        let result = check_ssrf("http://10.0.0.5/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "10.x.x.x should be blocked");
+
+        let result = check_ssrf("http://172.16.0.1/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "172.16.x.x should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_loopback() {
+        let result = check_ssrf("http://127.0.0.1:9090/download", &[]).await;
+        assert!(result.is_err(), "127.0.0.1 should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_link_local_metadata() {
+        // AWS/GCP/Azure metadata endpoint
+        let result = check_ssrf("http://169.254.169.254/latest/meta-data/", &[]).await;
+        assert!(result.is_err(), "Cloud metadata endpoint should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_allows_public_url() {
+        // Public URLs should pass SSRF checks and return a pinned address
+        let result = check_ssrf("https://clawhub.ai/api/v1/download/web-scraper", &[]).await;
+        assert!(result.is_ok(), "Public URL should be allowed");
+        // The result should contain a pinned address for DNS rebinding prevention
+        let pinned = result.unwrap();
+        assert!(
+            pinned.is_some(),
+            "Public hostname should return a pinned address"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_allowed_hosts_bypass() {
+        // A private IP that is explicitly allowed should pass
+        let allowed = vec!["192.168.1.100".to_string()];
+        let result = check_ssrf("http://192.168.1.100/api/v1/download/test", &allowed).await;
+        assert!(
+            result.is_ok(),
+            "Explicitly allowed host should bypass SSRF checks"
+        );
+        // Allowed hosts skip DNS check, so pinned should be None
+        let pinned = result.unwrap();
+        assert!(
+            pinned.is_none(),
+            "Allowed host bypass should return None (no pinning needed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_allowed_hosts_case_insensitive() {
+        let allowed = vec!["Registry.Internal.Corp".to_string()];
+        let result = check_ssrf(
+            "https://registry.internal.corp/api/v1/download/test",
+            &allowed,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "Allowed host matching should be case-insensitive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_rejects_ftp_scheme() {
+        let result = check_ssrf("ftp://example.com/skill.tar.gz", &[]).await;
+        assert!(result.is_err(), "ftp:// should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("http/https"),
+            "Error should mention scheme restriction: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_rejects_file_scheme() {
+        let result = check_ssrf("file:///etc/passwd", &[]).await;
+        assert!(result.is_err(), "file:// should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_ipv6_loopback() {
+        let result = check_ssrf("http://[::1]:8080/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "IPv6 loopback should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_check_ssrf_blocks_unspecified() {
+        let result = check_ssrf("http://0.0.0.0/api/v1/download/test", &[]).await;
+        assert!(result.is_err(), "0.0.0.0 should be blocked");
+    }
+
+    // -------------------------------------------------------------------------
+    // ClawHubRegistry with allowed_hosts
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_registry_new_has_empty_allowed_hosts() {
+        let cache = Arc::new(SearchCache::new(10, Duration::from_secs(60)));
+        let registry = ClawHubRegistry::new("https://clawhub.ai", None, cache);
+        assert!(registry.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn test_registry_with_allowed_hosts_stores_list() {
+        let cache = Arc::new(SearchCache::new(10, Duration::from_secs(60)));
+        let hosts = vec!["internal.corp".to_string(), "10.0.0.5".to_string()];
+        let registry =
+            ClawHubRegistry::with_allowed_hosts("http://10.0.0.5", None, cache, hosts.clone());
+        assert_eq!(registry.allowed_hosts, hosts);
     }
 }

@@ -489,10 +489,11 @@ pub async fn register_all_tools(
             config.tools.skills.search_cache.max_size,
             Duration::from_secs(config.tools.skills.search_cache.ttl_seconds),
         ));
-        let clawhub = Arc::new(ClawHubRegistry::new(
+        let clawhub = Arc::new(ClawHubRegistry::with_allowed_hosts(
             &config.tools.skills.clawhub.base_url,
             config.tools.skills.clawhub.auth_token.clone(),
             cache,
+            config.tools.skills.clawhub.allowed_hosts.clone(),
         ));
         if filter.is_enabled("find_skills") {
             registry.register(Box::new(crate::tools::FindSkillsTool::new(Arc::clone(
