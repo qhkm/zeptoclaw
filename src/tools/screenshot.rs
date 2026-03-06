@@ -39,10 +39,6 @@ const MIN_DIMENSION: u32 = 100;
 /// Maximum viewport dimension.
 const MAX_DIMENSION: u32 = 3840;
 
-/// Maximum allowed redirects before rejecting the navigation.
-/// Matches the limit used by `web_fetch` and `http_request` tools.
-const MAX_SCREENSHOT_REDIRECTS: usize = 5;
-
 /// Web screenshot tool that captures full-page screenshots of URLs.
 ///
 /// Uses a headless Chromium browser via the Chrome DevTools Protocol.
@@ -200,47 +196,26 @@ impl Tool for WebScreenshotTool {
             }
         });
 
-        // ---- Preflight: follow redirects with SSRF validation ----
-        // Before launching the browser, do an HTTP HEAD request to discover
-        // the final destination and validate each redirect hop. This catches
-        // SSRF via redirect chains before the browser fetches any content.
-        let preflight_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= MAX_SCREENSHOT_REDIRECTS {
-                    return attempt.error(format!(
-                        "Too many redirects (max {})",
-                        MAX_SCREENSHOT_REDIRECTS
-                    ));
-                }
-                match super::web::validate_redirect_target_for_policy(attempt.url()) {
-                    Ok(()) => attempt.follow(),
-                    Err(e) => attempt.error(e),
-                }
-            }))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to build preflight client: {}", e)))?;
-
-        let preflight_resp = preflight_client.head(url_str).send().await.map_err(|e| {
-            if e.is_redirect() {
-                ZeptoError::SecurityViolation(format!(
-                    "Screenshot blocked: redirect chain failed SSRF validation: {}",
-                    e
-                ))
-            } else {
-                ZeptoError::Tool(format!("Screenshot preflight request failed: {}", e))
-            }
-        })?;
-
-        // Validate the final destination after all redirects.
-        validate_redirect_target(preflight_resp.url()).await?;
-
-        // ---- Navigate and screenshot (with timeout) ----
+        // ---- Navigate and validate final URL (with timeout) ----
+        // The browser follows redirects natively. After navigation completes,
+        // we validate the final URL before capturing the screenshot. This
+        // catches SSRF via redirect chains regardless of method-specific or
+        // UA-specific server behavior — we check what the browser actually
+        // landed on, not what a separate preflight request saw.
         let screenshot_result = timeout(Duration::from_secs(timeout_secs), async {
             let page = browser
                 .new_page(url_str)
                 .await
                 .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?;
+
+            // ---- Post-navigation SSRF check ----
+            // Validate the URL the browser actually navigated to after any
+            // redirects. This is the true final destination — no TOCTOU gap.
+            if let Ok(Some(final_url_str)) = page.url().await {
+                if let Ok(final_url) = Url::parse(&final_url_str) {
+                    validate_redirect_target(&final_url).await?;
+                }
+            }
 
             let screenshot_bytes = page
                 .screenshot(ScreenshotParams::builder().full_page(false).build())
@@ -528,7 +503,7 @@ mod tests {
 
     // ---- Redirect SSRF validation tests ----
     // These test the redirect-target validation functions from web.rs
-    // that the screenshot tool now uses for preflight checks.
+    // that the screenshot tool uses for post-navigation final URL checks.
 
     #[test]
     fn test_redirect_to_localhost_blocked() {
@@ -645,11 +620,6 @@ mod tests {
         let url = Url::parse("http://0.0.0.0/").unwrap();
         let result = super::super::web::validate_redirect_target_basic(&url);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_max_screenshot_redirects_constant() {
-        assert_eq!(MAX_SCREENSHOT_REDIRECTS, 5);
     }
 
     // ---- Parameter parsing / defaults tests ----
