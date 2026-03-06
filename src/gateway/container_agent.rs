@@ -341,8 +341,13 @@ impl ContainerAgentProxy {
                         OutboundMessage::new(&message.channel, &message.chat_id, &content)
                     }
                     AgentResult::Error { message: err, .. } => {
-                        if let Some(metrics) = usage_metrics.as_ref() {
-                            metrics.record_error();
+                        // Only record a request-level error when the usage
+                        // snapshot is absent; when present, the error count
+                        // was already replayed above via usage.errors.
+                        if response.usage.is_none() {
+                            if let Some(metrics) = usage_metrics.as_ref() {
+                                metrics.record_error();
+                            }
                         }
                         OutboundMessage::new(
                             &message.channel,
