@@ -1087,11 +1087,17 @@ impl Channel for LarkChannel {
             self.api_base(),
             receive_id_type
         );
-        let content = serde_json::json!({ "text": msg.content }).to_string();
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [{
+                "tag": "markdown",
+                "content": msg.content,
+            }]
+        });
         let body = serde_json::json!({
             "receive_id": msg.chat_id,
-            "msg_type":   "text",
-            "content":    content,
+            "msg_type":   "interactive",
+            "content":    card.to_string(),
         });
 
         let (status, response) = self
@@ -1441,5 +1447,30 @@ mod tests {
             "open_id"
         };
         assert_eq!(receive_id_type, "open_id");
+    }
+
+    // ---- interactive card payload ----
+
+    #[test]
+    fn test_send_payload_uses_interactive_card() {
+        let content = "Here is **bold** and `code`";
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [{
+                "tag": "markdown",
+                "content": content,
+            }]
+        });
+        let body = serde_json::json!({
+            "receive_id": "oc_test",
+            "msg_type":   "interactive",
+            "content":    card.to_string(),
+        });
+        assert_eq!(body["msg_type"], "interactive");
+        let parsed_card: serde_json::Value =
+            serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_card["elements"][0]["tag"], "markdown");
+        assert_eq!(parsed_card["elements"][0]["content"], content);
+        assert_eq!(parsed_card["config"]["wide_screen_mode"], true);
     }
 }
