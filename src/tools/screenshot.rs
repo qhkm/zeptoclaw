@@ -328,7 +328,7 @@ impl Tool for WebScreenshotTool {
         });
 
         // ---- Navigate and screenshot (with timeout + browser-side SSRF redirect checks) ----
-        let screenshot_result = timeout(Duration::from_secs(timeout_secs), async {
+        let screenshot_result = async {
             // Create an empty page first so we can attach interception before navigation.
             let page = browser
                 .new_page("about:blank")
@@ -380,72 +380,74 @@ impl Tool for WebScreenshotTool {
             let mut seen_document_redirect_urls: HashSet<String> = HashSet::new();
             seen_document_redirect_urls.insert(normalized_entry_url.clone());
 
-            let capture_result = loop {
-                tokio::select! {
-                    captured = &mut screenshot_future => {
-                        break captured;
-                    }
-                    maybe_event = paused_events.next() => {
-                        let Some(event) = maybe_event else {
-                            break Err(ZeptoError::Tool(
-                                "Browser request interception stream ended unexpectedly".to_string()
-                            ));
-                        };
+            let timed_capture = timeout(Duration::from_secs(timeout_secs), async {
+                loop {
+                    tokio::select! {
+                        captured = &mut screenshot_future => {
+                            break captured;
+                        }
+                        maybe_event = paused_events.next() => {
+                            let Some(event) = maybe_event else {
+                                break Err(ZeptoError::Tool(
+                                    "Browser request interception stream ended unexpectedly".to_string()
+                                ));
+                            };
 
-                        let event_ref = event.as_ref();
-                        let is_main_frame = match &main_frame_id {
-                            Some(frame_id) => event_ref.frame_id == *frame_id,
-                            None => true,
-                        };
+                            let event_ref = event.as_ref();
+                            let is_main_frame = match &main_frame_id {
+                                Some(frame_id) => event_ref.frame_id == *frame_id,
+                                None => true,
+                            };
 
-                        if event_ref.redirected_request_id.is_some()
-                            && is_main_frame
-                            && matches!(
-                                event_ref.resource_type,
-                                chromiumoxide::cdp::browser_protocol::network::ResourceType::Document
-                            )
-                        {
-                            if let Err(err) = track_document_redirect(
-                                &mut document_redirect_hops,
-                                &mut seen_document_redirect_urls,
-                                &event_ref.request.url,
-                            ) {
-                                let _ = page
-                                    .execute(FailRequestParams::new(
-                                        event_ref.request_id.clone(),
-                                        ErrorReason::AccessDenied,
-                                    ))
-                                    .await;
+                            if event_ref.redirected_request_id.is_some()
+                                && is_main_frame
+                                && matches!(
+                                    event_ref.resource_type,
+                                    chromiumoxide::cdp::browser_protocol::network::ResourceType::Document
+                                )
+                            {
+                                if let Err(err) = track_document_redirect(
+                                    &mut document_redirect_hops,
+                                    &mut seen_document_redirect_urls,
+                                    &event_ref.request.url,
+                                ) {
+                                    let _ = page
+                                        .execute(FailRequestParams::new(
+                                            event_ref.request_id.clone(),
+                                            ErrorReason::AccessDenied,
+                                        ))
+                                        .await;
+                                    break Err(err);
+                                }
+                            }
+
+                            if let Err(err) = handle_paused_browser_request(&page, event_ref).await {
                                 break Err(err);
                             }
                         }
-
-                        if let Err(err) =
-                            handle_paused_browser_request(&page, event_ref)
-                                .await
-                        {
-                            break Err(err);
-                        }
                     }
                 }
-            };
+            })
+            .await;
 
             // Best-effort cleanup of interception domain.
             let _ = page.execute(FetchDisableParams::default()).await;
 
+            let capture_result = timed_capture.map_err(|_| {
+                ZeptoError::Tool(format!(
+                    "Screenshot timed out after {}s for '{}'",
+                    timeout_secs, url_str
+                ))
+            })?;
+
             capture_result
-        })
+        }
         .await;
 
         drop(browser);
         handler_handle.abort();
 
-        let screenshot_result = screenshot_result.map_err(|_| {
-            ZeptoError::Tool(format!(
-                "Screenshot timed out after {}s for '{}'",
-                timeout_secs, url_str
-            ))
-        })??;
+        let screenshot_result = screenshot_result?;
 
         // ---- Output: save or encode ----
         let result = if let Some(path) = output_path {
