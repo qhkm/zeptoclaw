@@ -60,11 +60,16 @@ impl WebScreenshotTool {
 }
 
 impl Default for WebScreenshotTool {
+    /// Create a default `WebScreenshotTool` instance.
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// Validate a browser-request URL target without performing DNS resolution.
+///
+/// Ensures the scheme is `http`/`https` and the host is not a blocked local
+/// or private address.
 fn validate_browser_request_target_basic(url: &Url) -> Result<()> {
     match url.scheme() {
         "http" | "https" => {}
@@ -86,6 +91,10 @@ fn validate_browser_request_target_basic(url: &Url) -> Result<()> {
     Ok(())
 }
 
+/// Validate a browser-request URL including DNS safety checks.
+///
+/// Hostnames are cached in `dns_allow_cache` once resolved and verified so
+/// repeated requests to the same host do not trigger redundant DNS lookups.
 async fn validate_browser_request_url(
     raw_url: &str,
     dns_allow_cache: &mut HashMap<String, ()>,
@@ -109,6 +118,10 @@ async fn validate_browser_request_url(
     Ok(())
 }
 
+/// Handle an intercepted browser request during screenshot navigation.
+///
+/// Safe requests are continued; unsafe requests are failed with
+/// `AccessDenied`, and the validation error is propagated.
 async fn handle_paused_browser_request(
     page: &chromiumoxide::Page,
     event: &EventRequestPaused,
@@ -143,23 +156,28 @@ async fn handle_paused_browser_request(
 
 #[async_trait]
 impl Tool for WebScreenshotTool {
+    /// Return the tool name.
     fn name(&self) -> &str {
         "web_screenshot"
     }
 
+    /// Describe what this tool does.
     fn description(&self) -> &str {
         "Take a screenshot of a web page. Returns base64-encoded PNG or saves to a file path."
     }
 
+    /// Provide a compact description for constrained UIs.
     fn compact_description(&self) -> &str {
         "Screenshot URL"
     }
 
+    /// Classify this tool for policy enforcement.
     fn category(&self) -> ToolCategory {
         // Fetches URL (NetworkRead) AND writes file to disk — use more restrictive category.
         ToolCategory::FilesystemWrite
     }
 
+    /// Define JSON schema for tool arguments.
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -195,6 +213,7 @@ impl Tool for WebScreenshotTool {
         })
     }
 
+    /// Execute screenshot capture with browser-native SSRF redirect checks.
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         // ---- Parse and validate URL ----
         let url_str = args
