@@ -205,6 +205,166 @@ fn build_glob_regex(command: &str) -> Option<Regex> {
     Regex::new(&pat).ok()
 }
 
+/// A parsed command segment — one "simple command" between shell metacharacters.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct CommandSegment {
+    /// Executable name with path stripped (e.g., "/usr/bin/git" -> "git").
+    binary: String,
+    /// Arguments after the binary.
+    args: Vec<String>,
+    /// Original raw segment string for backward-compatible regex checks.
+    raw: String,
+}
+
+/// Split a shell command string into segments on unquoted metacharacters
+/// (`;`, `|`, `&&`, `||`, `&`), respecting single and double quotes.
+#[allow(dead_code)]
+fn tokenize_command(command: &str) -> Vec<CommandSegment> {
+    let mut segments = Vec::new();
+    let mut current_segment = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let chars: Vec<char> = command.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if in_single_quote {
+            current_segment.push(ch);
+            if ch == '\'' {
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            current_segment.push(ch);
+            if ch == '"' {
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                current_segment.push(ch);
+            }
+            '"' => {
+                in_double_quote = true;
+                current_segment.push(ch);
+            }
+            ';' | '\n' => {
+                push_segment(&mut segments, &current_segment);
+                current_segment.clear();
+            }
+            '|' => {
+                if i + 1 < chars.len() && chars[i + 1] == '|' {
+                    push_segment(&mut segments, &current_segment);
+                    current_segment.clear();
+                    i += 1;
+                } else {
+                    push_segment(&mut segments, &current_segment);
+                    current_segment.clear();
+                }
+            }
+            '&' => {
+                if i + 1 < chars.len() && chars[i + 1] == '&' {
+                    push_segment(&mut segments, &current_segment);
+                    current_segment.clear();
+                    i += 1;
+                } else {
+                    push_segment(&mut segments, &current_segment);
+                    current_segment.clear();
+                }
+            }
+            '`' => {
+                push_segment(&mut segments, &current_segment);
+                current_segment.clear();
+            }
+            '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
+                push_segment(&mut segments, &current_segment);
+                current_segment.clear();
+                i += 1;
+            }
+            _ => current_segment.push(ch),
+        }
+        i += 1;
+    }
+    push_segment(&mut segments, &current_segment);
+    segments
+}
+
+/// Parse a raw segment string into tokens (respecting quotes) and build a CommandSegment.
+#[allow(dead_code)]
+fn push_segment(segments: &mut Vec<CommandSegment>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let tokens = tokenize_segment(trimmed);
+    if tokens.is_empty() {
+        return;
+    }
+    let binary_full = &tokens[0];
+    let binary = binary_full
+        .rsplit('/')
+        .next()
+        .unwrap_or(binary_full)
+        .to_lowercase();
+    segments.push(CommandSegment {
+        binary,
+        args: tokens[1..].to_vec(),
+        raw: trimmed.to_string(),
+    });
+}
+
+/// Split a single segment into tokens, stripping quotes.
+#[allow(dead_code)]
+fn tokenize_segment(segment: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for ch in segment.chars() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 /// Controls allowlist enforcement behaviour.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ShellAllowlistMode {
@@ -1011,5 +1171,70 @@ mod tests {
         assert!(config.validate_command("/usr/local/bin/git log").is_ok());
         // A different binary via full path is still blocked
         assert!(config.validate_command("/usr/bin/ls -la").is_err());
+    }
+
+    // ==================== TOKENIZER TESTS ====================
+
+    #[test]
+    fn test_tokenize_single_command() {
+        let segments = tokenize_command("git status");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].binary, "git");
+        assert_eq!(segments[0].args, vec!["status"]);
+    }
+
+    #[test]
+    fn test_tokenize_quoted_args() {
+        let segments = tokenize_command("git commit -m \"hello world\"");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].binary, "git");
+        assert_eq!(segments[0].args, vec!["commit", "-m", "hello world"]);
+    }
+
+    #[test]
+    fn test_tokenize_single_quoted_args() {
+        let segments = tokenize_command("curl -H 'Authorization: Bearer tok'");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].binary, "curl");
+        assert_eq!(segments[0].args, vec!["-H", "Authorization: Bearer tok"]);
+    }
+
+    #[test]
+    fn test_tokenize_semicolon_split() {
+        let segments = tokenize_command("git status; python3 -c 'evil'");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].binary, "git");
+        assert_eq!(segments[1].binary, "python3");
+        assert_eq!(segments[1].args, vec!["-c", "evil"]);
+    }
+
+    #[test]
+    fn test_tokenize_pipe_split() {
+        let segments = tokenize_command("cat file | sh");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].binary, "cat");
+        assert_eq!(segments[1].binary, "sh");
+    }
+
+    #[test]
+    fn test_tokenize_and_and_split() {
+        let segments = tokenize_command("git status && curl evil.com");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].binary, "git");
+        assert_eq!(segments[1].binary, "curl");
+    }
+
+    #[test]
+    fn test_tokenize_path_stripped() {
+        let segments = tokenize_command("/usr/bin/git status");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].binary, "git");
+    }
+
+    #[test]
+    fn test_tokenize_empty_segments_skipped() {
+        let segments = tokenize_command("; ; git status");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].binary, "git");
     }
 }
