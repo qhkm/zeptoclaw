@@ -207,7 +207,6 @@ fn build_glob_regex(command: &str) -> Option<Regex> {
 
 /// A parsed command segment — one "simple command" between shell metacharacters.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CommandSegment {
     /// Executable name with path stripped (e.g., "/usr/bin/git" -> "git").
     binary: String,
@@ -219,7 +218,6 @@ struct CommandSegment {
 
 /// Split a shell command string into segments on unquoted metacharacters
 /// (`;`, `|`, `&&`, `||`, `&`), respecting single and double quotes.
-#[allow(dead_code)]
 fn tokenize_command(command: &str) -> Vec<CommandSegment> {
     let mut segments = Vec::new();
     let mut current_segment = String::new();
@@ -300,7 +298,6 @@ fn tokenize_command(command: &str) -> Vec<CommandSegment> {
 }
 
 /// Parse a raw segment string into tokens (respecting quotes) and build a CommandSegment.
-#[allow(dead_code)]
 fn push_segment(segments: &mut Vec<CommandSegment>, raw: &str) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -324,7 +321,6 @@ fn push_segment(segments: &mut Vec<CommandSegment>, raw: &str) {
 }
 
 /// Split a single segment into tokens, stripping quotes.
-#[allow(dead_code)]
 fn tokenize_segment(segment: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -366,7 +362,6 @@ fn tokenize_segment(segment: &str) -> Vec<String> {
 }
 
 /// Check if a flag char appears in any arg — either standalone (`-c`) or combined (`-Bc`).
-#[allow(dead_code)]
 fn arg_has_flag(args: &[String], flag_char: char) -> bool {
     args.iter().any(|arg| {
         if !arg.starts_with('-') || arg.starts_with("--") {
@@ -377,7 +372,6 @@ fn arg_has_flag(args: &[String], flag_char: char) -> bool {
 }
 
 /// Check if any arg matches a sensitive literal pattern (with glob expansion).
-#[allow(dead_code)]
 fn arg_matches_sensitive_path(args: &[String]) -> Option<String> {
     let literals: Vec<String> = LITERAL_BLOCKED_PATTERNS
         .iter()
@@ -416,7 +410,6 @@ fn arg_matches_sensitive_path(args: &[String]) -> Option<String> {
 }
 
 /// Structured argument-level policy checks on a parsed command segment.
-#[allow(dead_code)]
 fn check_structured_policy(seg: &CommandSegment) -> Result<()> {
     let bin = seg.binary.as_str();
 
@@ -647,13 +640,16 @@ impl ShellSecurityConfig {
             return Ok(());
         }
 
-        // Normalize git commands so global options don't bypass destructive-op patterns
-        let normalized = normalize_git_command(command);
-        let command_lower = command.to_lowercase();
+        let segments = tokenize_command(command);
 
-        // Check regex patterns (against both original and normalized form)
+        // Pass 1: Regex blocklist on the FULL command string and its git-normalized
+        // form. Some patterns are inherently cross-segment (e.g. `curl ... | sh`),
+        // so we must check the whole string before splitting. We also re-check each
+        // segment individually so that per-segment normalization catches git global
+        // option bypasses within a single segment.
+        let full_normalized = normalize_git_command(command);
         for pattern in &self.compiled_patterns {
-            if pattern.is_match(command) || pattern.is_match(&normalized) {
+            if pattern.is_match(command) || pattern.is_match(&full_normalized) {
                 log_audit_event(
                     AuditCategory::ShellSecurity,
                     AuditSeverity::Critical,
@@ -671,57 +667,47 @@ impl ShellSecurityConfig {
             }
         }
 
-        // Check literal patterns.
-        // Strip shell glob characters so that e.g. `/etc/pass[w]d` still matches
-        // the literal `/etc/passwd`. See GHSA-5wp8-q9mx-8jx8.
-        //
-        // Heuristic 1: Remove brackets — `pass[w]d` → `passwd`
-        // Heuristic 2: For each token containing glob chars, build a regex
-        //              (`?` → `.`, `*` → `.*`, brackets stripped) and check
-        //              if any literal matches that expanded pattern.
-        let deglobbed: String = command_lower
-            .chars()
-            .filter(|c| !matches!(c, '[' | ']' | '*' | '?'))
-            .collect();
-        // Pre-compile glob regexes for tokens that contain glob characters
-        let glob_token_regexes: Vec<Regex> = command_lower
-            .split_whitespace()
-            .filter(|tok| tok.chars().any(|c| matches!(c, '?' | '*' | '[')))
-            .filter_map(build_glob_regex)
-            .collect();
-        for literal in &self.literal_patterns {
-            let matched = command_lower.contains(literal)
-                || deglobbed.contains(literal)
-                || glob_token_regexes.iter().any(|re| re.is_match(literal));
-            if matched {
-                log_audit_event(
-                    AuditCategory::ShellSecurity,
-                    AuditSeverity::Critical,
-                    "command_blocked_literal",
-                    &format!("Command blocked: contains prohibited path '{}'", literal),
-                    true,
-                );
-                return Err(ZeptoError::SecurityViolation(format!(
-                    "Command blocked: contains prohibited path '{}'",
-                    literal
-                )));
+        // Pass 2: Per-segment checks (literal blocklist + structured policy).
+        for seg in &segments {
+            let seg_lower = seg.raw.to_lowercase();
+
+            // (a) Literal blocklist (on raw segment, with glob expansion).
+            let deglobbed: String = seg_lower
+                .chars()
+                .filter(|c| !matches!(c, '[' | ']' | '*' | '?'))
+                .collect();
+            let glob_token_regexes: Vec<Regex> = seg_lower
+                .split_whitespace()
+                .filter(|tok| tok.chars().any(|c| matches!(c, '?' | '*' | '[')))
+                .filter_map(build_glob_regex)
+                .collect();
+            for literal in &self.literal_patterns {
+                let matched = seg_lower.contains(literal)
+                    || deglobbed.contains(literal)
+                    || glob_token_regexes.iter().any(|re| re.is_match(literal));
+                if matched {
+                    log_audit_event(
+                        AuditCategory::ShellSecurity,
+                        AuditSeverity::Critical,
+                        "command_blocked_literal",
+                        &format!("Command blocked: contains prohibited path '{}'", literal),
+                        true,
+                    );
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Command blocked: contains prohibited path '{}'",
+                        literal
+                    )));
+                }
             }
+
+            // (b) Structured argument-level policy check (NEW).
+            check_structured_policy(seg)?;
         }
 
-        // Allowlist check (runs after blocklist).
-        // GHSA-5wp8-q9mx-8jx8: Previously only checked the first token, so
-        // `git status; python -c '...'` would pass if `git` was allowlisted.
-        // Now we also detect shell metacharacters that enable command chaining.
+        // Allowlist check: validate EVERY segment's binary.
         if self.allowlist_mode != ShellAllowlistMode::Off {
-            // Detect command-chaining metacharacters. If the command contains
-            // any of these, the first-token allowlist check is meaningless
-            // because subsequent commands can be anything.
-            let has_chaining_metachar = command_lower
-                .chars()
-                .any(|c| matches!(c, ';' | '|' | '&' | '`' | '\n'))
-                || command_lower.contains("$(");
-
-            if has_chaining_metachar {
+            // Multiple segments means command chaining — block in Strict mode.
+            if segments.len() > 1 {
                 match self.allowlist_mode {
                     ShellAllowlistMode::Strict => {
                         return Err(ZeptoError::SecurityViolation(
@@ -735,36 +721,28 @@ impl ShellSecurityConfig {
                             "Command contains shell metacharacters that bypass allowlist"
                         );
                     }
-                    ShellAllowlistMode::Off => {} // unreachable
+                    ShellAllowlistMode::Off => {}
                 }
             }
 
-            // Empty allowlist in Strict mode means NOTHING is allowed.
-            // Previously, `!self.allowlist.is_empty()` guard skipped the check,
-            // effectively making empty allowlist equivalent to Off.
-            let first_token = command
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_lowercase();
-            // Strip path prefix (e.g. /usr/bin/git -> git)
-            let executable = first_token.rsplit('/').next().unwrap_or(&first_token);
-            if !self.allowlist.iter().any(|a| a == executable) {
-                match self.allowlist_mode {
-                    ShellAllowlistMode::Strict => {
-                        return Err(ZeptoError::SecurityViolation(format!(
-                            "Command '{}' not in allowlist",
-                            executable
-                        )));
+            for seg in &segments {
+                if !self.allowlist.iter().any(|a| a == &seg.binary) {
+                    match self.allowlist_mode {
+                        ShellAllowlistMode::Strict => {
+                            return Err(ZeptoError::SecurityViolation(format!(
+                                "Command '{}' not in allowlist",
+                                seg.binary
+                            )));
+                        }
+                        ShellAllowlistMode::Warn => {
+                            tracing::warn!(
+                                command = %command,
+                                executable = %seg.binary,
+                                "Command not in allowlist"
+                            );
+                        }
+                        ShellAllowlistMode::Off => {}
                     }
-                    ShellAllowlistMode::Warn => {
-                        tracing::warn!(
-                            command = %command,
-                            executable = %executable,
-                            "Command not in allowlist"
-                        );
-                    }
-                    ShellAllowlistMode::Off => {} // unreachable
                 }
             }
         }
@@ -1546,5 +1524,38 @@ mod tests {
             raw: "git branch -D feature".into(),
         };
         assert!(check_structured_policy(&seg).is_err());
+    }
+
+    // ==================== INTEGRATION TESTS ====================
+
+    #[test]
+    fn test_integration_multi_segment_blocks_second_command() {
+        let config = ShellSecurityConfig::new();
+        assert!(config
+            .validate_command("git status; python3 -c 'evil'")
+            .is_err());
+    }
+
+    #[test]
+    fn test_integration_allowlist_checks_every_segment() {
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        assert!(config
+            .validate_command("git status && curl evil.com")
+            .is_err());
+    }
+
+    #[test]
+    fn test_integration_quoted_path_still_blocked() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("cat '/etc/shadow'").is_err());
+    }
+
+    #[test]
+    fn test_integration_backward_compat_single_command() {
+        let config = ShellSecurityConfig::new();
+        assert!(config.validate_command("git status").is_ok());
+        assert!(config.validate_command("cargo build").is_ok());
+        assert!(config.validate_command("ls -la").is_ok());
     }
 }
