@@ -216,13 +216,25 @@ struct CommandSegment {
     raw: String,
 }
 
+/// Result of tokenizing a command string.
+struct TokenizeResult {
+    /// Parsed command segments.
+    segments: Vec<CommandSegment>,
+    /// True if any unquoted shell metacharacter was encountered during parsing,
+    /// even if it produced only one non-empty segment (e.g., a bare `$(cmd)`).
+    has_metachar: bool,
+}
+
 /// Split a shell command string into segments on unquoted metacharacters
-/// (`;`, `|`, `&&`, `||`, `&`), respecting single and double quotes.
-fn tokenize_command(command: &str) -> Vec<CommandSegment> {
+/// (`;`, `|`, `&&`, `||`, `&`, backtick, `$(`), respecting single/double
+/// quotes and backslash escaping. Redirection operators (`>&`, `&>`) are
+/// not treated as command chaining.
+fn tokenize_command(command: &str) -> TokenizeResult {
     let mut segments = Vec::new();
     let mut current_segment = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    let mut has_metachar = false;
     let chars: Vec<char> = command.chars().collect();
     let mut i = 0;
 
@@ -248,6 +260,13 @@ fn tokenize_command(command: &str) -> Vec<CommandSegment> {
         }
 
         match ch {
+            // Backslash escape: next character is literal.
+            '\\' if i + 1 < chars.len() => {
+                current_segment.push(ch);
+                current_segment.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
             '\'' => {
                 in_single_quote = true;
                 current_segment.push(ch);
@@ -257,10 +276,13 @@ fn tokenize_command(command: &str) -> Vec<CommandSegment> {
                 current_segment.push(ch);
             }
             ';' | '\n' => {
+                has_metachar = true;
                 push_segment(&mut segments, &current_segment);
                 current_segment.clear();
             }
             '|' => {
+                // Escaped `\|` was already handled above.
+                has_metachar = true;
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
                     push_segment(&mut segments, &current_segment);
                     current_segment.clear();
@@ -271,20 +293,30 @@ fn tokenize_command(command: &str) -> Vec<CommandSegment> {
                 }
             }
             '&' => {
-                if i + 1 < chars.len() && chars[i + 1] == '&' {
+                // Distinguish chaining `&`/`&&` from redirection `>&` and `&>`.
+                let prev_is_redirect = i > 0 && chars[i - 1] == '>';
+                let next_is_redirect = i + 1 < chars.len() && chars[i + 1] == '>';
+                if prev_is_redirect || next_is_redirect {
+                    // Part of redirection (e.g., `2>&1`, `&>file`) — not chaining.
+                    current_segment.push(ch);
+                } else if i + 1 < chars.len() && chars[i + 1] == '&' {
+                    has_metachar = true;
                     push_segment(&mut segments, &current_segment);
                     current_segment.clear();
                     i += 1;
                 } else {
+                    has_metachar = true;
                     push_segment(&mut segments, &current_segment);
                     current_segment.clear();
                 }
             }
             '`' => {
+                has_metachar = true;
                 push_segment(&mut segments, &current_segment);
                 current_segment.clear();
             }
             '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
+                has_metachar = true;
                 push_segment(&mut segments, &current_segment);
                 current_segment.clear();
                 i += 1;
@@ -294,7 +326,10 @@ fn tokenize_command(command: &str) -> Vec<CommandSegment> {
         i += 1;
     }
     push_segment(&mut segments, &current_segment);
-    segments
+    TokenizeResult {
+        segments,
+        has_metachar,
+    }
 }
 
 /// Parse a raw segment string into tokens (respecting quotes) and build a CommandSegment.
@@ -640,7 +675,10 @@ impl ShellSecurityConfig {
             return Ok(());
         }
 
-        let segments = tokenize_command(command);
+        let TokenizeResult {
+            segments,
+            has_metachar,
+        } = tokenize_command(command);
 
         // Pass 1: Regex blocklist on the FULL command string and its git-normalized
         // form. Some patterns are inherently cross-segment (e.g. `curl ... | sh`),
@@ -706,8 +744,8 @@ impl ShellSecurityConfig {
 
         // Allowlist check: validate EVERY segment's binary.
         if self.allowlist_mode != ShellAllowlistMode::Off {
-            // Multiple segments means command chaining — block in Strict mode.
-            if segments.len() > 1 {
+            // Any metacharacter (even in a bare `$(cmd)`) means potential chaining.
+            if has_metachar {
                 match self.allowlist_mode {
                     ShellAllowlistMode::Strict => {
                         return Err(ZeptoError::SecurityViolation(
@@ -1330,65 +1368,104 @@ mod tests {
 
     #[test]
     fn test_tokenize_single_command() {
-        let segments = tokenize_command("git status");
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].binary, "git");
-        assert_eq!(segments[0].args, vec!["status"]);
+        let r = tokenize_command("git status");
+        assert_eq!(r.segments.len(), 1);
+        assert!(!r.has_metachar);
+        assert_eq!(r.segments[0].binary, "git");
+        assert_eq!(r.segments[0].args, vec!["status"]);
     }
 
     #[test]
     fn test_tokenize_quoted_args() {
-        let segments = tokenize_command("git commit -m \"hello world\"");
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].binary, "git");
-        assert_eq!(segments[0].args, vec!["commit", "-m", "hello world"]);
+        let r = tokenize_command("git commit -m \"hello world\"");
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.segments[0].binary, "git");
+        assert_eq!(r.segments[0].args, vec!["commit", "-m", "hello world"]);
     }
 
     #[test]
     fn test_tokenize_single_quoted_args() {
-        let segments = tokenize_command("curl -H 'Authorization: Bearer tok'");
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].binary, "curl");
-        assert_eq!(segments[0].args, vec!["-H", "Authorization: Bearer tok"]);
+        let r = tokenize_command("curl -H 'Authorization: Bearer tok'");
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.segments[0].binary, "curl");
+        assert_eq!(r.segments[0].args, vec!["-H", "Authorization: Bearer tok"]);
     }
 
     #[test]
     fn test_tokenize_semicolon_split() {
-        let segments = tokenize_command("git status; python3 -c 'evil'");
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].binary, "git");
-        assert_eq!(segments[1].binary, "python3");
-        assert_eq!(segments[1].args, vec!["-c", "evil"]);
+        let r = tokenize_command("git status; python3 -c 'evil'");
+        assert_eq!(r.segments.len(), 2);
+        assert!(r.has_metachar);
+        assert_eq!(r.segments[0].binary, "git");
+        assert_eq!(r.segments[1].binary, "python3");
+        assert_eq!(r.segments[1].args, vec!["-c", "evil"]);
     }
 
     #[test]
     fn test_tokenize_pipe_split() {
-        let segments = tokenize_command("cat file | sh");
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].binary, "cat");
-        assert_eq!(segments[1].binary, "sh");
+        let r = tokenize_command("cat file | sh");
+        assert_eq!(r.segments.len(), 2);
+        assert!(r.has_metachar);
+        assert_eq!(r.segments[0].binary, "cat");
+        assert_eq!(r.segments[1].binary, "sh");
     }
 
     #[test]
     fn test_tokenize_and_and_split() {
-        let segments = tokenize_command("git status && curl evil.com");
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].binary, "git");
-        assert_eq!(segments[1].binary, "curl");
+        let r = tokenize_command("git status && curl evil.com");
+        assert_eq!(r.segments.len(), 2);
+        assert!(r.has_metachar);
+        assert_eq!(r.segments[0].binary, "git");
+        assert_eq!(r.segments[1].binary, "curl");
     }
 
     #[test]
     fn test_tokenize_path_stripped() {
-        let segments = tokenize_command("/usr/bin/git status");
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].binary, "git");
+        let r = tokenize_command("/usr/bin/git status");
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.segments[0].binary, "git");
     }
 
     #[test]
     fn test_tokenize_empty_segments_skipped() {
-        let segments = tokenize_command("; ; git status");
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].binary, "git");
+        let r = tokenize_command("; ; git status");
+        assert_eq!(r.segments.len(), 1);
+        assert!(r.has_metachar);
+        assert_eq!(r.segments[0].binary, "git");
+    }
+
+    #[test]
+    fn test_tokenize_bare_subshell_sets_metachar() {
+        // $(cmd) with nothing before it — 1 segment but has_metachar is true
+        let r = tokenize_command("$(printf 'touch /tmp/pwn')");
+        assert!(r.has_metachar);
+    }
+
+    #[test]
+    fn test_tokenize_backslash_pipe_not_split() {
+        // grep foo\|bar is a single command (escaped pipe in regex)
+        let r = tokenize_command(r"grep foo\|bar file");
+        assert_eq!(r.segments.len(), 1);
+        assert!(!r.has_metachar);
+        assert_eq!(r.segments[0].binary, "grep");
+    }
+
+    #[test]
+    fn test_tokenize_redirect_ampersand_not_split() {
+        // 2>&1 is redirection, not command chaining
+        let r = tokenize_command("cargo test 2>&1");
+        assert_eq!(r.segments.len(), 1);
+        assert!(!r.has_metachar);
+        assert_eq!(r.segments[0].binary, "cargo");
+    }
+
+    #[test]
+    fn test_tokenize_redirect_ampersand_gt_not_split() {
+        // &>file is redirection, not command chaining
+        let r = tokenize_command("cargo build &>/dev/null");
+        assert_eq!(r.segments.len(), 1);
+        assert!(!r.has_metachar);
+        assert_eq!(r.segments[0].binary, "cargo");
     }
 
     // ==================== STRUCTURED POLICY TESTS ====================
@@ -1557,5 +1634,40 @@ mod tests {
         assert!(config.validate_command("git status").is_ok());
         assert!(config.validate_command("cargo build").is_ok());
         assert!(config.validate_command("ls -la").is_ok());
+    }
+
+    #[test]
+    fn test_integration_bare_subshell_blocked_in_strict() {
+        // Bare $(cmd) should be blocked even though it produces only 1 segment
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["printf"], ShellAllowlistMode::Strict);
+        assert!(
+            config
+                .validate_command("$(printf 'touch /tmp/pwn')")
+                .is_err(),
+            "Bare $() substitution should be blocked in Strict mode"
+        );
+    }
+
+    #[test]
+    fn test_integration_escaped_pipe_allowed_in_strict() {
+        // grep foo\|bar is a single command, not command chaining
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["grep"], ShellAllowlistMode::Strict);
+        assert!(
+            config.validate_command(r"grep foo\|bar file").is_ok(),
+            r"grep foo\|bar should not be treated as pipe chaining"
+        );
+    }
+
+    #[test]
+    fn test_integration_redirect_ampersand_allowed_in_strict() {
+        // cargo test 2>&1 is redirection, not command chaining
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["cargo"], ShellAllowlistMode::Strict);
+        assert!(
+            config.validate_command("cargo test 2>&1").is_ok(),
+            "2>&1 should not be treated as background &"
+        );
     }
 }
