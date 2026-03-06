@@ -365,6 +365,169 @@ fn tokenize_segment(segment: &str) -> Vec<String> {
     tokens
 }
 
+/// Check if a flag char appears in any arg — either standalone (`-c`) or combined (`-Bc`).
+#[allow(dead_code)]
+fn arg_has_flag(args: &[String], flag_char: char) -> bool {
+    args.iter().any(|arg| {
+        if !arg.starts_with('-') || arg.starts_with("--") {
+            return false;
+        }
+        arg[1..].contains(flag_char)
+    })
+}
+
+/// Check if any arg matches a sensitive literal pattern (with glob expansion).
+#[allow(dead_code)]
+fn arg_matches_sensitive_path(args: &[String]) -> Option<String> {
+    let literals: Vec<String> = LITERAL_BLOCKED_PATTERNS
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    for arg in args {
+        let arg_lower = arg.to_lowercase();
+        // Direct match
+        for lit in &literals {
+            if arg_lower.contains(lit) {
+                return Some(lit.clone());
+            }
+        }
+        // Deglobbed match (strip brackets, ?, *)
+        let deglobbed: String = arg_lower
+            .chars()
+            .filter(|c| !matches!(c, '[' | ']' | '*' | '?'))
+            .collect();
+        for lit in &literals {
+            if deglobbed.contains(lit) {
+                return Some(lit.clone());
+            }
+        }
+        // Glob regex match
+        if arg_lower.chars().any(|c| matches!(c, '?' | '*' | '[')) {
+            if let Some(re) = build_glob_regex(&arg_lower) {
+                for lit in &literals {
+                    if re.is_match(lit) {
+                        return Some(lit.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Structured argument-level policy checks on a parsed command segment.
+#[allow(dead_code)]
+fn check_structured_policy(seg: &CommandSegment) -> Result<()> {
+    let bin = seg.binary.as_str();
+
+    // Scripting inline execution: python -c, perl -e, ruby -e, node -e
+    let is_python =
+        bin == "python" || bin == "python2" || bin == "python3" || bin.starts_with("python3.");
+    if is_python && arg_has_flag(&seg.args, 'c') {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Blocked: {} with inline code execution flag (-c)",
+            seg.binary
+        )));
+    }
+    if (bin == "perl" || bin == "ruby" || bin == "node") && arg_has_flag(&seg.args, 'e') {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Blocked: {} with inline code execution flag (-e)",
+            seg.binary
+        )));
+    }
+
+    // Destructive rm: binary is rm, has -r and -f (any order/combo), target is / or /*
+    if bin == "rm" {
+        let has_r = seg.args.iter().any(|a| {
+            a == "-r"
+                || a == "-R"
+                || (a.starts_with('-')
+                    && !a.starts_with("--")
+                    && (a.contains('r') || a.contains('R')))
+        });
+        let has_f = seg
+            .args
+            .iter()
+            .any(|a| a == "-f" || (a.starts_with('-') && !a.starts_with("--") && a.contains('f')));
+        let has_root_target = seg.args.iter().any(|a| {
+            !a.starts_with('-') && {
+                let trimmed = a.trim_end_matches('*');
+                trimmed == "/" || (trimmed.is_empty() && a.starts_with('*'))
+            }
+        });
+        if has_r && has_f && has_root_target {
+            return Err(ZeptoError::SecurityViolation(
+                "Blocked: rm -rf / (destructive root deletion)".to_string(),
+            ));
+        }
+    }
+
+    // Destructive git operations (structural check)
+    if bin == "git" {
+        // Skip global options (e.g. -C, --git-dir) to find the real subcommand
+        let subcommand = seg
+            .args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        match subcommand {
+            "push" => {
+                let has_force = seg.args.iter().any(|a| {
+                    a == "--force"
+                        || a == "--force-with-lease"
+                        || (a.starts_with('-') && !a.starts_with("--") && a.contains('f'))
+                });
+                if has_force {
+                    return Err(ZeptoError::SecurityViolation(
+                        "Blocked: git push --force (destructive push)".to_string(),
+                    ));
+                }
+            }
+            "reset" => {
+                if seg.args.iter().any(|a| a == "--hard") {
+                    return Err(ZeptoError::SecurityViolation(
+                        "Blocked: git reset --hard (destructive reset)".to_string(),
+                    ));
+                }
+            }
+            "clean" => {
+                let has_force = seg.args.iter().any(|a| {
+                    a == "--force"
+                        || (a.starts_with('-') && !a.starts_with("--") && a.contains('f'))
+                });
+                if has_force {
+                    return Err(ZeptoError::SecurityViolation(
+                        "Blocked: git clean -f (destructive clean)".to_string(),
+                    ));
+                }
+            }
+            "branch" => {
+                if seg
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('D'))
+                {
+                    return Err(ZeptoError::SecurityViolation(
+                        "Blocked: git branch -D (force delete)".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Sensitive path in any argument
+    if let Some(path) = arg_matches_sensitive_path(&seg.args) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Blocked: argument contains prohibited path '{}'",
+            path
+        )));
+    }
+
+    Ok(())
+}
+
 /// Controls allowlist enforcement behaviour.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ShellAllowlistMode {
@@ -1236,5 +1399,92 @@ mod tests {
         let segments = tokenize_command("; ; git status");
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].binary, "git");
+    }
+
+    // ==================== STRUCTURED POLICY TESTS ====================
+
+    #[test]
+    fn test_structured_blocks_python_c_reordered_flags() {
+        let seg = CommandSegment {
+            binary: "python3".into(),
+            args: vec!["-B".into(), "-u".into(), "-c".into(), "evil".into()],
+            raw: "python3 -B -u -c evil".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_python_combined_c_flag() {
+        let seg = CommandSegment {
+            binary: "python3".into(),
+            args: vec!["-Bc".into(), "evil".into()],
+            raw: "python3 -Bc evil".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_allows_python_script_file() {
+        let seg = CommandSegment {
+            binary: "python3".into(),
+            args: vec!["script.py".into()],
+            raw: "python3 script.py".into(),
+        };
+        assert!(check_structured_policy(&seg).is_ok());
+    }
+
+    #[test]
+    fn test_structured_blocks_perl_e_reordered() {
+        let seg = CommandSegment {
+            binary: "perl".into(),
+            args: vec!["-w".into(), "-T".into(), "-e".into(), "system('id')".into()],
+            raw: "perl -w -T -e system('id')".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_rm_rf_root_any_order() {
+        let seg = CommandSegment {
+            binary: "rm".into(),
+            args: vec!["-f".into(), "-r".into(), "/".into()],
+            raw: "rm -f -r /".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_allows_rm_normal_dir() {
+        let seg = CommandSegment {
+            binary: "rm".into(),
+            args: vec!["-rf".into(), "./temp".into()],
+            raw: "rm -rf ./temp".into(),
+        };
+        assert!(check_structured_policy(&seg).is_ok());
+    }
+
+    #[test]
+    fn test_structured_blocks_sensitive_path_in_args() {
+        let seg = CommandSegment {
+            binary: "cat".into(),
+            args: vec!["/etc/shadow".into()],
+            raw: "cat /etc/shadow".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
+    }
+
+    #[test]
+    fn test_structured_blocks_git_push_force_in_args() {
+        let seg = CommandSegment {
+            binary: "git".into(),
+            args: vec![
+                "push".into(),
+                "origin".into(),
+                "main".into(),
+                "--force".into(),
+            ],
+            raw: "git push origin main --force".into(),
+        };
+        assert!(check_structured_policy(&seg).is_err());
     }
 }
