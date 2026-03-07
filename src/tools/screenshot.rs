@@ -4,16 +4,22 @@
 //! via the Chrome DevTools Protocol. Includes full SSRF protection by
 //! reusing the validation from [`super::web`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::fetch::{
+    ContinueRequestParams, EventRequestPaused, FailRequestParams,
+};
+use chromiumoxide::cdp::browser_protocol::network::{ErrorReason, ResourceType};
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
 use reqwest::Url;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::error::{Result, ZeptoError};
@@ -57,6 +63,63 @@ impl Default for WebScreenshotTool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn should_validate_navigation_request(
+    resource_type: ResourceType,
+    response_status_code: Option<i64>,
+) -> bool {
+    response_status_code.is_none() && resource_type == ResourceType::Document
+}
+
+fn wrap_blocked_navigation_error(url_str: &str, err: ZeptoError) -> ZeptoError {
+    match err {
+        ZeptoError::SecurityViolation(msg) => ZeptoError::SecurityViolation(format!(
+            "Screenshot blocked: browser navigation target '{}' failed SSRF validation: {}",
+            url_str, msg
+        )),
+        other => ZeptoError::Tool(format!(
+            "Failed to validate browser navigation target '{}': {}",
+            url_str, other
+        )),
+    }
+}
+
+async fn validate_navigation_target(url_str: &str) -> Result<()> {
+    let parsed = Url::parse(url_str).map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to parse browser navigation target '{}': {}",
+            url_str, e
+        ))
+    })?;
+    validate_redirect_target(&parsed)
+        .await
+        .map_err(|e| wrap_blocked_navigation_error(url_str, e))
+}
+
+async fn continue_paused_request(
+    page: &chromiumoxide::Page,
+    request_id: &chromiumoxide::cdp::browser_protocol::fetch::RequestId,
+) {
+    let _ = page
+        .execute(ContinueRequestParams::new(request_id.clone()))
+        .await;
+}
+
+async fn block_paused_request(
+    page: &chromiumoxide::Page,
+    request_id: &chromiumoxide::cdp::browser_protocol::fetch::RequestId,
+) {
+    let _ = page
+        .execute(FailRequestParams::new(
+            request_id.clone(),
+            ErrorReason::BlockedByClient,
+        ))
+        .await;
+}
+
+async fn take_blocked_navigation_error(error: &Mutex<Option<ZeptoError>>) -> Option<ZeptoError> {
+    error.lock().await.take()
 }
 
 #[async_trait]
@@ -172,6 +235,7 @@ impl Tool for WebScreenshotTool {
         // ---- Launch headless browser ----
         let browser_config = BrowserConfig::builder()
             .no_sandbox()
+            .enable_request_intercept()
             .viewport(Some(Viewport {
                 width,
                 height,
@@ -196,45 +260,110 @@ impl Tool for WebScreenshotTool {
             }
         });
 
-        // ---- Navigate and validate final URL (with timeout) ----
-        // The browser follows redirects natively. After navigation completes,
-        // we validate the final URL before capturing the screenshot. This
-        // catches SSRF via redirect chains regardless of method-specific or
-        // UA-specific server behavior — we check what the browser actually
-        // landed on, not what a separate preflight request saw.
-        let screenshot_result = timeout(Duration::from_secs(timeout_secs), async {
-            let page = browser
-                .new_page(url_str)
+        let page = Arc::new(
+            browser
+                .new_page("about:blank")
                 .await
-                .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?;
+                .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?,
+        );
+        let blocked_navigation_error = Arc::new(Mutex::new(None::<ZeptoError>));
+        let mut request_paused =
+            page.event_listener::<EventRequestPaused>()
+                .await
+                .map_err(|e| {
+                    ZeptoError::Tool(format!("Failed to attach request interceptor: {}", e))
+                })?;
+        let intercept_page = Arc::clone(&page);
+        let intercept_error = Arc::clone(&blocked_navigation_error);
+        let intercept_handle = tokio::spawn(async move {
+            while let Some(event) = request_paused.next().await {
+                if !should_validate_navigation_request(
+                    event.resource_type.clone(),
+                    event.response_status_code,
+                ) {
+                    continue_paused_request(intercept_page.as_ref(), &event.request_id).await;
+                    continue;
+                }
 
-            // ---- Post-navigation SSRF check ----
-            // Validate the URL the browser actually navigated to after any
-            // redirects. This is the true final destination — no TOCTOU gap.
+                match validate_navigation_target(&event.request.url).await {
+                    Ok(()) => {
+                        continue_paused_request(intercept_page.as_ref(), &event.request_id).await;
+                    }
+                    Err(err) => {
+                        let mut slot = intercept_error.lock().await;
+                        if slot.is_none() {
+                            *slot = Some(err);
+                        }
+                        drop(slot);
+                        block_paused_request(intercept_page.as_ref(), &event.request_id).await;
+                    }
+                }
+            }
+        });
+
+        // ---- Navigate and screenshot (with timeout) ----
+        let screenshot_result = timeout(Duration::from_secs(timeout_secs), async {
+            match page.goto(url_str).await {
+                Ok(_) => {}
+                Err(e) => {
+                    if let Some(err) =
+                        take_blocked_navigation_error(&blocked_navigation_error).await
+                    {
+                        return Err(err);
+                    }
+                    return Err(ZeptoError::Tool(format!("Failed to navigate page: {}", e)));
+                }
+            }
+
+            if let Some(err) = take_blocked_navigation_error(&blocked_navigation_error).await {
+                return Err(err);
+            }
+
+            // Defense in depth: validate the final landed URL as well.
             if let Ok(Some(final_url_str)) = page.url().await {
                 if let Ok(final_url) = Url::parse(&final_url_str) {
                     validate_redirect_target(&final_url).await?;
                 }
             }
 
-            let screenshot_bytes = page
+            if let Some(err) = take_blocked_navigation_error(&blocked_navigation_error).await {
+                return Err(err);
+            }
+
+            let screenshot_bytes = match page
                 .screenshot(ScreenshotParams::builder().full_page(false).build())
                 .await
-                .map_err(|e| ZeptoError::Tool(format!("Failed to capture screenshot: {}", e)))?;
+            {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if let Some(err) =
+                        take_blocked_navigation_error(&blocked_navigation_error).await
+                    {
+                        return Err(err);
+                    }
+                    return Err(ZeptoError::Tool(format!(
+                        "Failed to capture screenshot: {}",
+                        e
+                    )));
+                }
+            };
 
             Ok::<Vec<u8>, ZeptoError>(screenshot_bytes)
         })
-        .await
-        .map_err(|_| {
+        .await;
+
+        // Clean up browser resources.
+        drop(page);
+        drop(browser);
+        intercept_handle.abort();
+        handler_handle.abort();
+
+        let screenshot_result = screenshot_result.map_err(|_| {
             ZeptoError::Tool(format!(
                 "Screenshot timed out after {}s for '{}'",
                 timeout_secs, url_str
             ))
         })??;
-
-        // Clean up browser resources.
-        drop(browser);
-        handler_handle.abort();
 
         // ---- Output: save or encode ----
         let result = if let Some(path) = output_path {
@@ -503,7 +632,37 @@ mod tests {
 
     // ---- Redirect SSRF validation tests ----
     // These test the redirect-target validation functions from web.rs
-    // that the screenshot tool uses for post-navigation final URL checks.
+    // that the screenshot tool uses for intercepted navigation validation.
+
+    #[test]
+    fn test_validate_document_request_stage() {
+        assert!(should_validate_navigation_request(
+            ResourceType::Document,
+            None
+        ));
+    }
+
+    #[test]
+    fn test_skip_subresource_request_validation() {
+        assert!(!should_validate_navigation_request(
+            ResourceType::Image,
+            None
+        ));
+    }
+
+    #[test]
+    fn test_skip_response_stage_validation() {
+        assert!(!should_validate_navigation_request(
+            ResourceType::Document,
+            Some(302)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_validate_navigation_target_blocks_private_url() {
+        let result = validate_navigation_target("http://127.0.0.1:8080/private").await;
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_redirect_to_localhost_blocked() {

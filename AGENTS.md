@@ -38,7 +38,7 @@ Project-level guidance for coding agents working in this repository.
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: 2956 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 126 doc (27 ignored)
+- Tests: 3073 lib + 95 main + 23 cli_smoke + 13 e2e + 70 integration + 1 no_byte_slices + 126 doc (27 ignored)
 
 ## Task Tracking Protocol
 

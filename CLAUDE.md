@@ -23,8 +23,8 @@ cargo clippy -- -D warnings
 # Format
 cargo fmt
 
-# Test counts (cargo test)
-# lib: 2956, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 126 passed (27 ignored)
+# Test counts (cargo test --features screenshot)
+# lib: 3073, main: 95, cli_smoke: 23, e2e: 13, integration: 70, no_byte_slices: 1, doc: 126 passed (27 ignored)
 
 # Version
 ./target/release/zeptoclaw --version
@@ -323,7 +323,7 @@ src/
 │   ├── transcribe.rs  # Audio transcription with provider abstraction
 │   ├── http_request.rs # General-purpose HTTP client tool
 │   ├── project.rs     # Project scaffolding and management
-│   ├── screenshot.rs  # Web screenshot capture (feature: screenshot)
+│   ├── screenshot.rs  # Web screenshot capture with pre-request SSRF redirect blocking (feature: screenshot)
 │   ├── custom.rs      # CLI-defined tools via custom_tools config
 │   ├── hardware.rs    # GPIO, serial, USB peripheral operations (feature: hardware)
 │   ├── whatsapp.rs    # WhatsApp Cloud API messaging
