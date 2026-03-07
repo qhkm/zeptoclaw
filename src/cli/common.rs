@@ -246,6 +246,9 @@ pub(crate) async fn create_agent_with_template(
                 Some(budget),
             );
         }
+        if tpl.max_tool_calls.is_some() {
+            config.agents.defaults.max_tool_calls = tpl.max_tool_calls;
+        }
     }
 
     // --- Kernel boot: assemble shared subsystems ---

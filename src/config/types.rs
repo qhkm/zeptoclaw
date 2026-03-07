@@ -659,6 +659,9 @@ pub struct AgentDefaults {
     /// Maximum bytes allowed per tool result before truncation.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
+    /// Maximum total tool calls allowed per agent run. None = unlimited.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
 }
 
 /// Detect the system's IANA timezone.
@@ -712,6 +715,7 @@ impl Default for AgentDefaults {
             timezone: default_timezone(),
             loop_guard: LoopGuardConfig::default(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
+            max_tool_calls: None,
         }
     }
 }

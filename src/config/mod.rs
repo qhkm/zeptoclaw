@@ -197,6 +197,11 @@ impl Config {
                 self.agents.defaults.max_tool_result_bytes = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_CALLS") {
+            if let Ok(v) = val.parse::<u32>() {
+                self.agents.defaults.max_tool_calls = Some(v);
+            }
+        }
 
         // Gateway
         if let Ok(val) = std::env::var("ZEPTOCLAW_GATEWAY_HOST") {

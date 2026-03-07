@@ -57,6 +57,7 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "active_hand",
     "loop_guard",
     "max_tool_result_bytes",
+    "max_tool_calls",
 ];
 
 const KNOWN_LOOP_GUARD: &[&str] = &[

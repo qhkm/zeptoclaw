@@ -62,6 +62,7 @@ pub mod facade;
 mod r#loop;
 pub mod loop_guard;
 pub mod scratchpad;
+pub mod tool_call_limit;
 
 pub use budget::TokenBudget;
 pub use context::{format_message_envelope, ContextBuilder, RuntimeContext};
@@ -70,3 +71,4 @@ pub use facade::{ZeptoAgent, ZeptoAgentBuilder};
 pub use r#loop::AgentLoop;
 pub use r#loop::{ToolFeedback, ToolFeedbackPhase};
 pub use scratchpad::SwarmScratchpad;
+pub use tool_call_limit::ToolCallLimitTracker;

@@ -27,6 +27,7 @@ use crate::utils::metrics::MetricsCollector;
 
 use super::budget::TokenBudget;
 use super::context::ContextBuilder;
+use super::tool_call_limit::ToolCallLimitTracker;
 
 /// System prompt sent during the memory flush turn, instructing the LLM to
 /// persist important facts and deduplicate existing long-term memory entries.
@@ -393,6 +394,8 @@ pub struct AgentLoop {
     dry_run: AtomicBool,
     /// Per-session token budget tracker.
     token_budget: Arc<TokenBudget>,
+    /// Per-agent-run tool call limit tracker.
+    tool_call_limit: ToolCallLimitTracker,
     /// Tool approval gate for policy-based tool gating.
     approval_gate: Arc<ApprovalGate>,
     /// Agent mode for category-based tool enforcement.
@@ -472,6 +475,7 @@ impl AgentLoop {
     pub fn new(config: Config, session_manager: SessionManager, bus: Arc<MessageBus>) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
+        let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
         let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
@@ -508,6 +512,7 @@ impl AgentLoop {
             streaming: AtomicBool::new(false),
             dry_run: AtomicBool::new(false),
             token_budget,
+            tool_call_limit,
             approval_gate,
             agent_mode,
             safety_layer,
@@ -538,6 +543,7 @@ impl AgentLoop {
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
+        let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
         let agent_mode = config.agent_mode.resolve();
         let safety_layer = if config.safety.enabled {
@@ -574,6 +580,7 @@ impl AgentLoop {
             streaming: AtomicBool::new(false),
             dry_run: AtomicBool::new(false),
             token_budget,
+            tool_call_limit,
             approval_gate,
             agent_mode,
             safety_layer,
@@ -999,6 +1006,18 @@ impl AgentLoop {
             debug!("Tool iteration {} of {}", iteration, max_iterations);
             if let Some(metrics) = usage_metrics.as_ref() {
                 metrics.record_tool_calls(response.tool_calls.len() as u64);
+            }
+
+            // Check tool call limit before executing
+            self.tool_call_limit
+                .increment(response.tool_calls.len() as u32);
+            if self.tool_call_limit.is_exceeded() {
+                info!(
+                    count = self.tool_call_limit.count(),
+                    limit = ?self.tool_call_limit.limit(),
+                    "Tool call limit reached, stopping tool execution"
+                );
+                break;
             }
 
             // Add assistant message with tool calls
@@ -1512,6 +1531,18 @@ impl AgentLoop {
 
         while response.has_tool_calls() && iteration < max_iterations {
             iteration += 1;
+
+            // Check tool call limit before executing
+            self.tool_call_limit
+                .increment(response.tool_calls.len() as u32);
+            if self.tool_call_limit.is_exceeded() {
+                info!(
+                    count = self.tool_call_limit.count(),
+                    limit = ?self.tool_call_limit.limit(),
+                    "Tool call limit reached, stopping streaming tool execution"
+                );
+                break;
+            }
 
             let mut assistant_msg = Message::assistant(&response.content);
             assistant_msg.tool_calls = Some(
