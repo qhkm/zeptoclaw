@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use crate::error::{Result, ZeptoError};
-use crate::security::validate_path_in_workspace;
+use crate::security::{revalidate_path, validate_path_in_workspace};
 
 use super::{Tool, ToolContext, ToolOutput};
 
@@ -50,6 +50,8 @@ impl DocxReadTool {
                 "Only .docx files are supported".to_string(),
             ));
         }
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(safe.as_path(), &self.workspace)?;
         if !safe.as_path().exists() {
             return Err(ZeptoError::Tool(format!("File not found: {path}")));
         }

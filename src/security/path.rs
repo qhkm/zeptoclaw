@@ -242,6 +242,94 @@ fn check_symlink_escape(path: &Path, canonical_workspace: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Re-validates a previously validated path immediately before I/O.
+///
+/// This narrows the TOCTOU window between validation and use. Call this
+/// right before every filesystem read/write operation on a path that was
+/// validated earlier by `validate_path_in_workspace`.
+///
+/// Performs:
+/// 1. Symlink escape check (including dangling symlink detection)
+/// 2. Workspace boundary check via canonicalization
+pub fn revalidate_path(path: &Path, workspace: &str) -> Result<()> {
+    let workspace_path = Path::new(workspace);
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(workspace_path));
+
+    // Re-check symlink escapes (components may have changed since initial validation)
+    check_symlink_escape(path, &canonical_workspace)?;
+
+    // If the path now exists, verify its canonical form is still within workspace
+    if let Ok(canonical) = path.canonicalize() {
+        if !canonical.starts_with(&canonical_workspace) {
+            log_audit_event(
+                AuditCategory::PathSecurity,
+                AuditSeverity::Critical,
+                "toctou_escape",
+                &format!(
+                    "Path moved outside workspace between validation and use: '{}' -> '{}'",
+                    path.display(),
+                    canonical.display()
+                ),
+                true,
+            );
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Path escaped workspace between validation and use: '{}' resolves to '{}'",
+                path.display(),
+                canonical.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks if a file has multiple hard links, which could indicate it aliases
+/// an inode outside the workspace trust boundary.
+///
+/// Call this before write operations on existing files. A file with `nlink > 1`
+/// inside workspace may be a hardlink to an external inode on the same filesystem,
+/// allowing writes to escape workspace boundaries.
+///
+/// Returns Ok(()) if the file doesn't exist (new file creation) or has exactly 1 link.
+pub fn check_hardlink_write(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            if meta.nlink() > 1 {
+                log_audit_event(
+                    AuditCategory::PathSecurity,
+                    AuditSeverity::Critical,
+                    "hardlink_escape",
+                    &format!(
+                        "File has {} hard links, may alias external inode: '{}'",
+                        meta.nlink(),
+                        path.display()
+                    ),
+                    true,
+                );
+                return Err(ZeptoError::SecurityViolation(format!(
+                    "Write blocked: '{}' has {} hard links and may alias content outside workspace",
+                    path.display(),
+                    meta.nlink()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet — new file creation is fine
+            Ok(())
+        }
+        Err(e) => Err(ZeptoError::Tool(format!(
+            "Failed to check file metadata for '{}': {}",
+            path.display(),
+            e
+        ))),
+    }
+}
+
 /// Normalizes a path by resolving `.` and `..` components.
 ///
 /// This function processes path components to remove:
@@ -645,5 +733,99 @@ mod tests {
             result.is_err(),
             "Should reject direct access to dangling symlink"
         );
+    }
+
+    // ==================== REVALIDATE_PATH TESTS ====================
+
+    #[test]
+    fn test_revalidate_path_valid_file() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        let file = canonical.join("safe.txt");
+        fs::write(&file, "content").unwrap();
+
+        // Revalidation should pass for a normal file
+        let result = revalidate_path(&file, workspace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_revalidate_path_nonexistent_file() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Non-existent file — new file creation is fine
+        let file = canonical.join("new_file.txt");
+        let result = revalidate_path(&file, workspace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_revalidate_path_symlink_escape() {
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink pointing outside workspace
+        let escape = canonical.join("escape");
+        symlink(outside.path(), &escape).unwrap();
+
+        let target = escape.join("secret.txt");
+        let result = revalidate_path(&target, workspace);
+        assert!(
+            result.is_err(),
+            "Should detect symlink escape on revalidation"
+        );
+    }
+
+    // ==================== CHECK_HARDLINK_WRITE TESTS ====================
+
+    #[test]
+    fn test_hardlink_write_single_link() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("single.txt");
+        fs::write(&file, "content").unwrap();
+
+        // Single link (nlink=1) should be allowed
+        let result = check_hardlink_write(&file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_hardlink_write_multiple_links() {
+        let temp = tempdir().unwrap();
+        let original = temp.path().join("original.txt");
+        fs::write(&original, "content").unwrap();
+
+        let link = temp.path().join("hardlink.txt");
+        fs::hard_link(&original, &link).unwrap();
+
+        // nlink=2 should be blocked
+        let result = check_hardlink_write(&link);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+
+        // Original also has nlink=2 now
+        let result = check_hardlink_write(&original);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hardlink_write_nonexistent_file() {
+        let temp = tempdir().unwrap();
+        let nonexistent = temp.path().join("does_not_exist.txt");
+
+        // Non-existent file — new file creation is fine
+        let result = check_hardlink_write(&nonexistent);
+        assert!(result.is_ok());
     }
 }

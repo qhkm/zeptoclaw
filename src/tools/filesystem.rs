@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use crate::error::{Result, ZeptoError};
-use crate::security::validate_path_in_workspace;
+use crate::security::{check_hardlink_write, revalidate_path, validate_path_in_workspace};
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
@@ -18,14 +18,19 @@ use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 /// Requires a workspace to be configured. All paths are validated to stay
 /// within workspace boundaries. This is the correct security posture --
 /// filesystem tools must not operate outside a defined workspace.
-fn resolve_path(path: &str, ctx: &ToolContext) -> Result<String> {
+///
+/// Returns `(resolved_path, workspace)` so callers can re-validate before I/O.
+fn resolve_path(path: &str, ctx: &ToolContext) -> Result<(String, String)> {
     let workspace = ctx.workspace.as_ref().ok_or_else(|| {
         ZeptoError::SecurityViolation(
             "Workspace not configured; filesystem tools require a workspace for safety".to_string(),
         )
     })?;
     let safe_path = validate_path_in_workspace(path, workspace)?;
-    Ok(safe_path.as_path().to_string_lossy().to_string())
+    Ok((
+        safe_path.as_path().to_string_lossy().to_string(),
+        workspace.clone(),
+    ))
 }
 
 /// Tool for reading file contents.
@@ -87,7 +92,10 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(Path::new(&full_path), &workspace)?;
 
         let content = tokio::fs::read_to_string(&full_path)
             .await
@@ -165,16 +173,22 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'content' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+        let full_path_ref = Path::new(&full_path);
 
         // Create parent directories if they don't exist
-        if let Some(parent) = Path::new(&full_path).parent() {
+        if let Some(parent) = full_path_ref.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     ZeptoError::Tool(format!("Failed to create parent directories: {}", e))
                 })?;
             }
         }
+
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(full_path_ref, &workspace)?;
+        // Hardlink check: block writes to files with multiple hard links
+        check_hardlink_write(full_path_ref)?;
 
         tokio::fs::write(&full_path, content).await.map_err(|e| {
             ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
@@ -246,7 +260,10 @@ impl Tool for ListDirTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(Path::new(&full_path), &workspace)?;
 
         let mut entries = tokio::fs::read_dir(&full_path).await.map_err(|e| {
             ZeptoError::Tool(format!("Failed to read directory '{}': {}", full_path, e))
@@ -359,7 +376,11 @@ impl Tool for EditFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'new_text' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+        let full_path_ref = Path::new(&full_path);
+
+        // TOCTOU: re-validate immediately before read
+        revalidate_path(full_path_ref, &workspace)?;
 
         // Read the current content
         let content = tokio::fs::read_to_string(&full_path)
@@ -377,6 +398,10 @@ impl Tool for EditFileTool {
 
         // Replace the text
         let new_content = content.replace(old_text, new_text);
+
+        // TOCTOU: re-validate and hardlink check immediately before write
+        revalidate_path(full_path_ref, &workspace)?;
+        check_hardlink_write(full_path_ref)?;
 
         // Write back
         tokio::fs::write(&full_path, &new_content)
@@ -707,7 +732,7 @@ mod tests {
         let ctx = ToolContext::new().with_workspace(workspace);
         let result = resolve_path("relative/path", &ctx);
         assert!(result.is_ok());
-        let resolved = result.unwrap();
+        let (resolved, _ws) = result.unwrap();
         // The path should contain "relative/path" and be within workspace
         assert!(resolved.contains("relative/path") || resolved.ends_with("relative/path"));
     }
@@ -875,6 +900,102 @@ mod tests {
             err.contains("Security violation") || err.contains("traversal"),
             "Expected security error for double-encoded traversal, got: {}",
             err
+        );
+    }
+
+    // ==================== TOCTOU + HARDLINK SECURITY TESTS ====================
+
+    #[tokio::test]
+    async fn test_write_blocks_hardlinked_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file
+        let original = canonical.join("original.txt");
+        fs::write(&original, "original content").unwrap();
+
+        // Create a hard link to it
+        let hardlink = canonical.join("hardlink.txt");
+        fs::hard_link(&original, &hardlink).unwrap();
+
+        let tool = WriteFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        // Writing to the hardlinked file should be blocked
+        let result = tool
+            .execute(
+                json!({"path": "hardlink.txt", "content": "malicious"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_blocks_hardlinked_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file
+        let original = canonical.join("editable.txt");
+        fs::write(&original, "Hello World").unwrap();
+
+        // Create a hard link
+        let hardlink = canonical.join("edit_link.txt");
+        fs::hard_link(&original, &hardlink).unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_link.txt",
+                    "old_text": "Hello",
+                    "new_text": "Goodbye"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_allows_single_link_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file (nlink = 1)
+        fs::write(canonical.join("normal.txt"), "original").unwrap();
+
+        let tool = WriteFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        let result = tool
+            .execute(json!({"path": "normal.txt", "content": "updated"}), &ctx)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read_to_string(canonical.join("normal.txt")).unwrap(),
+            "updated"
         );
     }
 }
