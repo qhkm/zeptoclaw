@@ -1334,6 +1334,13 @@ impl AgentLoop {
                     limit = ?self.tool_call_limit.limit(),
                     "Tool call limit reached, making final synthesis call"
                 );
+                // Respect token budget — skip the synthesis call if already over.
+                if self.token_budget.is_exceeded() {
+                    info!(budget = %self.token_budget.summary(), "Token budget also exceeded, skipping synthesis call");
+                    response.content =
+                        "Tool call limit reached. Token budget exceeded.".to_string();
+                    break;
+                }
                 let messages: Vec<_> = self
                     .context_builder
                     .build_messages_with_memory_override(
@@ -1575,6 +1582,7 @@ impl AgentLoop {
         // Tool loop (non-streaming)
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
         let mut iteration = 0;
+        let mut tool_limit_hit = false;
         let mut chain_tracker = crate::safety::chain_alert::ChainTracker::new();
         let mut loop_guard = if self.config.agents.defaults.loop_guard.enabled {
             Some(LoopGuard::new(
@@ -1874,6 +1882,7 @@ impl AgentLoop {
                     limit = ?self.tool_call_limit.limit(),
                     "Tool call limit reached, proceeding to final streaming synthesis"
                 );
+                tool_limit_hit = true;
                 response.tool_calls.clear();
                 break;
             }
@@ -1928,7 +1937,9 @@ impl AgentLoop {
 
         // Final call: if no more tool calls, use streaming
         if !response.has_tool_calls() {
-            // Re-issue the final call via chat_stream
+            // Re-issue the final call via chat_stream.
+            // If the tool call limit was hit, pass empty tools so the model
+            // cannot emit further tool calls after the cap was enforced.
             let messages: Vec<_> = self
                 .context_builder
                 .build_messages_with_memory_override(
@@ -1940,7 +1951,9 @@ impl AgentLoop {
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
 
-            let tool_definitions = {
+            let tool_definitions = if tool_limit_hit {
+                vec![]
+            } else {
                 let tools = self.tools.read().await;
                 tools.definitions_with_options(self.config.agents.defaults.compact_tools)
             };
