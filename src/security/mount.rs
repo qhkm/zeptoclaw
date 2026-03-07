@@ -307,17 +307,27 @@ pub fn validate_mount_not_blocked(mount_spec: &str) -> Result<()> {
 
     // If the mount source exists, check its canonical path too so symlink
     // targets cannot bypass blocked-pattern checks.
-    if host_path.exists() {
-        let canonical_host = canonicalize_existing(&host_path)?;
-        if let Some(pattern) = path_contains_blocked_pattern(&canonical_host, &blocked) {
+    match host_path.try_exists() {
+        Ok(true) => {
+            let canonical_host = canonicalize_existing(&host_path)?;
+            if let Some(pattern) = path_contains_blocked_pattern(&canonical_host, &blocked) {
+                return Err(ZeptoError::SecurityViolation(format!(
+                    "Resolved mount path '{}' blocked by sensitive pattern '{}'",
+                    canonical_host.display(),
+                    pattern
+                )));
+            }
+
+            validate_no_hardlink_alias(&canonical_host, mount_spec)?;
+        }
+        Ok(false) => {}
+        Err(e) => {
             return Err(ZeptoError::SecurityViolation(format!(
-                "Resolved mount path '{}' blocked by sensitive pattern '{}'",
-                canonical_host.display(),
-                pattern
+                "Failed to inspect mount path '{}': {}",
+                host_path.display(),
+                e
             )));
         }
-
-        validate_no_hardlink_alias(&canonical_host, mount_spec)?;
     }
 
     Ok(())
