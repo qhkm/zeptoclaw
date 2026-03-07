@@ -699,7 +699,7 @@ async fn test_max_tool_calls_exact_budget() {
 }
 
 /// max_tool_calls=2 with a batch of 5 should truncate to 2 tool calls,
-/// then synthesize. The provider's call_count confirms truncation happened.
+/// then synthesize.
 #[tokio::test]
 async fn test_max_tool_calls_truncates_batch() {
     let mut config = Config::default();
@@ -709,9 +709,6 @@ async fn test_max_tool_calls_truncates_batch() {
     let bus = Arc::new(MessageBus::new());
     let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
 
-    let provider = Arc::new(MockBatchToolProvider::new(5));
-    // We need to use set_provider which takes Box, but we also want to inspect
-    // call_count. Use a separate Arc'd provider and a forwarding wrapper.
     agent
         .set_provider(Box::new(MockBatchToolProvider::new(5)))
         .await;
@@ -728,8 +725,50 @@ async fn test_max_tool_calls_truncates_batch() {
         "Expected synthesis response after truncation, got: {}",
         response
     );
-    // Drop the unused Arc to avoid a warning
-    drop(provider);
+}
+
+/// Regression: tool call counter must reset between process_message() calls.
+/// Without reset, the second run would inherit the exhausted counter from the
+/// first run and fail to execute any tools.
+#[tokio::test]
+async fn test_max_tool_calls_resets_between_runs() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = Some(3);
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    // First run: exhausts the 3-call budget
+    let msg1 = InboundMessage::new("test", "user1", "chat1", "First run");
+    let result1 = agent.process_message(&msg1).await;
+    assert!(result1.is_ok(), "First run failed: {:?}", result1.err());
+    let response1 = result1.unwrap();
+    assert!(
+        response1.contains("synthesis-complete"),
+        "First run should synthesize, got: {}",
+        response1
+    );
+
+    // Second run on the SAME agent: counter must have reset, so tools work again.
+    // Replace provider to reset its internal call_count.
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    let msg2 = InboundMessage::new("test", "user2", "chat2", "Second run");
+    let result2 = agent.process_message(&msg2).await;
+    assert!(result2.is_ok(), "Second run failed: {:?}", result2.err());
+    let response2 = result2.unwrap();
+    assert!(
+        response2.contains("synthesis-complete"),
+        "Second run should also synthesize (counter reset), got: {}",
+        response2
+    );
 }
 
 /// max_tool_calls with no limit (None) should allow all tool calls.

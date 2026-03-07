@@ -240,7 +240,9 @@ pub async fn register_all_tools(
     // --- Group 3: Git ---
     if filter.is_enabled("git") {
         if crate::tools::GitTool::is_available() {
-            registry.register(Box::new(crate::tools::GitTool::new()));
+            registry.register(Box::new(crate::tools::GitTool::with_security(
+                shell_config.clone(),
+            )));
             info!("Registered git tool");
         } else {
             tracing::debug!("git binary not found, skipping git tool");

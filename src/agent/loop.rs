@@ -793,6 +793,10 @@ impl AgentLoop {
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
 
+        // Reset per-run counters so limits apply to each process_message call
+        // independently, not across the lifetime of the AgentLoop struct.
+        self.tool_call_limit.reset();
+
         // Tiered inbound injection scanning: block untrusted channels, warn others.
         // Runs before any LLM call so injected payloads never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
@@ -1452,6 +1456,10 @@ impl AgentLoop {
         // Acquire per-session lock
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
+
+        // Reset per-run counters so limits apply to each process_message call
+        // independently, not across the lifetime of the AgentLoop struct.
+        self.tool_call_limit.reset();
 
         // Tiered inbound injection scanning (streaming path).
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {

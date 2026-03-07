@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
+use crate::security::ShellSecurityConfig;
 
 use super::{Tool, ToolContext, ToolOutput};
 
@@ -33,12 +34,27 @@ const MAX_LOG_COUNT: u64 = 200;
 /// (checked via `GitTool::is_available()`). All commands run in the workspace
 /// directory supplied by `ToolContext`. When no workspace is set the tool
 /// returns an error.
-pub struct GitTool;
+///
+/// When a `ShellSecurityConfig` is provided, the tool validates that `git` is
+/// permitted by the allowlist before executing any command.
+pub struct GitTool {
+    shell_config: ShellSecurityConfig,
+}
 
 impl GitTool {
-    /// Create a new GitTool instance.
+    /// Create a new GitTool instance with default (blocklist-only) security.
     pub fn new() -> Self {
-        Self
+        Self {
+            shell_config: ShellSecurityConfig::new(),
+        }
+    }
+
+    /// Create a new GitTool with an explicit shell security config.
+    ///
+    /// When the config uses `ShellAllowlistMode::Strict`, the git binary
+    /// must appear in the allowlist or all actions will be rejected.
+    pub fn with_security(shell_config: ShellSecurityConfig) -> Self {
+        Self { shell_config }
     }
 
     /// Return `true` if the `git` binary is reachable on PATH.
@@ -89,6 +105,12 @@ impl Default for GitTool {
     }
 }
 
+impl std::fmt::Debug for GitTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitTool").finish()
+    }
+}
+
 #[async_trait]
 impl Tool for GitTool {
     fn name(&self) -> &str {
@@ -136,6 +158,12 @@ impl Tool for GitTool {
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        // Validate that the git binary is permitted by the shell allowlist.
+        // This prevents bypassing shell_allowlist restrictions via the git tool.
+        self.shell_config
+            .validate_command("git")
+            .map_err(|e| ZeptoError::Tool(format!("Git blocked by shell allowlist: {}", e)))?;
+
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -530,6 +558,52 @@ mod tests {
 
     #[test]
     fn test_default_impl() {
-        let _tool = GitTool;
+        let _tool = GitTool::default();
+    }
+
+    // --- Shell allowlist enforcement ---
+
+    #[tokio::test]
+    async fn test_git_blocked_by_empty_allowlist() {
+        use crate::security::{ShellAllowlistMode, ShellSecurityConfig};
+
+        let config = ShellSecurityConfig::new().with_allowlist(vec![], ShellAllowlistMode::Strict);
+        let tool = GitTool::with_security(config);
+        let ctx = ctx_with_workspace(&repo_root());
+
+        let result = tool.execute(json!({"action": "status"}), &ctx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocked by shell allowlist"),
+            "Expected allowlist rejection, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_allowed_by_allowlist() {
+        use crate::security::{ShellAllowlistMode, ShellSecurityConfig};
+
+        let config =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        let tool = GitTool::with_security(config);
+        let ctx = ctx_with_workspace(&repo_root());
+
+        let result = tool.execute(json!({"action": "status"}), &ctx).await;
+        assert!(result.is_ok(), "git should be allowed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_git_default_security_allows() {
+        let tool = GitTool::new();
+        let ctx = ctx_with_workspace(&repo_root());
+
+        let result = tool.execute(json!({"action": "status"}), &ctx).await;
+        assert!(
+            result.is_ok(),
+            "Default security should allow git: {:?}",
+            result.err()
+        );
     }
 }

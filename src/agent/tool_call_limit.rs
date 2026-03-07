@@ -57,6 +57,15 @@ impl ToolCallLimitTracker {
         self.limit
     }
 
+    /// Resets the counter to zero. The limit remains unchanged.
+    ///
+    /// Called at the start of each `process_message` invocation so that
+    /// per-agent-run limits apply to each run independently, not across
+    /// the lifetime of the `AgentLoop` struct.
+    pub fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+    }
+
     /// Returns the number of tool calls still allowed before the limit is hit.
     ///
     /// Returns `None` if the tracker has no limit (unlimited).
@@ -113,6 +122,19 @@ mod tests {
         assert_eq!(tracker.limit(), Some(10));
         tracker.increment(5);
         assert_eq!(tracker.count(), 5);
+    }
+
+    #[test]
+    fn test_reset() {
+        let tracker = ToolCallLimitTracker::new(Some(5));
+        tracker.increment(5);
+        assert!(tracker.is_exceeded());
+        tracker.reset();
+        assert_eq!(tracker.count(), 0);
+        assert!(!tracker.is_exceeded());
+        assert_eq!(tracker.remaining(), Some(5));
+        // Limit unchanged after reset.
+        assert_eq!(tracker.limit(), Some(5));
     }
 
     #[test]
