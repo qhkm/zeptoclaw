@@ -75,6 +75,38 @@ fn path_contains_blocked_pattern(path: &Path, patterns: &[String]) -> Option<Str
         .cloned()
 }
 
+fn path_contains_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+#[cfg(unix)]
+fn validate_no_hardlink_alias(path: &Path, mount_spec: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        ZeptoError::SecurityViolation(format!(
+            "Failed to inspect mount path '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    if metadata.file_type().is_file() && metadata.nlink() > 1 {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Mount '{}' points to a file with multiple hard links; use allowlist-based mount validation for sensitive mounts",
+            mount_spec
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_no_hardlink_alias(_path: &Path, _mount_spec: &str) -> Result<()> {
+    Ok(())
+}
+
 fn parse_mount_spec(spec: &str) -> Result<(String, String, bool)> {
     let parts: Vec<&str> = spec.split(':').collect();
     match parts.as_slice() {
@@ -229,8 +261,14 @@ pub fn validate_extra_mounts(mounts: &[String], allowlist_path: &str) -> Result<
 /// Validate that a mount spec does not reference any blocked sensitive paths.
 ///
 /// This performs a lightweight check against [`DEFAULT_BLOCKED_PATTERNS`] without
-/// requiring a full allowlist file.  Useful for contexts (e.g. the container
+/// requiring a full allowlist file. Useful for contexts (e.g. the container
 /// agent proxy) where the full allowlist may not be configured.
+///
+/// The host path is checked in both unresolved and canonicalized forms (when the
+/// host path exists) to prevent symlink-based bypasses.
+///
+/// On Unix, regular files with multiple hard links are rejected to reduce inode
+/// aliasing risk in lightweight mode.
 ///
 /// The mount spec must follow `host_path:container_path[:ro]` format.
 pub fn validate_mount_not_blocked(mount_spec: &str) -> Result<()> {
@@ -250,6 +288,16 @@ pub fn validate_mount_not_blocked(mount_spec: &str) -> Result<()> {
         .collect();
 
     let host_path = expand_path(&host);
+
+    // Check for path traversal in host path.
+    if path_contains_parent_component(&host_path) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Mount host path '{}' contains path traversal",
+            host
+        )));
+    }
+
+    // Check unresolved host path against default blocked patterns.
     if let Some(pattern) = path_contains_blocked_pattern(&host_path, &blocked) {
         return Err(ZeptoError::SecurityViolation(format!(
             "Mount '{}' blocked by sensitive pattern '{}'",
@@ -257,12 +305,19 @@ pub fn validate_mount_not_blocked(mount_spec: &str) -> Result<()> {
         )));
     }
 
-    // Also check for path traversal in host path.
-    if host.contains("..") {
-        return Err(ZeptoError::SecurityViolation(format!(
-            "Mount host path '{}' contains path traversal",
-            host
-        )));
+    // If the mount source exists, check its canonical path too so symlink
+    // targets cannot bypass blocked-pattern checks.
+    if host_path.exists() {
+        let canonical_host = canonicalize_existing(&host_path)?;
+        if let Some(pattern) = path_contains_blocked_pattern(&canonical_host, &blocked) {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Resolved mount path '{}' blocked by sensitive pattern '{}'",
+                canonical_host.display(),
+                pattern
+            )));
+        }
+
+        validate_no_hardlink_alias(&canonical_host, mount_spec)?;
     }
 
     Ok(())
@@ -455,5 +510,38 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Invalid mount mode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_not_blocked_rejects_symlink_to_blocked_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let blocked_target = temp.path().join(".ssh");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+
+        let safe_link = temp.path().join("safe_mount");
+        symlink(&blocked_target, &safe_link).unwrap();
+
+        let spec = format!("{}:/container/data", safe_link.display());
+        let result = validate_mount_not_blocked(&spec);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".ssh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_not_blocked_rejects_regular_file_with_multiple_hardlinks() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let alias = temp.path().join("alias.txt");
+        std::fs::write(&source, "secret").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+
+        let spec = format!("{}:/container/alias", alias.display());
+        let result = validate_mount_not_blocked(&spec);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hard links"));
     }
 }

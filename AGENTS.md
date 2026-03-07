@@ -29,6 +29,7 @@ Project-level guidance for coding agents working in this repository.
 - Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
 - Tool execution convergence: agent loop and MCP server both route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording)
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
+- Lightweight mount validator hardening: `validate_mount_not_blocked` now checks unresolved + canonical host paths and rejects Unix regular-file mounts with multiple hard links
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
 - Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
