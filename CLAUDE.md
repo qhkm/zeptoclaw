@@ -304,7 +304,7 @@ src/
 ├── migrate/        # OpenClaw migration (config, skills import)
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (30 built-in + MCP + binary plugins + android)
+├── tools/          # Agent tools (32 built-in + MCP + binary plugins + android)
 │   ├── android/     # Android device control via ADB (feature-gated: --features android)
 │   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
 │   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
@@ -314,7 +314,10 @@ src/
 │   │   └── stuck.rs    # Screen hash, repetition/drift detection, alerts
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
-│   ├── filesystem.rs  # Read, write, list, edit files (4 tools: read, write, list, edit)
+│   ├── diff.rs        # Unified diff parser/applier (used by edit_file)
+│   ├── filesystem.rs  # Read, write, list, edit files (4 tools: read, write, list, edit + diff mode)
+│   ├── find.rs        # File discovery by glob pattern (FindTool)
+│   ├── grep.rs        # Codebase search by regex pattern (GrepTool)
 │   ├── web.rs         # Web search (Brave + DuckDuckGo + SearXNG) and fetch with SSRF protection
 │   ├── git.rs         # Git operations (status, diff, log, commit)
 │   ├── stripe.rs      # Stripe API integration for payment operations
@@ -451,7 +454,7 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-30 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
+32 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
 
 **Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
 - `CreateToolTool` — agent tool with create/list/delete/run actions

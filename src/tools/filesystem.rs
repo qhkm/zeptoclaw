@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::error::{Result, ZeptoError};
 use crate::security::{check_hardlink_write, revalidate_path, validate_path_in_workspace};
+use crate::tools::diff::apply_unified_diff;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
@@ -329,7 +330,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing specified text with new content"
+        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff)."
     }
 
     fn compact_description(&self) -> &str {
@@ -355,9 +356,13 @@ impl Tool for EditFileTool {
                 "new_text": {
                     "type": "string",
                     "description": "The text to replace it with"
+                },
+                "diff": {
+                    "type": "string",
+                    "description": "A unified diff patch to apply. Use standard @@ hunk headers with +/- lines. Mutually exclusive with old_text/new_text."
                 }
             },
-            "required": ["path", "old_text", "new_text"]
+            "required": ["path"]
         })
     }
 
@@ -367,55 +372,87 @@ impl Tool for EditFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let old_text = args
-            .get("old_text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ZeptoError::Tool("Missing 'old_text' argument".into()))?;
+        let diff_param = args.get("diff").and_then(|v| v.as_str());
+        let old_text = args.get("old_text").and_then(|v| v.as_str());
+        let new_text = args.get("new_text").and_then(|v| v.as_str());
 
-        let new_text = args
-            .get("new_text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ZeptoError::Tool("Missing 'new_text' argument".into()))?;
+        if diff_param.is_some() && (old_text.is_some() || new_text.is_some()) {
+            return Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text', not both.".into(),
+            ));
+        }
+
+        if diff_param.is_none() && (old_text.is_none() || new_text.is_none()) {
+            return Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text'".into(),
+            ));
+        }
 
         let (full_path, workspace) = resolve_path(path, ctx)?;
         let full_path_ref = Path::new(&full_path);
 
-        // TOCTOU: re-validate immediately before read
-        revalidate_path(full_path_ref, &workspace)?;
+        if let Some(diff_str) = diff_param {
+            // --- Unified diff mode ---
+            revalidate_path(full_path_ref, &workspace)?;
 
-        // Read the current content
-        let content = tokio::fs::read_to_string(&full_path)
-            .await
-            .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
-
-        // Check if old_text exists in the file
-        if !content.contains(old_text) {
-            return Err(ZeptoError::Tool(format!(
-                "Text '{}' not found in file '{}'",
-                crate::utils::string::preview(old_text, 50),
-                full_path
-            )));
-        }
-
-        // Replace the text
-        let new_content = content.replace(old_text, new_text);
-
-        // TOCTOU: re-validate and hardlink check immediately before write
-        revalidate_path(full_path_ref, &workspace)?;
-        check_hardlink_write(full_path_ref)?;
-
-        // Write back
-        tokio::fs::write(&full_path, &new_content)
-            .await
-            .map_err(|e| {
-                ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
+            let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
+                ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
             })?;
 
-        let replacements = content.matches(old_text).count();
-        Ok(ToolOutput::llm_only(format!(
-            "Successfully replaced {} occurrence(s) in {}",
-            replacements, full_path
-        )))
+            let (new_content, summary) = apply_unified_diff(&content, diff_str)
+                .map_err(|e| ZeptoError::Tool(format!("Diff apply failed: {}", e)))?;
+
+            revalidate_path(full_path_ref, &workspace)?;
+            check_hardlink_write(full_path_ref)?;
+
+            tokio::fs::write(&full_path, &new_content)
+                .await
+                .map_err(|e| {
+                    ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
+                })?;
+
+            Ok(ToolOutput::llm_only(format!(
+                "Applied {} hunk(s): +{} -{} in {}",
+                summary.hunks_applied, summary.lines_added, summary.lines_removed, full_path
+            )))
+        } else if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
+            // --- String replacement mode (existing logic) ---
+            revalidate_path(full_path_ref, &workspace)?;
+
+            let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
+                ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
+            })?;
+
+            if !content.contains(old_text) {
+                return Err(ZeptoError::Tool(format!(
+                    "Text '{}' not found in file '{}'",
+                    crate::utils::string::preview(old_text, 50),
+                    full_path
+                )));
+            }
+
+            let new_content = content.replace(old_text, new_text);
+
+            revalidate_path(full_path_ref, &workspace)?;
+            check_hardlink_write(full_path_ref)?;
+
+            tokio::fs::write(&full_path, &new_content)
+                .await
+                .map_err(|e| {
+                    ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
+                })?;
+
+            let replacements = content.matches(old_text).count();
+            Ok(ToolOutput::llm_only(format!(
+                "Successfully replaced {} occurrence(s) in {}",
+                replacements, full_path
+            )))
+        } else {
+            // unreachable due to early validation, but kept for safety
+            Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text'".into(),
+            ))
+        }
     }
 }
 
@@ -692,7 +729,7 @@ mod tests {
         let tool = EditFileTool;
         let ctx = ToolContext::new().with_workspace("/tmp");
 
-        // Missing old_text
+        // Missing old_text (only new_text provided)
         let result = tool
             .execute(json!({"path": "test.txt", "new_text": "new"}), &ctx)
             .await;
@@ -700,9 +737,9 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Missing 'old_text'"));
+            .contains("Provide either 'diff' or 'old_text'/'new_text'"));
 
-        // Missing new_text
+        // Missing new_text (only old_text provided)
         let result = tool
             .execute(json!({"path": "test.txt", "old_text": "old"}), &ctx)
             .await;
@@ -710,7 +747,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Missing 'new_text'"));
+            .contains("Provide either 'diff' or 'old_text'/'new_text'"));
     }
 
     #[test]
@@ -998,5 +1035,77 @@ mod tests {
             fs::read_to_string(canonical.join("normal.txt")).unwrap(),
             "updated"
         );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_mode_simple() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("diff_test.txt");
+        fs::write(&file_path, "line one\nline two\nline three\n").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "diff_test.txt",
+                    "diff": "@@ -1,3 +1,3 @@\n line one\n-line two\n+LINE TWO\n line three"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap().for_llm;
+        assert!(output.contains("Applied 1 hunk"));
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "line one\nLINE TWO\nline three\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_mode_context_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("diff_mismatch.txt");
+        fs::write(&file_path, "foo\nbar\nbaz\n").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "diff_mismatch.txt",
+                    "diff": "@@ -1,3 +1,3 @@\n foo\n WRONG\n baz"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("context mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_and_old_text_mutually_exclusive() {
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace("/tmp");
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "diff": "@@ -1,1 +1,1 @@\n-a\n+b",
+                    "old_text": "a",
+                    "new_text": "b"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not both"));
     }
 }
