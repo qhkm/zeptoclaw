@@ -80,7 +80,8 @@ Before finishing any non-trivial change, run:
 ```bash
 cargo fmt -- --check
 cargo clippy -- -D warnings
-cargo test
+cargo nextest run --lib
+cargo test --doc
 ```
 
 If benchmark-related code is changed, also run:

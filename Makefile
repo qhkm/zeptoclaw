@@ -31,13 +31,15 @@ setup:
 	@which cargo-nextest > /dev/null 2>&1 && echo "cargo-nextest already installed" || \
 		(echo "Installing cargo-nextest..." && cargo install cargo-nextest --locked)
 
-# Run all tests
+# Run all tests (nextest + doc tests for CI parity)
 test: setup
 	cargo nextest run
+	cargo test --doc
 
 # Run tests with output
 test-verbose: setup
 	cargo nextest run --no-capture
+	cargo test --doc -- --nocapture
 
 # Lint with clippy
 lint:
