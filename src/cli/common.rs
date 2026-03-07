@@ -246,8 +246,12 @@ pub(crate) async fn create_agent_with_template(
                 Some(budget),
             );
         }
-        if tpl.max_tool_calls.is_some() {
-            config.agents.defaults.max_tool_calls = tpl.max_tool_calls;
+        if let Some(tpl_limit) = tpl.max_tool_calls {
+            config.agents.defaults.max_tool_calls =
+                Some(match config.agents.defaults.max_tool_calls {
+                    Some(global) => global.min(tpl_limit),
+                    None => tpl_limit,
+                });
         }
     }
 

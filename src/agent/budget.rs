@@ -167,11 +167,13 @@ impl Default for TokenBudget {
 /// Resolve effective token budget from global config and optional template override.
 ///
 /// - `global` = 0 means unlimited; `template` = None means inherit global.
+/// - `template` = Some(0) means "no override" (treated same as None, since 0 = unlimited
+///   in TokenBudget, and a template must not expand beyond global).
 /// - When both are set (non-zero), the lower value wins.
-/// - When global is unlimited (0) and template sets a value, template wins.
+/// - When global is unlimited (0) and template sets a non-zero value, template wins.
 pub fn resolve_token_budget(global: u64, template: Option<u64>) -> u64 {
     match template {
-        None => global,
+        None | Some(0) => global,
         Some(tpl) => {
             if global == 0 {
                 tpl
@@ -353,5 +355,13 @@ mod tests {
     #[test]
     fn test_resolve_token_budget_both_unlimited() {
         assert_eq!(resolve_token_budget(0, None), 0);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_template_zero_cannot_expand() {
+        // Template setting 0 must NOT disable a finite global budget
+        assert_eq!(resolve_token_budget(50000, Some(0)), 50000);
+        // When global is also unlimited, stays unlimited
+        assert_eq!(resolve_token_budget(0, Some(0)), 0);
     }
 }

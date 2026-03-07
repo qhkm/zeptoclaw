@@ -1008,18 +1008,6 @@ impl AgentLoop {
                 metrics.record_tool_calls(response.tool_calls.len() as u64);
             }
 
-            // Check tool call limit before executing
-            self.tool_call_limit
-                .increment(response.tool_calls.len() as u32);
-            if self.tool_call_limit.is_exceeded() {
-                info!(
-                    count = self.tool_call_limit.count(),
-                    limit = ?self.tool_call_limit.limit(),
-                    "Tool call limit reached, stopping tool execution"
-                );
-                break;
-            }
-
             // Add assistant message with tool calls
             let mut assistant_msg = Message::assistant(&response.content);
             assistant_msg.tool_calls = Some(
@@ -1307,6 +1295,18 @@ impl AgentLoop {
                 session.add_message(Message::tool_result(id, result));
             }
 
+            // Check tool call limit after executing (not before, to avoid off-by-one)
+            self.tool_call_limit
+                .increment(response.tool_calls.len() as u32);
+            if self.tool_call_limit.is_exceeded() {
+                info!(
+                    count = self.tool_call_limit.count(),
+                    limit = ?self.tool_call_limit.limit(),
+                    "Tool call limit reached, stopping tool execution"
+                );
+                break;
+            }
+
             if let Some(guard) = loop_guard.as_mut() {
                 if check_loop_guard(guard, &response.tool_calls, &mut session) {
                     response.content =
@@ -1531,18 +1531,6 @@ impl AgentLoop {
 
         while response.has_tool_calls() && iteration < max_iterations {
             iteration += 1;
-
-            // Check tool call limit before executing
-            self.tool_call_limit
-                .increment(response.tool_calls.len() as u32);
-            if self.tool_call_limit.is_exceeded() {
-                info!(
-                    count = self.tool_call_limit.count(),
-                    limit = ?self.tool_call_limit.limit(),
-                    "Tool call limit reached, stopping streaming tool execution"
-                );
-                break;
-            }
 
             let mut assistant_msg = Message::assistant(&response.content);
             assistant_msg.tool_calls = Some(
@@ -1792,6 +1780,18 @@ impl AgentLoop {
             let results: Vec<(String, String)> = results;
             for (id, result) in &results {
                 session.add_message(Message::tool_result(id, result));
+            }
+
+            // Check tool call limit after executing (not before, to avoid off-by-one)
+            self.tool_call_limit
+                .increment(response.tool_calls.len() as u32);
+            if self.tool_call_limit.is_exceeded() {
+                info!(
+                    count = self.tool_call_limit.count(),
+                    limit = ?self.tool_call_limit.limit(),
+                    "Tool call limit reached, stopping streaming tool execution"
+                );
+                break;
             }
 
             if let Some(guard) = loop_guard.as_mut() {
