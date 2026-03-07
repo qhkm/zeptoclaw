@@ -119,6 +119,48 @@ impl LLMProvider for MockToolCallingProvider {
     }
 }
 
+/// A provider that reports large token usage on each call.
+/// Used to test that token_budget resets between process_message() runs.
+#[derive(Debug)]
+struct MockBudgetExhaustingProvider {
+    tokens_per_call: u32,
+}
+
+impl MockBudgetExhaustingProvider {
+    fn new(tokens_per_call: u32) -> Self {
+        Self { tokens_per_call }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for MockBudgetExhaustingProvider {
+    fn name(&self) -> &str {
+        "mock-budget-exhaust"
+    }
+
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+
+    async fn chat(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+    ) -> zeptoclaw::error::Result<LLMResponse> {
+        Ok(LLMResponse {
+            content: "budget-test-response".to_string(),
+            tool_calls: vec![],
+            usage: Some(zeptoclaw::providers::Usage {
+                prompt_tokens: self.tokens_per_call,
+                completion_tokens: self.tokens_per_call,
+                total_tokens: self.tokens_per_call * 2,
+            }),
+        })
+    }
+}
+
 /// A provider that emits a configurable number of tool calls per batch.
 /// Used to test max_tool_calls enforcement at the agent loop level.
 ///
@@ -797,5 +839,50 @@ async fn test_max_tool_calls_unlimited() {
         response.contains("synthesis-complete"),
         "Expected synthesis response with unlimited budget, got: {}",
         response
+    );
+}
+
+/// Regression: token budget must reset between process_message() calls.
+/// Without reset, the second run would fail with "Token budget exceeded"
+/// because the budget was consumed by the first run.
+#[tokio::test]
+async fn test_token_budget_resets_between_runs() {
+    let mut config = Config::default();
+    // Set a budget of 200 tokens. The provider reports 100+100=200 per call,
+    // which exactly exhausts the budget on the first run.
+    config.agents.defaults.token_budget = 200;
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBudgetExhaustingProvider::new(100)))
+        .await;
+
+    // First run: consumes 200 tokens (exactly the budget)
+    let msg1 = InboundMessage::new("test", "user1", "chat1", "First run");
+    let result1 = agent.process_message(&msg1).await;
+    assert!(result1.is_ok(), "First run failed: {:?}", result1.err());
+    let response1 = result1.unwrap();
+    assert!(
+        response1.contains("budget-test-response"),
+        "First run should succeed, got: {}",
+        response1
+    );
+
+    // Second run on the SAME agent: budget must have reset.
+    let msg2 = InboundMessage::new("test", "user2", "chat2", "Second run");
+    let result2 = agent.process_message(&msg2).await;
+    assert!(
+        result2.is_ok(),
+        "Second run should succeed (budget reset), but got error: {:?}",
+        result2.err()
+    );
+    let response2 = result2.unwrap();
+    assert!(
+        response2.contains("budget-test-response"),
+        "Second run should also return response (budget reset), got: {}",
+        response2
     );
 }

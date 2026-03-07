@@ -796,6 +796,7 @@ impl AgentLoop {
         // Reset per-run counters so limits apply to each process_message call
         // independently, not across the lifetime of the AgentLoop struct.
         self.tool_call_limit.reset();
+        self.token_budget.reset();
 
         // Tiered inbound injection scanning: block untrusted channels, warn others.
         // Runs before any LLM call so injected payloads never reach the model.
@@ -1460,6 +1461,7 @@ impl AgentLoop {
         // Reset per-run counters so limits apply to each process_message call
         // independently, not across the lifetime of the AgentLoop struct.
         self.tool_call_limit.reset();
+        self.token_budget.reset();
 
         // Tiered inbound injection scanning (streaming path).
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
