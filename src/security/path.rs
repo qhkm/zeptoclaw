@@ -158,29 +158,83 @@ fn check_symlink_escape(path: &Path, canonical_workspace: &Path) -> Result<()> {
     for component in relative.components() {
         current.push(component);
 
-        // Only check components that exist on the filesystem
-        if current.exists() {
-            // Canonicalize to resolve any symlinks
-            if let Ok(canonical) = current.canonicalize() {
-                // Check if the canonical path is still within workspace
-                if !canonical.starts_with(canonical_workspace) {
-                    log_audit_event(
-                        AuditCategory::PathSecurity,
-                        AuditSeverity::Critical,
-                        "symlink_escape",
-                        &format!(
-                            "Symlink escape: '{}' resolves to '{}' outside workspace",
-                            current.display(),
-                            canonical.display()
-                        ),
-                        true,
-                    );
-                    return Err(ZeptoError::SecurityViolation(format!(
-                        "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
-                        current.display(),
-                        canonical.display()
-                    )));
+        // Use symlink_metadata instead of exists() — exists() follows symlinks
+        // and returns false for dangling symlinks, letting them bypass validation.
+        // symlink_metadata returns metadata for the symlink itself (lstat).
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    // It's a symlink — try to canonicalize to check where it points
+                    match current.canonicalize() {
+                        Ok(canonical) => {
+                            // Symlink resolves — check if target is within workspace
+                            if !canonical.starts_with(canonical_workspace) {
+                                log_audit_event(
+                                    AuditCategory::PathSecurity,
+                                    AuditSeverity::Critical,
+                                    "symlink_escape",
+                                    &format!(
+                                        "Symlink escape: '{}' resolves to '{}' outside workspace",
+                                        current.display(),
+                                        canonical.display()
+                                    ),
+                                    true,
+                                );
+                                return Err(ZeptoError::SecurityViolation(format!(
+                                    "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
+                                    current.display(),
+                                    canonical.display()
+                                )));
+                            }
+                        }
+                        Err(_) => {
+                            // Dangling symlink — target doesn't exist, so we can't
+                            // verify it stays within workspace. Reject it since the
+                            // target could be created or retargeted outside workspace.
+                            log_audit_event(
+                                AuditCategory::PathSecurity,
+                                AuditSeverity::Critical,
+                                "dangling_symlink",
+                                &format!(
+                                    "Dangling symlink: '{}' cannot be resolved",
+                                    current.display()
+                                ),
+                                true,
+                            );
+                            return Err(ZeptoError::SecurityViolation(format!(
+                                "Dangling symlink detected: '{}' target does not exist and cannot be validated",
+                                current.display()
+                            )));
+                        }
+                    }
+                } else if meta.is_dir() {
+                    // Regular directory — canonicalize to check for nested symlinks
+                    if let Ok(canonical) = current.canonicalize() {
+                        if !canonical.starts_with(canonical_workspace) {
+                            log_audit_event(
+                                AuditCategory::PathSecurity,
+                                AuditSeverity::Critical,
+                                "symlink_escape",
+                                &format!(
+                                    "Symlink escape: '{}' resolves to '{}' outside workspace",
+                                    current.display(),
+                                    canonical.display()
+                                ),
+                                true,
+                            );
+                            return Err(ZeptoError::SecurityViolation(format!(
+                                "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
+                                current.display(),
+                                canonical.display()
+                            )));
+                        }
+                    }
                 }
+                // Regular files: no escape check needed (they can't redirect traversal)
+            }
+            Err(_) => {
+                // Path component doesn't exist yet — this is fine for new file creation
+                // (e.g., writing to workspace/subdir/newfile.txt where newfile.txt doesn't exist)
             }
         }
     }
@@ -508,6 +562,88 @@ mod tests {
         assert!(
             result.is_err(),
             "Should block writing new files through symlinks to outside"
+        );
+    }
+
+    // ==================== DANGLING SYMLINK TESTS ====================
+
+    #[test]
+    fn test_dangling_symlink_rejected() {
+        let temp = tempdir().unwrap();
+        // Use canonical workspace to avoid macOS /var -> /private/var mismatch
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink pointing to a non-existent target inside workspace
+        // (target within workspace namespace so starts_with doesn't mask the check)
+        let nonexistent_target = canonical.join("does_not_exist_subdir");
+        let symlink_path = canonical.join("dangling_link");
+        symlink(&nonexistent_target, &symlink_path).unwrap();
+
+        // Dangling symlink should be rejected — target can't be validated
+        let result = validate_path_in_workspace("dangling_link/file.txt", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject dangling symlinks whose target can't be verified"
+        );
+
+        if let Err(ZeptoError::SecurityViolation(msg)) = result {
+            assert!(
+                msg.contains("Dangling symlink") || msg.contains("cannot be validated"),
+                "Expected dangling symlink error, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_dangling_symlink_to_outside_workspace() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink that points outside workspace to a path that doesn't exist
+        let symlink_path = canonical.join("future_escape");
+        symlink("/tmp/attacker_controlled_dir_nonexistent", &symlink_path).unwrap();
+
+        let result = validate_path_in_workspace("future_escape/secret.txt", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject dangling symlink pointing outside workspace"
+        );
+    }
+
+    #[test]
+    fn test_nested_dangling_symlink() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a/dangling where dangling is a broken symlink within workspace namespace
+        fs::create_dir_all(canonical.join("a")).unwrap();
+        let nonexistent_target = canonical.join("no_such_dir");
+        symlink(&nonexistent_target, canonical.join("a/dangling")).unwrap();
+
+        let result = validate_path_in_workspace("a/dangling/file.txt", workspace);
+        assert!(result.is_err(), "Should reject nested dangling symlinks");
+    }
+
+    #[test]
+    fn test_dangling_symlink_direct_access() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a dangling symlink pointing to non-existent path within workspace
+        let nonexistent_target = canonical.join("ghost");
+        let symlink_path = canonical.join("broken_link");
+        symlink(&nonexistent_target, &symlink_path).unwrap();
+
+        // Accessing the symlink itself (not a child) — the symlink is the leaf
+        let result = validate_path_in_workspace("broken_link", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject direct access to dangling symlink"
         );
     }
 }
