@@ -66,6 +66,29 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@f23382d582832e41d5eb4fff2bddb06bc5adf8d3 # v2.68.21
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Generate code coverage
+        run: cargo llvm-cov nextest --lib --features memory-bm25 --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0561704f0f02c16a585d4c7555e57fa2e44cf909 # v5.5.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+
   # Heavy checks that only run on main merges
   riscv64-smoke:
     name: RISC-V smoke test
