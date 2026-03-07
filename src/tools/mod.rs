@@ -64,11 +64,14 @@ pub mod composed;
 pub mod cron;
 pub mod custom;
 pub mod delegate;
+pub mod diff;
 pub mod docx_read;
 pub mod filesystem;
+pub mod find;
 pub mod git;
 #[cfg(feature = "google")]
 pub mod google;
+pub mod grep;
 pub mod gsheets;
 pub mod hardware;
 pub mod http_request;
@@ -103,9 +106,11 @@ pub use composed::{ComposedTool, CreateToolTool};
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
 pub use docx_read::DocxReadTool;
+pub use find::FindTool;
 pub use git::GitTool;
 #[cfg(feature = "google")]
 pub use google::GoogleTool;
+pub use grep::GrepTool;
 pub use gsheets::GoogleSheetsTool;
 pub use hardware::HardwareTool;
 pub use http_request::HttpRequestTool;

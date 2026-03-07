@@ -228,6 +228,12 @@ pub async fn register_all_tools(
     if filter.is_enabled("edit_file") {
         registry.register(Box::new(EditFileTool));
     }
+    if filter.is_enabled("grep") {
+        registry.register(Box::new(crate::tools::grep::GrepTool));
+    }
+    if filter.is_enabled("find") {
+        registry.register(Box::new(crate::tools::find::FindTool));
+    }
 
     // --- Group 2: Runtime-dependent ---
     if filter.is_enabled("shell") {

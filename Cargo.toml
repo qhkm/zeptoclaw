@@ -187,6 +187,12 @@ probe-rs = { version = "0.31", optional = true }
 quick-xml = "0.39"
 
 # =============================================================================
+# GLOB MATCHING
+# =============================================================================
+# File path pattern matching for FindTool
+glob = "0.3"
+
+# =============================================================================
 # GOOGLE WORKSPACE (optional, --features google)
 # =============================================================================
 gog-gmail    = { git = "https://github.com/qhkm/gogcli-rs", version = "0.1", optional = true }
