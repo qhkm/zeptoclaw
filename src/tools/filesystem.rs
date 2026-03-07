@@ -176,6 +176,9 @@ impl Tool for WriteFileTool {
         let (full_path, workspace) = resolve_path(path, ctx)?;
         let full_path_ref = Path::new(&full_path);
 
+        // TOCTOU: re-validate BEFORE any filesystem mutation (including mkdir)
+        revalidate_path(full_path_ref, &workspace)?;
+
         // Create parent directories if they don't exist
         if let Some(parent) = full_path_ref.parent() {
             if !parent.as_os_str().is_empty() {
@@ -185,8 +188,6 @@ impl Tool for WriteFileTool {
             }
         }
 
-        // TOCTOU: re-validate immediately before I/O
-        revalidate_path(full_path_ref, &workspace)?;
         // Hardlink check: block writes to files with multiple hard links
         check_hardlink_write(full_path_ref)?;
 
