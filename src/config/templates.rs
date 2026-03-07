@@ -317,9 +317,9 @@ impl TemplateRegistry {
         self.templates.keys().map(|k| k.as_str()).collect()
     }
 
-    /// Loads all `.json` template files from a directory.
+    /// Loads all `.json` and `.toml` template files from a directory.
     ///
-    /// Returns the successfully parsed templates. Files that are not valid JSON
+    /// Returns the successfully parsed templates. Files that are not valid JSON/TOML
     /// or do not deserialize into `AgentTemplate` are skipped with a warning
     /// logged via `tracing`.
     ///
@@ -344,24 +344,33 @@ impl TemplateRegistry {
             let entry = entry?;
             let path = entry.path();
 
-            // Only process .json files
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            // Only process .json and .toml files
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext != Some("json") && ext != Some("toml") {
                 continue;
             }
 
             match std::fs::read_to_string(&path) {
-                Ok(content) => match serde_json::from_str::<AgentTemplate>(&content) {
-                    Ok(template) => {
-                        templates.push(template);
+                Ok(content) => {
+                    let parse_result: std::result::Result<AgentTemplate, String> =
+                        if ext == Some("toml") {
+                            toml::from_str(&content).map_err(|e| e.to_string())
+                        } else {
+                            serde_json::from_str(&content).map_err(|e| e.to_string())
+                        };
+                    match parse_result {
+                        Ok(template) => {
+                            templates.push(template);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "Skipping invalid template file"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "Skipping invalid template file"
-                        );
-                    }
-                },
+                }
                 Err(e) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -947,5 +956,82 @@ mod tests {
         assert!(matches!(err, ZeptoError::Config(msg) if msg.contains("not a directory")));
 
         fs::remove_file(&temp_file).ok();
+    }
+
+    #[test]
+    fn test_load_toml_template_from_dir() {
+        let temp_dir = std::env::temp_dir().join("zeptoclaw_tpl_test_toml");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let toml_content = r#"
+name = "toml-agent"
+description = "Agent from TOML"
+system_prompt = "You are a TOML agent."
+shell_allowlist = ["git", "cargo"]
+max_token_budget = 30000
+max_tool_calls = 50
+tags = ["toml"]
+"#;
+        fs::write(temp_dir.join("toml-agent.toml"), toml_content).unwrap();
+
+        let templates = TemplateRegistry::load_from_dir(&temp_dir).unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].name, "toml-agent");
+        assert_eq!(
+            templates[0].shell_allowlist,
+            Some(vec!["git".to_string(), "cargo".to_string()])
+        );
+        assert_eq!(templates[0].max_token_budget, Some(30000));
+        assert_eq!(templates[0].max_tool_calls, Some(50));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_load_mixed_json_and_toml_templates() {
+        let temp_dir = std::env::temp_dir().join("zeptoclaw_tpl_test_mixed");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let json_tpl = r#"{
+            "name": "json-one",
+            "description": "JSON template",
+            "system_prompt": "Hi.",
+            "tags": []
+        }"#;
+        fs::write(temp_dir.join("json-one.json"), json_tpl).unwrap();
+
+        let toml_tpl =
+            "name = \"toml-one\"\ndescription = \"TOML template\"\nsystem_prompt = \"Hi.\"\ntags = []\n";
+        fs::write(temp_dir.join("toml-one.toml"), toml_tpl).unwrap();
+
+        let templates = TemplateRegistry::load_from_dir(&temp_dir).unwrap();
+        assert_eq!(templates.len(), 2);
+
+        let names: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"json-one"));
+        assert!(names.contains(&"toml-one"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_invalid_toml_skipped() {
+        let temp_dir = std::env::temp_dir().join("zeptoclaw_tpl_test_bad_toml");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        fs::write(temp_dir.join("broken.toml"), "not = [valid toml {{{}}}").unwrap();
+
+        let valid =
+            "name = \"ok\"\ndescription = \"OK agent\"\nsystem_prompt = \"Hi.\"\ntags = []\n";
+        fs::write(temp_dir.join("ok.toml"), valid).unwrap();
+
+        let templates = TemplateRegistry::load_from_dir(&temp_dir).unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].name, "ok");
+
+        fs::remove_dir_all(&temp_dir).ok();
     }
 }
