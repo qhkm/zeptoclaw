@@ -240,6 +240,12 @@ pub(crate) async fn create_agent_with_template(
         if let Some(max_tool_iterations) = tpl.max_tool_iterations {
             config.agents.defaults.max_tool_iterations = max_tool_iterations;
         }
+        if let Some(budget) = tpl.max_token_budget {
+            config.agents.defaults.token_budget = zeptoclaw::agent::budget::resolve_token_budget(
+                config.agents.defaults.token_budget,
+                Some(budget),
+            );
+        }
     }
 
     // --- Kernel boot: assemble shared subsystems ---
