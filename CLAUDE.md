@@ -543,7 +543,7 @@ Panel web dashboard backend:
 ### Security (`src/security/`)
 - `shell.rs` - Regex-based command blocklist + optional allowlist (`ShellAllowlistMode`: Off/Warn/Strict); includes `.zeptoclaw/config.json` blocklist to prevent LLM-driven config exfiltration
 - `path.rs` - Workspace path validation, symlink escape detection
-- `mount.rs` - Mount allowlist validation, docker binary verification, lightweight blocked-path checks on both unresolved/canonical host paths, and Unix hardlink alias rejection for regular-file mounts
+- `mount.rs` - Mount allowlist validation, docker binary verification, host-path `..` traversal rejection, lightweight blocked-path checks on unresolved paths plus canonical host paths when the source exists, and Unix hardlink alias rejection for regular-file mounts
 - `encryption.rs` - `SecretEncryption`: XChaCha20-Poly1305 AEAD + Argon2id KDF, `ENC[...]` ciphertext format, `resolve_master_key()` for env/file/prompt sources, transparent config decrypt on load
 
 ### Tunnel (`src/tunnel/`)
