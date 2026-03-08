@@ -52,6 +52,9 @@ enum Commands {
         full: bool,
     },
     /// Start interactive agent mode
+    #[command(
+        after_help = "Coding tools (grep, find) are disabled by default to keep the core\nruntime portable. Enable them with `--template coder` or by setting\n`tools.coding_tools: true` in your config file."
+    )]
     Agent {
         /// Direct message to process (non-interactive mode)
         #[arg(short, long)]

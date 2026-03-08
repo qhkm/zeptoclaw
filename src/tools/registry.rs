@@ -14,6 +14,16 @@ use crate::providers::ToolDefinition;
 
 use super::{Tool, ToolContext, ToolOutput};
 
+/// Returns a setup hint for tools that are opt-in (not registered by default).
+fn opt_in_tool_hint(name: &str) -> &'static str {
+    match name {
+        "grep" | "find" => {
+            " (coding tool — enable with `--template coder` or set `tools.coding_tools: true` in config)"
+        }
+        _ => "",
+    }
+}
+
 /// A registry that holds and manages tools.
 ///
 /// The registry allows tools to be registered, looked up by name,
@@ -162,7 +172,11 @@ impl ToolRegistry {
         let tool = match self.tools.get(name) {
             Some(t) => t,
             None => {
-                return Ok(ToolOutput::error(format!("Tool not found: {}", name)));
+                let hint = opt_in_tool_hint(name);
+                return Ok(ToolOutput::error(format!(
+                    "Tool not found: {}{}",
+                    name, hint
+                )));
             }
         };
 
@@ -546,5 +560,20 @@ mod tests {
         let defs = registry.definitions_with_options(true);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].description, "Echo message");
+    }
+
+    #[test]
+    fn test_opt_in_tool_hint_grep() {
+        assert!(opt_in_tool_hint("grep").contains("--template coder"));
+    }
+
+    #[test]
+    fn test_opt_in_tool_hint_find() {
+        assert!(opt_in_tool_hint("find").contains("--template coder"));
+    }
+
+    #[test]
+    fn test_opt_in_tool_hint_unknown() {
+        assert_eq!(opt_in_tool_hint("unknown"), "");
     }
 }

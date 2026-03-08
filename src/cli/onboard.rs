@@ -292,6 +292,16 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         configure_providers(&mut config).await?;
         configure_soul(&config)?;
 
+        // Ask about coding tools
+        println!();
+        print!("Are you using ZeptoClaw as a coding agent? (grep, find tools) [y/N]: ");
+        io::stdout().flush()?;
+        let coding_input = read_line()?.to_ascii_lowercase();
+        if matches!(coding_input.trim(), "y" | "yes") {
+            config.tools.coding_tools = true;
+            println!("  Coding tools (grep, find) enabled.");
+        }
+
         // Save config
         config
             .save()
