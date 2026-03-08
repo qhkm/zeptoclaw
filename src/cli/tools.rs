@@ -232,13 +232,31 @@ async fn cmd_tools_info(name: String) -> Result<()> {
             println!("Tool: {}", t.name);
             println!("{}", "-".repeat(40));
             println!("Description: {}", t.description);
-            let configured = !t.requires_config || is_tool_configured(&config, t.name);
-            println!(
-                "Status: {}",
-                if configured { "ready" } else { "needs setup" }
-            );
-            if !configured {
-                println!("Setup: {}", t.config_hint);
+            if t.opt_in {
+                let coding_on = is_coding_tools_on(&config);
+                println!(
+                    "Status: {}",
+                    if coding_on {
+                        "ready (coding tools enabled)"
+                    } else {
+                        "disabled (opt-in)"
+                    }
+                );
+                if !coding_on {
+                    println!(
+                        "Enable: `--template coder` or set `tools.coding_tools: true` in config"
+                    );
+                    println!("       or set env var `ZEPTOCLAW_TOOLS_CODING_TOOLS=true`");
+                }
+            } else {
+                let configured = !t.requires_config || is_tool_configured(&config, t.name);
+                println!(
+                    "Status: {}",
+                    if configured { "ready" } else { "needs setup" }
+                );
+                if !configured {
+                    println!("Setup: {}", t.config_hint);
+                }
             }
         }
         None => {
@@ -400,6 +418,21 @@ mod tests {
 
     #[test]
     fn test_is_coding_tools_on_when_enabled() {
+        let mut config = Config::default();
+        config.tools.coding_tools = true;
+        assert!(is_coding_tools_on(&config));
+    }
+
+    #[test]
+    fn test_tools_info_opt_in_disabled() {
+        let config = Config::default(); // coding_tools = false
+        let grep = TOOLS.iter().find(|t| t.name == "grep").unwrap();
+        assert!(grep.opt_in);
+        assert!(!is_coding_tools_on(&config));
+    }
+
+    #[test]
+    fn test_tools_info_opt_in_enabled() {
         let mut config = Config::default();
         config.tools.coding_tools = true;
         assert!(is_coding_tools_on(&config));

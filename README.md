@@ -31,7 +31,7 @@ $ zeptoclaw agent --stream -m "Analyze our API for security issues"
 ✓ Analysis complete in 4.2s
 ```
 
-We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 29 tools, 9 channels, 9 providers, and 6 sandbox runtimes.
+We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 32 tools, 9 channels, 9 providers, and 6 sandbox runtimes.
 
 <p align="center">
   <img src="https://img.shields.io/badge/binary-~6MB-3b82f6" alt="~6MB binary">
@@ -195,7 +195,7 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 | Feature | What it does |
 |---------|-------------|
 | **Multi-Provider LLM** | 9 providers with SSE streaming, retry with backoff + budget cap, auto-failover |
-| **29 Tools + Plugins** | Shell, filesystem, web, git, stripe, PDF, transcription, Android ADB, and more |
+| **32 Tools + Plugins** | Shell, filesystem, grep, find, web, git, stripe, PDF, transcription, Android ADB, and more |
 | **Tool Composition** | Create new tools from natural language descriptions — composable `{{param}}` templates |
 | **Agent Swarms** | Delegate to sub-agents with parallel fan-out, aggregation, and cost-aware routing |
 | **Library Facade** | Embed as a crate — `ZeptoAgent::builder().provider(p).tool(t).build()` for Tauri/GUI apps |

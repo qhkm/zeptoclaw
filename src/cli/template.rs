@@ -65,6 +65,11 @@ pub(crate) async fn cmd_template(action: TemplateAction) -> Result<()> {
             if !tpl.tags.is_empty() {
                 println!("Tags: {}", tpl.tags.join(", "));
             }
+            // Show opt-in tools that this template activates via its tags
+            if tpl.tags.iter().any(|t| t == "coding") {
+                println!("Activates coding tools: grep, find");
+                println!("  (disabled by default — automatically enabled by this template)");
+            }
             println!();
             println!("System prompt:");
             println!("{}", tpl.system_prompt);
