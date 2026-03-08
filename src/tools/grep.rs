@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
+use crate::security::validate_path_in_workspace;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
@@ -72,17 +73,13 @@ impl Tool for GrepTool {
             )
         })?;
 
-        let search_path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|p| {
-                if std::path::Path::new(p).is_absolute() {
-                    p.to_string()
-                } else {
-                    format!("{}/{}", workspace, p)
-                }
-            })
-            .unwrap_or_else(|| workspace.clone());
+        let search_path = match args.get("path").and_then(|v| v.as_str()) {
+            Some(p) => {
+                let safe = validate_path_in_workspace(p, workspace)?;
+                safe.as_path().to_string_lossy().to_string()
+            }
+            None => workspace.clone(),
+        };
 
         let ignore_case = args
             .get("ignore_case")
