@@ -98,7 +98,9 @@ fn builtin_coder() -> AgentTemplate {
             "well-structured code following best practices for the language and ",
             "framework in use. You explain your reasoning, consider edge cases, ",
             "handle errors properly, and write tests when appropriate. You prefer ",
-            "simple, readable solutions over clever ones."
+            "simple, readable solutions over clever ones. ",
+            "You have access to grep (regex search across files) and find (glob file discovery) ",
+            "tools for navigating and understanding codebases."
         )
         .to_string(),
         model: None,

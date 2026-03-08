@@ -51,6 +51,15 @@ pub(crate) async fn cmd_config(action: ConfigAction) -> Result<()> {
             }
             warnings += tool_warnings.len();
 
+            // Hint: workspace configured but coding tools disabled
+            let workspace = config.workspace_path();
+            if workspace.exists() && !config.tools.coding_tools {
+                println!(
+                    "[hint] Workspace is set but coding tools (grep, find) are disabled. \
+                     Enable with `tools.coding_tools: true` or use `--template coder`."
+                );
+            }
+
             if errors == 0 && warnings == 0 {
                 println!("\nConfiguration looks good!");
             } else {

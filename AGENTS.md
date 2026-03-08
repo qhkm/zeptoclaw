@@ -129,7 +129,8 @@ cargo bench --bench message_bus --no-run
 1. Create `src/tools/<name>.rs`
 2. Implement `Tool` trait (`name()`, `description()`, `parameters()`, `execute()`)
 3. Add `pub mod <name>;` in `src/tools/mod.rs`
-4. Register in `create_agent()` in `src/cli/common.rs`
+4. Register in `src/kernel/registrar.rs` inside `register_all_tools()` behind `filter.is_enabled("<name>")`
+5. If the tool assumes laptop/server environment (bash, filesystem, shell): make it opt-in by gating on `coding_tools_on` (see the grep/find block in registrar.rs), add it to the `TOOLS` array in `src/cli/tools.rs` with `opt_in: true`, and add it to `opt_in_tool_hint()` in `src/tools/registry.rs`
 
 ### Adding a provider wrapper
 1. Create `src/providers/<name>.rs`
