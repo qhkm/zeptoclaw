@@ -76,6 +76,14 @@ Every config field can be overridden with an environment variable. The naming co
 |----------|---------|-------------|
 | `ZEPTOCLAW_MEMORY_BACKEND` | `"builtin"` | Search backend: builtin, bm25, embedding, hnsw |
 
+## Tool settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ZEPTOCLAW_TOOLS_CODING_TOOLS` | `false` | Enable coding tools (grep, find). Auto-enabled by the `coder` template. |
+| `ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER` | auto | Search provider: `brave`, `searxng`, `ddg` |
+| `ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL` | — | SearXNG instance URL (required when provider is `searxng`) |
+
 ## Tunnel settings
 
 | Variable | Default | Description |

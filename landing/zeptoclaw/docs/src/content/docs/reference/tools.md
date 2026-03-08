@@ -6,7 +6,7 @@ tableOfContents:
   maxHeadingLevel: 3
 ---
 
-ZeptoClaw ships with 29 built-in tools. Each tool is available to the agent by default unless restricted by the approval gate or a template's tool whitelist.
+ZeptoClaw ships with 32 built-in tools. Most tools are available by default; `grep` and `find` are opt-in coding tools (see below).
 
 ## shell
 
@@ -45,13 +45,50 @@ List directory contents.
 
 ## edit_file
 
-Search-and-replace edits on existing files.
+Edit an existing file. Supports two modes — string replacement and unified diff.
+
+**String replacement mode:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Relative path within workspace |
-| `old_text` | string | Yes | Text to find |
+| `old_text` | string | Yes | Exact text to find and replace |
 | `new_text` | string | Yes | Replacement text |
+
+**Unified diff mode** (pass `diff` instead of `old_text`/`new_text`):
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Relative path within workspace |
+| `diff` | string | Yes | Unified diff string (`@@ -old +new @@` format) |
+
+The two modes are mutually exclusive. Diff mode is useful for LLMs that emit standard `diff` output.
+
+## grep
+
+Search file contents by regex pattern. **Opt-in coding tool** — requires `--template coder` or `tools.coding_tools: true`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | Yes | Regex pattern to search for |
+| `path` | string | No | Directory or file to search (default: workspace root) |
+| `glob` | string | No | Glob filter for file types (e.g. `*.rs`) |
+| `ignore_case` | boolean | No | Case-insensitive search (default: false) |
+| `limit` | integer | No | Max matches to return (default: 100) |
+
+**Security:** Path argument is validated against the workspace boundary.
+
+## find
+
+Find files by glob pattern. **Opt-in coding tool** — requires `--template coder` or `tools.coding_tools: true`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | Yes | Glob pattern (e.g. `**/*.rs`, `src/**/test_*`) |
+| `path` | string | No | Root directory to search from (default: workspace root) |
+| `limit` | integer | No | Max results to return (default: 200) |
+
+**Security:** Path argument is validated against the workspace boundary.
 
 ## web_search
 
