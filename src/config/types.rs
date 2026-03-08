@@ -1503,6 +1503,16 @@ pub struct ToolsConfig {
     /// Skills marketplace (ClawHub) configuration
     #[serde(default)]
     pub skills: SkillsMarketplaceConfig,
+    /// Enable coding-specific tools (grep, find). Default: false.
+    ///
+    /// These tools assume a laptop/server environment with bash available.
+    /// Enable when using ZeptoClaw as a coding agent. The built-in "coder"
+    /// template enables them automatically; this flag lets you enable them
+    /// without switching templates.
+    ///
+    /// Example: `"tools": { "coding_tools": true }`
+    #[serde(default)]
+    pub coding_tools: bool,
     /// Tools to deny (disable). Set by startup guard in degraded mode.
     #[serde(default)]
     pub deny: Vec<String>,

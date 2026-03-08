@@ -1020,6 +1020,9 @@ impl Config {
         if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_TRANSCRIBE_ENABLED") {
             self.tools.transcribe.enabled = v == "true" || v == "1";
         }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_CODING_TOOLS") {
+            self.tools.coding_tools = v == "true" || v == "1";
+        }
     }
 
     /// Apply memory-specific environment variable overrides.

@@ -163,6 +163,13 @@ impl ToolFilter {
         !self.blocked.contains(&key)
     }
 
+    /// Returns `true` when the user has set an explicit tool profile or
+    /// template `allowed_tools` list. Coding-only tools use this to honour
+    /// explicit opt-in even when no "coding" template tag is active.
+    pub fn has_explicit_profile(&self) -> bool {
+        self.profile.is_some() || self.allowed.is_some()
+    }
+
     /// Create a permissive filter that allows all tools.
     pub fn allow_all() -> Self {
         Self {
@@ -228,11 +235,27 @@ pub async fn register_all_tools(
     if filter.is_enabled("edit_file") {
         registry.register(Box::new(EditFileTool));
     }
-    if filter.is_enabled("grep") {
+
+    // --- Group 1b: Coding tools (default-off, enabled by "coding" template tag) ---
+    // These are laptop/server workload tools that assume bash/filesystem access.
+    // They ship as opt-in via the coder template, explicit tool_profiles, or
+    // template allowed_tools. Without any of these, they stay off to keep the
+    // core runtime portable for IoT/embedded use cases.
+    let coding_profile_active = deps
+        .template
+        .as_ref()
+        .map(|t| t.tags.iter().any(|tag| tag == "coding"))
+        .unwrap_or(false);
+    let has_explicit_profile = filter.has_explicit_profile();
+    let coding_tools_on =
+        coding_profile_active || has_explicit_profile || config.tools.coding_tools;
+    if coding_tools_on && filter.is_enabled("grep") {
         registry.register(Box::new(crate::tools::grep::GrepTool));
+        info!("Registered grep tool (coding profile)");
     }
-    if filter.is_enabled("find") {
+    if coding_tools_on && filter.is_enabled("find") {
         registry.register(Box::new(crate::tools::find::FindTool));
+        info!("Registered find tool (coding profile)");
     }
 
     // --- Group 2: Runtime-dependent ---

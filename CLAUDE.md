@@ -630,6 +630,7 @@ Environment variables override config:
 - `ZEPTOCLAW_PANEL_BIND` — bind address (default: 127.0.0.1)
 - `ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER` — search provider: "brave", "searxng", "ddg" (default: auto-detect)
 - `ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL` — SearXNG instance URL (required when provider is "searxng")
+- `ZEPTOCLAW_TOOLS_CODING_TOOLS` — enable coding-specific tools: grep, find (default: false; auto-enabled by coder template)
 
 ### Cargo Features
 
