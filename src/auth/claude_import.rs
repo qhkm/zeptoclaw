@@ -98,8 +98,12 @@ fn read_from_keychain() -> Option<OAuthTokenSet> {
     for service in KEYCHAIN_SERVICES {
         let output = std::process::Command::new("security")
             .args(["find-generic-password", "-s", service, "-w"])
-            .output()
-            .ok()?;
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
 
         if !output.status.success() {
             continue;

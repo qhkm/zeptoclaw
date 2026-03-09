@@ -3,7 +3,7 @@
 //! This module centralizes provider metadata and the mapping from configuration
 //! to runtime provider selection.
 
-use crate::auth::{AuthMethod, ResolvedCredential};
+use crate::auth::{claude_import, AuthMethod, ResolvedCredential};
 use crate::config::{Config, ProviderConfig};
 
 /// Metadata describing an LLM provider.
@@ -342,11 +342,10 @@ fn resolve_credential(
 ) -> Option<(ResolvedCredential, String)> {
     let api_key = configured_api_key(provider_config);
 
-    match auth_method {
+    let result = match auth_method {
         AuthMethod::ApiKey => {
             // Only use API key
-            let key = api_key?;
-            Some((ResolvedCredential::ApiKey(key.to_string()), key.to_string()))
+            api_key.map(|key| (ResolvedCredential::ApiKey(key.to_string()), key.to_string()))
         }
         AuthMethod::OAuth => {
             // Only use OAuth token
@@ -361,7 +360,28 @@ fn resolve_credential(
                 api_key.map(|key| (ResolvedCredential::ApiKey(key.to_string()), key.to_string()))
             }
         }
+    };
+
+    // Last-resort fallback: import from Claude CLI (Keychain / ~/.claude.json).
+    // Disabled in test builds to avoid picking up real credentials from the host.
+    #[cfg(not(test))]
+    if result.is_none() && provider_name == "anthropic" {
+        if let Some(token_set) = claude_import::read_claude_credentials() {
+            tracing::warn!(
+                "Using Claude subscription token (unofficial). \
+                 This may violate Anthropic's Terms of Service. \
+                 Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY for official API access."
+            );
+
+            let credential = ResolvedCredential::BearerToken {
+                access_token: token_set.access_token,
+                expires_at: token_set.expires_at,
+            };
+            return Some((credential, String::new()));
+        }
     }
+
+    result
 }
 
 /// Try to load a valid OAuth token from the store.
