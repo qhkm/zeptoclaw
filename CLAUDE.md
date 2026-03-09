@@ -238,7 +238,7 @@ src/
 │   │   └── ws.rs       # WebSocket event streaming
 │   ├── server.rs       # AppState, router builder, server startup
 │   └── tasks.rs        # KanbanTask model + TaskStore persistence
-├── auth/           # OAuth (PKCE), token refresh, encrypted token store
+├── auth/           # OAuth (PKCE), token refresh, encrypted token store, Claude CLI import
 ├── bus/            # Async message bus (pub/sub)
 ├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.) with spawned-task panic isolation
 │   ├── factory.rs  # Channel factory/registry
@@ -426,6 +426,7 @@ LLM provider abstraction via `LLMProvider` trait:
 
 ### Auth (`src/auth/`)
 OAuth support with PKCE, CSRF state validation, encrypted token persistence, and best-effort refresh before expiry.
+- `claude_import.rs` - Import credentials from Claude CLI (Keychain on macOS, `~/.claude.json` on all platforms); lowest-priority fallback for Anthropic provider when no API key or OAuth token is configured
 
 ### Channels (`src/channels/`)
 Message input channels via `Channel` trait:
