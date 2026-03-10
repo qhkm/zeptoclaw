@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use zeptoclaw::config::Config;
 
-use super::common::read_line;
+use super::common::{read_line, read_secret};
 use super::ChannelAction;
 
 fn canonical_channel_name(channel_name: &str) -> &str {
@@ -177,28 +177,16 @@ fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
     }
 
     println!();
-    println!("WhatsApp Web Channel Setup (Native)");
-    println!("-----------------------------------");
-    println!("Uses wa-rs for direct WhatsApp Web protocol support.");
-    println!("Requires: cargo build --features whatsapp-web");
-    println!();
+    println!("WhatsApp Web Channel Setup");
+    println!("--------------------------");
 
     let wa_config = config
         .channels
         .whatsapp_web
         .get_or_insert_with(Default::default);
-
-    print!("Enable WhatsApp Web channel? [y/N]: ");
-    io::stdout().flush()?;
-    let enabled = read_line()?.to_ascii_lowercase();
-    if !matches!(enabled.as_str(), "y" | "yes") {
-        wa_config.enabled = false;
-        println!("  WhatsApp Web channel disabled.");
-        return Ok(());
-    }
     wa_config.enabled = true;
 
-    print!("Phone number allowlist (comma-separated E.164, or Enter for all): ");
+    print!("Phone number allowlist (comma-separated E.164, e.g. +60123456789, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
     if !allowlist.is_empty() {
@@ -209,8 +197,10 @@ fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
             .collect();
     }
 
-    println!("  WhatsApp Web channel configured.");
+    println!("  WhatsApp Web channel enabled.");
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
+    println!("  On first run, scan the QR code with your phone:");
+    println!("    WhatsApp → Settings → Linked Devices → Link a Device");
     Ok(())
 }
 
@@ -224,7 +214,7 @@ fn setup_telegram(config: &mut Config) -> Result<()> {
     print!("Enter Telegram bot token (or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let token = read_line()?;
+    let token = read_secret()?;
     if token.is_empty() {
         println!("  Skipped.");
         return Ok(());
@@ -267,7 +257,7 @@ fn setup_discord(config: &mut Config) -> Result<()> {
     print!("Enter Discord bot token (or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let token = read_line()?;
+    let token = read_secret()?;
     if token.is_empty() {
         println!("  Skipped.");
         return Ok(());
@@ -307,7 +297,7 @@ fn setup_slack(config: &mut Config) -> Result<()> {
     print!("Enter Slack bot token (xoxb-..., or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let bot_token = read_line()?;
+    let bot_token = read_secret()?;
     if bot_token.is_empty() {
         println!("  Skipped.");
         return Ok(());
@@ -315,7 +305,7 @@ fn setup_slack(config: &mut Config) -> Result<()> {
 
     print!("Enter Slack app-level token (xapp-...): ");
     io::stdout().flush()?;
-    let app_token = read_line()?;
+    let app_token = read_secret()?;
 
     let sl = config.channels.slack.get_or_insert_with(Default::default);
     sl.bot_token = bot_token;
@@ -393,11 +383,11 @@ fn setup_whatsapp_cloud(config: &mut Config) -> Result<()> {
 
     print!("Enter permanent access token: ");
     io::stdout().flush()?;
-    let token = read_line()?;
+    let token = read_secret()?;
 
     print!("Choose a webhook verify token (any secret string): ");
     io::stdout().flush()?;
-    let verify_token = read_line()?;
+    let verify_token = read_secret()?;
 
     let wc = config
         .channels

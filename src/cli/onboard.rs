@@ -315,23 +315,56 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         println!("  5. Slack");
         println!("  6. Skip (configure later with 'zeptoclaw channel setup <name>')");
         println!();
-        print!("Which channel? [1-6]: ");
+        print!("Which channels? (comma-separated, e.g. 1,2 or 6 to skip): ");
         io::stdout().flush()?;
-        let channel_choice = read_line()?;
-        match channel_choice.trim() {
-            "1" => configure_telegram(&mut config)?,
-            "2" => {
-                if cfg!(feature = "whatsapp-web") {
-                    configure_whatsapp_channel(&mut config)?;
-                } else {
-                    println!("  WhatsApp Web requires: cargo build --features whatsapp-web");
-                    println!("  Skipped.");
-                }
+        let channel_input = read_line()?;
+
+        let mut want_telegram = false;
+        let mut want_whatsapp_web = false;
+        let mut want_whatsapp_cloud = false;
+        let mut want_discord = false;
+        let mut want_slack = false;
+
+        for raw in channel_input.split(',') {
+            match raw.trim() {
+                "1" => want_telegram = true,
+                "2" => want_whatsapp_web = true,
+                "3" => want_whatsapp_cloud = true,
+                "4" => want_discord = true,
+                "5" => want_slack = true,
+                "6" | "" => {}
+                _ => println!("  Unknown option '{}', skipping.", raw.trim()),
             }
-            "3" => configure_whatsapp_cloud(&mut config)?,
-            "4" => configure_discord(&mut config)?,
-            "5" => configure_slack(&mut config)?,
-            _ => println!("  Skipped. Run 'zeptoclaw channel setup <name>' anytime."),
+        }
+
+        if want_telegram {
+            configure_telegram(&mut config)?;
+        }
+        if want_whatsapp_web {
+            if cfg!(feature = "whatsapp-web") {
+                configure_whatsapp_channel(&mut config)?;
+            } else {
+                println!();
+                println!("  WhatsApp Web requires: cargo build --features whatsapp-web");
+                println!("  Skipped.");
+            }
+        }
+        if want_whatsapp_cloud {
+            configure_whatsapp_cloud(&mut config)?;
+        }
+        if want_discord {
+            configure_discord(&mut config)?;
+        }
+        if want_slack {
+            configure_slack(&mut config)?;
+        }
+        if !want_telegram
+            && !want_whatsapp_web
+            && !want_whatsapp_cloud
+            && !want_discord
+            && !want_slack
+        {
+            println!("  Skipped. Run 'zeptoclaw channel setup <name>' anytime.");
         }
 
         // Save config
@@ -394,11 +427,7 @@ fn configure_memory(config: &mut Config) -> Result<()> {
     println!("Choose memory backend:");
     println!("  1. Built-in substring search (recommended)");
     println!("  2. BM25 keyword scoring (requires --features memory-bm25)");
-    println!("  3. Embedding + cosine similarity (not yet implemented)");
-    println!("  4. HNSW approximate nearest neighbor (not yet implemented)");
-    println!("  5. Tantivy full-text search (not yet implemented)");
-    println!("  6. QMD (planned; currently falls back to built-in)");
-    println!("  7. Disabled");
+    println!("  3. Disabled");
     println!();
     print!(
         "Memory backend [current={}]: ",
@@ -411,11 +440,7 @@ fn configure_memory(config: &mut Config) -> Result<()> {
         config.memory.backend = match backend_choice.trim() {
             "1" | "builtin" => MemoryBackend::Builtin,
             "2" | "bm25" => MemoryBackend::Bm25,
-            "3" | "embedding" => MemoryBackend::Embedding,
-            "4" | "hnsw" => MemoryBackend::Hnsw,
-            "5" | "tantivy" => MemoryBackend::Tantivy,
-            "6" | "qmd" => MemoryBackend::Qmd,
-            "7" | "none" | "disabled" => MemoryBackend::Disabled,
+            "3" | "none" | "disabled" => MemoryBackend::Disabled,
             _ => config.memory.backend.clone(),
         };
     }
@@ -826,7 +851,7 @@ fn configure_telegram(config: &mut Config) -> Result<()> {
     print!("Enter Telegram bot token (or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let token = read_line()?;
+    let token = read_secret()?;
 
     if !token.is_empty() {
         let telegram_config = config
@@ -853,18 +878,8 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     }
 
     println!();
-    println!("WhatsApp Web Channel Setup (Native)");
-    println!("-----------------------------------");
-    println!("Uses wa-rs for direct WhatsApp Web protocol support.");
-    println!("Requires: cargo build --features whatsapp-web");
-    print!("Enable WhatsApp Web channel? [y/N]: ");
-    io::stdout().flush()?;
-
-    let enabled = read_line()?.to_ascii_lowercase();
-    if !matches!(enabled.as_str(), "y" | "yes") {
-        println!("  Skipped WhatsApp Web channel configuration.");
-        return Ok(());
-    }
+    println!("WhatsApp Web Channel Setup");
+    println!("--------------------------");
 
     let whatsapp_config = config
         .channels
@@ -894,9 +909,9 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     }
 
     println!();
-    println!("  WhatsApp Web channel configured.");
+    println!("  WhatsApp Web channel enabled.");
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
-    println!("  On first run, scan the terminal QR code with your phone:");
+    println!("  On first run, scan the QR code with your phone:");
     println!("    WhatsApp → Settings → Linked Devices → Link a Device");
     Ok(())
 }
@@ -923,11 +938,11 @@ fn configure_whatsapp_cloud(config: &mut Config) -> Result<()> {
 
     print!("Enter permanent access token: ");
     io::stdout().flush()?;
-    let token = read_line()?;
+    let token = read_secret()?;
 
     print!("Choose a webhook verify token (any secret string): ");
     io::stdout().flush()?;
-    let verify_token = read_line()?;
+    let verify_token = read_secret()?;
 
     let wc = config
         .channels
@@ -965,7 +980,7 @@ fn configure_discord(config: &mut Config) -> Result<()> {
     print!("Enter Discord bot token (or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let token = read_line()?;
+    let token = read_secret()?;
 
     if !token.is_empty() {
         let discord_config = config.channels.discord.get_or_insert_with(Default::default);
@@ -996,16 +1011,16 @@ fn configure_slack(config: &mut Config) -> Result<()> {
     print!("Enter Slack bot token (xoxb-..., or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let bot_token = read_line()?;
+    let bot_token = read_secret()?;
 
     if bot_token.is_empty() {
         println!("  Skipped Slack configuration.");
         return Ok(());
     }
 
-    print!("Enter Slack app-level token (xapp-..., or press Enter to skip): ");
+    print!("Enter Slack app-level token (xapp-...): ");
     io::stdout().flush()?;
-    let app_token = read_line()?;
+    let app_token = read_secret()?;
 
     let slack_config = config.channels.slack.get_or_insert_with(Default::default);
     slack_config.bot_token = bot_token;
