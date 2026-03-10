@@ -3,7 +3,7 @@
 //! This module centralizes provider metadata and the mapping from configuration
 //! to runtime provider selection.
 
-use crate::auth::{claude_import, AuthMethod, ResolvedCredential};
+use crate::auth::{AuthMethod, ResolvedCredential};
 use crate::config::{Config, ProviderConfig};
 
 /// Metadata describing an LLM provider.
@@ -366,7 +366,7 @@ fn resolve_credential(
     // Disabled in test builds to avoid picking up real credentials from the host.
     #[cfg(not(test))]
     if result.is_none() && provider_name == "anthropic" {
-        if let Some(token_set) = claude_import::read_claude_credentials() {
+        if let Some(token_set) = crate::auth::claude_import::read_claude_credentials() {
             tracing::warn!(
                 "Using Claude subscription token (unofficial). \
                  This may violate Anthropic's Terms of Service. \
