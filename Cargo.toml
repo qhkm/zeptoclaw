@@ -279,6 +279,18 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[lints.clippy]
+# Suppress pre-#187 chore lints
+unnecessary_unwrap = "allow"
+uninlined_format_args = "allow"
+field_reassign_with_default = "allow"
+default_constructed_unit_structs = "allow"
+assertions_on_constants = "allow"
+unnecessary_get_then_check = "allow"
+
+[lints.rust]
+deprecated = "allow"
+
 [[bin]]
 name = "zeptoclaw"
 path = "src/main.rs"

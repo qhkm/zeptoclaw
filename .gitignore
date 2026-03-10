@@ -27,6 +27,7 @@ target/
 .cursor/
 .aider*
 .codex/
+.pi/
 
 # Worktrees
 .worktrees/

@@ -1,0 +1,17 @@
+FROM rust:1.93.0-slim
+
+# Project deps
+RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Components
+RUN rustup component add clippy rustfmt
+
+# nextest latest
+RUN cargo install cargo-nextest --locked
+
+# Baked configs
+COPY scripts/artifacts/clippy.toml /clippy.toml
+
+WORKDIR /src
+
+CMD ["/bin/bash"]
