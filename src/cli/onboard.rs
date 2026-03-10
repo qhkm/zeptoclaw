@@ -890,13 +890,11 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     print!("Phone number allowlist (comma-separated E.164, e.g. +60123456789, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
-    if !allowlist.is_empty() {
-        whatsapp_config.allow_from = allowlist
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
+    whatsapp_config.allow_from = allowlist
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     if whatsapp_config.allow_from.is_empty() {
         print!("Deny all senders by default (strict mode)? [y/N]: ");

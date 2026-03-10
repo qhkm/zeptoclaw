@@ -189,13 +189,11 @@ fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
     print!("Phone number allowlist (comma-separated E.164, e.g. +60123456789, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
-    if !allowlist.is_empty() {
-        wa_config.allow_from = allowlist
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
+    wa_config.allow_from = allowlist
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     println!("  WhatsApp Web channel enabled.");
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
@@ -230,13 +228,11 @@ fn setup_telegram(config: &mut Config) -> Result<()> {
     print!("Allowlist user IDs/usernames (comma-separated, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
-    if !allowlist.is_empty() {
-        tg.allow_from = allowlist
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
+    tg.allow_from = allowlist
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     println!("  Telegram bot configured.");
     println!("  Run 'zeptoclaw gateway' to start the bot.");
@@ -270,13 +266,11 @@ fn setup_discord(config: &mut Config) -> Result<()> {
     print!("Allowlist user IDs (comma-separated, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
-    if !allowlist.is_empty() {
-        dc.allow_from = allowlist
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
+    dc.allow_from = allowlist
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     println!("  Discord bot configured.");
     println!("  Run 'zeptoclaw gateway' to start the bot.");
@@ -347,7 +341,7 @@ fn setup_webhook(config: &mut Config) -> Result<()> {
 
     print!("Bearer auth token (or Enter for none): ");
     io::stdout().flush()?;
-    let auth = read_line()?;
+    let auth = read_secret()?;
     if !auth.is_empty() {
         wh.auth_token = Some(auth);
     }

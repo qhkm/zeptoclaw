@@ -3,7 +3,6 @@
 //! Pairs via QR code like WhatsApp Desktop and persists session state to a
 //! local SQLite database.
 
-use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,11 +82,12 @@ fn render_qr_terminal(data: &str) -> Option<String> {
 fn normalize_phone(phone: &str) -> String {
     phone
         .trim()
-        .trim_start_matches('+')
         .split('@')
         .next()
         .unwrap_or_default()
-        .to_string()
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect()
 }
 
 fn expand_auth_dir(path: &str) -> String {
@@ -218,7 +218,7 @@ impl Channel for WhatsAppWebChannel {
 
         let store_path = sqlite_store_path(&self.config.auth_dir);
         if let Some(parent) = store_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ZeptoError::Channel(format!(
                     "WhatsApp Web: failed to create auth directory {}: {}",
                     parent.display(),
@@ -276,14 +276,14 @@ impl Channel for WhatsAppWebChannel {
                             match render_qr_terminal(&code) {
                                 Some(qr) => eprint!("{}", qr),
                                 None => {
-                                    warn!("Failed to render QR code, raw token: {}", code);
+                                    eprintln!("Failed to render QR code. Please try again.");
                                 }
                             }
                             eprintln!();
                         }
                         Event::PairingCode { code, timeout } => {
-                            info!(
-                                "WhatsApp Web pair code received (valid for {}s): {}",
+                            eprintln!(
+                                "WhatsApp Web pair code (valid for {}s): {}",
                                 timeout.as_secs(),
                                 code
                             );
@@ -293,8 +293,10 @@ impl Channel for WhatsAppWebChannel {
                             warn!("WhatsApp Web logged out: {:?}", reason.reason);
                         }
                         Event::Disconnected(_) => {
-                            running.store(false, Ordering::SeqCst);
-                            warn!("WhatsApp Web disconnected");
+                            // Don't set running = false here — wa-rs will
+                            // reconnect automatically. Only mark dead on
+                            // LoggedOut or when the bot task actually exits.
+                            warn!("WhatsApp Web disconnected (will reconnect)");
                         }
                         Event::Message(message, info) => {
                             if info.source.is_from_me {
