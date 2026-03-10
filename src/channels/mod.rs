@@ -124,8 +124,9 @@ pub mod slack;
 pub mod telegram;
 mod types;
 pub mod webhook;
-pub mod whatsapp;
 pub mod whatsapp_cloud;
+#[cfg(feature = "whatsapp-web")]
+pub mod whatsapp_web;
 
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
@@ -141,5 +142,6 @@ pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};
 pub use webhook::{WebhookChannel, WebhookChannelConfig};
-pub use whatsapp::WhatsAppChannel;
 pub use whatsapp_cloud::WhatsAppCloudChannel;
+#[cfg(feature = "whatsapp-web")]
+pub use whatsapp_web::WhatsAppWebChannel;

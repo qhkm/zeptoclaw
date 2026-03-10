@@ -900,29 +900,22 @@ impl Config {
             }
         }
 
-        // WhatsApp
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL") {
+        // WhatsApp Web
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR") {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_url = val;
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.auth_dir = val;
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_TOKEN") {
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED").map(|v| v.parse::<bool>())
+        {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_token = Some(val);
-        }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED") {
-            if let Ok(enabled) = val.parse() {
-                let channel = self
-                    .channels
-                    .whatsapp
-                    .get_or_insert_with(WhatsAppConfig::default);
-                channel.enabled = enabled;
-            }
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.enabled = enabled;
         }
 
         // Runtime: Apple Container

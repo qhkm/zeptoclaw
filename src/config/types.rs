@@ -745,8 +745,8 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot configuration
     pub slack: Option<SlackConfig>,
-    /// WhatsApp bridge configuration
-    pub whatsapp: Option<WhatsAppConfig>,
+    /// WhatsApp Web native channel configuration (requires `whatsapp-web` feature).
+    pub whatsapp_web: Option<WhatsAppWebConfig>,
     /// WhatsApp Cloud API configuration (official API, no bridge)
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
@@ -968,52 +968,6 @@ pub struct SlackConfig {
     pub deny_by_default: bool,
 }
 
-/// WhatsApp channel configuration (via bridge)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhatsAppConfig {
-    /// Whether the channel is enabled
-    #[serde(default)]
-    pub enabled: bool,
-    /// WebSocket bridge URL
-    #[serde(default = "default_whatsapp_bridge_url")]
-    pub bridge_url: String,
-    /// Optional Bearer token for authenticating to the bridge WebSocket.
-    #[serde(default)]
-    pub bridge_token: Option<String>,
-    /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set)
-    #[serde(default)]
-    pub allow_from: Vec<String>,
-    /// When true, empty `allow_from` rejects all senders (strict mode).
-    #[serde(default)]
-    pub deny_by_default: bool,
-    /// Whether ZeptoClaw manages the bridge binary lifecycle.
-    /// When true, `channel setup` and `gateway` will auto-install and start the bridge.
-    /// When false, the user manages the bridge process externally.
-    #[serde(default = "default_bridge_managed")]
-    pub bridge_managed: bool,
-}
-
-fn default_whatsapp_bridge_url() -> String {
-    "ws://localhost:3001".to_string()
-}
-
-fn default_bridge_managed() -> bool {
-    true
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bridge_url: default_whatsapp_bridge_url(),
-            bridge_token: None,
-            allow_from: Vec::new(),
-            deny_by_default: false,
-            bridge_managed: default_bridge_managed(),
-        }
-    }
-}
-
 /// WhatsApp Cloud API channel configuration (official Meta API).
 ///
 /// Uses Meta's webhook system for inbound messages and the Cloud API
@@ -1071,6 +1025,44 @@ impl Default for WhatsAppCloudConfig {
             bind_address: default_whatsapp_cloud_bind(),
             port: default_whatsapp_cloud_port(),
             path: default_whatsapp_cloud_path(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+/// WhatsApp Web native channel configuration (personal WhatsApp via QR pairing).
+///
+/// Uses wa-rs for direct WhatsApp Web protocol support. No Meta Business
+/// account required — pairs via QR code like WhatsApp Desktop.
+/// Requires: `--features whatsapp-web`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppWebConfig {
+    /// Whether the channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for session persistence (SQLite database).
+    /// Default: ~/.zeptoclaw/state/whatsapp_web
+    #[serde(default = "default_whatsapp_web_auth_dir")]
+    pub auth_dir: String,
+    /// Allowlist of phone numbers in E.164 format (e.g., "+60123456789").
+    /// Empty = allow all unless `deny_by_default` is set.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_whatsapp_web_auth_dir() -> String {
+    "~/.zeptoclaw/state/whatsapp_web".to_string()
+}
+
+impl Default for WhatsAppWebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auth_dir: default_whatsapp_web_auth_dir(),
             allow_from: Vec::new(),
             deny_by_default: false,
         }

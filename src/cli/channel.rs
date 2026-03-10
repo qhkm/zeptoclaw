@@ -1,10 +1,8 @@
 //! CLI channel management commands (zeptoclaw channel list|setup|test).
 
 use std::io::{self, Write};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio_tungstenite::connect_async;
 
 use zeptoclaw::config::Config;
 
@@ -72,12 +70,12 @@ async fn cmd_channel_list() -> Result<()> {
     };
     println!("  {:<12} {:<10} {}", "slack", sl_status, sl_detail);
 
-    // WhatsApp
-    let (wa_status, wa_detail) = match config.channels.whatsapp {
-        Some(ref c) if c.enabled => ("enabled", format!("bridge: {}", c.bridge_url)),
+    // WhatsApp Web
+    let (wa_status, wa_detail) = match config.channels.whatsapp_web {
+        Some(ref c) if c.enabled => ("enabled", format!("auth: {}", c.auth_dir)),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "whatsapp", wa_status, wa_detail);
+    println!("  {:<12} {:<10} {}", "whatsapp_web", wa_status, wa_detail);
 
     // Webhook
     let (wh_status, wh_detail) = match config.channels.webhook {
@@ -97,7 +95,7 @@ async fn cmd_channel_list() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Known channel names for validation.
-const KNOWN_CHANNELS: &[&str] = &["telegram", "discord", "slack", "whatsapp", "webhook"];
+const KNOWN_CHANNELS: &[&str] = &["telegram", "discord", "slack", "whatsapp_web", "webhook"];
 
 /// Interactive setup for a named channel.
 async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
@@ -112,7 +110,7 @@ async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
     let mut config = Config::load().unwrap_or_default();
 
     match channel_name {
-        "whatsapp" => setup_whatsapp(&mut config)?,
+        "whatsapp_web" => setup_whatsapp_web(&mut config)?,
         "telegram" => {
             println!("Use 'zeptoclaw onboard' to configure Telegram.");
             return Ok(());
@@ -139,51 +137,43 @@ async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Interactive WhatsApp channel setup.
-fn setup_whatsapp(config: &mut Config) -> Result<()> {
+/// Interactive WhatsApp Web channel setup.
+fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
     println!();
-    println!("WhatsApp Channel Setup (via Bridge)");
+    println!("WhatsApp Web Channel Setup (Native)");
     println!("-----------------------------------");
-    println!("Requires whatsmeow-rs bridge: https://github.com/qhkm/whatsmeow-rs");
+    println!("Uses wa-rs for direct WhatsApp Web protocol support.");
+    println!("Requires: cargo build --features whatsapp-web");
     println!();
 
-    let whatsapp_config = config
+    let wa_config = config
         .channels
-        .whatsapp
+        .whatsapp_web
         .get_or_insert_with(Default::default);
 
-    print!("Enable WhatsApp channel? [y/N]: ");
+    print!("Enable WhatsApp Web channel? [y/N]: ");
     io::stdout().flush()?;
     let enabled = read_line()?.to_ascii_lowercase();
     if !matches!(enabled.as_str(), "y" | "yes") {
-        whatsapp_config.enabled = false;
-        println!("  WhatsApp channel disabled.");
+        wa_config.enabled = false;
+        println!("  WhatsApp Web channel disabled.");
         return Ok(());
     }
-    whatsapp_config.enabled = true;
+    wa_config.enabled = true;
 
-    print!("Bridge WebSocket URL [{}]: ", whatsapp_config.bridge_url);
-    io::stdout().flush()?;
-    let bridge_url = read_line()?;
-    if !bridge_url.is_empty() {
-        whatsapp_config.bridge_url = bridge_url;
-    }
-
-    print!("Phone number allowlist (comma-separated, or Enter for all): ");
+    print!("Phone number allowlist (comma-separated E.164, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
     if !allowlist.is_empty() {
-        whatsapp_config.allow_from = allowlist
+        wa_config.allow_from = allowlist
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
     }
 
-    println!(
-        "  WhatsApp channel configured (bridge: {}).",
-        whatsapp_config.bridge_url
-    );
+    println!("  WhatsApp Web channel configured.");
+    println!("  Run 'zeptoclaw gateway' to pair via QR code.");
     Ok(())
 }
 
@@ -204,7 +194,7 @@ async fn cmd_channel_test(channel_name: &str) -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     match channel_name {
-        "whatsapp" => test_whatsapp(&config).await,
+        "whatsapp_web" => test_whatsapp_web(&config).await,
         "telegram" => {
             println!("Telegram test: not yet implemented (use BotFather /getMe).");
             Ok(())
@@ -225,45 +215,27 @@ async fn cmd_channel_test(channel_name: &str) -> Result<()> {
     }
 }
 
-/// Test WhatsApp bridge connectivity via WebSocket.
-async fn test_whatsapp(config: &Config) -> Result<()> {
-    let bridge_url = match config.channels.whatsapp {
+/// Test WhatsApp Web channel configuration.
+async fn test_whatsapp_web(config: &Config) -> Result<()> {
+    match config.channels.whatsapp_web {
         Some(ref c) if c.enabled => {
-            if c.bridge_url.is_empty() {
-                anyhow::bail!("WhatsApp channel enabled but bridge_url is empty");
-            }
-            c.bridge_url.clone()
+            println!("WhatsApp Web channel is configured and enabled.");
+            println!("  Auth dir: {}", c.auth_dir);
+            println!("  Allowlist: {:?}", c.allow_from);
+            println!("  Run 'zeptoclaw gateway' to connect and pair.");
+            Ok(())
         }
         Some(_) => {
             anyhow::bail!(
-                "WhatsApp channel is not enabled. Run 'zeptoclaw channel setup whatsapp' first."
+                "WhatsApp Web channel is not enabled. Run 'zeptoclaw channel setup whatsapp_web' first."
             );
         }
         None => {
             anyhow::bail!(
-                "WhatsApp channel not configured. Run 'zeptoclaw channel setup whatsapp' first."
-            );
-        }
-    };
-
-    println!("Testing WhatsApp bridge connection to {}...", bridge_url);
-
-    match tokio::time::timeout(Duration::from_secs(5), connect_async(&bridge_url)).await {
-        Ok(Ok((_ws_stream, _))) => {
-            println!("WhatsApp bridge reachable at {}", bridge_url);
-        }
-        Ok(Err(e)) => {
-            println!("Failed to connect to WhatsApp bridge: {}", e);
-        }
-        Err(_) => {
-            println!(
-                "Connection timed out after 5 seconds. Is the bridge running at {}?",
-                bridge_url
+                "WhatsApp Web channel not configured. Run 'zeptoclaw channel setup whatsapp_web' first."
             );
         }
     }
-
-    Ok(())
 }
 
 // ===========================================================================
@@ -279,7 +251,7 @@ mod tests {
         assert!(KNOWN_CHANNELS.contains(&"telegram"));
         assert!(KNOWN_CHANNELS.contains(&"discord"));
         assert!(KNOWN_CHANNELS.contains(&"slack"));
-        assert!(KNOWN_CHANNELS.contains(&"whatsapp"));
+        assert!(KNOWN_CHANNELS.contains(&"whatsapp_web"));
         assert!(KNOWN_CHANNELS.contains(&"webhook"));
     }
 
@@ -315,46 +287,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_channel_test_whatsapp_not_configured() {
-        // Default config has no WhatsApp configured
+    async fn test_channel_test_whatsapp_web_not_configured() {
         let config = Config::default();
-        let result = test_whatsapp(&config).await;
+        let result = test_whatsapp_web(&config).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("not configured"));
-    }
-
-    #[tokio::test]
-    async fn test_channel_test_whatsapp_disabled() {
-        let mut config = Config::default();
-        config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
-            enabled: false,
-            bridge_url: "ws://localhost:3001".to_string(),
-            bridge_token: None,
-            allow_from: vec![],
-            bridge_managed: true,
-            deny_by_default: true,
-        });
-        let result = test_whatsapp(&config).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not enabled"));
-    }
-
-    #[tokio::test]
-    async fn test_channel_test_whatsapp_empty_url() {
-        let mut config = Config::default();
-        config.channels.whatsapp = Some(zeptoclaw::config::WhatsAppConfig {
-            enabled: true,
-            bridge_url: String::new(),
-            bridge_token: None,
-            allow_from: vec![],
-            bridge_managed: true,
-            deny_by_default: true,
-        });
-        let result = test_whatsapp(&config).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("bridge_url is empty"));
     }
 }

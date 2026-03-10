@@ -812,35 +812,29 @@ fn configure_telegram(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-/// Configure WhatsApp channel (via whatsmeow-rs bridge).
+/// Configure WhatsApp Web channel (native, via wa-rs).
 fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     println!();
-    println!("WhatsApp Channel Setup (via Bridge)");
+    println!("WhatsApp Web Channel Setup (Native)");
     println!("-----------------------------------");
-    println!("Requires whatsmeow-rs bridge: https://github.com/qhkm/whatsmeow-rs");
-    print!("Enable WhatsApp channel? [y/N]: ");
+    println!("Uses wa-rs for direct WhatsApp Web protocol support.");
+    println!("Requires: cargo build --features whatsapp-web");
+    print!("Enable WhatsApp Web channel? [y/N]: ");
     io::stdout().flush()?;
 
     let enabled = read_line()?.to_ascii_lowercase();
     if !matches!(enabled.as_str(), "y" | "yes") {
-        println!("  Skipped WhatsApp channel configuration.");
+        println!("  Skipped WhatsApp Web channel configuration.");
         return Ok(());
     }
 
     let whatsapp_config = config
         .channels
-        .whatsapp
+        .whatsapp_web
         .get_or_insert_with(Default::default);
     whatsapp_config.enabled = true;
 
-    print!("Bridge WebSocket URL [{}]: ", whatsapp_config.bridge_url);
-    io::stdout().flush()?;
-    let bridge_url = read_line()?;
-    if !bridge_url.is_empty() {
-        whatsapp_config.bridge_url = bridge_url;
-    }
-
-    print!("Phone number allowlist (comma-separated, or Enter for all): ");
+    print!("Phone number allowlist (comma-separated E.164, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
     if !allowlist.is_empty() {
@@ -851,11 +845,8 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
             .collect();
     }
 
-    println!(
-        "  WhatsApp channel configured (bridge: {}).",
-        whatsapp_config.bridge_url
-    );
-    println!("  Run 'zeptoclaw gateway' to start the WhatsApp channel.");
+    println!("  WhatsApp Web channel configured.");
+    println!("  Run 'zeptoclaw gateway' to pair via QR code.");
     Ok(())
 }
 
