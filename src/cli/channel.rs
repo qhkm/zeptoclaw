@@ -12,6 +12,7 @@ use super::ChannelAction;
 fn canonical_channel_name(channel_name: &str) -> &str {
     match channel_name {
         "whatsapp" | "whatsapp_web" => "whatsapp_web",
+        "whatsapp_cloud" | "whatsapp-cloud" => "whatsapp_cloud",
         _ => channel_name,
     }
 }
@@ -51,7 +52,7 @@ async fn cmd_channel_list() -> Result<()> {
         ),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "telegram", tg_status, tg_detail);
+    println!("  {:<15} {:<10} {}", "telegram", tg_status, tg_detail);
 
     // Discord
     let (dc_status, dc_detail) = match config.channels.discord {
@@ -65,7 +66,7 @@ async fn cmd_channel_list() -> Result<()> {
         ),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "discord", dc_status, dc_detail);
+    println!("  {:<15} {:<10} {}", "discord", dc_status, dc_detail);
 
     // Slack
     let (sl_status, sl_detail) = match config.channels.slack {
@@ -79,7 +80,7 @@ async fn cmd_channel_list() -> Result<()> {
         ),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "slack", sl_status, sl_detail);
+    println!("  {:<15} {:<10} {}", "slack", sl_status, sl_detail);
 
     // WhatsApp Web
     let (wa_status, wa_detail) = match config.channels.whatsapp_web {
@@ -92,7 +93,21 @@ async fn cmd_channel_list() -> Result<()> {
         ),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "whatsapp_web", wa_status, wa_detail);
+    println!("  {:<15} {:<10} {}", "whatsapp_web", wa_status, wa_detail);
+
+    // WhatsApp Cloud
+    let (wc_status, wc_detail) = match config.channels.whatsapp_cloud {
+        Some(ref c) if c.enabled => (
+            "enabled",
+            if c.phone_number_id.is_empty() {
+                "phone_number_id missing".to_string()
+            } else {
+                format!("phone: {}", c.phone_number_id)
+            },
+        ),
+        _ => ("disabled", "-".to_string()),
+    };
+    println!("  {:<15} {:<10} {}", "whatsapp_cloud", wc_status, wc_detail);
 
     // Webhook
     let (wh_status, wh_detail) = match config.channels.webhook {
@@ -102,7 +117,7 @@ async fn cmd_channel_list() -> Result<()> {
         ),
         _ => ("disabled", "-".to_string()),
     };
-    println!("  {:<12} {:<10} {}", "webhook", wh_status, wh_detail);
+    println!("  {:<15} {:<10} {}", "webhook", wh_status, wh_detail);
 
     Ok(())
 }
@@ -118,6 +133,7 @@ const KNOWN_CHANNELS: &[&str] = &[
     "slack",
     "whatsapp",
     "whatsapp_web",
+    "whatsapp_cloud",
     "webhook",
 ];
 
@@ -137,6 +153,7 @@ async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
 
     match channel_name {
         "whatsapp_web" => setup_whatsapp_web(&mut config)?,
+        "whatsapp_cloud" => setup_whatsapp_cloud(&mut config)?,
         "telegram" => setup_telegram(&mut config)?,
         "discord" => setup_discord(&mut config)?,
         "slack" => setup_slack(&mut config)?,
@@ -354,6 +371,54 @@ fn setup_webhook(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+/// Interactive WhatsApp Cloud API channel setup.
+fn setup_whatsapp_cloud(config: &mut Config) -> Result<()> {
+    println!();
+    println!("WhatsApp Cloud API Setup (Official)");
+    println!("-----------------------------------");
+    println!("Uses Meta's official Cloud API. Requires a Meta Business account.");
+    println!("  1. Go to https://developers.facebook.com → Create App → Business");
+    println!("  2. Add WhatsApp product → API Setup");
+    println!("  3. Copy Phone Number ID and generate a permanent access token");
+    println!("  4. Set up a webhook URL (use 'zeptoclaw gateway --tunnel auto')");
+    println!();
+    print!("Enter Phone Number ID (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let phone_id = read_line()?;
+    if phone_id.is_empty() {
+        println!("  Skipped.");
+        return Ok(());
+    }
+
+    print!("Enter permanent access token: ");
+    io::stdout().flush()?;
+    let token = read_line()?;
+
+    print!("Choose a webhook verify token (any secret string): ");
+    io::stdout().flush()?;
+    let verify_token = read_line()?;
+
+    let wc = config
+        .channels
+        .whatsapp_cloud
+        .get_or_insert_with(Default::default);
+    wc.phone_number_id = phone_id;
+    wc.access_token = token;
+    wc.webhook_verify_token = verify_token;
+    wc.enabled = true;
+
+    println!("  WhatsApp Cloud API configured.");
+    println!(
+        "  Webhook endpoint: {}:{}{}",
+        wc.bind_address, wc.port, wc.path
+    );
+    println!(
+        "  Run 'zeptoclaw gateway' to start, then configure the webhook URL in Meta dashboard."
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // channel test
 // ---------------------------------------------------------------------------
@@ -374,6 +439,17 @@ async fn cmd_channel_test(channel_name: &str) -> Result<()> {
 
     match channel_name {
         "whatsapp_web" => test_whatsapp_web(&config).await,
+        "whatsapp_cloud" => match config.channels.whatsapp_cloud {
+            Some(ref c) if c.enabled => {
+                println!("WhatsApp Cloud API channel is configured and enabled.");
+                println!("  Phone Number ID: {}", c.phone_number_id);
+                println!("  Webhook: {}:{}{}", c.bind_address, c.port, c.path);
+                Ok(())
+            }
+            _ => {
+                anyhow::bail!("WhatsApp Cloud channel not configured. Run 'zeptoclaw channel setup whatsapp_cloud' first.");
+            }
+        },
         "telegram" => {
             println!("Telegram test: not yet implemented (use BotFather /getMe).");
             Ok(())

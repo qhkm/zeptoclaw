@@ -263,11 +263,12 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         // Configure heartbeat service.
         configure_heartbeat(&mut config)?;
 
-        // Configure Telegram channel
+        // Configure messaging channels
         configure_telegram(&mut config)?;
-
-        // Configure WhatsApp channel (via bridge)
         configure_whatsapp_channel(&mut config)?;
+        configure_whatsapp_cloud(&mut config)?;
+        configure_discord(&mut config)?;
+        configure_slack(&mut config)?;
 
         // Configure runtime for shell command isolation
         configure_runtime(&mut config)?;
@@ -309,11 +310,12 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         println!("Connect ZeptoClaw to messaging platforms so you can chat via phone/desktop.");
         println!("  1. Telegram (recommended — easiest setup)");
         println!("  2. WhatsApp Web (native, QR code pairing)");
-        println!("  3. Discord");
-        println!("  4. Slack");
-        println!("  5. Skip (configure later with 'zeptoclaw channel setup <name>')");
+        println!("  3. WhatsApp Cloud API (official Meta API)");
+        println!("  4. Discord");
+        println!("  5. Slack");
+        println!("  6. Skip (configure later with 'zeptoclaw channel setup <name>')");
         println!();
-        print!("Which channel? [1/2/3/4/5]: ");
+        print!("Which channel? [1-6]: ");
         io::stdout().flush()?;
         let channel_choice = read_line()?;
         match channel_choice.trim() {
@@ -326,8 +328,9 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
                     println!("  Skipped.");
                 }
             }
-            "3" => configure_discord(&mut config)?,
-            "4" => configure_slack(&mut config)?,
+            "3" => configure_whatsapp_cloud(&mut config)?,
+            "4" => configure_discord(&mut config)?,
+            "5" => configure_slack(&mut config)?,
             _ => println!("  Skipped. Run 'zeptoclaw channel setup <name>' anytime."),
         }
 
@@ -895,6 +898,54 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
     println!("  On first run, scan the terminal QR code with your phone:");
     println!("    WhatsApp → Settings → Linked Devices → Link a Device");
+    Ok(())
+}
+
+/// Configure WhatsApp Cloud API channel (official Meta API).
+fn configure_whatsapp_cloud(config: &mut Config) -> Result<()> {
+    println!();
+    println!("WhatsApp Cloud API Setup (Official)");
+    println!("-----------------------------------");
+    println!("Uses Meta's official Cloud API. Requires a Meta Business account.");
+    println!("  1. Go to https://developers.facebook.com → Create App → Business");
+    println!("  2. Add WhatsApp product → API Setup");
+    println!("  3. Copy Phone Number ID and generate a permanent access token");
+    println!("  4. Set up a webhook URL (use 'zeptoclaw gateway --tunnel auto')");
+    println!();
+    print!("Enter Phone Number ID (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let phone_id = read_line()?;
+    if phone_id.is_empty() {
+        println!("  Skipped WhatsApp Cloud API configuration.");
+        return Ok(());
+    }
+
+    print!("Enter permanent access token: ");
+    io::stdout().flush()?;
+    let token = read_line()?;
+
+    print!("Choose a webhook verify token (any secret string): ");
+    io::stdout().flush()?;
+    let verify_token = read_line()?;
+
+    let wc = config
+        .channels
+        .whatsapp_cloud
+        .get_or_insert_with(Default::default);
+    wc.phone_number_id = phone_id;
+    wc.access_token = token;
+    wc.webhook_verify_token = verify_token;
+    wc.enabled = true;
+
+    println!("  WhatsApp Cloud API configured.");
+    println!(
+        "  Webhook endpoint: {}:{}{}",
+        wc.bind_address, wc.port, wc.path
+    );
+    println!(
+        "  Run 'zeptoclaw gateway' to start, then configure the webhook URL in Meta dashboard."
+    );
     Ok(())
 }
 
