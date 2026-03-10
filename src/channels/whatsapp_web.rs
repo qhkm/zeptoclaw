@@ -103,13 +103,13 @@ fn render_qr_terminal(qr_data: &[Vec<bool>]) -> String {
 
     let mut y = 0;
     while y < height {
-        for x in 0..width {
-            let top = qr_data[y][x];
-            let bottom = if y + 1 < height {
-                qr_data[y + 1][x]
-            } else {
-                false
-            };
+        let bottom_row = if y + 1 < height {
+            Some(&qr_data[y + 1])
+        } else {
+            None
+        };
+        for (x, &top) in qr_data[y].iter().enumerate().take(width) {
+            let bottom = bottom_row.is_some_and(|row| row[x]);
             let ch = match (top, bottom) {
                 (true, true) => '\u{2588}',  // █
                 (true, false) => '\u{2580}', // ▀
