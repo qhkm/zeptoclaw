@@ -206,7 +206,7 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 
 | Feature | What it does |
 |---------|-------------|
-| **9-Channel Gateway** | Telegram, Slack, Discord, WhatsApp (bridge + Cloud), Lark, Email, Webhook, Serial — unified message bus |
+| **9-Channel Gateway** | Telegram, Slack, Discord, WhatsApp Web (native, `--features whatsapp-web`) + Cloud API, Lark, Email, Webhook, Serial — unified message bus |
 | **Persona System** | Per-chat personality switching via `/persona` command with LTM persistence |
 | **Plugin System** | JSON manifest plugins auto-discovered from `~/.zeptoclaw/plugins/` |
 | **Hooks** | `before_tool`, `after_tool`, `on_error` with Log, Block, and Notify actions |

@@ -249,7 +249,7 @@ src/
 │   ├── slack.rs    # Slack outbound channel
 │   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
 │   ├── webhook.rs  # Generic HTTP webhook inbound
-│   ├── whatsapp.rs # WhatsApp via whatsmeow-rs bridge (WebSocket)
+│   ├── whatsapp_web.rs # WhatsApp Web via wa-rs native (feature: whatsapp-web)
 │   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
 │   ├── lark.rs     # Lark/Feishu messaging (WS long-connection)
 │   ├── email_channel.rs # Email channel (IMAP IDLE + SMTP)
@@ -407,8 +407,6 @@ Containerized agent proxy for full request isolation:
 - Stdin/stdout IPC with containerized agent
 - Semaphore-based concurrency limiting (`max_concurrent` config)
 - Mount allowlist validation, docker binary verification
-- **Auto-installs channel dependencies** (e.g., whatsmeow-bridge for WhatsApp)
-- Dependencies installed at gateway startup via DepManager
 - Warn-and-continue on dependency failures (non-blocking)
 
 ### Providers (`src/providers/`)
@@ -433,7 +431,7 @@ Message input channels via `Channel` trait:
 - `SlackChannel` - Slack outbound messaging
 - `DiscordChannel` - Discord Gateway WebSocket + REST API messaging (replies + thread creation)
 - `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth
-- `WhatsAppChannel` - WhatsApp via whatsmeow-rs bridge (WebSocket JSON protocol)
+- `WhatsAppWebChannel` - WhatsApp Web via wa-rs native client (QR pairing, feature: whatsapp-web)
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
 - `MqttChannel` - MQTT messaging for IoT devices over WiFi/network (rumqttc, feature: mqtt)
 - `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
@@ -631,12 +629,15 @@ Environment variables override config:
 - `ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER` — search provider: "brave", "searxng", "ddg" (default: auto-detect)
 - `ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL` — SearXNG instance URL (required when provider is "searxng")
 - `ZEPTOCLAW_TOOLS_CODING_TOOLS` — enable coding-specific tools: grep, find (default: false; auto-enabled by coder template)
+- `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` — enable WhatsApp Web channel (default: false)
+- `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` — session persistence directory (default: ~/.zeptoclaw/state/whatsapp_web)
 
 ### Cargo Features
 
 - `android` — Enable Android device control tool via ADB
 - `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
 - `mqtt` — Enable MQTT channel for IoT device communication (rumqttc async client)
+- `whatsapp-web` — Enable native WhatsApp Web channel via wa-rs (QR code pairing)
 - `memory-bm25` — Enable BM25 keyword scoring for memory search
 - `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
 - `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
@@ -646,6 +647,9 @@ Environment variables override config:
 
 ```bash
 cargo build --release --features android
+
+# Native WhatsApp Web channel
+cargo build --release --features whatsapp-web
 
 # Linux sandbox runtimes
 cargo build --release --features sandbox-landlock
