@@ -257,6 +257,38 @@ pub(crate) async fn cmd_gateway(
         None
     };
 
+    // Preflight: validate model-provider compatibility before starting anything.
+    if !containerized {
+        let model_diags = zeptoclaw::config::validate::validate_model_provider_compat(&config);
+        for diag in &model_diags {
+            match diag.level {
+                zeptoclaw::config::validate::DiagnosticLevel::Error => {
+                    error!("{}", diag);
+                }
+                zeptoclaw::config::validate::DiagnosticLevel::Warn => {
+                    warn!("{}", diag);
+                }
+                zeptoclaw::config::validate::DiagnosticLevel::Ok => {
+                    info!("{}", diag);
+                }
+            }
+        }
+        let has_errors = model_diags
+            .iter()
+            .any(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Error);
+        if has_errors {
+            eprintln!();
+            eprintln!("ERROR: Model-provider mismatch detected.");
+            eprintln!(
+                "  Fix your config ({:?}) or run 'zeptoclaw onboard'.",
+                Config::path()
+            );
+            eprintln!("  Run 'zeptoclaw config check' for details.");
+            eprintln!();
+            std::process::exit(1);
+        }
+    }
+
     // Create in-process agent (only needed when not containerized)
     let mut agent = if !containerized {
         let agent = create_agent(config.clone(), bus.clone()).await?;

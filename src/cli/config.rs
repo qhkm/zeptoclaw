@@ -39,7 +39,7 @@ async fn cmd_config_check() -> Result<()> {
         println!("{}", diag);
     }
 
-    let errors = diagnostics
+    let mut errors = diagnostics
         .iter()
         .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Error)
         .count();
@@ -55,6 +55,20 @@ async fn cmd_config_check() -> Result<()> {
         println!("[WARN] {}", w);
     }
     warnings += tool_warnings.len();
+
+    // Model-provider compatibility
+    let model_diags = zeptoclaw::config::validate::validate_model_provider_compat(&config);
+    for diag in &model_diags {
+        println!("{}", diag);
+    }
+    errors += model_diags
+        .iter()
+        .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Error)
+        .count();
+    warnings += model_diags
+        .iter()
+        .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Warn)
+        .count();
 
     // Hint: workspace configured but coding tools disabled
     let workspace = config.workspace_path();
