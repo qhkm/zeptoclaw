@@ -532,12 +532,24 @@ pub async fn run() -> Result<()> {
     // Initialize logging from config (format, level, optional file output).
     // Load config early so we can respect the logging settings; fall back to
     // defaults if the config file is missing or unreadable.
-    let logging_cfg = zeptoclaw::config::Config::load()
+    let cli = Cli::parse();
+
+    let mut logging_cfg = zeptoclaw::config::Config::load()
         .map(|c| c.logging)
         .unwrap_or_default();
-    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
-    let cli = Cli::parse();
+    // CLI agent mode defaults to warn-level logging to keep output clean.
+    // Gateway and other long-running modes keep info-level for operational visibility.
+    // Users can still override with RUST_LOG=info.
+    if matches!(
+        cli.command,
+        Some(Commands::Agent { .. } | Commands::Batch { .. })
+    ) && std::env::var("RUST_LOG").is_err()
+    {
+        logging_cfg.level = "warn".to_string();
+    }
+
+    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
     match cli.command {
         None => {
