@@ -108,8 +108,27 @@ fn sqlite_store_path(path: &str) -> PathBuf {
     }
 }
 
-fn normalize_sender_id(jid: &str) -> String {
-    normalize_phone(jid)
+/// Resolve a sender to a phone number for allowlist matching.
+///
+/// WhatsApp Web may deliver messages with a LID-based sender JID
+/// (e.g. `78971563720736@lid`) instead of a phone number JID
+/// (`60123456789@s.whatsapp.net`). The `sender_alt` field on
+/// `MessageSource` contains the phone number JID when the primary
+/// sender is a LID. This function checks `sender_alt` first,
+/// falling back to the primary sender JID.
+fn resolve_sender_phone(sender: &Jid, sender_alt: &Option<Jid>) -> String {
+    // Prefer sender_alt (contains phone JID when sender is LID)
+    if let Some(ref alt) = sender_alt {
+        if alt.is_pn() {
+            return normalize_phone(&alt.to_string());
+        }
+    }
+    // If sender itself is a phone JID, use it directly
+    if sender.is_pn() {
+        return normalize_phone(&sender.to_string());
+    }
+    // Fallback: use sender as-is (LID user part)
+    normalize_phone(&sender.to_string())
 }
 
 fn parse_chat_jid(chat_id: &str) -> Result<Jid> {
@@ -283,11 +302,12 @@ impl Channel for WhatsAppWebChannel {
                             }
 
                             let sender_jid = info.source.sender.to_string();
-                            let sender_id = normalize_sender_id(&sender_jid);
+                            let sender_id =
+                                resolve_sender_phone(&info.source.sender, &info.source.sender_alt);
                             if !base_config.is_allowed(&sender_id) {
                                 info!(
-                                    "WhatsApp Web: sender {} not in allowlist, ignoring",
-                                    sender_id
+                                    "WhatsApp Web: sender {} (jid: {}) not in allowlist, ignoring",
+                                    sender_id, sender_jid
                                 );
                                 return;
                             }
@@ -536,5 +556,36 @@ mod tests {
         let result = ch.send(msg).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not started"));
+    }
+
+    #[test]
+    fn test_resolve_sender_phone_from_pn_jid() {
+        let sender = Jid::from_str("60123456789@s.whatsapp.net").unwrap();
+        let result = resolve_sender_phone(&sender, &None);
+        assert_eq!(result, "60123456789");
+    }
+
+    #[test]
+    fn test_resolve_sender_phone_from_lid_with_alt() {
+        let sender = Jid::from_str("78971563720736@lid").unwrap();
+        let alt = Some(Jid::from_str("60123456789@s.whatsapp.net").unwrap());
+        let result = resolve_sender_phone(&sender, &alt);
+        assert_eq!(result, "60123456789");
+    }
+
+    #[test]
+    fn test_resolve_sender_phone_from_lid_without_alt() {
+        let sender = Jid::from_str("78971563720736@lid").unwrap();
+        let result = resolve_sender_phone(&sender, &None);
+        assert_eq!(result, "78971563720736");
+    }
+
+    #[test]
+    fn test_resolve_sender_phone_lid_alt_is_also_lid() {
+        let sender = Jid::from_str("111111@lid").unwrap();
+        let alt = Some(Jid::from_str("222222@lid").unwrap());
+        let result = resolve_sender_phone(&sender, &alt);
+        // Neither is a PN, falls back to sender user part
+        assert_eq!(result, "111111");
     }
 }
