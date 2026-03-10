@@ -456,13 +456,26 @@ pub(crate) async fn create_agent_with_template(
     Ok(agent)
 }
 
+/// Result of API key validation.
+#[derive(Debug, PartialEq)]
+pub(crate) enum KeyValidation {
+    /// Key confirmed valid (2xx response).
+    Valid,
+    /// Key recognized by server but currently rate-limited (429).
+    /// Common for new free-tier accounts.
+    RateLimited,
+}
+
 /// Validate an API key by making a minimal API call.
-/// Returns Ok(()) if key works, Err with user-friendly message if not.
+///
+/// HTTP 429 (rate limited) returns `Ok(RateLimited)` — the server recognized
+/// the key, confirming it is valid. New free-tier accounts commonly hit rate
+/// limits immediately, so surfacing this as a validation failure is confusing.
 pub(crate) async fn validate_api_key(
     provider: &str,
     api_key: &str,
     api_base: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<KeyValidation> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -477,10 +490,12 @@ pub(crate) async fn validate_api_key(
                 .header("anthropic-version", "2023-06-01")
                 .send()
                 .await?;
+            let status = resp.status().as_u16();
             if resp.status().is_success() {
-                Ok(())
+                Ok(KeyValidation::Valid)
+            } else if status == 429 {
+                Ok(KeyValidation::RateLimited)
             } else {
-                let status = resp.status().as_u16();
                 let body = resp.text().await.unwrap_or_default();
                 Err(anyhow::anyhow!(friendly_api_error(
                     "anthropic",
@@ -496,10 +511,12 @@ pub(crate) async fn validate_api_key(
                 .header("Authorization", format!("Bearer {}", api_key))
                 .send()
                 .await?;
+            let status = resp.status().as_u16();
             if resp.status().is_success() {
-                Ok(())
+                Ok(KeyValidation::Valid)
+            } else if status == 429 {
+                Ok(KeyValidation::RateLimited)
             } else {
-                let status = resp.status().as_u16();
                 let body = resp.text().await.unwrap_or_default();
                 Err(anyhow::anyhow!(friendly_api_error("openai", status, &body)))
             }
@@ -512,10 +529,12 @@ pub(crate) async fn validate_api_key(
                 .header("Authorization", format!("Bearer {}", api_key))
                 .send()
                 .await?;
+            let status = resp.status().as_u16();
             if resp.status().is_success() {
-                Ok(())
+                Ok(KeyValidation::Valid)
+            } else if status == 429 {
+                Ok(KeyValidation::RateLimited)
             } else {
-                let status = resp.status().as_u16();
                 let body = resp.text().await.unwrap_or_default();
                 Err(anyhow::anyhow!(friendly_api_error(
                     "openrouter",
@@ -529,7 +548,7 @@ pub(crate) async fn validate_api_key(
                 "API key validation not supported for provider '{}', skipping",
                 provider
             );
-            Ok(())
+            Ok(KeyValidation::Valid)
         }
     }
 }
@@ -614,6 +633,178 @@ async fn resolve_google_token(config: &Config) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_validation_server(
+        expected_path: &'static str,
+        expected_headers: &'static [(&'static str, &'static str)],
+        status: u16,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test server should expose address");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("test server should accept");
+            let mut req = Vec::new();
+            loop {
+                let mut buf = [0_u8; 1024];
+                let n = stream
+                    .read(&mut buf)
+                    .await
+                    .expect("test server should read request");
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&req).to_lowercase();
+
+            assert!(
+                req.starts_with(&format!("get {} http/1.1", expected_path)),
+                "unexpected request line: {req}"
+            );
+            for (name, value) in expected_headers {
+                let header = format!("{}: {}", name.to_lowercase(), value.to_lowercase());
+                assert!(
+                    req.contains(&header),
+                    "missing header: {header}\nrequest: {req}"
+                );
+            }
+
+            let reason = match status {
+                200 => "OK",
+                401 => "Unauthorized",
+                429 => "Too Many Requests",
+                _ => "Test Status",
+            };
+            let response = format!(
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status,
+                reason,
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test server should write response");
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_anthropic_429_returns_rate_limited() {
+        let base = spawn_validation_server(
+            "/v1/models",
+            &[
+                ("x-api-key", "test-key"),
+                ("anthropic-version", "2023-06-01"),
+            ],
+            429,
+            "{}",
+        )
+        .await;
+
+        let result = validate_api_key("anthropic", "test-key", Some(&base))
+            .await
+            .expect("429 should be treated as a valid key");
+
+        assert_eq!(result, KeyValidation::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_openai_429_returns_rate_limited() {
+        let base = spawn_validation_server(
+            "/models",
+            &[("authorization", "Bearer test-key")],
+            429,
+            "{}",
+        )
+        .await;
+
+        let result = validate_api_key("openai", "test-key", Some(&base))
+            .await
+            .expect("429 should be treated as a valid key");
+
+        assert_eq!(result, KeyValidation::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_openrouter_429_returns_rate_limited() {
+        let base =
+            spawn_validation_server("/key", &[("authorization", "Bearer test-key")], 429, "{}")
+                .await;
+
+        let result = validate_api_key("openrouter", "test-key", Some(&base))
+            .await
+            .expect("429 should be treated as a valid key");
+
+        assert_eq!(result, KeyValidation::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_anthropic_401_returns_error() {
+        let base = spawn_validation_server(
+            "/v1/models",
+            &[
+                ("x-api-key", "bad-key"),
+                ("anthropic-version", "2023-06-01"),
+            ],
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+        )
+        .await;
+
+        let err = validate_api_key("anthropic", "bad-key", Some(&base))
+            .await
+            .expect_err("401 should remain an error");
+
+        assert!(err.to_string().contains("Invalid API key"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_openai_401_returns_error() {
+        let base = spawn_validation_server(
+            "/models",
+            &[("authorization", "Bearer bad-key")],
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+        )
+        .await;
+
+        let err = validate_api_key("openai", "bad-key", Some(&base))
+            .await
+            .expect_err("401 should remain an error");
+
+        assert!(err.to_string().contains("Invalid API key"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_api_key_openrouter_401_returns_error() {
+        let base = spawn_validation_server(
+            "/key",
+            &[("authorization", "Bearer bad-key")],
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+        )
+        .await;
+
+        let err = validate_api_key("openrouter", "bad-key", Some(&base))
+            .await
+            .expect_err("401 should remain an error");
+
+        assert!(err.to_string().contains("Invalid API key"));
+    }
 
     #[test]
     fn test_friendly_api_error_401_anthropic() {
@@ -650,6 +841,12 @@ mod tests {
         let msg = friendly_api_error("openrouter", 402, "");
         assert!(msg.contains("Insufficient OpenRouter credits"));
         assert!(msg.contains("openrouter.ai/settings/credits"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_429() {
+        let msg = friendly_api_error("anthropic", 429, "");
+        assert!(msg.contains("Rate limited"));
     }
 
     #[test]
