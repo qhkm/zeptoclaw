@@ -289,7 +289,26 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         println!("Initializing ZeptoClaw...");
         println!();
 
-        configure_providers(&mut config).await?;
+        // Check if Claude CLI credentials are already available (Keychain or ~/.claude.json).
+        // If so, skip the provider setup prompt entirely — zero-config experience.
+        let has_claude_creds = zeptoclaw::auth::claude_import::read_claude_credentials().is_some();
+        let has_api_key = config
+            .providers
+            .anthropic
+            .as_ref()
+            .and_then(|p| p.api_key.as_ref())
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
+
+        if has_claude_creds && !has_api_key {
+            println!("Detected Claude CLI credentials (Keychain / ~/.claude.json).");
+            println!("  These will be used automatically as a fallback provider.");
+            println!("  You can still add an API key later for official access.");
+            println!();
+        } else {
+            configure_providers(&mut config).await?;
+        }
+
         configure_soul(&config)?;
 
         // Ask about coding tools
