@@ -414,6 +414,12 @@ pub enum AuthAction {
 pub enum ConfigAction {
     /// Check configuration for errors and warnings
     Check,
+    /// Reset configuration to defaults (backs up existing config first)
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
