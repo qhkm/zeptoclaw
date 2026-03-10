@@ -24,7 +24,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# default build: lib 2956, main 92, cli_smoke 23, e2e 13, integration 70, doc 126 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
+# default build: lib 3090 total (3084 passed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
 
 # Version
 ./target/release/zeptoclaw --version
@@ -141,6 +141,10 @@ cargo release patch --execute  # actually bump, commit, tag, push, publish to cr
 ./target/release/zeptoclaw update --check      # check without downloading
 ./target/release/zeptoclaw update --version v0.5.2  # specific version
 ./target/release/zeptoclaw update --force      # re-download even if current
+
+# Uninstall
+./target/release/zeptoclaw uninstall --yes
+./target/release/zeptoclaw uninstall --remove-binary --yes
 
 # Per-provider quota management
 ./target/release/zeptoclaw quota status
@@ -260,6 +264,7 @@ src/
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
 │   ├── hand.rs     # Hands-lite list/activate/deactivate/status commands
 │   ├── provider.rs # Provider chain status introspection (resolved providers, wrappers, quota)
+│   ├── uninstall.rs # State removal + guarded binary uninstall command
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
 ├── hands/          # HAND.toml manifest parsing + built-in hands registry

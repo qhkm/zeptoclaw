@@ -28,6 +28,7 @@ pub mod skills;
 pub mod status;
 pub mod template;
 pub mod tools;
+pub mod uninstall;
 pub mod update;
 pub mod watch;
 
@@ -246,6 +247,15 @@ enum Commands {
         /// Force re-download even if already on latest
         #[arg(long)]
         force: bool,
+    },
+    /// Remove ZeptoClaw state and optionally the current binary
+    Uninstall {
+        /// Also remove the current zeptoclaw binary for direct file installs
+        #[arg(long)]
+        remove_binary: bool,
+        /// Skip the confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Hardware device management (USB discovery, peripherals)
     Hardware {
@@ -659,6 +669,9 @@ pub async fn run() -> Result<()> {
             force,
         }) => {
             update::cmd_update(check, version, force).await?;
+        }
+        Some(Commands::Uninstall { remove_binary, yes }) => {
+            uninstall::cmd_uninstall(remove_binary, yes).await?;
         }
         Some(Commands::Hardware { action }) => {
             cmd_hardware(action);

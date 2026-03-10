@@ -85,6 +85,20 @@ docker pull ghcr.io/qhkm/zeptoclaw:latest
 cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw
 ```
 
+## Uninstall
+
+```bash
+# Remove ZeptoClaw state (~/.zeptoclaw)
+zeptoclaw uninstall --yes
+
+# Also remove a direct-install binary from ~/.local/bin or /usr/local/bin
+zeptoclaw uninstall --remove-binary --yes
+
+# Package-managed installs still use their package manager
+brew uninstall qhkm/tap/zeptoclaw
+cargo uninstall zeptoclaw
+```
+
 ## Quick Start
 
 ```bash
