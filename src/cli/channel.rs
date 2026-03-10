@@ -544,6 +544,12 @@ mod tests {
         let result = test_whatsapp_web(&config).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not configured"));
+        // Without whatsapp-web feature: "not available in this build"
+        // With whatsapp-web feature but no config: "not configured"
+        assert!(
+            err_msg.contains("not configured") || err_msg.contains("not available"),
+            "unexpected error: {}",
+            err_msg
+        );
     }
 }
