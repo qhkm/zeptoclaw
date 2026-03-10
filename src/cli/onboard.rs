@@ -571,9 +571,9 @@ async fn configure_anthropic(config: &mut Config) -> Result<()> {
                 io::stdout().flush()?;
                 match super::common::validate_api_key("anthropic", &api_key, None).await {
                     Ok(super::common::KeyValidation::Valid) => println!(" valid!"),
-                    Ok(super::common::KeyValidation::RateLimited) => {
-                        println!(" valid! (rate-limited, normal for new accounts)");
-                    }
+                    Ok(super::common::KeyValidation::RateLimited) => println!(
+                        " valid! (key recognized, but the account is currently rate-limited or out of quota)"
+                    ),
                     Err(e) => {
                         println!(" failed.");
                         println!("  Warning: {}", e);
@@ -689,9 +689,9 @@ async fn configure_openai(config: &mut Config) -> Result<()> {
             .and_then(|p| p.api_base.as_deref());
         match super::common::validate_api_key("openai", &api_key, existing_base).await {
             Ok(super::common::KeyValidation::Valid) => println!(" valid!"),
-            Ok(super::common::KeyValidation::RateLimited) => {
-                println!(" valid! (rate-limited, normal for new accounts)");
-            }
+            Ok(super::common::KeyValidation::RateLimited) => println!(
+                " valid! (key recognized, but the account is currently rate-limited or out of quota)"
+            ),
             Err(e) => {
                 println!(" failed.");
                 println!("  Warning: {}", e);
@@ -756,9 +756,9 @@ async fn configure_openrouter(config: &mut Config) -> Result<()> {
             .and_then(|p| p.api_base.as_deref());
         match super::common::validate_api_key("openrouter", &api_key, existing_base).await {
             Ok(super::common::KeyValidation::Valid) => println!(" valid!"),
-            Ok(super::common::KeyValidation::RateLimited) => {
-                println!(" valid! (rate-limited, normal for new accounts)");
-            }
+            Ok(super::common::KeyValidation::RateLimited) => println!(
+                " valid! (key recognized, but the account is currently rate-limited or out of quota)"
+            ),
             Err(e) => {
                 println!(" failed.");
                 println!("  Warning: {}", e);

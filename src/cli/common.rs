@@ -461,16 +461,18 @@ pub(crate) async fn create_agent_with_template(
 pub(crate) enum KeyValidation {
     /// Key confirmed valid (2xx response).
     Valid,
-    /// Key recognized by server but currently rate-limited (429).
-    /// Common for new free-tier accounts.
+    /// Key recognized by server but the account is not currently usable (429).
+    /// This typically indicates rate limiting and can also indicate quota
+    /// exhaustion, depending on the provider.
     RateLimited,
 }
 
 /// Validate an API key by making a minimal API call.
 ///
-/// HTTP 429 (rate limited) returns `Ok(RateLimited)` — the server recognized
-/// the key, confirming it is valid. New free-tier accounts commonly hit rate
-/// limits immediately, so surfacing this as a validation failure is confusing.
+/// HTTP 429 returns `Ok(RateLimited)` — the server recognized the key, so it is
+/// not an authentication failure. Providers use 429 for rate limiting and, in
+/// some cases, quota exhaustion, so onboarding should not report it as an
+/// invalid key.
 pub(crate) async fn validate_api_key(
     provider: &str,
     api_key: &str,
