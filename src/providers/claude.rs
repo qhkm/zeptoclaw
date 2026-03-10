@@ -117,7 +117,8 @@ impl ClaudeProvider {
     /// Build auth headers based on the resolved credential type.
     ///
     /// - API key: sends `x-api-key` header
-    /// - Bearer token: sends `Authorization: Bearer` header
+    /// - Bearer token: sends `Authorization: Bearer` header + required
+    ///   `anthropic-beta` betas for OAuth (learned from OpenClaw)
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         match &self.credential {
@@ -141,6 +142,15 @@ impl ClaudeProvider {
                         warn!(error = %e, "Invalid Authorization header value; omitting header");
                     }
                 }
+                // OAuth tokens require specific beta headers to be accepted by
+                // the Anthropic API. Without these, the API returns
+                // "OAuth authentication is currently not supported".
+                headers.insert(
+                    "anthropic-beta",
+                    reqwest::header::HeaderValue::from_static(
+                        "claude-code-20250219,oauth-2025-04-20",
+                    ),
+                );
             }
         }
         headers
