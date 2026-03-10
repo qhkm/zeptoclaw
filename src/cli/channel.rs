@@ -137,22 +137,10 @@ async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
 
     match channel_name {
         "whatsapp_web" => setup_whatsapp_web(&mut config)?,
-        "telegram" => {
-            println!("Use 'zeptoclaw onboard' to configure Telegram.");
-            return Ok(());
-        }
-        "discord" => {
-            println!("Use 'zeptoclaw onboard' to configure Discord.");
-            return Ok(());
-        }
-        "slack" => {
-            println!("Use 'zeptoclaw onboard' to configure Slack.");
-            return Ok(());
-        }
-        "webhook" => {
-            println!("Use 'zeptoclaw onboard' to configure Webhook.");
-            return Ok(());
-        }
+        "telegram" => setup_telegram(&mut config)?,
+        "discord" => setup_discord(&mut config)?,
+        "slack" => setup_slack(&mut config)?,
+        "webhook" => setup_webhook(&mut config)?,
         _ => unreachable!(),
     }
 
@@ -206,6 +194,163 @@ fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
 
     println!("  WhatsApp Web channel configured.");
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
+    Ok(())
+}
+
+/// Interactive Telegram channel setup.
+fn setup_telegram(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Telegram Bot Setup");
+    println!("------------------");
+    println!("To create a bot: Open Telegram, message @BotFather, send /newbot");
+    println!();
+    print!("Enter Telegram bot token (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let token = read_line()?;
+    if token.is_empty() {
+        println!("  Skipped.");
+        return Ok(());
+    }
+
+    let tg = config
+        .channels
+        .telegram
+        .get_or_insert_with(Default::default);
+    tg.token = token;
+    tg.enabled = true;
+
+    print!("Allowlist user IDs/usernames (comma-separated, or Enter for all): ");
+    io::stdout().flush()?;
+    let allowlist = read_line()?;
+    if !allowlist.is_empty() {
+        tg.allow_from = allowlist
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    println!("  Telegram bot configured.");
+    println!("  Run 'zeptoclaw gateway' to start the bot.");
+    Ok(())
+}
+
+/// Interactive Discord channel setup.
+fn setup_discord(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Discord Bot Setup");
+    println!("-----------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://discord.com/developers/applications");
+    println!("  2. Create New Application → Bot → Reset Token → copy it");
+    println!("  3. Enable MESSAGE CONTENT intent under Bot → Privileged Intents");
+    println!("  4. Invite bot to your server with OAuth2 URL Generator");
+    println!();
+    print!("Enter Discord bot token (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let token = read_line()?;
+    if token.is_empty() {
+        println!("  Skipped.");
+        return Ok(());
+    }
+
+    let dc = config.channels.discord.get_or_insert_with(Default::default);
+    dc.token = token;
+    dc.enabled = true;
+
+    print!("Allowlist user IDs (comma-separated, or Enter for all): ");
+    io::stdout().flush()?;
+    let allowlist = read_line()?;
+    if !allowlist.is_empty() {
+        dc.allow_from = allowlist
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    println!("  Discord bot configured.");
+    println!("  Run 'zeptoclaw gateway' to start the bot.");
+    Ok(())
+}
+
+/// Interactive Slack channel setup.
+fn setup_slack(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Slack Bot Setup");
+    println!("---------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://api.slack.com/apps → Create New App");
+    println!("  2. Add Bot Token Scopes: chat:write, app_mentions:read");
+    println!("  3. Install to Workspace → copy Bot User OAuth Token (xoxb-...)");
+    println!("  4. Generate App-Level Token with connections:write scope");
+    println!();
+    print!("Enter Slack bot token (xoxb-..., or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let bot_token = read_line()?;
+    if bot_token.is_empty() {
+        println!("  Skipped.");
+        return Ok(());
+    }
+
+    print!("Enter Slack app-level token (xapp-...): ");
+    io::stdout().flush()?;
+    let app_token = read_line()?;
+
+    let sl = config.channels.slack.get_or_insert_with(Default::default);
+    sl.bot_token = bot_token;
+    sl.app_token = app_token;
+    sl.enabled = true;
+
+    println!("  Slack bot configured.");
+    println!("  Run 'zeptoclaw gateway' to start the bot.");
+    Ok(())
+}
+
+/// Interactive Webhook channel setup.
+fn setup_webhook(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Webhook Channel Setup");
+    println!("---------------------");
+    println!("Receives messages via HTTP POST to a local endpoint.");
+    println!();
+
+    let wh = config.channels.webhook.get_or_insert_with(Default::default);
+
+    print!("Bind address [{}]: ", wh.bind_address);
+    io::stdout().flush()?;
+    let bind = read_line()?;
+    if !bind.is_empty() {
+        wh.bind_address = bind;
+    }
+
+    print!("Port [{}]: ", wh.port);
+    io::stdout().flush()?;
+    let port_str = read_line()?;
+    if !port_str.is_empty() {
+        if let Ok(p) = port_str.parse::<u16>() {
+            wh.port = p;
+        } else {
+            println!("  Invalid port, keeping default {}.", wh.port);
+        }
+    }
+
+    print!("Bearer auth token (or Enter for none): ");
+    io::stdout().flush()?;
+    let auth = read_line()?;
+    if !auth.is_empty() {
+        wh.auth_token = Some(auth);
+    }
+
+    wh.enabled = true;
+    println!(
+        "  Webhook configured at {}:{}{}",
+        wh.bind_address, wh.port, wh.path
+    );
+    println!("  Run 'zeptoclaw gateway' to start listening.");
     Ok(())
 }
 

@@ -302,6 +302,35 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
             println!("  Coding tools (grep, find) enabled.");
         }
 
+        // Ask about messaging channels
+        println!();
+        println!("Messaging Channels");
+        println!("==================");
+        println!("Connect ZeptoClaw to messaging platforms so you can chat via phone/desktop.");
+        println!("  1. Telegram (recommended — easiest setup)");
+        println!("  2. WhatsApp Web (native, QR code pairing)");
+        println!("  3. Discord");
+        println!("  4. Slack");
+        println!("  5. Skip (configure later with 'zeptoclaw channel setup <name>')");
+        println!();
+        print!("Which channel? [1/2/3/4/5]: ");
+        io::stdout().flush()?;
+        let channel_choice = read_line()?;
+        match channel_choice.trim() {
+            "1" => configure_telegram(&mut config)?,
+            "2" => {
+                if cfg!(feature = "whatsapp-web") {
+                    configure_whatsapp_channel(&mut config)?;
+                } else {
+                    println!("  WhatsApp Web requires: cargo build --features whatsapp-web");
+                    println!("  Skipped.");
+                }
+            }
+            "3" => configure_discord(&mut config)?,
+            "4" => configure_slack(&mut config)?,
+            _ => println!("  Skipped. Run 'zeptoclaw channel setup <name>' anytime."),
+        }
+
         // Save config
         config
             .save()
@@ -866,6 +895,74 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
     println!("  On first run, scan the terminal QR code with your phone:");
     println!("    WhatsApp → Settings → Linked Devices → Link a Device");
+    Ok(())
+}
+
+/// Configure Discord channel.
+fn configure_discord(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Discord Bot Setup");
+    println!("-----------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://discord.com/developers/applications");
+    println!("  2. Create New Application → Bot → Reset Token → copy it");
+    println!("  3. Enable MESSAGE CONTENT intent under Bot → Privileged Intents");
+    println!(
+        "  4. Invite bot to your server with OAuth2 URL Generator (bot scope + Send Messages)"
+    );
+    println!();
+    print!("Enter Discord bot token (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let token = read_line()?;
+
+    if !token.is_empty() {
+        let discord_config = config.channels.discord.get_or_insert_with(Default::default);
+        discord_config.token = token;
+        discord_config.enabled = true;
+        println!("  Discord bot configured.");
+        println!("  Run 'zeptoclaw gateway' to start the bot.");
+    } else {
+        println!("  Skipped Discord configuration.");
+    }
+
+    Ok(())
+}
+
+/// Configure Slack channel.
+fn configure_slack(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Slack Bot Setup");
+    println!("---------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://api.slack.com/apps → Create New App");
+    println!("  2. Add Bot Token Scopes: chat:write, app_mentions:read");
+    println!("  3. Install to Workspace → copy Bot User OAuth Token (xoxb-...)");
+    println!(
+        "  4. Under Basic Information → App-Level Tokens → generate with connections:write scope"
+    );
+    println!();
+    print!("Enter Slack bot token (xoxb-..., or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let bot_token = read_line()?;
+
+    if bot_token.is_empty() {
+        println!("  Skipped Slack configuration.");
+        return Ok(());
+    }
+
+    print!("Enter Slack app-level token (xapp-..., or press Enter to skip): ");
+    io::stdout().flush()?;
+    let app_token = read_line()?;
+
+    let slack_config = config.channels.slack.get_or_insert_with(Default::default);
+    slack_config.bot_token = bot_token;
+    slack_config.app_token = app_token;
+    slack_config.enabled = true;
+    println!("  Slack bot configured.");
+    println!("  Run 'zeptoclaw gateway' to start the bot.");
+
     Ok(())
 }
 
