@@ -571,6 +571,8 @@ Panel web dashboard backend:
 
 Config file: `~/.zeptoclaw/config.json`
 
+`./target/release/zeptoclaw config check` validates top-level sections such as `tunnel` and agent defaults including `timezone` and `tool_timeout_secs`.
+
 Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY`
 - `ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY`
@@ -578,6 +580,8 @@ Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_ANTHROPIC_OAUTH_CLIENT_ID` — provider-specific OAuth client id override
 - `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
 - `ZEPTOCLAW_AGENTS_DEFAULTS_AGENT_TIMEOUT_SECS` — wall-clock timeout for agent runs (default: 300)
+- `ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_TIMEOUT_SECS` — wall-clock timeout for tool calls (default: 0 = inherit agent timeout)
+- `ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE` — IANA timezone for prompts and timestamps (default: system timezone or `UTC`)
 - `ZEPTOCLAW_AGENTS_DEFAULTS_MESSAGE_QUEUE_MODE` — "collect" (default) or "followup"
 - `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` — enable retry wrapper (default: false)
 - `ZEPTOCLAW_PROVIDERS_RETRY_MAX_RETRIES` — max retry attempts (default: 3)

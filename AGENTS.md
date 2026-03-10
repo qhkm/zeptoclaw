@@ -36,6 +36,7 @@ Project-level guidance for coding agents working in this repository.
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
+- Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and agent defaults such as `timezone` and `tool_timeout_secs`
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)

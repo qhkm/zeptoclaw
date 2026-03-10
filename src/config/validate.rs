@@ -26,6 +26,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "compaction",
     "mcp",
     "routines",
+    "tunnel",
     "stripe",
     "custom_tools",
     "transcription",
@@ -49,12 +50,14 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "temperature",
     "max_tool_iterations",
     "agent_timeout_secs",
+    "tool_timeout_secs",
     "message_queue_mode",
     "streaming",
     "token_budget",
     "compact_tools",
     "tool_profile",
     "active_hand",
+    "timezone",
     "loop_guard",
     "max_tool_result_bytes",
     "max_tool_calls",
@@ -358,6 +361,24 @@ mod tests {
         let raw = json!({
             "agents": {"defaults": {"model": "gpt-4"}},
             "gateway": {"port": 8080}
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().all(|d| d.level != DiagnosticLevel::Error));
+    }
+
+    #[test]
+    fn test_validate_accepts_tunnel_and_agent_default_fields() {
+        let raw = json!({
+            "agents": {
+                "defaults": {
+                    "model": "gpt-4",
+                    "timezone": "Asia/Kuala_Lumpur",
+                    "tool_timeout_secs": 30
+                }
+            },
+            "tunnel": {
+                "provider": "cloudflare"
+            }
         });
         let diags = validate_config(&raw);
         assert!(diags.iter().all(|d| d.level != DiagnosticLevel::Error));
