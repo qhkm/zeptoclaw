@@ -814,6 +814,12 @@ fn configure_telegram(config: &mut Config) -> Result<()> {
 
 /// Configure WhatsApp Web channel (native, via wa-rs).
 fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
+    if !cfg!(feature = "whatsapp-web") {
+        anyhow::bail!(
+            "WhatsApp Web support is not available in this build. Rebuild with --features whatsapp-web."
+        );
+    }
+
     println!();
     println!("WhatsApp Web Channel Setup (Native)");
     println!("-----------------------------------");
@@ -834,7 +840,7 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
         .get_or_insert_with(Default::default);
     whatsapp_config.enabled = true;
 
-    print!("Phone number allowlist (comma-separated E.164, or Enter for all): ");
+    print!("Phone number allowlist (comma-separated E.164, e.g. +60123456789, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
     if !allowlist.is_empty() {
@@ -845,8 +851,21 @@ fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
             .collect();
     }
 
+    if whatsapp_config.allow_from.is_empty() {
+        print!("Deny all senders by default (strict mode)? [y/N]: ");
+        io::stdout().flush()?;
+        let deny = read_line()?.to_ascii_lowercase();
+        if matches!(deny.as_str(), "y" | "yes") {
+            whatsapp_config.deny_by_default = true;
+            println!("  Strict mode enabled — no messages will be accepted until you add allowed numbers.");
+        }
+    }
+
+    println!();
     println!("  WhatsApp Web channel configured.");
     println!("  Run 'zeptoclaw gateway' to pair via QR code.");
+    println!("  On first run, scan the terminal QR code with your phone:");
+    println!("    WhatsApp → Settings → Linked Devices → Link a Device");
     Ok(())
 }
 

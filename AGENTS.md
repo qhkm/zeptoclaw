@@ -10,7 +10,7 @@ Project-level guidance for coding agents working in this repository.
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
 - Codebase: ~106,000+ lines of Rust
-- Channels: 9 (Telegram, Slack, Discord, WhatsApp, WhatsApp Cloud, Lark, Email, Webhook, Serial)
+- Channels: 10 (Telegram, Slack, Discord, WhatsApp, WhatsApp Web, WhatsApp Cloud, Lark, Email, Webhook, Serial)
 - Runtimes: 6 (Native, Docker, Apple Container, Landlock, Firejail, Bubblewrap)
 - Peripherals: 4 boards (ESP32, RPi, Arduino, Nucleo) with GPIO, I2C, NVS, Serial
 - Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
@@ -20,7 +20,7 @@ Project-level guidance for coding agents working in this repository.
 - Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
-- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
+- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
@@ -39,7 +39,7 @@ Project-level guidance for coding agents working in this repository.
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: 2956 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 126 doc (27 ignored)
+- Tests: default build runs 2956 lib + 92 main + 23 cli_smoke + 13 e2e + 70 integration + 126 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
 
 ## Task Tracking Protocol
 

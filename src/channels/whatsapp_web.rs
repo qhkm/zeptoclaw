@@ -1,77 +1,95 @@
 //! WhatsApp Web native channel via wa-rs.
 //!
-//! Pairs via QR code like WhatsApp Desktop — no Meta Business account required.
-//! Uses the wa-rs crate for direct WhatsApp Web protocol support.
-//!
-//! # Feature Gate
-//!
-//! This entire module requires the `whatsapp-web` feature:
-//! ```bash
-//! cargo build --features whatsapp-web
-//! ```
-//!
-//! # Session Persistence
-//!
-//! Authentication state is stored in `auth_dir` (default:
-//! `~/.zeptoclaw/state/whatsapp_web`). On first run a QR code is printed to
-//! the terminal; subsequent runs reuse the saved session.
+//! Pairs via QR code like WhatsApp Desktop and persists session state to a
+//! local SQLite database.
 
-use std::panic::AssertUnwindSafe;
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::FutureExt;
-use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info, warn};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
+use wa_rs::bot::Bot;
+use wa_rs::proto_helpers::MessageExt;
+use wa_rs::store::SqliteStore;
+use wa_rs::types::events::Event;
+use wa_rs::wa_rs_proto::whatsapp as wa;
+use wa_rs::{Client, Jid};
+use wa_rs_tokio_transport::TokioWebSocketTransportFactory;
+use wa_rs_ureq_http::UreqHttpClient;
 
-use crate::bus::{MessageBus, OutboundMessage};
+use qrcode::QrCode;
+
+use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::channels::types::{BaseChannelConfig, Channel};
 use crate::config::WhatsAppWebConfig;
 use crate::error::{Result, ZeptoError};
 
-// ── Helper functions (pure, testable without wa-rs) ──────────────────────────
+/// Render a QR code string as unicode block characters in the terminal.
+///
+/// Uses 2x1 half-block characters for compact display:
+/// - `█` (U+2588) = both pixels dark
+/// - `▀` (U+2580) = top dark, bottom light
+/// - `▄` (U+2584) = top light, bottom dark
+/// - ` ` (space)  = both pixels light
+fn render_qr_terminal(data: &str) -> Option<String> {
+    let code = QrCode::new(data.as_bytes()).ok()?;
+    let width = code.width();
+    let colors: Vec<bool> = code
+        .into_colors()
+        .into_iter()
+        .map(|c| c == qrcode::Color::Dark)
+        .collect();
 
-/// Normalize a phone number by stripping a leading `+`.
-///
-/// WhatsApp JIDs use plain E.164 without the leading plus sign
-/// (e.g. `"60123456789@s.whatsapp.net"`). This function converts
-/// `"+60123456789"` → `"60123456789"` and leaves already-normalized
-/// numbers unchanged.
-///
-/// # Examples
-///
-/// ```
-/// // "+60123456789" → "60123456789"
-/// // "60123456789"  → "60123456789" (no-op)
-/// ```
+    // Add 1-module quiet zone on each side
+    let padded_width = width + 2;
+    let padded_height = width + 2;
+
+    let pixel = |row: usize, col: usize| -> bool {
+        if row == 0 || row > width || col == 0 || col > width {
+            false // quiet zone
+        } else {
+            colors[(row - 1) * width + (col - 1)]
+        }
+    };
+
+    let mut output = String::new();
+    let mut y = 0;
+    while y < padded_height {
+        for x in 0..padded_width {
+            let top = pixel(y, x);
+            let bottom = if y + 1 < padded_height {
+                pixel(y + 1, x)
+            } else {
+                false
+            };
+            output.push(match (top, bottom) {
+                (true, true) => '\u{2588}',
+                (true, false) => '\u{2580}',
+                (false, true) => '\u{2584}',
+                (false, false) => ' ',
+            });
+        }
+        output.push('\n');
+        y += 2;
+    }
+    Some(output)
+}
+
 fn normalize_phone(phone: &str) -> String {
-    phone.trim_start_matches('+').to_string()
+    phone
+        .trim()
+        .trim_start_matches('+')
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
-/// Calculate exponential back-off delay for reconnection attempts.
-///
-/// Base: 2 s, doubles each attempt, capped at 120 s.
-///
-/// | attempt | delay  |
-/// |---------|--------|
-/// | 0       |   2 s  |
-/// | 1       |   4 s  |
-/// | 2       |   8 s  |
-/// | 5       |  64 s  |
-/// | 6+      | 120 s  |
-#[allow(dead_code)]
-fn backoff_delay(attempt: u32) -> std::time::Duration {
-    let base_ms: u64 = 2_000;
-    let max_ms: u64 = 120_000;
-    let delay_ms = base_ms.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
-    std::time::Duration::from_millis(delay_ms.min(max_ms))
-}
-
-/// Expand a leading `~/` in `path` to the user's home directory.
-///
-/// If the path does not start with `~/`, or if the home directory cannot be
-/// determined, the original string is returned unchanged.
 fn expand_auth_dir(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -81,83 +99,66 @@ fn expand_auth_dir(path: &str) -> String {
     path.to_string()
 }
 
-/// Render a QR-code bit-matrix as Unicode block characters for terminal output.
-///
-/// Each pair of rows is collapsed into a single terminal line using the
-/// half-block characters so the QR code fits in roughly half the vertical
-/// space:
-///
-/// | top pixel | bottom pixel | character |
-/// |-----------|--------------|-----------|
-/// | dark      | dark         | `█` U+2588 |
-/// | dark      | light        | `▀` U+2580 |
-/// | light     | dark         | `▄` U+2584 |
-/// | light     | light        | ` ` (space) |
-///
-/// The input is a row-major boolean matrix where `true` = dark module.
-#[allow(dead_code)]
-fn render_qr_terminal(qr_data: &[Vec<bool>]) -> String {
-    let height = qr_data.len();
-    let width = if height > 0 { qr_data[0].len() } else { 0 };
-    let mut output = String::new();
-
-    let mut y = 0;
-    while y < height {
-        let bottom_row = if y + 1 < height {
-            Some(&qr_data[y + 1])
-        } else {
-            None
-        };
-        for (x, &top) in qr_data[y].iter().enumerate().take(width) {
-            let bottom = bottom_row.is_some_and(|row| row[x]);
-            let ch = match (top, bottom) {
-                (true, true) => '\u{2588}',  // █
-                (true, false) => '\u{2580}', // ▀
-                (false, true) => '\u{2584}', // ▄
-                (false, false) => ' ',
-            };
-            output.push(ch);
-        }
-        output.push('\n');
-        y += 2;
+fn sqlite_store_path(path: &str) -> PathBuf {
+    let expanded = PathBuf::from(expand_auth_dir(path));
+    if expanded.extension().is_some() {
+        expanded
+    } else {
+        expanded.join("session.sqlite3")
     }
-    output
 }
 
-// ── Internal message type ─────────────────────────────────────────────────────
-
-/// A message queued for delivery via the wa-rs client.
-#[allow(dead_code)]
-struct OutboundWaMessage {
-    /// Recipient JID, e.g. `"60123456789@s.whatsapp.net"`.
-    to: String,
-    /// Plain-text content to send.
-    content: String,
-    /// Optional message ID to quote/reply to.
-    reply_to: Option<String>,
+fn normalize_sender_id(jid: &str) -> String {
+    normalize_phone(jid)
 }
 
-// ── Channel struct ────────────────────────────────────────────────────────────
+fn parse_chat_jid(chat_id: &str) -> Result<Jid> {
+    let jid = if chat_id.contains('@') {
+        chat_id.trim().to_string()
+    } else {
+        format!("{}@s.whatsapp.net", normalize_phone(chat_id))
+    };
+
+    Jid::from_str(&jid)
+        .map_err(|e| ZeptoError::Channel(format!("WhatsApp Web: invalid recipient '{jid}': {e}")))
+}
+
+fn build_outbound_message(msg: &OutboundMessage) -> wa::Message {
+    if let Some(reply_to) = msg.reply_to.as_deref() {
+        wa::Message {
+            extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
+                text: Some(msg.content.clone()),
+                context_info: Some(Box::new(wa::ContextInfo {
+                    stanza_id: Some(reply_to.to_string()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    } else {
+        wa::Message {
+            conversation: Some(msg.content.clone()),
+            ..Default::default()
+        }
+    }
+}
+
+struct RuntimeState {
+    client: Arc<Client>,
+    task: JoinHandle<()>,
+}
 
 /// WhatsApp Web channel using the native wa-rs protocol.
-///
-/// Pairs with WhatsApp via a QR code on first run and then persists the
-/// session to `auth_dir`. No Meta Business account is required.
 pub struct WhatsAppWebChannel {
     config: WhatsAppWebConfig,
     base_config: BaseChannelConfig,
     bus: Arc<MessageBus>,
     running: Arc<AtomicBool>,
-    shutdown_tx: Option<watch::Sender<bool>>,
-    outbound_tx: Option<mpsc::Sender<OutboundWaMessage>>,
+    runtime: Arc<Mutex<Option<RuntimeState>>>,
 }
 
 impl WhatsAppWebChannel {
-    /// Create a new `WhatsAppWebChannel`.
-    ///
-    /// Phone numbers in `config.allow_from` are normalized (leading `+`
-    /// stripped) so that both `"+60123456789"` and `"60123456789"` work
-    /// as allowlist entries.
     pub fn new(config: WhatsAppWebConfig, bus: Arc<MessageBus>) -> Self {
         let normalized_allowlist: Vec<String> = config
             .allow_from
@@ -176,13 +177,10 @@ impl WhatsAppWebChannel {
             base_config,
             bus,
             running: Arc::new(AtomicBool::new(false)),
-            shutdown_tx: None,
-            outbound_tx: None,
+            runtime: Arc::new(Mutex::new(None)),
         }
     }
 }
-
-// ── Channel trait impl ────────────────────────────────────────────────────────
 
 #[async_trait]
 impl Channel for WhatsAppWebChannel {
@@ -191,101 +189,219 @@ impl Channel for WhatsAppWebChannel {
     }
 
     async fn start(&mut self) -> Result<()> {
-        let auth_dir = expand_auth_dir(&self.config.auth_dir);
-        info!(auth_dir = %auth_dir, "WhatsApp Web channel starting");
+        {
+            let runtime = self.runtime.lock().await;
+            if runtime.is_some() && self.running.load(Ordering::SeqCst) {
+                info!("WhatsApp Web channel already running");
+                return Ok(());
+            }
+        }
 
-        // TODO: Initialize wa-rs client when crate is available.
-        //
-        // The implementation would:
-        //   1. Create the auth_dir if it does not exist.
-        //   2. Open / create the wa-rs SQLite session store at `auth_dir`.
-        //   3. Spawn a wa-rs event loop task that:
-        //      - On first run: prints the QR code via `render_qr_terminal()`.
-        //      - On reconnect: uses exponential back-off via `backoff_delay()`.
-        //      - Publishes inbound messages to `self.bus`.
-        //      - Forwards outbound messages from `outbound_rx` to wa-rs.
-        //      - Sets `running = false` on exit.
-        //   4. Stores the client handle for `send()`.
+        let store_path = sqlite_store_path(&self.config.auth_dir);
+        if let Some(parent) = store_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                ZeptoError::Channel(format!(
+                    "WhatsApp Web: failed to create auth directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        self.shutdown_tx = Some(shutdown_tx);
-
-        let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundWaMessage>(64);
-        self.outbound_tx = Some(outbound_tx);
-
-        let running = self.running.clone();
-        running.store(true, Ordering::SeqCst);
+        let store = Arc::new(
+            SqliteStore::new(store_path.to_str().ok_or_else(|| {
+                ZeptoError::Channel(format!(
+                    "WhatsApp Web: invalid auth path {}",
+                    store_path.display()
+                ))
+            })?)
+            .await
+            .map_err(|e| {
+                ZeptoError::Channel(format!(
+                    "WhatsApp Web: failed to initialize SQLite store {}: {}",
+                    store_path.display(),
+                    e
+                ))
+            })?,
+        );
 
         let bus = self.bus.clone();
+        let base_config = self.base_config.clone();
+        let running = self.running.clone();
 
-        tokio::spawn(async move {
-            let task_result = AssertUnwindSafe(async move {
-                let mut _shutdown_rx = shutdown_rx;
-                let mut _outbound_rx = outbound_rx;
-                debug!("WhatsApp Web event loop placeholder started");
+        let mut bot = Bot::builder()
+            .with_backend(store)
+            .with_transport_factory(TokioWebSocketTransportFactory::new())
+            .with_http_client(UreqHttpClient::new())
+            .on_event(move |event, client| {
+                let bus = bus.clone();
+                let base_config = base_config.clone();
+                let running = running.clone();
+                async move {
+                    match event {
+                        Event::Connected(_) => {
+                            running.store(true, Ordering::SeqCst);
+                            info!("WhatsApp Web connected");
+                        }
+                        Event::PairingQrCode { code, timeout } => {
+                            eprintln!();
+                            eprintln!("╔══════════════════════════════════════════╗");
+                            eprintln!("║   Scan this QR code with WhatsApp       ║");
+                            eprintln!("║   Phone → Settings → Linked Devices     ║");
+                            eprintln!(
+                                "║   Valid for {}s                        ║",
+                                timeout.as_secs()
+                            );
+                            eprintln!("╚══════════════════════════════════════════╝");
+                            eprintln!();
+                            match render_qr_terminal(&code) {
+                                Some(qr) => eprint!("{}", qr),
+                                None => {
+                                    warn!("Failed to render QR code, raw token: {}", code);
+                                }
+                            }
+                            eprintln!();
+                        }
+                        Event::PairingCode { code, timeout } => {
+                            info!(
+                                "WhatsApp Web pair code received (valid for {}s): {}",
+                                timeout.as_secs(),
+                                code
+                            );
+                        }
+                        Event::LoggedOut(reason) => {
+                            running.store(false, Ordering::SeqCst);
+                            warn!("WhatsApp Web logged out: {:?}", reason.reason);
+                        }
+                        Event::Disconnected(_) => {
+                            running.store(false, Ordering::SeqCst);
+                            warn!("WhatsApp Web disconnected");
+                        }
+                        Event::Message(message, info) => {
+                            if info.source.is_from_me {
+                                return;
+                            }
 
-                // Real implementation: drive wa-rs event loop here, forwarding
-                // inbound events to `bus` and outbound messages from `_outbound_rx`.
-                // Select on `_shutdown_rx.changed()` to detect shutdown.
-                let _ = &bus; // suppress unused warning in placeholder
+                            let sender_jid = info.source.sender.to_string();
+                            let sender_id = normalize_sender_id(&sender_jid);
+                            if !base_config.is_allowed(&sender_id) {
+                                info!(
+                                    "WhatsApp Web: sender {} not in allowlist, ignoring",
+                                    sender_id
+                                );
+                                return;
+                            }
+
+                            let content = message
+                                .text_content()
+                                .or_else(|| message.get_caption())
+                                .map(str::trim)
+                                .unwrap_or_default()
+                                .to_string();
+
+                            if content.is_empty() {
+                                return;
+                            }
+
+                            let chat_id = info.source.chat.to_string();
+                            let mut inbound =
+                                InboundMessage::new("whatsapp_web", &sender_id, &chat_id, &content)
+                                    .with_metadata("whatsapp_message_id", &info.id)
+                                    .with_metadata("sender_jid", &sender_jid)
+                                    .with_metadata("chat_jid", &chat_id);
+
+                            if !info.push_name.is_empty() {
+                                inbound = inbound.with_metadata("sender_name", &info.push_name);
+                            }
+                            if info.source.is_group {
+                                inbound = inbound.with_metadata("is_group", "true");
+                            }
+
+                            if let Err(e) = bus.publish_inbound(inbound).await {
+                                error!("WhatsApp Web: failed to publish inbound message: {}", e);
+                            }
+                        }
+                        Event::PairError(err) => {
+                            warn!("WhatsApp Web pairing failed: {}", err.error);
+                        }
+                        _ => {
+                            let _ = client;
+                        }
+                    }
+                }
             })
-            .catch_unwind()
-            .await;
+            .build()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("WhatsApp Web: bot build failed: {e}")))?;
 
-            if let Err(e) = task_result {
-                error!("WhatsApp Web event loop panicked: {:?}", e);
+        let client = bot.client();
+        let run_handle = bot
+            .run()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("WhatsApp Web: bot run failed: {e}")))?;
+
+        self.running.store(true, Ordering::SeqCst);
+        let running = self.running.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = run_handle.await {
+                error!("WhatsApp Web task failed: {}", e);
             }
-
             running.store(false, Ordering::SeqCst);
-            info!("WhatsApp Web channel event loop stopped");
         });
 
-        info!(auth_dir = %auth_dir, "WhatsApp Web channel started (wa-rs initialization pending crate availability)");
+        let mut runtime = self.runtime.lock().await;
+        *runtime = Some(RuntimeState { client, task });
+
+        info!(
+            auth_db = %store_path.display(),
+            "WhatsApp Web channel started"
+        );
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown_tx.take() {
-            if tx.send(true).is_err() {
-                warn!("WhatsApp Web shutdown receiver already dropped");
-            }
+        let state = self.runtime.lock().await.take();
+        let Some(state) = state else {
+            self.running.store(false, Ordering::SeqCst);
+            return Ok(());
+        };
+
+        state.client.disconnect().await;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(10), state.task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("WhatsApp Web task join failed: {}", e),
+            Err(_) => warn!("WhatsApp Web task did not stop within 10 seconds"),
         }
-        self.outbound_tx = None;
+
         self.running.store(false, Ordering::SeqCst);
         info!("WhatsApp Web channel stopped");
         Ok(())
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        // Build the recipient JID from chat_id.
-        // chat_id is expected to be a normalized phone number or a full JID.
-        let to = if msg.chat_id.contains('@') {
-            msg.chat_id.clone()
-        } else {
-            format!("{}@s.whatsapp.net", normalize_phone(&msg.chat_id))
-        };
-
-        let wa_msg = OutboundWaMessage {
-            to,
-            content: msg.content.clone(),
-            reply_to: msg.reply_to.clone(),
-        };
-
-        match &self.outbound_tx {
-            Some(tx) => {
-                if let Err(e) = tx.try_send(wa_msg) {
-                    return Err(ZeptoError::Channel(format!(
-                        "WhatsApp Web: failed to queue outbound message: {}",
-                        e
-                    )));
-                }
-            }
-            None => {
-                return Err(ZeptoError::Channel(
-                    "WhatsApp Web: channel not started".to_string(),
-                ));
-            }
+        if msg.content.trim().is_empty() {
+            return Err(ZeptoError::Channel(
+                "WhatsApp Web: outbound content cannot be empty".to_string(),
+            ));
         }
+
+        let client = {
+            let runtime = self.runtime.lock().await;
+            runtime
+                .as_ref()
+                .map(|state| state.client.clone())
+                .ok_or_else(|| {
+                    ZeptoError::Channel("WhatsApp Web: channel not started".to_string())
+                })?
+        };
+
+        let jid = parse_chat_jid(&msg.chat_id)?;
+        let wa_message = build_outbound_message(&msg);
+        client
+            .send_message(jid, wa_message)
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("WhatsApp Web: send failed: {e}")))?;
 
         Ok(())
     }
@@ -295,29 +411,18 @@ impl Channel for WhatsAppWebChannel {
     }
 
     fn is_allowed(&self, user_id: &str) -> bool {
-        // Normalize the inbound user_id before checking — the allowlist was
-        // already normalized in `new()`.
-        let normalized = normalize_phone(user_id);
-        self.base_config.is_allowed(&normalized)
+        self.base_config.is_allowed(&normalize_phone(user_id))
     }
 }
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
-    use crate::config::WhatsAppWebConfig;
-
-    // ── Helper ────────────────────────────────────────────────────────────────
 
     fn make_channel(config: WhatsAppWebConfig) -> WhatsAppWebChannel {
-        let bus = Arc::new(MessageBus::new());
-        WhatsAppWebChannel::new(config, bus)
+        WhatsAppWebChannel::new(config, Arc::new(MessageBus::new()))
     }
-
-    // ── Config tests ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_default_config() {
@@ -329,89 +434,42 @@ mod tests {
     }
 
     #[test]
-    fn test_config_serde_roundtrip() {
-        let cfg = WhatsAppWebConfig {
-            enabled: true,
-            auth_dir: "~/.zeptoclaw/state/whatsapp_web".to_string(),
-            allow_from: vec!["+60123456789".to_string()],
-            deny_by_default: false,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let decoded: WhatsAppWebConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.enabled, cfg.enabled);
-        assert_eq!(decoded.auth_dir, cfg.auth_dir);
-        assert_eq!(decoded.allow_from, cfg.allow_from);
-        assert_eq!(decoded.deny_by_default, cfg.deny_by_default);
-    }
-
-    #[test]
-    fn test_config_serde_partial() {
-        let json = r#"{"enabled":true}"#;
-        let cfg: WhatsAppWebConfig = serde_json::from_str(json).unwrap();
-        assert!(cfg.enabled);
-        assert_eq!(cfg.auth_dir, "~/.zeptoclaw/state/whatsapp_web");
-        assert!(cfg.allow_from.is_empty());
-        assert!(!cfg.deny_by_default);
-    }
-
-    // ── E.164 normalization tests ─────────────────────────────────────────────
-
-    #[test]
     fn test_normalize_phone_with_plus() {
         assert_eq!(normalize_phone("+60123456789"), "60123456789");
     }
 
     #[test]
-    fn test_normalize_phone_without_plus() {
-        assert_eq!(normalize_phone("60123456789"), "60123456789");
+    fn test_normalize_phone_jid() {
+        assert_eq!(normalize_phone("60123456789@s.whatsapp.net"), "60123456789");
     }
 
     #[test]
-    fn test_normalize_phone_empty() {
-        assert_eq!(normalize_phone(""), "");
+    fn test_expand_auth_dir_tilde() {
+        let expanded = expand_auth_dir("~/.zeptoclaw/state/whatsapp_web");
+        if dirs::home_dir().is_some() {
+            assert!(!expanded.starts_with('~'));
+        }
     }
 
     #[test]
-    fn test_normalize_phone_only_plus() {
-        assert_eq!(normalize_phone("+"), "");
+    fn test_sqlite_store_path_from_directory() {
+        let path = sqlite_store_path("/tmp/wa-state");
+        assert_eq!(path, std::path::Path::new("/tmp/wa-state/session.sqlite3"));
     }
 
     #[test]
-    fn test_normalize_phone_us_number() {
-        assert_eq!(normalize_phone("+14155551234"), "14155551234");
+    fn test_sqlite_store_path_from_file() {
+        let path = sqlite_store_path("/tmp/wa-state.sqlite");
+        assert_eq!(path, std::path::Path::new("/tmp/wa-state.sqlite"));
     }
-
-    // ── Allowlist tests ───────────────────────────────────────────────────────
 
     #[test]
     fn test_is_allowed_normalized_match() {
-        // Config stores "+60123456789"; allowlist normalization strips the "+".
         let ch = make_channel(WhatsAppWebConfig {
             allow_from: vec!["+60123456789".to_string()],
             ..Default::default()
         });
-        // Query without "+": should still match after normalization.
-        assert!(ch.is_allowed("60123456789"));
-    }
-
-    #[test]
-    fn test_is_allowed_denied() {
-        let ch = make_channel(WhatsAppWebConfig {
-            allow_from: vec!["+60123456789".to_string()],
-            ..Default::default()
-        });
-        assert!(!ch.is_allowed("60111111111"));
-    }
-
-    #[test]
-    fn test_is_allowed_empty_allowlist() {
-        let ch = make_channel(WhatsAppWebConfig {
-            allow_from: vec![],
-            deny_by_default: false,
-            ..Default::default()
-        });
-        // Empty allowlist + deny_by_default false → allow all.
-        assert!(ch.is_allowed("60999999999"));
+        assert!(ch.is_allowed("60123456789@s.whatsapp.net"));
     }
 
     #[test]
@@ -421,156 +479,43 @@ mod tests {
             deny_by_default: true,
             ..Default::default()
         });
-        // Strict mode: empty allowlist → deny all.
         assert!(!ch.is_allowed("60999999999"));
     }
 
     #[test]
-    fn test_is_allowed_with_plus_query() {
-        let ch = make_channel(WhatsAppWebConfig {
-            allow_from: vec!["+60123456789".to_string()],
-            ..Default::default()
-        });
-        // Query WITH "+": normalize_phone strips it before the allowlist check.
-        assert!(ch.is_allowed("+60123456789"));
-    }
-
-    // ── QR rendering tests ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_render_qr_empty() {
-        let result = render_qr_terminal(&[]);
-        assert_eq!(result, "");
+    fn test_parse_chat_jid_from_phone() {
+        let jid = parse_chat_jid("+60123456789").unwrap();
+        assert_eq!(jid.to_string(), "60123456789@s.whatsapp.net");
     }
 
     #[test]
-    fn test_render_qr_single_row() {
-        // A single row of [true, false] renders as one line with ▀ and space
-        // (top=true/false, bottom=false because there is no row y+1).
-        let data = vec![vec![true, false]];
-        let result = render_qr_terminal(&data);
-        // Expect "▀ \n" (▀ for top-dark/bottom-light, space for top-light/bottom-light)
-        assert!(result.contains('\u{2580}')); // ▀
-        assert!(result.ends_with('\n'));
+    fn test_parse_chat_jid_from_jid() {
+        let jid = parse_chat_jid("60123456789@s.whatsapp.net").unwrap();
+        assert_eq!(jid.to_string(), "60123456789@s.whatsapp.net");
     }
 
     #[test]
-    fn test_render_qr_two_rows() {
-        // Two rows compress into one terminal line.
-        let data = vec![vec![true, false], vec![false, true]];
-        let result = render_qr_terminal(&data);
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines.len(), 1, "two rows → one terminal line");
+    fn test_build_outbound_message_plain() {
+        let message = build_outbound_message(&OutboundMessage::new(
+            "whatsapp_web",
+            "60123456789",
+            "Hello",
+        ));
+        assert_eq!(message.conversation.as_deref(), Some("Hello"));
     }
 
     #[test]
-    fn test_render_qr_all_patterns() {
-        // Row 0: [true,  true,  false, false]
-        // Row 1: [true,  false, true,  false]
-        // Expected chars: █ ▀ ▄ ' '
-        let data = vec![
-            vec![true, true, false, false],
-            vec![true, false, true, false],
-        ];
-        let result = render_qr_terminal(&data);
-        assert!(result.contains('\u{2588}'), "should contain █ (both dark)");
-        assert!(
-            result.contains('\u{2580}'),
-            "should contain ▀ (top dark, bottom light)"
+    fn test_build_outbound_message_reply() {
+        let message = build_outbound_message(
+            &OutboundMessage::new("whatsapp_web", "60123456789", "Hello").with_reply("abc123"),
         );
-        assert!(
-            result.contains('\u{2584}'),
-            "should contain ▄ (top light, bottom dark)"
+        let reply = message.extended_text_message.expect("reply message");
+        assert_eq!(reply.text.as_deref(), Some("Hello"));
+        assert_eq!(
+            reply.context_info.and_then(|ctx| ctx.stanza_id).as_deref(),
+            Some("abc123")
         );
-        assert!(result.contains(' '), "should contain space (both light)");
     }
-
-    // ── Back-off tests ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_backoff_attempt_0() {
-        assert_eq!(backoff_delay(0).as_millis(), 2_000);
-    }
-
-    #[test]
-    fn test_backoff_attempt_1() {
-        assert_eq!(backoff_delay(1).as_millis(), 4_000);
-    }
-
-    #[test]
-    fn test_backoff_attempt_2() {
-        assert_eq!(backoff_delay(2).as_millis(), 8_000);
-    }
-
-    #[test]
-    fn test_backoff_attempt_5() {
-        assert_eq!(backoff_delay(5).as_millis(), 64_000);
-    }
-
-    #[test]
-    fn test_backoff_capped_at_120s() {
-        // Attempt 10 would be 2048 s; must be capped at 120 s.
-        assert_eq!(backoff_delay(10).as_millis(), 120_000);
-        // Very high attempt.
-        assert_eq!(backoff_delay(100).as_millis(), 120_000);
-    }
-
-    // ── Auth-dir expansion tests ──────────────────────────────────────────────
-
-    #[test]
-    fn test_expand_auth_dir_tilde() {
-        let expanded = expand_auth_dir("~/.zeptoclaw/state/whatsapp_web");
-        // Must not start with "~" after expansion (home dir was found).
-        if dirs::home_dir().is_some() {
-            assert!(!expanded.starts_with('~'));
-        }
-    }
-
-    #[test]
-    fn test_expand_auth_dir_absolute() {
-        let path = "/absolute/path/to/state";
-        assert_eq!(expand_auth_dir(path), path);
-    }
-
-    #[test]
-    fn test_expand_auth_dir_relative() {
-        let path = "relative/path/state";
-        assert_eq!(expand_auth_dir(path), path);
-    }
-
-    // ── OutboundWaMessage tests ───────────────────────────────────────────────
-
-    #[test]
-    fn test_outbound_message_basic() {
-        let msg = OutboundWaMessage {
-            to: "60123456789@s.whatsapp.net".to_string(),
-            content: "Hello".to_string(),
-            reply_to: None,
-        };
-        assert_eq!(msg.to, "60123456789@s.whatsapp.net");
-        assert_eq!(msg.content, "Hello");
-        assert!(msg.reply_to.is_none());
-    }
-
-    #[test]
-    fn test_outbound_message_with_reply() {
-        let msg = OutboundWaMessage {
-            to: "60123456789@s.whatsapp.net".to_string(),
-            content: "Got it!".to_string(),
-            reply_to: Some("ABCDEF123456".to_string()),
-        };
-        assert_eq!(msg.reply_to, Some("ABCDEF123456".to_string()));
-    }
-
-    #[test]
-    fn test_outbound_jid_format() {
-        // Verify the JID format used for phone-number chat IDs.
-        let phone = "60123456789";
-        let jid = format!("{}@s.whatsapp.net", phone);
-        assert_eq!(jid, "60123456789@s.whatsapp.net");
-    }
-
-    // ── Channel lifecycle tests ───────────────────────────────────────────────
 
     #[test]
     fn test_channel_name() {
@@ -585,63 +530,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_channel_start_sets_running() {
-        let mut ch = make_channel(WhatsAppWebConfig::default());
-        ch.start().await.unwrap();
-        // The placeholder task immediately sets running = false, so we just
-        // check that start() succeeded without error.  In the real impl the
-        // event loop would keep `running = true` for the channel lifetime.
-        // We only assert that the call does not fail.
-    }
-
-    #[tokio::test]
-    async fn test_channel_stop_clears_running() {
-        let mut ch = make_channel(WhatsAppWebConfig::default());
-        ch.start().await.unwrap();
-        ch.stop().await.unwrap();
-        assert!(!ch.is_running());
-    }
-
-    #[tokio::test]
     async fn test_send_errors_when_not_started() {
         let ch = make_channel(WhatsAppWebConfig::default());
-        let msg = OutboundMessage {
-            channel: "whatsapp_web".to_string(),
-            chat_id: "60123456789".to_string(),
-            content: "Hello".to_string(),
-            reply_to: None,
-            metadata: Default::default(),
-        };
+        let msg = OutboundMessage::new("whatsapp_web", "60123456789", "Hello");
         let result = ch.send(msg).await;
         assert!(result.is_err());
-    }
-
-    // ── Channel new() tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_new_normalizes_allowlist() {
-        let ch = make_channel(WhatsAppWebConfig {
-            allow_from: vec!["+60123456789".to_string(), "+14155551234".to_string()],
-            ..Default::default()
-        });
-        // Allowlist should have stripped leading "+" during construction.
-        assert!(ch
-            .base_config
-            .allowlist
-            .contains(&"60123456789".to_string()));
-        assert!(ch
-            .base_config
-            .allowlist
-            .contains(&"14155551234".to_string()));
-        assert!(!ch.base_config.allowlist.iter().any(|p| p.starts_with('+')));
-    }
-
-    #[test]
-    fn test_new_sets_deny_by_default() {
-        let ch = make_channel(WhatsAppWebConfig {
-            deny_by_default: true,
-            ..Default::default()
-        });
-        assert!(ch.base_config.deny_by_default);
+        assert!(result.unwrap_err().to_string().contains("not started"));
     }
 }

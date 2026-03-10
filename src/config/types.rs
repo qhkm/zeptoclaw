@@ -746,6 +746,7 @@ pub struct ChannelsConfig {
     /// Slack bot configuration
     pub slack: Option<SlackConfig>,
     /// WhatsApp Web native channel configuration (requires `whatsapp-web` feature).
+    #[serde(alias = "whatsapp")]
     pub whatsapp_web: Option<WhatsAppWebConfig>,
     /// WhatsApp Cloud API configuration (official API, no bridge)
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
@@ -2524,6 +2525,22 @@ mod tests {
         let wac = config.channels.whatsapp_cloud.unwrap();
         assert!(wac.enabled);
         assert_eq!(wac.phone_number_id, "999");
+    }
+
+    #[test]
+    fn test_channels_config_whatsapp_legacy_alias_deserializes_to_whatsapp_web() {
+        let json = r#"{
+            "channels": {
+                "whatsapp": {
+                    "enabled": true,
+                    "auth_dir": "/tmp/wa-legacy"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let wa = config.channels.whatsapp_web.unwrap();
+        assert!(wa.enabled);
+        assert_eq!(wa.auth_dir, "/tmp/wa-legacy");
     }
 
     #[test]

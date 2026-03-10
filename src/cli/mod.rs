@@ -422,12 +422,12 @@ pub enum ChannelAction {
     List,
     /// Interactive setup for a channel
     Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
     /// Test channel connectivity
     Test {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
 }

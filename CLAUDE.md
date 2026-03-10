@@ -24,7 +24,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# lib: 2956, main: 92, cli_smoke: 23, e2e: 13, integration: 70, doc: 126 passed (27 ignored)
+# default build: lib 2956, main 92, cli_smoke 23, e2e 13, integration 70, doc 126 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
 
 # Version
 ./target/release/zeptoclaw --version
@@ -98,8 +98,8 @@ cargo fmt
 
 # Channel management
 ./target/release/zeptoclaw channel list
-./target/release/zeptoclaw channel setup whatsapp
-./target/release/zeptoclaw channel test whatsapp
+./target/release/zeptoclaw channel setup whatsapp_web
+./target/release/zeptoclaw channel test whatsapp_web
 
 # Onboard (express setup by default)
 ./target/release/zeptoclaw onboard

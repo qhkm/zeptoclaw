@@ -123,6 +123,15 @@ pub async fn register_configured_channels(
         }
     }
 
+    #[cfg(not(feature = "whatsapp-web"))]
+    if let Some(ref wa_web_config) = config.channels.whatsapp_web {
+        if wa_web_config.enabled {
+            warn!(
+                "WhatsApp Web channel is enabled in config but this build was compiled without the whatsapp-web feature"
+            );
+        }
+    }
+
     // WhatsApp Cloud API (official)
     if let Some(ref wac_config) = config.channels.whatsapp_cloud {
         if wac_config.enabled {

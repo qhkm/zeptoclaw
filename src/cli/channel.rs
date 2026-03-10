@@ -9,6 +9,17 @@ use zeptoclaw::config::Config;
 use super::common::read_line;
 use super::ChannelAction;
 
+fn canonical_channel_name(channel_name: &str) -> &str {
+    match channel_name {
+        "whatsapp" | "whatsapp_web" => "whatsapp_web",
+        _ => channel_name,
+    }
+}
+
+fn whatsapp_web_available() -> bool {
+    cfg!(feature = "whatsapp-web")
+}
+
 /// Dispatch channel subcommands.
 pub(crate) async fn cmd_channel(action: ChannelAction) -> Result<()> {
     match action {
@@ -72,7 +83,13 @@ async fn cmd_channel_list() -> Result<()> {
 
     // WhatsApp Web
     let (wa_status, wa_detail) = match config.channels.whatsapp_web {
-        Some(ref c) if c.enabled => ("enabled", format!("auth: {}", c.auth_dir)),
+        Some(ref c) if c.enabled && whatsapp_web_available() => {
+            ("enabled", format!("auth: {}", c.auth_dir))
+        }
+        Some(ref c) if c.enabled => (
+            "configured",
+            format!("feature not built (auth: {})", c.auth_dir),
+        ),
         _ => ("disabled", "-".to_string()),
     };
     println!("  {:<12} {:<10} {}", "whatsapp_web", wa_status, wa_detail);
@@ -95,10 +112,19 @@ async fn cmd_channel_list() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Known channel names for validation.
-const KNOWN_CHANNELS: &[&str] = &["telegram", "discord", "slack", "whatsapp_web", "webhook"];
+const KNOWN_CHANNELS: &[&str] = &[
+    "telegram",
+    "discord",
+    "slack",
+    "whatsapp",
+    "whatsapp_web",
+    "webhook",
+];
 
 /// Interactive setup for a named channel.
 async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
+    let channel_name = canonical_channel_name(channel_name);
+
     if !KNOWN_CHANNELS.contains(&channel_name) {
         anyhow::bail!(
             "Unknown channel '{}'. Known channels: {}",
@@ -139,6 +165,12 @@ async fn cmd_channel_setup(channel_name: &str) -> Result<()> {
 
 /// Interactive WhatsApp Web channel setup.
 fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
+    if !whatsapp_web_available() {
+        anyhow::bail!(
+            "WhatsApp Web support is not available in this build. Rebuild with --features whatsapp-web."
+        );
+    }
+
     println!();
     println!("WhatsApp Web Channel Setup (Native)");
     println!("-----------------------------------");
@@ -183,6 +215,8 @@ fn setup_whatsapp_web(config: &mut Config) -> Result<()> {
 
 /// Test connectivity for a named channel.
 async fn cmd_channel_test(channel_name: &str) -> Result<()> {
+    let channel_name = canonical_channel_name(channel_name);
+
     if !KNOWN_CHANNELS.contains(&channel_name) {
         anyhow::bail!(
             "Unknown channel '{}'. Known channels: {}",
@@ -217,6 +251,12 @@ async fn cmd_channel_test(channel_name: &str) -> Result<()> {
 
 /// Test WhatsApp Web channel configuration.
 async fn test_whatsapp_web(config: &Config) -> Result<()> {
+    if !whatsapp_web_available() {
+        anyhow::bail!(
+            "WhatsApp Web support is not available in this build. Rebuild with --features whatsapp-web."
+        );
+    }
+
     match config.channels.whatsapp_web {
         Some(ref c) if c.enabled => {
             println!("WhatsApp Web channel is configured and enabled.");
@@ -251,6 +291,7 @@ mod tests {
         assert!(KNOWN_CHANNELS.contains(&"telegram"));
         assert!(KNOWN_CHANNELS.contains(&"discord"));
         assert!(KNOWN_CHANNELS.contains(&"slack"));
+        assert!(KNOWN_CHANNELS.contains(&"whatsapp"));
         assert!(KNOWN_CHANNELS.contains(&"whatsapp_web"));
         assert!(KNOWN_CHANNELS.contains(&"webhook"));
     }
