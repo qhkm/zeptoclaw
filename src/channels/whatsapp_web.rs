@@ -29,13 +29,13 @@ use crate::channels::types::{BaseChannelConfig, Channel};
 use crate::config::WhatsAppWebConfig;
 use crate::error::{Result, ZeptoError};
 
-/// Render a QR code as a compact terminal string using ANSI inverted colors.
+/// Render a QR code string as unicode block characters in the terminal.
 ///
-/// Uses half-block characters with black/white ANSI colors so each terminal
-/// cell encodes 2 vertical QR modules — halving the height. The quiet zone
-/// is rendered as white (light) to ensure scanners detect the boundary.
-///
-/// Dark QR modules → black (#000), Light QR modules → white (#fff).
+/// Uses 2x1 half-block characters for compact display:
+/// - `█` (U+2588) = both pixels dark
+/// - `▀` (U+2580) = top dark, bottom light
+/// - `▄` (U+2584) = top light, bottom dark
+/// - ` ` (space)  = both pixels light
 fn render_qr_terminal(data: &str) -> Option<String> {
     let code = QrCode::new(data.as_bytes()).ok()?;
     let width = code.width();
@@ -45,17 +45,15 @@ fn render_qr_terminal(data: &str) -> Option<String> {
         .map(|c| c == qrcode::Color::Dark)
         .collect();
 
-    // 2-module quiet zone (white border) on each side for reliable scanning
-    let quiet = 2;
-    let padded_width = width + quiet * 2;
-    let padded_height = width + quiet * 2;
+    // Add 1-module quiet zone on each side
+    let padded_width = width + 2;
+    let padded_height = width + 2;
 
-    // Returns true for dark modules, false for light (including quiet zone)
     let pixel = |row: usize, col: usize| -> bool {
-        if row < quiet || row >= width + quiet || col < quiet || col >= width + quiet {
-            false // quiet zone = light
+        if row == 0 || row > width || col == 0 || col > width {
+            false // quiet zone
         } else {
-            colors[(row - quiet) * width + (col - quiet)]
+            colors[(row - 1) * width + (col - 1)]
         }
     };
 
@@ -69,17 +67,14 @@ fn render_qr_terminal(data: &str) -> Option<String> {
             } else {
                 false
             };
-            // Use ANSI 256-color: fg = top pixel color, bg = bottom pixel color
-            // ▀ (upper half block) draws fg on top, bg on bottom
-            let (fg, bg) = match (top, bottom) {
-                (true, true) => ("0", "0"),     // both dark
-                (true, false) => ("0", "15"),   // top dark, bottom light
-                (false, true) => ("15", "0"),   // top light, bottom dark
-                (false, false) => ("15", "15"), // both light
-            };
-            output.push_str(&format!("\x1b[38;5;{}m\x1b[48;5;{}m\u{2580}", fg, bg));
+            output.push(match (top, bottom) {
+                (true, true) => '\u{2588}',
+                (true, false) => '\u{2580}',
+                (false, true) => '\u{2584}',
+                (false, false) => ' ',
+            });
         }
-        output.push_str("\x1b[0m\n"); // reset colors at end of line
+        output.push('\n');
         y += 2;
     }
     Some(output)
