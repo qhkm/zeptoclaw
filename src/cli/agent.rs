@@ -146,6 +146,11 @@ pub(crate) async fn cmd_agent(
         println!("Type your message and press Enter. Type /help for commands, /quit to exit.");
         println!();
 
+        // Track model/persona overrides set via /model and /persona commands.
+        // Injected into InboundMessage metadata so the agent loop uses them.
+        let mut model_override: Option<(Option<String>, String)> = None; // (provider, model)
+        let mut persona_override: Option<String> = None;
+
         // Try rustyline; fall back to raw stdin if terminal is unavailable.
         let mut rl = match Editor::new() {
             Ok(mut editor) => {
@@ -213,7 +218,7 @@ pub(crate) async fn cmd_agent(
                         println!("{}", super::slash::format_help());
                         continue;
                     }
-                    _ if cmd.starts_with("model") => {
+                    _ if cmd == "model" || cmd.starts_with("model ") => {
                         use zeptoclaw::channels::model_switch::{
                             format_model_list, parse_model_command, ModelCommand,
                         };
@@ -221,7 +226,15 @@ pub(crate) async fn cmd_agent(
                         if let Some(mcmd) = parse_model_command(input) {
                             match mcmd {
                                 ModelCommand::Show => {
-                                    println!("Current model: {}", config.agents.defaults.model);
+                                    if let Some((ref p, ref m)) = model_override {
+                                        let provider = p.as_deref().unwrap_or("auto");
+                                        println!("Current model: {}:{} (override)", provider, m);
+                                    } else {
+                                        println!(
+                                            "Current model: {} (default)",
+                                            config.agents.defaults.model
+                                        );
+                                    }
                                 }
                                 ModelCommand::List => {
                                     let providers = configured_provider_names(&config)
@@ -233,7 +246,9 @@ pub(crate) async fn cmd_agent(
                                     println!("{}", list);
                                 }
                                 ModelCommand::Set(ov) => {
-                                    config.agents.defaults.model = ov.model.clone();
+                                    // Store override; injected via InboundMessage metadata
+                                    // so the agent loop uses it (same pattern as Telegram).
+                                    model_override = Some((ov.provider.clone(), ov.model.clone()));
                                     if let Some(p) = &ov.provider {
                                         println!("Switched to {}:{}", p, ov.model);
                                     } else {
@@ -241,9 +256,7 @@ pub(crate) async fn cmd_agent(
                                     }
                                 }
                                 ModelCommand::Reset => {
-                                    if let Ok(fresh) = Config::load() {
-                                        config.agents.defaults.model = fresh.agents.defaults.model;
-                                    }
+                                    model_override = None;
                                     println!(
                                         "Model reset to default: {}",
                                         config.agents.defaults.model
@@ -255,25 +268,40 @@ pub(crate) async fn cmd_agent(
                         }
                         continue;
                     }
-                    _ if cmd.starts_with("persona") => {
+                    _ if cmd == "persona" || cmd.starts_with("persona ") => {
                         use zeptoclaw::channels::persona_switch::{
                             parse_persona_command, PersonaCommand, PERSONA_PRESETS,
                         };
                         if let Some(pcmd) = parse_persona_command(input) {
                             match pcmd {
                                 PersonaCommand::Show => {
-                                    println!("Current persona: default");
+                                    if let Some(ref p) = persona_override {
+                                        println!("Current persona: {} (override)", p);
+                                    } else {
+                                        println!("Current persona: default");
+                                    }
                                 }
                                 PersonaCommand::List => {
                                     println!("Available personas:\n");
                                     for preset in PERSONA_PRESETS {
-                                        println!("  {:<16} {}", preset.name, preset.label);
+                                        let marker =
+                                            if persona_override.as_deref() == Some(preset.name) {
+                                                " (active)"
+                                            } else {
+                                                ""
+                                            };
+                                        println!(
+                                            "  {:<16} {}{}",
+                                            preset.name, preset.label, marker
+                                        );
                                     }
                                 }
                                 PersonaCommand::Set(name) => {
+                                    persona_override = Some(name.clone());
                                     println!("Persona set to: {}", name);
                                 }
                                 PersonaCommand::Reset => {
+                                    persona_override = None;
                                     println!("Persona reset to default.");
                                 }
                             }
@@ -292,7 +320,7 @@ pub(crate) async fn cmd_agent(
                         );
                         continue;
                     }
-                    _ if cmd.starts_with("template") => {
+                    _ if cmd == "template" || cmd.starts_with("template ") => {
                         use zeptoclaw::config::templates::TemplateRegistry;
                         if cmd == "template list" || cmd == "template" {
                             let registry = TemplateRegistry::new();
@@ -319,8 +347,10 @@ pub(crate) async fn cmd_agent(
                     "clear" => {
                         // SessionManager::delete() removes the session by key.
                         // The CLI session key is "cli" (from InboundMessage::new("cli", ...)).
-                        let _ = agent.session_manager().delete("cli").await;
-                        println!("Conversation cleared.");
+                        match agent.session_manager().delete("cli").await {
+                            Ok(_) => println!("Conversation cleared."),
+                            Err(e) => eprintln!("Warning: failed to clear session: {}", e),
+                        }
                         continue;
                     }
                     _ => {
@@ -337,8 +367,17 @@ pub(crate) async fn cmd_agent(
                 break;
             }
 
-            // Process message through agent
-            let inbound = InboundMessage::new("cli", "user", "cli", input);
+            // Process message through agent, injecting any active overrides
+            let mut inbound = InboundMessage::new("cli", "user", "cli", input);
+            if let Some((ref provider, ref model)) = model_override {
+                inbound = inbound.with_metadata("model_override", model);
+                if let Some(ref p) = provider {
+                    inbound = inbound.with_metadata("provider_override", p);
+                }
+            }
+            if let Some(ref persona) = persona_override {
+                inbound = inbound.with_metadata("persona_override", persona);
+            }
             let streaming = stream || config.agents.defaults.streaming;
 
             if streaming {

@@ -91,8 +91,8 @@ impl Completer for SlashHelper {
         pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Only complete if input starts with '/'
-        if !line.starts_with('/') {
+        // Only complete if input starts with '/' and cursor is past it
+        if !line.starts_with('/') || pos < 1 {
             return Ok((0, vec![]));
         }
 
