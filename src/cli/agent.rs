@@ -18,6 +18,32 @@ use zeptoclaw::providers::{
 use super::common::{create_agent, create_agent_with_template, resolve_template};
 use super::slash::SlashHelper;
 
+const CLI_CHANNEL: &str = "cli";
+const CLI_SENDER_ID: &str = "user";
+const CLI_CHAT_ID: &str = "cli";
+
+fn cli_inbound_message(content: &str) -> InboundMessage {
+    InboundMessage::new(CLI_CHANNEL, CLI_SENDER_ID, CLI_CHAT_ID, content)
+}
+
+fn cli_session_key() -> String {
+    format!("{}:{}", CLI_CHANNEL, CLI_CHAT_ID)
+}
+
+fn format_tool_list(tool_names: &[&str]) -> String {
+    if tool_names.is_empty() {
+        return "No tools registered.".to_string();
+    }
+
+    let mut out = format!("Available tools ({}):\n\n", tool_names.len());
+    for name in tool_names {
+        out.push_str("  ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
 /// Interactive or single-message agent mode.
 pub(crate) async fn cmd_agent(
     message: Option<String>,
@@ -101,7 +127,7 @@ pub(crate) async fn cmd_agent(
 
     if let Some(msg) = message {
         // Single message mode
-        let inbound = InboundMessage::new("cli", "user", "cli", &msg);
+        let inbound = cli_inbound_message(&msg);
         let streaming = stream || config.agents.defaults.streaming;
 
         if streaming {
@@ -311,13 +337,8 @@ pub(crate) async fn cmd_agent(
                         continue;
                     }
                     "tools" => {
-                        // AgentLoop exposes tool_count() but not an iterator.
-                        // Print count and redirect to CLI command for full list.
-                        let count = agent.tool_count().await;
-                        println!(
-                            "{} tools registered. Run 'zeptoclaw tools list' for details.",
-                            count
-                        );
+                        let tool_names = agent.tool_names();
+                        println!("{}", format_tool_list(&tool_names));
                         continue;
                     }
                     _ if cmd == "template" || cmd.starts_with("template ") => {
@@ -345,9 +366,7 @@ pub(crate) async fn cmd_agent(
                         continue;
                     }
                     "clear" => {
-                        // SessionManager::delete() removes the session by key.
-                        // The CLI session key is "cli" (from InboundMessage::new("cli", ...)).
-                        match agent.session_manager().delete("cli").await {
+                        match agent.session_manager().delete(&cli_session_key()).await {
                             Ok(_) => println!("Conversation cleared."),
                             Err(e) => eprintln!("Warning: failed to clear session: {}", e),
                         }
@@ -368,7 +387,7 @@ pub(crate) async fn cmd_agent(
             }
 
             // Process message through agent, injecting any active overrides
-            let mut inbound = InboundMessage::new("cli", "user", "cli", input);
+            let mut inbound = cli_inbound_message(input);
             if let Some((ref provider, ref model)) = model_override {
                 inbound = inbound.with_metadata("model_override", model);
                 if let Some(ref p) = provider {
@@ -575,5 +594,25 @@ mod tests {
         let msg = format_cli_error(&e);
         assert_eq!(msg, "Something went wrong");
         assert!(!msg.contains("Fix:"));
+    }
+
+    #[test]
+    fn test_cli_session_key_matches_inbound_message() {
+        let inbound = cli_inbound_message("hello");
+        assert_eq!(inbound.session_key, cli_session_key());
+    }
+
+    #[test]
+    fn test_format_tool_list_lists_each_tool() {
+        let output = format_tool_list(&["echo", "filesystem", "web_fetch"]);
+        assert!(output.contains("Available tools (3):"));
+        assert!(output.contains("  echo"));
+        assert!(output.contains("  filesystem"));
+        assert!(output.contains("  web_fetch"));
+    }
+
+    #[test]
+    fn test_format_tool_list_handles_empty_registry() {
+        assert_eq!(format_tool_list(&[]), "No tools registered.");
     }
 }
