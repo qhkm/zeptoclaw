@@ -35,6 +35,19 @@ cargo fmt
 # Run agent with streaming
 ./target/release/zeptoclaw agent -m "Hello" --stream
 
+# Interactive slash commands (inside `zeptoclaw agent`)
+/help                    # Show available slash commands
+/model                   # Show current model
+/model list              # Show available models
+/model <provider:model>  # Switch model
+/persona                 # Show current persona
+/persona list            # Show persona presets
+/persona <name>          # Switch persona
+/tools                   # List available tools
+/template list           # Show templates
+/clear                   # Clear conversation
+/quit                    # Exit
+
 # Run gateway (Telegram bot)
 ./target/release/zeptoclaw gateway
 
