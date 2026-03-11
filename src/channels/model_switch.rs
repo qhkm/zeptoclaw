@@ -90,7 +90,7 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         model: "gemini-2.5-flash",
         label: "Gemini 2.5 Flash",
     },
-    // Ollama (local)
+    // Ollama (local or cloud)
     KnownModel {
         provider: "ollama",
         model: "llama3.3",
