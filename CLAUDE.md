@@ -44,7 +44,9 @@ cargo fmt
 /persona list            # Show persona presets
 /persona <name>          # Switch persona
 /tools                   # List available tools
-/template list           # Show templates
+/template                # List available templates
+/history                 # Show history command hints
+/memory                  # Show memory command hints
 /clear                   # Clear conversation
 /quit                    # Exit
 

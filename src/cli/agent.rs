@@ -8,6 +8,7 @@ use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
 use zeptoclaw::bus::{InboundMessage, MessageBus};
+use zeptoclaw::channels::model_switch::ModelOverride;
 use zeptoclaw::config::Config;
 use zeptoclaw::gateway::ipc::UsageSnapshot;
 use zeptoclaw::health::UsageMetrics;
@@ -28,6 +29,22 @@ fn cli_inbound_message(content: &str) -> InboundMessage {
 
 fn cli_session_key() -> String {
     format!("{}:{}", CLI_CHANNEL, CLI_CHAT_ID)
+}
+
+fn active_model_override(
+    model_override: &Option<(Option<String>, String)>,
+    default_model: &str,
+) -> Option<ModelOverride> {
+    model_override
+        .as_ref()
+        .map(|(provider, model)| ModelOverride {
+            provider: provider.clone().or_else(|| {
+                default_model
+                    .split_once(':')
+                    .map(|(provider, _)| provider.to_string())
+            }),
+            model: model.clone(),
+        })
 }
 
 fn format_tool_list(tool_names: &[&str]) -> String {
@@ -267,7 +284,12 @@ pub(crate) async fn cmd_agent(
                                         .map(|s| s.to_string())
                                         .collect::<Vec<_>>();
                                     let models = configured_provider_models(&config);
-                                    let list = format_model_list(&providers, None, &models);
+                                    let current = active_model_override(
+                                        &model_override,
+                                        &config.agents.defaults.model,
+                                    );
+                                    let list =
+                                        format_model_list(&providers, current.as_ref(), &models);
                                     println!("{}", list);
                                 }
                                 ModelCommand::Set(ov) => {
@@ -614,5 +636,39 @@ mod tests {
     #[test]
     fn test_format_tool_list_handles_empty_registry() {
         assert_eq!(format_tool_list(&[]), "No tools registered.");
+    }
+
+    #[test]
+    fn test_active_model_override_uses_explicit_provider() {
+        let current = active_model_override(
+            &Some((Some("openai".to_string()), "gpt-5.1".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        )
+        .unwrap();
+        assert_eq!(current.provider.as_deref(), Some("openai"));
+        assert_eq!(current.model, "gpt-5.1");
+    }
+
+    #[test]
+    fn test_active_model_override_falls_back_to_default_provider() {
+        let current = active_model_override(
+            &Some((None, "claude-haiku-4-5-20251001".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        )
+        .unwrap();
+        assert_eq!(current.provider.as_deref(), Some("anthropic"));
+        assert_eq!(current.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_active_model_override_marks_current_in_formatted_list() {
+        let current = active_model_override(
+            &Some((Some("openai".to_string()), "gpt-5.1".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        );
+        let providers = vec!["openai".to_string()];
+        let list =
+            zeptoclaw::channels::model_switch::format_model_list(&providers, current.as_ref(), &[]);
+        assert!(list.contains("gpt-5.1 GPT-5.1 (current)"));
     }
 }

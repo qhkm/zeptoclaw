@@ -26,6 +26,7 @@ Project-level guidance for coding agents working in this repository.
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
+- CLI interactive mode: rustyline-backed slash commands with tab completion, persisted REPL history, `/model` and `/persona` overrides, `/tools`, `/template`, and `/clear`
 - Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
 - Tool execution convergence: agent loop and MCP server both route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording)
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
@@ -41,7 +42,7 @@ Project-level guidance for coding agents working in this repository.
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: default build runs 3090 lib (3084 passed, 6 ignored) + 92 main + 24 cli_smoke + 13 e2e + 70 integration + 127 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
+- Tests: default build runs 3106 lib (3100 passed, 6 ignored) + 92 main + 24 cli_smoke + 13 e2e + 70 integration + 127 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
 
 ## Task Tracking Protocol
 

@@ -44,15 +44,15 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "memory",
-            description: "Search or manage memory",
+            description: "Show memory command hints",
         },
         SlashCommand {
             name: "history",
-            description: "Show conversation history",
+            description: "Show history command hints",
         },
         SlashCommand {
             name: "template",
-            description: "Switch agent template",
+            description: "List available templates",
         },
         SlashCommand {
             name: "template list",
@@ -238,5 +238,17 @@ mod tests {
     fn test_format_help_includes_tab_hint() {
         let help = format_help();
         assert!(help.contains("Tab"));
+    }
+
+    #[test]
+    fn test_builtin_commands_stub_descriptions_match_behavior() {
+        let cmds = builtin_commands();
+        let template = cmds.iter().find(|cmd| cmd.name == "template").unwrap();
+        let history = cmds.iter().find(|cmd| cmd.name == "history").unwrap();
+        let memory = cmds.iter().find(|cmd| cmd.name == "memory").unwrap();
+
+        assert_eq!(template.description, "List available templates");
+        assert_eq!(history.description, "Show history command hints");
+        assert_eq!(memory.description, "Show memory command hints");
     }
 }
