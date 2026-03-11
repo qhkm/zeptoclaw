@@ -493,7 +493,13 @@ impl OpenAIProvider {
     /// When `auth_key_header` is `Some(name)`, returns `(name, api_key)` for any
     /// custom header name (e.g. `"api-key"`, `"x-api-key"`, etc.).
     /// When `None`, returns `("Authorization", "Bearer <api_key>")`.
+    ///
+    /// When `api_key` is empty (keyless providers such as Ollama or vLLM),
+    /// returns `("", "")` so callers can skip adding the auth header entirely.
     pub(crate) fn auth_header_pair(&self) -> (&'_ str, String) {
+        if self.api_key.is_empty() {
+            return ("", String::new());
+        }
         match self.auth_key_header.as_deref() {
             Some(name) => (name, self.api_key.clone()),
             None => ("Authorization", format!("Bearer {}", self.api_key)),
@@ -773,12 +779,15 @@ impl LLMProvider for OpenAIProvider {
             debug!("OpenAI request to model {} with {:?}", model, token_field);
 
             let (auth_header_name, auth_header_value) = self.auth_header_pair();
-            let response = self
+            let mut req = self
                 .client
                 .post(self.versioned_url("chat/completions"))
-                .header(auth_header_name, auth_header_value)
                 .header("Content-Type", "application/json")
-                .json(&request)
+                .json(&request);
+            if !auth_header_name.is_empty() {
+                req = req.header(auth_header_name, auth_header_value);
+            }
+            let response = req
                 .send()
                 .await
                 .map_err(|e| ZeptoError::Provider(format!("OpenAI request failed: {}", e)))?;
@@ -857,12 +866,15 @@ impl LLMProvider for OpenAIProvider {
             );
 
             let (auth_header_name, auth_header_value) = self.auth_header_pair();
-            let response = self
+            let mut req = self
                 .client
                 .post(self.versioned_url("chat/completions"))
-                .header(auth_header_name, auth_header_value)
                 .header("Content-Type", "application/json")
-                .json(&request)
+                .json(&request);
+            if !auth_header_name.is_empty() {
+                req = req.header(auth_header_name, auth_header_value);
+            }
+            let response = req
                 .send()
                 .await
                 .map_err(|e| ZeptoError::Provider(format!("OpenAI request failed: {}", e)))?;
@@ -1004,12 +1016,15 @@ impl LLMProvider for OpenAIProvider {
         });
 
         let (auth_header_name, auth_header_value) = self.auth_header_pair();
-        let resp = self
+        let mut req = self
             .client
             .post(&url)
-            .header(auth_header_name, auth_header_value)
             .header("Content-Type", "application/json")
-            .json(&body)
+            .json(&body);
+        if !auth_header_name.is_empty() {
+            req = req.header(auth_header_name, auth_header_value);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| ZeptoError::Provider(format!("Embedding request failed: {}", e)))?;
@@ -1997,5 +2012,21 @@ mod tests {
         let p = OpenAIProvider::with_base_url("k", "https://api.openai.com/v1");
         let url = p.versioned_url("chat/completions");
         assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_auth_header_pair_skips_auth_for_empty_key() {
+        let provider = OpenAIProvider::with_base_url("", "http://localhost:11434/v1");
+        let (name, value) = provider.auth_header_pair();
+        assert_eq!(name, "");
+        assert_eq!(value, "");
+    }
+
+    #[test]
+    fn test_auth_header_pair_sends_auth_for_nonempty_key() {
+        let provider = OpenAIProvider::with_base_url("sk-real-key", "http://localhost:11434/v1");
+        let (name, value) = provider.auth_header_pair();
+        assert_eq!(name, "Authorization");
+        assert_eq!(value, "Bearer sk-real-key");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "zeptoclaw"
-version = "0.7.2"
+version = "0.7.4"
 edition = "2021"
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
@@ -173,6 +173,20 @@ webpki-roots = { version = "1.0", optional = true }
 rumqttc = { version = "0.25", optional = true }
 
 # =============================================================================
+# WHATSAPP WEB (optional — feature-gated behind "whatsapp-web")
+# =============================================================================
+# Pure Rust WhatsApp Web client (Signal Protocol, QR pairing, session persistence)
+wa-rs = { version = "0.2", optional = true }
+# SQLite storage backend for wa-rs session persistence
+wa-rs-sqlite-storage = { version = "0.2", optional = true }
+# Tokio WebSocket transport for wa-rs
+wa-rs-tokio-transport = { version = "0.2", optional = true }
+# HTTP client for wa-rs version/media requests
+wa-rs-ureq-http = { version = "0.2", optional = true }
+# QR code generation for WhatsApp Web terminal pairing
+qrcode = { version = "0.14", optional = true, default-features = false }
+
+# =============================================================================
 # HARDWARE (optional — feature-gated)
 # =============================================================================
 # Serial port communication for peripherals (STM32, Arduino, ESP32)
@@ -246,6 +260,14 @@ peripheral-esp32 = ["hardware"]
 probe = ["probe-rs"]
 # MQTT channel for IoT device communication (rumqttc async client)
 mqtt = ["dep:rumqttc"]
+# WhatsApp Web native client (wa-rs + SQLite session storage)
+whatsapp-web = [
+    "dep:wa-rs",
+    "dep:wa-rs-sqlite-storage",
+    "dep:wa-rs-tokio-transport",
+    "dep:wa-rs-ureq-http",
+    "dep:qrcode",
+]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)
 android = []
 # Linux sandbox runtimes (Linux-only, require respective binaries except landlock)

@@ -263,11 +263,12 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         // Configure heartbeat service.
         configure_heartbeat(&mut config)?;
 
-        // Configure Telegram channel
+        // Configure messaging channels
         configure_telegram(&mut config)?;
-
-        // Configure WhatsApp channel (via bridge)
         configure_whatsapp_channel(&mut config)?;
+        configure_whatsapp_cloud(&mut config)?;
+        configure_discord(&mut config)?;
+        configure_slack(&mut config)?;
 
         // Configure runtime for shell command isolation
         configure_runtime(&mut config)?;
@@ -319,6 +320,70 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         if matches!(coding_input.trim(), "y" | "yes") {
             config.tools.coding_tools = true;
             println!("  Coding tools (grep, find) enabled.");
+        }
+
+        // Ask about messaging channels
+        println!();
+        println!("Messaging Channels");
+        println!("==================");
+        println!("Connect ZeptoClaw to messaging platforms so you can chat via phone/desktop.");
+        println!("  1. Telegram (recommended — easiest setup)");
+        println!("  2. WhatsApp Web (native, QR code pairing)");
+        println!("  3. WhatsApp Cloud API (official Meta API)");
+        println!("  4. Discord");
+        println!("  5. Slack");
+        println!("  6. Skip (configure later with 'zeptoclaw channel setup <name>')");
+        println!();
+        print!("Which channels? (comma-separated, e.g. 1,2 or 6 to skip): ");
+        io::stdout().flush()?;
+        let channel_input = read_line()?;
+
+        let mut want_telegram = false;
+        let mut want_whatsapp_web = false;
+        let mut want_whatsapp_cloud = false;
+        let mut want_discord = false;
+        let mut want_slack = false;
+
+        for raw in channel_input.split(',') {
+            match raw.trim() {
+                "1" => want_telegram = true,
+                "2" => want_whatsapp_web = true,
+                "3" => want_whatsapp_cloud = true,
+                "4" => want_discord = true,
+                "5" => want_slack = true,
+                "6" | "" => {}
+                _ => println!("  Unknown option '{}', skipping.", raw.trim()),
+            }
+        }
+
+        if want_telegram {
+            configure_telegram(&mut config)?;
+        }
+        if want_whatsapp_web {
+            if cfg!(feature = "whatsapp-web") {
+                configure_whatsapp_channel(&mut config)?;
+            } else {
+                println!();
+                println!("  WhatsApp Web requires: cargo build --features whatsapp-web");
+                println!("  Skipped.");
+            }
+        }
+        if want_whatsapp_cloud {
+            configure_whatsapp_cloud(&mut config)?;
+        }
+        if want_discord {
+            configure_discord(&mut config)?;
+        }
+        if want_slack {
+            configure_slack(&mut config)?;
+        }
+        if !want_telegram
+            && !want_whatsapp_web
+            && !want_whatsapp_cloud
+            && !want_discord
+            && !want_slack
+        {
+            println!("  Skipped. Run 'zeptoclaw channel setup <name>' anytime.");
         }
 
         // Save config
@@ -381,11 +446,7 @@ fn configure_memory(config: &mut Config) -> Result<()> {
     println!("Choose memory backend:");
     println!("  1. Built-in substring search (recommended)");
     println!("  2. BM25 keyword scoring (requires --features memory-bm25)");
-    println!("  3. Embedding + cosine similarity (not yet implemented)");
-    println!("  4. HNSW approximate nearest neighbor (not yet implemented)");
-    println!("  5. Tantivy full-text search (not yet implemented)");
-    println!("  6. QMD (planned; currently falls back to built-in)");
-    println!("  7. Disabled");
+    println!("  3. Disabled");
     println!();
     print!(
         "Memory backend [current={}]: ",
@@ -398,11 +459,7 @@ fn configure_memory(config: &mut Config) -> Result<()> {
         config.memory.backend = match backend_choice.trim() {
             "1" | "builtin" => MemoryBackend::Builtin,
             "2" | "bm25" => MemoryBackend::Bm25,
-            "3" | "embedding" => MemoryBackend::Embedding,
-            "4" | "hnsw" => MemoryBackend::Hnsw,
-            "5" | "tantivy" => MemoryBackend::Tantivy,
-            "6" | "qmd" => MemoryBackend::Qmd,
-            "7" | "none" | "disabled" => MemoryBackend::Disabled,
+            "3" | "none" | "disabled" => MemoryBackend::Disabled,
             _ => config.memory.backend.clone(),
         };
     }
@@ -813,7 +870,7 @@ fn configure_telegram(config: &mut Config) -> Result<()> {
     print!("Enter Telegram bot token (or press Enter to skip): ");
     io::stdout().flush()?;
 
-    let token = read_line()?;
+    let token = read_secret()?;
 
     if !token.is_empty() {
         let telegram_config = config
@@ -831,50 +888,164 @@ fn configure_telegram(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-/// Configure WhatsApp channel (via whatsmeow-rs bridge).
+/// Configure WhatsApp Web channel (native, via wa-rs).
 fn configure_whatsapp_channel(config: &mut Config) -> Result<()> {
-    println!();
-    println!("WhatsApp Channel Setup (via Bridge)");
-    println!("-----------------------------------");
-    println!("Requires whatsmeow-rs bridge: https://github.com/qhkm/whatsmeow-rs");
-    print!("Enable WhatsApp channel? [y/N]: ");
-    io::stdout().flush()?;
-
-    let enabled = read_line()?.to_ascii_lowercase();
-    if !matches!(enabled.as_str(), "y" | "yes") {
-        println!("  Skipped WhatsApp channel configuration.");
-        return Ok(());
+    if !cfg!(feature = "whatsapp-web") {
+        anyhow::bail!(
+            "WhatsApp Web support is not available in this build. Rebuild with --features whatsapp-web."
+        );
     }
+
+    println!();
+    println!("WhatsApp Web Channel Setup");
+    println!("--------------------------");
 
     let whatsapp_config = config
         .channels
-        .whatsapp
+        .whatsapp_web
         .get_or_insert_with(Default::default);
     whatsapp_config.enabled = true;
 
-    print!("Bridge WebSocket URL [{}]: ", whatsapp_config.bridge_url);
-    io::stdout().flush()?;
-    let bridge_url = read_line()?;
-    if !bridge_url.is_empty() {
-        whatsapp_config.bridge_url = bridge_url;
-    }
-
-    print!("Phone number allowlist (comma-separated, or Enter for all): ");
+    print!("Phone number allowlist (comma-separated E.164, e.g. +60123456789, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
-    if !allowlist.is_empty() {
-        whatsapp_config.allow_from = allowlist
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    whatsapp_config.allow_from = allowlist
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if whatsapp_config.allow_from.is_empty() {
+        print!("Deny all senders by default (strict mode)? [y/N]: ");
+        io::stdout().flush()?;
+        let deny = read_line()?.to_ascii_lowercase();
+        if matches!(deny.as_str(), "y" | "yes") {
+            whatsapp_config.deny_by_default = true;
+            println!("  Strict mode enabled — no messages will be accepted until you add allowed numbers.");
+        }
     }
 
+    println!();
+    println!("  WhatsApp Web channel enabled.");
+    println!("  Run 'zeptoclaw gateway' to pair via QR code.");
+    println!("  On first run, scan the QR code with your phone:");
+    println!("    WhatsApp → Settings → Linked Devices → Link a Device");
+    Ok(())
+}
+
+/// Configure WhatsApp Cloud API channel (official Meta API).
+fn configure_whatsapp_cloud(config: &mut Config) -> Result<()> {
+    println!();
+    println!("WhatsApp Cloud API Setup (Official)");
+    println!("-----------------------------------");
+    println!("Uses Meta's official Cloud API. Requires a Meta Business account.");
+    println!("  1. Go to https://developers.facebook.com → Create App → Business");
+    println!("  2. Add WhatsApp product → API Setup");
+    println!("  3. Copy Phone Number ID and generate a permanent access token");
+    println!("  4. Set up a webhook URL (use 'zeptoclaw gateway --tunnel auto')");
+    println!();
+    print!("Enter Phone Number ID (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let phone_id = read_line()?;
+    if phone_id.is_empty() {
+        println!("  Skipped WhatsApp Cloud API configuration.");
+        return Ok(());
+    }
+
+    print!("Enter permanent access token: ");
+    io::stdout().flush()?;
+    let token = read_secret()?;
+
+    print!("Choose a webhook verify token (any secret string): ");
+    io::stdout().flush()?;
+    let verify_token = read_secret()?;
+
+    let wc = config
+        .channels
+        .whatsapp_cloud
+        .get_or_insert_with(Default::default);
+    wc.phone_number_id = phone_id;
+    wc.access_token = token;
+    wc.webhook_verify_token = verify_token;
+    wc.enabled = true;
+
+    println!("  WhatsApp Cloud API configured.");
     println!(
-        "  WhatsApp channel configured (bridge: {}).",
-        whatsapp_config.bridge_url
+        "  Webhook endpoint: {}:{}{}",
+        wc.bind_address, wc.port, wc.path
     );
-    println!("  Run 'zeptoclaw gateway' to start the WhatsApp channel.");
+    println!(
+        "  Run 'zeptoclaw gateway' to start, then configure the webhook URL in Meta dashboard."
+    );
+    Ok(())
+}
+
+/// Configure Discord channel.
+fn configure_discord(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Discord Bot Setup");
+    println!("-----------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://discord.com/developers/applications");
+    println!("  2. Create New Application → Bot → Reset Token → copy it");
+    println!("  3. Enable MESSAGE CONTENT intent under Bot → Privileged Intents");
+    println!(
+        "  4. Invite bot to your server with OAuth2 URL Generator (bot scope + Send Messages)"
+    );
+    println!();
+    print!("Enter Discord bot token (or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let token = read_secret()?;
+
+    if !token.is_empty() {
+        let discord_config = config.channels.discord.get_or_insert_with(Default::default);
+        discord_config.token = token;
+        discord_config.enabled = true;
+        println!("  Discord bot configured.");
+        println!("  Run 'zeptoclaw gateway' to start the bot.");
+    } else {
+        println!("  Skipped Discord configuration.");
+    }
+
+    Ok(())
+}
+
+/// Configure Slack channel.
+fn configure_slack(config: &mut Config) -> Result<()> {
+    println!();
+    println!("Slack Bot Setup");
+    println!("---------------");
+    println!("To create a bot:");
+    println!("  1. Go to https://api.slack.com/apps → Create New App");
+    println!("  2. Add Bot Token Scopes: chat:write, app_mentions:read");
+    println!("  3. Install to Workspace → copy Bot User OAuth Token (xoxb-...)");
+    println!(
+        "  4. Under Basic Information → App-Level Tokens → generate with connections:write scope"
+    );
+    println!();
+    print!("Enter Slack bot token (xoxb-..., or press Enter to skip): ");
+    io::stdout().flush()?;
+
+    let bot_token = read_secret()?;
+
+    if bot_token.is_empty() {
+        println!("  Skipped Slack configuration.");
+        return Ok(());
+    }
+
+    print!("Enter Slack app-level token (xapp-...): ");
+    io::stdout().flush()?;
+    let app_token = read_secret()?;
+
+    let slack_config = config.channels.slack.get_or_insert_with(Default::default);
+    slack_config.bot_token = bot_token;
+    slack_config.app_token = app_token;
+    slack_config.enabled = true;
+    println!("  Slack bot configured.");
+    println!("  Run 'zeptoclaw gateway' to start the bot.");
+
     Ok(())
 }
 
