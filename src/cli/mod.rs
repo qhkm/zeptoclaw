@@ -27,6 +27,7 @@ pub mod serve;
 pub mod skills;
 pub mod status;
 pub mod template;
+pub mod slash;
 pub mod tools;
 pub mod uninstall;
 pub mod update;
