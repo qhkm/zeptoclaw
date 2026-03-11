@@ -337,8 +337,9 @@ pub(crate) async fn cmd_agent(
                         continue;
                     }
                     "tools" => {
-                        let tool_names = agent.tool_names();
-                        println!("{}", format_tool_list(&tool_names));
+                        let tool_names = agent.tool_names().await;
+                        let refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+                        println!("{}", format_tool_list(&refs));
                         continue;
                     }
                     _ if cmd == "template" || cmd.starts_with("template ") => {

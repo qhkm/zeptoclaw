@@ -760,6 +760,12 @@ impl AgentLoop {
         tools.len()
     }
 
+    /// Get the names of all registered tools.
+    pub async fn tool_names(&self) -> Vec<String> {
+        let tools = self.tools.read().await;
+        tools.names().iter().map(|s| s.to_string()).collect()
+    }
+
     /// Check if a tool is registered.
     pub async fn has_tool(&self, name: &str) -> bool {
         let tools = self.tools.read().await;
