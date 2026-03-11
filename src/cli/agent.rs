@@ -4,6 +4,8 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
 
 use zeptoclaw::bus::{InboundMessage, MessageBus};
 use zeptoclaw::config::Config;
@@ -14,6 +16,7 @@ use zeptoclaw::providers::{
 };
 
 use super::common::{create_agent, create_agent_with_template, resolve_template};
+use super::slash::SlashHelper;
 
 /// Interactive or single-message agent mode.
 pub(crate) async fn cmd_agent(
@@ -138,84 +141,145 @@ pub(crate) async fn cmd_agent(
             }
         }
     } else {
-        // Interactive mode
+        // Interactive mode with rustyline (tab completion for slash commands)
         println!("ZeptoClaw Interactive Agent");
-        println!("Type your message and press Enter. Type 'quit' or 'exit' to stop.");
+        println!("Type your message and press Enter. Type /help for commands, /quit to exit.");
         println!();
 
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
+        // Try rustyline; fall back to raw stdin if terminal is unavailable.
+        let mut rl = match Editor::new() {
+            Ok(mut editor) => {
+                editor.set_helper(Some(SlashHelper::new()));
+                // Persist history across sessions
+                let history_path =
+                    dirs::home_dir().map(|h| h.join(".zeptoclaw/state/repl_history"));
+                if let Some(ref path) = history_path {
+                    let _ = editor.load_history(path);
+                }
+                Some((editor, history_path))
+            }
+            Err(_) => None,
+        };
 
         loop {
-            print!("> ");
-            stdout.flush()?;
-
-            let mut input = String::new();
-            match stdin.lock().read_line(&mut input) {
-                Ok(0) => {
-                    // EOF
-                    println!();
-                    break;
-                }
-                Ok(_) => {
-                    let input = input.trim();
-                    if input.is_empty() {
-                        continue;
-                    }
-                    if input == "quit" || input == "exit" {
+            let input = if let Some((ref mut editor, _)) = rl {
+                match editor.readline("> ") {
+                    Ok(line) => line,
+                    Err(ReadlineError::Eof | ReadlineError::Interrupted) => {
                         println!("Goodbye!");
                         break;
                     }
-
-                    // Process message
-                    let inbound = InboundMessage::new("cli", "user", "cli", input);
-                    let streaming = stream || config.agents.defaults.streaming;
-
-                    if streaming {
-                        use zeptoclaw::providers::StreamEvent;
-                        match agent.process_message_streaming(&inbound).await {
-                            Ok(mut rx) => {
-                                println!();
-                                while let Some(event) = rx.recv().await {
-                                    match event {
-                                        StreamEvent::Delta(text) => {
-                                            print!("{}", text);
-                                            let _ = io::stdout().flush();
-                                        }
-                                        StreamEvent::Done { .. } => break,
-                                        StreamEvent::Error(e) => {
-                                            eprintln!("{}", format_cli_error(&e));
-                                        }
-                                        StreamEvent::ToolCalls(_) => {}
-                                    }
-                                }
-                                println!();
-                                println!();
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_cli_error(&e));
-                                eprintln!();
-                            }
-                        }
-                    } else {
-                        match agent.process_message(&inbound).await {
-                            Ok(response) => {
-                                println!();
-                                println!("{}", response);
-                                println!();
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_cli_error(&e));
-                                eprintln!();
-                            }
-                        }
+                    Err(e) => {
+                        eprintln!("Error reading input: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading input: {}", e);
-                    break;
+            } else {
+                // Fallback: raw stdin (piped/non-TTY)
+                print!("> ");
+                io::stdout().flush()?;
+                let mut buf = String::new();
+                match io::stdin().lock().read_line(&mut buf) {
+                    Ok(0) => {
+                        println!();
+                        break;
+                    }
+                    Ok(_) => buf,
+                    Err(e) => {
+                        eprintln!("Error reading input: {}", e);
+                        break;
+                    }
+                }
+            };
+
+            let input = input.trim();
+            if input.is_empty() {
+                continue;
+            }
+
+            // Add to history
+            if let Some((ref mut editor, _)) = rl {
+                let _ = editor.add_history_entry(input);
+            }
+
+            // Handle slash commands
+            if input.starts_with('/') {
+                let cmd = &input[1..]; // strip leading /
+                match cmd {
+                    "quit" | "exit" => {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    "help" => {
+                        println!("{}", super::slash::format_help());
+                        continue;
+                    }
+                    _ => {
+                        // TODO: wire /model, /persona, /tools, etc.
+                        eprintln!("Unknown command: /{}", cmd);
+                        eprintln!("Type /help to see available commands.");
+                        continue;
+                    }
                 }
             }
+
+            // Legacy quit/exit support (without slash)
+            if input == "quit" || input == "exit" {
+                println!("Goodbye!");
+                break;
+            }
+
+            // Process message through agent
+            let inbound = InboundMessage::new("cli", "user", "cli", input);
+            let streaming = stream || config.agents.defaults.streaming;
+
+            if streaming {
+                use zeptoclaw::providers::StreamEvent;
+                match agent.process_message_streaming(&inbound).await {
+                    Ok(mut rx) => {
+                        println!();
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                StreamEvent::Delta(text) => {
+                                    print!("{}", text);
+                                    let _ = io::stdout().flush();
+                                }
+                                StreamEvent::Done { .. } => break,
+                                StreamEvent::Error(e) => {
+                                    eprintln!("{}", format_cli_error(&e));
+                                }
+                                StreamEvent::ToolCalls(_) => {}
+                            }
+                        }
+                        println!();
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format_cli_error(&e));
+                        eprintln!();
+                    }
+                }
+            } else {
+                match agent.process_message(&inbound).await {
+                    Ok(response) => {
+                        println!();
+                        println!("{}", response);
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format_cli_error(&e));
+                        eprintln!();
+                    }
+                }
+            }
+        }
+
+        // Save history on exit
+        if let Some((ref mut editor, Some(ref path))) = rl {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = editor.save_history(path);
         }
     }
 
