@@ -274,3 +274,10 @@ fn cli_gateway_help() {
     assert_eq!(code, 0);
     assert!(stdout.contains("gateway") || stdout.contains("Gateway"));
 }
+
+#[test]
+fn cli_uninstall_help() {
+    let (code, stdout, _stderr) = run_cli(&["uninstall", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("remove-binary") || stdout.contains("Uninstall"));
+}

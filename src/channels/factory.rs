@@ -13,7 +13,6 @@ use super::email_channel::EmailChannel;
 use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
-use super::WhatsAppChannel;
 use super::WhatsAppCloudChannel;
 use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel};
 
@@ -110,20 +109,26 @@ pub async fn register_configured_channels(
         }
     }
 
-    // WhatsApp (via bridge)
-    if let Some(ref whatsapp_config) = config.channels.whatsapp {
-        if whatsapp_config.enabled {
-            if whatsapp_config.bridge_url.is_empty() {
-                warn!("WhatsApp channel enabled but bridge_url is empty");
-            } else {
-                manager
-                    .register(Box::new(WhatsAppChannel::new(
-                        whatsapp_config.clone(),
-                        bus.clone(),
-                    )))
-                    .await;
-                info!("Registered WhatsApp channel");
-            }
+    // WhatsApp Web (native via wa-rs) — requires whatsapp-web feature
+    #[cfg(feature = "whatsapp-web")]
+    if let Some(ref wa_web_config) = config.channels.whatsapp_web {
+        if wa_web_config.enabled {
+            manager
+                .register(Box::new(super::WhatsAppWebChannel::new(
+                    wa_web_config.clone(),
+                    bus.clone(),
+                )))
+                .await;
+            info!("Registered WhatsApp Web channel (native)");
+        }
+    }
+
+    #[cfg(not(feature = "whatsapp-web"))]
+    if let Some(ref wa_web_config) = config.channels.whatsapp_web {
+        if wa_web_config.enabled {
+            warn!(
+                "WhatsApp Web channel is enabled in config but this build was compiled without the whatsapp-web feature"
+            );
         }
     }
 
@@ -286,7 +291,7 @@ pub async fn register_configured_channels(
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
-    use crate::config::{Config, SlackConfig, TelegramConfig, WhatsAppCloudConfig, WhatsAppConfig};
+    use crate::config::{Config, SlackConfig, TelegramConfig, WhatsAppCloudConfig};
 
     #[tokio::test]
     async fn test_register_configured_channels_registers_telegram() {
@@ -304,25 +309,6 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(manager.has_channel("telegram").await);
-    }
-
-    #[tokio::test]
-    async fn test_register_configured_channels_registers_whatsapp() {
-        let bus = Arc::new(MessageBus::new());
-        let mut config = Config::default();
-        config.channels.whatsapp = Some(WhatsAppConfig {
-            enabled: true,
-            bridge_url: "ws://localhost:3001".to_string(),
-            allow_from: Vec::new(),
-            bridge_managed: true,
-            ..Default::default()
-        });
-
-        let manager = ChannelManager::new(bus.clone(), config.clone());
-        let count = register_configured_channels(&manager, bus, &config).await;
-
-        assert_eq!(count, 1);
-        assert!(manager.has_channel("whatsapp").await);
     }
 
     #[tokio::test]

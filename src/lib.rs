@@ -44,9 +44,11 @@ pub mod utils;
 
 pub use agent::{AgentLoop, ContextBuilder, SwarmScratchpad, ZeptoAgent, ZeptoAgentBuilder};
 pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
+#[cfg(feature = "whatsapp-web")]
+pub use channels::WhatsAppWebChannel;
 pub use channels::{
     BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,
-    TelegramChannel, WhatsAppChannel, WhatsAppCloudChannel,
+    TelegramChannel, WhatsAppCloudChannel,
 };
 pub use config::Config;
 pub use cron::{CronJob, CronPayload, CronSchedule, CronService, OnMiss};
