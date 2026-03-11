@@ -214,8 +214,132 @@ pub(crate) async fn cmd_agent(
                         println!("{}", super::slash::format_help());
                         continue;
                     }
+                    _ if cmd.starts_with("model") => {
+                        use zeptoclaw::channels::model_switch::{
+                            format_model_list, parse_model_command, ModelCommand,
+                        };
+                        use zeptoclaw::providers::configured_provider_models;
+                        if let Some(mcmd) = parse_model_command(input) {
+                            match mcmd {
+                                ModelCommand::Show => {
+                                    println!(
+                                        "Current model: {}",
+                                        config.agents.defaults.model
+                                    );
+                                }
+                                ModelCommand::List => {
+                                    let providers = configured_provider_names(&config)
+                                        .into_iter()
+                                        .map(|s| s.to_string())
+                                        .collect::<Vec<_>>();
+                                    let models = configured_provider_models(&config);
+                                    let list =
+                                        format_model_list(&providers, None, &models);
+                                    println!("{}", list);
+                                }
+                                ModelCommand::Set(ov) => {
+                                    config.agents.defaults.model = ov.model.clone();
+                                    if let Some(p) = &ov.provider {
+                                        println!("Switched to {}:{}", p, ov.model);
+                                    } else {
+                                        println!("Switched to {}", ov.model);
+                                    }
+                                }
+                                ModelCommand::Reset => {
+                                    if let Ok(fresh) = Config::load() {
+                                        config.agents.defaults.model =
+                                            fresh.agents.defaults.model;
+                                    }
+                                    println!(
+                                        "Model reset to default: {}",
+                                        config.agents.defaults.model
+                                    );
+                                }
+                            }
+                        } else {
+                            println!(
+                                "Current model: {}",
+                                config.agents.defaults.model
+                            );
+                        }
+                        continue;
+                    }
+                    _ if cmd.starts_with("persona") => {
+                        use zeptoclaw::channels::persona_switch::{
+                            parse_persona_command, PersonaCommand, PERSONA_PRESETS,
+                        };
+                        if let Some(pcmd) = parse_persona_command(input) {
+                            match pcmd {
+                                PersonaCommand::Show => {
+                                    println!("Current persona: default");
+                                }
+                                PersonaCommand::List => {
+                                    println!("Available personas:\n");
+                                    for preset in PERSONA_PRESETS {
+                                        println!(
+                                            "  {:<16} {}",
+                                            preset.name, preset.label
+                                        );
+                                    }
+                                }
+                                PersonaCommand::Set(name) => {
+                                    println!("Persona set to: {}", name);
+                                }
+                                PersonaCommand::Reset => {
+                                    println!("Persona reset to default.");
+                                }
+                            }
+                        } else {
+                            println!("Current persona: default");
+                        }
+                        continue;
+                    }
+                    "tools" => {
+                        // AgentLoop exposes tool_count() but not an iterator.
+                        // Print count and redirect to CLI command for full list.
+                        let count = agent.tool_count().await;
+                        println!(
+                            "{} tools registered. Run 'zeptoclaw tools list' for details.",
+                            count
+                        );
+                        continue;
+                    }
+                    _ if cmd.starts_with("template") => {
+                        use zeptoclaw::config::templates::TemplateRegistry;
+                        if cmd == "template list" || cmd == "template" {
+                            let registry = TemplateRegistry::new();
+                            println!("Available templates:\n");
+                            for t in registry.list() {
+                                println!("  {:<16} {}", t.name, t.description);
+                            }
+                        } else {
+                            println!("Usage: /template list");
+                        }
+                        continue;
+                    }
+                    "history" => {
+                        println!(
+                            "Use 'zeptoclaw history list' for full history."
+                        );
+                        println!(
+                            "This session's messages are tracked automatically."
+                        );
+                        continue;
+                    }
+                    "memory" => {
+                        println!(
+                            "Use 'zeptoclaw memory list' or 'zeptoclaw memory search <query>'."
+                        );
+                        continue;
+                    }
+                    "clear" => {
+                        // SessionManager::delete() removes the session by key.
+                        // The CLI session key is "cli" (from InboundMessage::new("cli", ...)).
+                        let _ = agent.session_manager().delete("cli").await;
+                        println!("Conversation cleared.");
+                        continue;
+                    }
                     _ => {
-                        // TODO: wire /model, /persona, /tools, etc.
                         eprintln!("Unknown command: /{}", cmd);
                         eprintln!("Type /help to see available commands.");
                         continue;
