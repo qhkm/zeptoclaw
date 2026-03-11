@@ -225,7 +225,7 @@ fn setup_telegram(config: &mut Config) -> Result<()> {
     tg.token = token;
     tg.enabled = true;
 
-    print!("Allowlist user IDs/usernames (comma-separated, or Enter for all): ");
+    print!("Allowlist numeric Telegram user IDs (comma-separated, or Enter for all): ");
     io::stdout().flush()?;
     let allowlist = read_line()?;
     tg.allow_from = allowlist
@@ -233,8 +233,10 @@ fn setup_telegram(config: &mut Config) -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    tg.allow_usernames = false;
 
     println!("  Telegram bot configured.");
+    println!("  Numeric user IDs are recommended; username allowlists stay disabled.");
     println!("  Run 'zeptoclaw gateway' to start the bot.");
     Ok(())
 }
@@ -346,11 +348,42 @@ fn setup_webhook(config: &mut Config) -> Result<()> {
         wh.auth_token = Some(auth);
     }
 
+    print!("HMAC signature secret (or Enter to disable body signing): ");
+    io::stdout().flush()?;
+    let signature_secret = read_secret()?;
+    if !signature_secret.is_empty() {
+        wh.signature_secret = Some(signature_secret);
+
+        print!("Signature header [{}]: ", wh.signature_header);
+        io::stdout().flush()?;
+        let signature_header = read_line()?;
+        if !signature_header.is_empty() {
+            wh.signature_header = signature_header;
+        }
+    }
+
+    print!("Fixed sender ID (recommended, Enter to configure later): ");
+    io::stdout().flush()?;
+    let sender_id = read_line()?;
+    if !sender_id.is_empty() {
+        wh.sender_id = Some(sender_id);
+
+        print!("Fixed chat ID (Enter to reuse sender ID): ");
+        io::stdout().flush()?;
+        let chat_id = read_line()?;
+        if !chat_id.is_empty() {
+            wh.chat_id = Some(chat_id);
+        }
+    }
+
     wh.enabled = true;
     println!(
         "  Webhook configured at {}:{}{}",
         wh.bind_address, wh.port, wh.path
     );
+    if wh.sender_id.is_none() && !wh.trust_payload_identity {
+        println!("  Note: set channels.webhook.sender_id before starting, or enable trust_payload_identity manually for legacy payload-driven identity.");
+    }
     println!("  Run 'zeptoclaw gateway' to start listening.");
     Ok(())
 }
@@ -383,6 +416,10 @@ fn setup_whatsapp_cloud(config: &mut Config) -> Result<()> {
     io::stdout().flush()?;
     let verify_token = read_secret()?;
 
+    print!("Enter Meta app secret for X-Hub-Signature-256 verification (or Enter to skip): ");
+    io::stdout().flush()?;
+    let app_secret = read_secret()?;
+
     let wc = config
         .channels
         .whatsapp_cloud
@@ -390,6 +427,9 @@ fn setup_whatsapp_cloud(config: &mut Config) -> Result<()> {
     wc.phone_number_id = phone_id;
     wc.access_token = token;
     wc.webhook_verify_token = verify_token;
+    if !app_secret.is_empty() {
+        wc.app_secret = Some(app_secret);
+    }
     wc.enabled = true;
 
     println!("  WhatsApp Cloud API configured.");

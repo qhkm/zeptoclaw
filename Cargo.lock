@@ -7041,6 +7041,7 @@ dependencies = [
  "jsonwebtoken",
  "landlock",
  "lettre",
+ "libc",
  "lopdf",
  "mail-parser",
  "mockall",

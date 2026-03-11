@@ -285,6 +285,106 @@ pub fn revalidate_path(path: &Path, workspace: &str) -> Result<()> {
     Ok(())
 }
 
+/// Securely ensure a directory chain exists within the workspace.
+///
+/// This creates missing directories one component at a time, re-checking the
+/// workspace boundary and rejecting symlinked or non-directory ancestors.
+pub fn ensure_directory_chain_secure(path: &Path, workspace: &str) -> Result<()> {
+    let workspace_path = Path::new(workspace);
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(workspace_path));
+    let normalized_path = normalize_path(path);
+
+    if !normalized_path.starts_with(&canonical_workspace) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Directory path escapes workspace: '{}' is not within '{}'",
+            normalized_path.display(),
+            canonical_workspace.display()
+        )));
+    }
+
+    let relative = normalized_path
+        .strip_prefix(&canonical_workspace)
+        .map_err(|_| {
+            ZeptoError::SecurityViolation(format!(
+                "Directory path escapes workspace: '{}' is not within '{}'",
+                normalized_path.display(),
+                canonical_workspace.display()
+            ))
+        })?;
+
+    let mut current = canonical_workspace.clone();
+    for component in relative.components() {
+        current.push(component);
+
+        check_symlink_escape(&current, &canonical_workspace)?;
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Symlink escape detected while creating directory '{}'",
+                        current.display()
+                    )));
+                }
+                if !meta.is_dir() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Cannot create directory '{}': existing path is not a directory",
+                        current.display()
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(ZeptoError::Tool(format!(
+                            "Failed to create directory '{}': {}",
+                            current.display(),
+                            e
+                        )));
+                    }
+                }
+
+                let meta = std::fs::symlink_metadata(&current).map_err(|e| {
+                    ZeptoError::Tool(format!(
+                        "Failed to inspect directory '{}' after creation: {}",
+                        current.display(),
+                        e
+                    ))
+                })?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Directory '{}' became unsafe during creation",
+                        current.display()
+                    )));
+                }
+            }
+            Err(e) => {
+                return Err(ZeptoError::Tool(format!(
+                    "Failed to inspect directory '{}': {}",
+                    current.display(),
+                    e
+                )));
+            }
+        }
+
+        if let Ok(canonical) = current.canonicalize() {
+            if !canonical.starts_with(&canonical_workspace) {
+                return Err(ZeptoError::SecurityViolation(format!(
+                    "Directory '{}' resolves outside workspace to '{}'",
+                    current.display(),
+                    canonical.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Checks if a file has multiple hard links, which could indicate it aliases
 /// an inode outside the workspace trust boundary.
 ///
@@ -780,6 +880,32 @@ mod tests {
             result.is_err(),
             "Should detect symlink escape on revalidation"
         );
+    }
+
+    #[test]
+    fn test_ensure_directory_chain_secure_creates_nested_dirs() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+        let nested = canonical.join("a/b/c");
+
+        let result = ensure_directory_chain_secure(&nested, workspace);
+        assert!(result.is_ok());
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn test_ensure_directory_chain_secure_rejects_symlink_parent() {
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        let linked = canonical.join("linked");
+        symlink(outside.path(), &linked).unwrap();
+
+        let result = ensure_directory_chain_secure(&linked.join("child"), workspace);
+        assert!(result.is_err());
     }
 
     // ==================== CHECK_HARDLINK_WRITE TESTS ====================

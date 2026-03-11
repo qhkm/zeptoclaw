@@ -249,12 +249,12 @@ src/
 │   ├── manager.rs  # Channel lifecycle management
 │   ├── model_switch.rs # /model command parsing + model registry + persistence
 │   ├── persona_switch.rs # /persona command parsing + preset registry + LTM persistence
-│   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support)
+│   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support, numeric-ID allowlist default for new setups)
 │   ├── slack.rs    # Slack outbound channel
 │   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
-│   ├── webhook.rs  # Generic HTTP webhook inbound
+│   ├── webhook.rs  # Generic HTTP webhook inbound with optional Bearer + HMAC auth and fixed server-side identity
 │   ├── whatsapp_web.rs # WhatsApp Web via wa-rs native (feature: whatsapp-web)
-│   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official webhook + REST)
+│   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official signed webhook + REST)
 │   ├── lark.rs     # Lark/Feishu messaging (WS long-connection)
 │   ├── email_channel.rs # Email channel (IMAP IDLE + SMTP)
 │   ├── mqtt.rs    # MQTT channel for IoT device messaging (feature: mqtt)
@@ -320,7 +320,7 @@ src/
 │   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
 │   ├── shell.rs       # Shell execution with runtime isolation
 │   ├── diff.rs        # Unified diff parser/applier (used by edit_file)
-│   ├── filesystem.rs  # Read, write, list, edit files (4 tools: read, write, list, edit + diff mode)
+│   ├── filesystem.rs  # Read, write, list, edit files with secure parent-dir creation and no-follow writes
 │   ├── find.rs        # File discovery by glob pattern (FindTool)
 │   ├── grep.rs        # Codebase search by regex pattern (GrepTool)
 │   ├── web.rs         # Web search (Brave + DuckDuckGo + SearXNG) and fetch with SSRF protection
@@ -433,12 +433,12 @@ OAuth support with PKCE, CSRF state validation, encrypted token persistence, and
 
 ### Channels (`src/channels/`)
 Message input channels via `Channel` trait:
-- `TelegramChannel` - Telegram bot integration
+- `TelegramChannel` - Telegram bot integration with numeric-ID allowlists by default for new setups and legacy username matching behind `allow_usernames`
 - `SlackChannel` - Slack outbound messaging
 - `DiscordChannel` - Discord Gateway WebSocket + REST API messaging (replies + thread creation)
-- `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth
+- `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth, HMAC-SHA256 body signing, and fixed server-side sender/chat identity by default
 - `WhatsAppWebChannel` - WhatsApp Web via wa-rs native client (QR pairing, feature: whatsapp-web)
-- `WhatsAppCloudChannel` - WhatsApp Cloud API (webhook inbound + REST outbound, no bridge)
+- `WhatsAppCloudChannel` - WhatsApp Cloud API (signed webhook inbound + REST outbound, no bridge)
 - `MqttChannel` - MQTT messaging for IoT devices over WiFi/network (rumqttc, feature: mqtt)
 - `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
 - CLI mode via direct agent invocation
@@ -549,8 +549,8 @@ Panel web dashboard backend:
 
 ### Security (`src/security/`)
 - `shell.rs` - Regex-based command blocklist + optional allowlist (`ShellAllowlistMode`: Off/Warn/Strict); includes `.zeptoclaw/config.json` blocklist to prevent LLM-driven config exfiltration
-- `path.rs` - Workspace path validation, symlink escape detection
-- `mount.rs` - Mount allowlist validation, docker binary verification, host-path `..` traversal rejection, lightweight blocked-path checks on unresolved paths plus canonical host paths when the source exists, and Unix hardlink alias rejection for regular-file mounts
+- `path.rs` - Workspace path validation, symlink escape detection, and secure directory-chain creation for write paths
+- `mount.rs` - Mount allowlist validation, docker binary verification, host-path `..` traversal rejection, lightweight blocked-path checks on unresolved paths plus canonical host paths when the source exists, and Unix hardlink alias rejection for regular-file mounts in both blocked-path and allowlist validation flows
 - `encryption.rs` - `SecretEncryption`: XChaCha20-Poly1305 AEAD + Argon2id KDF, `ENC[...]` ciphertext format, `resolve_master_key()` for env/file/prompt sources, transparent config decrypt on load
 
 ### Tunnel (`src/tunnel/`)

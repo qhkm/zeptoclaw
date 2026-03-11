@@ -87,6 +87,8 @@ subtle = "2.5"
 hex = "0.4"
 # HMAC-SHA256 for CSRF token generation/validation
 ring = "0.17"
+# Platform-specific filesystem flags such as O_NOFOLLOW
+libc = "0.2"
 
 # =============================================================================
 # ASYNC UTILITIES

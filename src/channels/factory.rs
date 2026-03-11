@@ -89,6 +89,11 @@ pub async fn register_configured_channels(
                 port: webhook_config.port,
                 path: webhook_config.path.clone(),
                 auth_token: webhook_config.auth_token.clone(),
+                signature_secret: webhook_config.signature_secret.clone(),
+                signature_header: webhook_config.signature_header.clone(),
+                sender_id: webhook_config.sender_id.clone(),
+                chat_id: webhook_config.chat_id.clone(),
+                trust_payload_identity: webhook_config.trust_payload_identity,
             };
             let base_config = BaseChannelConfig {
                 name: "webhook".to_string(),

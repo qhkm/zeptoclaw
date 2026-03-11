@@ -214,6 +214,8 @@ pub fn validate_extra_mounts(mounts: &[String], allowlist_path: &str) -> Result<
             )));
         }
 
+        validate_no_hardlink_alias(&host_path, mount)?;
+
         let allowed_root = allowlist
             .allowed_roots
             .iter()
@@ -388,6 +390,23 @@ mod tests {
         let validated =
             validate_extra_mounts(&mounts, allowlist.to_str().unwrap()).expect("should validate");
         assert!(validated[0].ends_with(":ro"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_mount_rejects_regular_file_with_multiple_hardlinks() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let alias = temp.path().join("alias.txt");
+        std::fs::write(&source, "secret").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+
+        let allowlist = temp.path().join("allowlist.json");
+        write_allowlist(&allowlist, temp.path(), true);
+
+        let mounts = vec![format!("{}:/workspace/data", alias.display())];
+        let err = validate_extra_mounts(&mounts, allowlist.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("hard links"));
     }
 
     #[test]

@@ -885,6 +885,22 @@ pub struct WebhookConfig {
     /// Optional Bearer token for request authentication
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Optional HMAC secret for request signature verification.
+    #[serde(default)]
+    pub signature_secret: Option<String>,
+    /// Header carrying the request HMAC signature when `signature_secret` is set.
+    #[serde(default = "default_webhook_signature_header")]
+    pub signature_header: String,
+    /// Server-controlled sender ID used when `trust_payload_identity` is disabled.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Optional server-controlled chat ID used when `trust_payload_identity` is disabled.
+    /// Falls back to `sender_id` when omitted.
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// When true, accept caller-supplied `sender` and `chat_id` from webhook JSON.
+    #[serde(default)]
+    pub trust_payload_identity: bool,
     /// Allowlist of sender IDs (empty = allow all unless `deny_by_default` is set)
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -905,6 +921,10 @@ fn default_webhook_path() -> String {
     "/webhook".to_string()
 }
 
+fn default_webhook_signature_header() -> String {
+    "X-ZeptoClaw-Signature-256".to_string()
+}
+
 impl Default for WebhookConfig {
     fn default() -> Self {
         Self {
@@ -913,26 +933,55 @@ impl Default for WebhookConfig {
             port: default_webhook_port(),
             path: default_webhook_path(),
             auth_token: None,
+            signature_secret: None,
+            signature_header: default_webhook_signature_header(),
+            sender_id: None,
+            chat_id: None,
+            trust_payload_identity: false,
             allow_from: Vec::new(),
             deny_by_default: false,
         }
     }
 }
 
+fn default_telegram_allow_usernames() -> bool {
+    true
+}
+
 /// Telegram channel configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelegramConfig {
     /// Whether the channel is enabled
     #[serde(default)]
     pub enabled: bool,
     /// Bot token from BotFather
     pub token: String,
-    /// Allowlist of user IDs/usernames (empty = allow all unless `deny_by_default` is set)
+    /// Allowlist of numeric user IDs (empty = allow all unless `deny_by_default` is set).
+    ///
+    /// Legacy username entries are only honored when `allow_usernames` is true.
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// When true, empty `allow_from` rejects all senders (strict mode).
     #[serde(default)]
     pub deny_by_default: bool,
+    /// Legacy compatibility toggle for username-based allowlist entries.
+    ///
+    /// New configs should keep this disabled and use numeric Telegram user IDs only.
+    #[serde(default = "default_telegram_allow_usernames")]
+    pub allow_usernames: bool,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: String::new(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+            allow_usernames: default_telegram_allow_usernames(),
+        }
+    }
 }
 
 /// Discord channel configuration
@@ -987,6 +1036,9 @@ pub struct WhatsAppCloudConfig {
     /// Webhook verify token (you choose this secret, must match Meta dashboard).
     #[serde(default)]
     pub webhook_verify_token: String,
+    /// Optional Meta app secret used to verify `X-Hub-Signature-256` callback signatures.
+    #[serde(default)]
+    pub app_secret: Option<String>,
     /// Address to bind the webhook HTTP server to.
     #[serde(default = "default_whatsapp_cloud_bind")]
     pub bind_address: String,
@@ -1023,6 +1075,7 @@ impl Default for WhatsAppCloudConfig {
             phone_number_id: String::new(),
             access_token: String::new(),
             webhook_verify_token: String::new(),
+            app_secret: None,
             bind_address: default_whatsapp_cloud_bind(),
             port: default_whatsapp_cloud_port(),
             path: default_whatsapp_cloud_path(),
@@ -2483,6 +2536,7 @@ mod tests {
         assert!(config.phone_number_id.is_empty());
         assert!(config.access_token.is_empty());
         assert!(config.webhook_verify_token.is_empty());
+        assert!(config.app_secret.is_none());
         assert_eq!(config.bind_address, "127.0.0.1");
         assert_eq!(config.port, 9877);
         assert_eq!(config.path, "/whatsapp");
@@ -2497,6 +2551,7 @@ mod tests {
             "phone_number_id": "123456",
             "access_token": "EAAx...",
             "webhook_verify_token": "my-verify-secret",
+            "app_secret": "meta-secret",
             "port": 8443,
             "allow_from": ["60123456789"]
         }"#;
@@ -2505,6 +2560,7 @@ mod tests {
         assert_eq!(config.phone_number_id, "123456");
         assert_eq!(config.access_token, "EAAx...");
         assert_eq!(config.webhook_verify_token, "my-verify-secret");
+        assert_eq!(config.app_secret.as_deref(), Some("meta-secret"));
         assert_eq!(config.port, 8443);
         assert_eq!(config.allow_from, vec!["60123456789"]);
     }

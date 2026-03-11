@@ -69,6 +69,8 @@ use super::{BaseChannelConfig, Channel};
 /// silently overwrites earlier ones.
 #[derive(Clone)]
 struct Allowlist(Vec<String>);
+#[derive(Clone, Copy)]
+struct AllowUsernames(bool);
 #[derive(Clone)]
 struct DefaultModel(String);
 #[derive(Clone)]
@@ -115,6 +117,35 @@ fn render_telegram_html(content: &str) -> String {
     }
 
     out
+}
+
+fn is_numeric_allowlist_entry(entry: &str) -> bool {
+    let trimmed = entry.trim();
+    !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn allowlist_has_username_entries(allowlist: &[String]) -> bool {
+    allowlist
+        .iter()
+        .any(|entry| !is_numeric_allowlist_entry(entry))
+}
+
+fn telegram_allowlist_allows(
+    allowlist: &[String],
+    user_id: &str,
+    username: &str,
+    allow_usernames: bool,
+) -> bool {
+    allowlist.contains(&user_id.to_string())
+        || (allow_usernames
+            && !username.is_empty()
+            && allowlist.iter().any(|entry| {
+                let entry_lower = entry.trim().to_lowercase();
+                let user_lower = username.to_lowercase();
+                entry_lower == user_lower
+                    || entry_lower == format!("@{user_lower}")
+                    || format!("@{entry_lower}") == user_lower
+            }))
 }
 
 /// Telegram channel implementation using teloxide.
@@ -193,6 +224,18 @@ impl TelegramChannel {
         configured_models: Vec<(String, String)>,
         memory_enabled: bool,
     ) -> Self {
+        if allowlist_has_username_entries(&config.allow_from) {
+            if config.allow_usernames {
+                warn!(
+                    "Telegram allow_from contains username entries. Username matching is a legacy compatibility mode and can drift if usernames are reassigned; migrate to numeric user IDs and set channels.telegram.allow_usernames=false when ready."
+                );
+            } else {
+                warn!(
+                    "Telegram allow_from contains non-numeric entries, but channels.telegram.allow_usernames=false so only numeric user IDs will match."
+                );
+            }
+        }
+
         let base_config = BaseChannelConfig {
             name: "telegram".to_string(),
             allowlist: config.allow_from.clone(),
@@ -312,6 +355,7 @@ impl Channel for TelegramChannel {
         let token = self.config.token.clone();
         let bus = self.bus.clone();
         let allowlist = Allowlist(self.config.allow_from.clone());
+        let allow_usernames = AllowUsernames(self.config.allow_usernames);
         let deny_by_default = self.config.deny_by_default;
         let overrides_dep = OverridesDep {
             model: self.model_overrides.clone(),
@@ -408,6 +452,7 @@ impl Channel for TelegramChannel {
                          msg: Message,
                          bus: Arc<MessageBus>,
                          Allowlist(allowlist): Allowlist,
+                         AllowUsernames(allow_usernames): AllowUsernames,
                          deny_by_default: bool,
                          overrides_dep: OverridesDep,
                          DefaultModel(default_model): DefaultModel,
@@ -427,19 +472,15 @@ impl Channel for TelegramChannel {
                                 .unwrap_or_default();
 
                             // Check allowlist with deny_by_default support.
-                            // Accepts both numeric IDs ("123456") and usernames ("alice" or "@alice").
                             let allowed = if allowlist.is_empty() {
                                 !deny_by_default
                             } else {
-                                allowlist.contains(&user_id)
-                                    || (!username.is_empty()
-                                        && allowlist.iter().any(|entry| {
-                                            let entry_lower = entry.to_lowercase();
-                                            let user_lower = username.to_lowercase();
-                                            entry_lower == user_lower
-                                                || entry_lower == format!("@{user_lower}")
-                                                || format!("@{entry_lower}") == user_lower
-                                        }))
+                                telegram_allowlist_allows(
+                                    &allowlist,
+                                    &user_id,
+                                    &username,
+                                    allow_usernames,
+                                )
                             };
                             if !allowed {
                                 if allowlist.is_empty() {
@@ -763,6 +804,7 @@ impl Channel for TelegramChannel {
                     .dependencies(dptree::deps![
                         bus,
                         allowlist,
+                        allow_usernames,
                         deny_by_default,
                         overrides_dep,
                         default_model,
@@ -1014,6 +1056,37 @@ mod tests {
         assert!(channel.is_allowed("admin"));
         assert!(!channel.is_allowed("user3"));
         assert!(!channel.is_allowed("hacker"));
+    }
+
+    #[test]
+    fn test_telegram_allowlist_allows_numeric_user_id_without_usernames() {
+        let allowlist = vec!["123456".to_string()];
+        assert!(telegram_allowlist_allows(
+            &allowlist, "123456", "alice", false
+        ));
+        assert!(!telegram_allowlist_allows(
+            &allowlist, "999999", "alice", false
+        ));
+    }
+
+    #[test]
+    fn test_telegram_allowlist_rejects_username_when_disabled() {
+        let allowlist = vec!["alice".to_string(), "@bob".to_string()];
+        assert!(!telegram_allowlist_allows(
+            &allowlist, "123456", "alice", false
+        ));
+        assert!(!telegram_allowlist_allows(
+            &allowlist, "123456", "bob", false
+        ));
+    }
+
+    #[test]
+    fn test_telegram_allowlist_allows_legacy_username_when_enabled() {
+        let allowlist = vec!["alice".to_string(), "@bob".to_string()];
+        assert!(telegram_allowlist_allows(
+            &allowlist, "123456", "alice", true
+        ));
+        assert!(telegram_allowlist_allows(&allowlist, "123456", "bob", true));
     }
 
     #[test]

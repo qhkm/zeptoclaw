@@ -6,10 +6,16 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+#[cfg(unix)]
+use std::{fs::OpenOptions, io::Write as _, os::unix::fs::MetadataExt};
 
 use crate::error::{Result, ZeptoError};
-use crate::security::{check_hardlink_write, revalidate_path, validate_path_in_workspace};
+#[cfg(not(unix))]
+use crate::security::check_hardlink_write;
+use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
 use crate::tools::diff::apply_unified_diff;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
@@ -32,6 +38,85 @@ fn resolve_path(path: &str, ctx: &ToolContext) -> Result<(String, String)> {
         safe_path.as_path().to_string_lossy().to_string(),
         workspace.clone(),
     ))
+}
+
+#[cfg(unix)]
+fn write_file_secure_blocking(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_directory_chain_secure(parent, workspace)?;
+            revalidate_path(parent, workspace)?;
+        }
+    }
+
+    revalidate_path(path, workspace)?;
+
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(path).map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to securely open file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    let metadata = file.metadata().map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to inspect opened file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    if metadata.is_file() && metadata.nlink() > 1 {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Write blocked: '{}' has {} hard links and may alias content outside workspace",
+            path.display(),
+            metadata.nlink()
+        )));
+    }
+
+    file.set_len(0).map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to truncate file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    file.write_all(content).map_err(|e| {
+        ZeptoError::Tool(format!("Failed to write file '{}': {}", path.display(), e))
+    })?;
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_file_secure_blocking(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_directory_chain_secure(parent, workspace)?;
+            revalidate_path(parent, workspace)?;
+        }
+    }
+
+    revalidate_path(path, workspace)?;
+    check_hardlink_write(path)?;
+    std::fs::write(path, content).map_err(|e| {
+        ZeptoError::Tool(format!("Failed to write file '{}': {}", path.display(), e))
+    })?;
+    Ok(())
+}
+
+async fn write_file_secure(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    let path = path.to_path_buf();
+    let workspace = workspace.to_string();
+    let content = content.to_vec();
+    tokio::task::spawn_blocking(move || write_file_secure_blocking(&path, &workspace, &content))
+        .await
+        .map_err(|e| ZeptoError::Tool(format!("Secure write task failed: {}", e)))?
 }
 
 /// Tool for reading file contents.
@@ -177,24 +262,7 @@ impl Tool for WriteFileTool {
         let (full_path, workspace) = resolve_path(path, ctx)?;
         let full_path_ref = Path::new(&full_path);
 
-        // TOCTOU: re-validate BEFORE any filesystem mutation (including mkdir)
-        revalidate_path(full_path_ref, &workspace)?;
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = full_path_ref.parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ZeptoError::Tool(format!("Failed to create parent directories: {}", e))
-                })?;
-            }
-        }
-
-        // Hardlink check: block writes to files with multiple hard links
-        check_hardlink_write(full_path_ref)?;
-
-        tokio::fs::write(&full_path, content).await.map_err(|e| {
-            ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
-        })?;
+        write_file_secure(full_path_ref, &workspace, content.as_bytes()).await?;
 
         Ok(ToolOutput::llm_only(format!(
             "Successfully wrote {} bytes to {}",
@@ -402,14 +470,7 @@ impl Tool for EditFileTool {
             let (new_content, summary) = apply_unified_diff(&content, diff_str)
                 .map_err(|e| ZeptoError::Tool(format!("Diff apply failed: {}", e)))?;
 
-            revalidate_path(full_path_ref, &workspace)?;
-            check_hardlink_write(full_path_ref)?;
-
-            tokio::fs::write(&full_path, &new_content)
-                .await
-                .map_err(|e| {
-                    ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
-                })?;
+            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
 
             Ok(ToolOutput::llm_only(format!(
                 "Applied {} hunk(s): +{} -{} in {}",
@@ -433,14 +494,7 @@ impl Tool for EditFileTool {
 
             let new_content = content.replace(old_text, new_text);
 
-            revalidate_path(full_path_ref, &workspace)?;
-            check_hardlink_write(full_path_ref)?;
-
-            tokio::fs::write(&full_path, &new_content)
-                .await
-                .map_err(|e| {
-                    ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
-                })?;
+            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
 
             let replacements = content.matches(old_text).count();
             Ok(ToolOutput::llm_only(format!(
