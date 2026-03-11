@@ -4,8 +4,11 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
 
 use zeptoclaw::bus::{InboundMessage, MessageBus};
+use zeptoclaw::channels::model_switch::ModelOverride;
 use zeptoclaw::config::Config;
 use zeptoclaw::gateway::ipc::UsageSnapshot;
 use zeptoclaw::health::UsageMetrics;
@@ -14,6 +17,49 @@ use zeptoclaw::providers::{
 };
 
 use super::common::{create_agent, create_agent_with_template, resolve_template};
+use super::slash::SlashHelper;
+
+const CLI_CHANNEL: &str = "cli";
+const CLI_SENDER_ID: &str = "user";
+const CLI_CHAT_ID: &str = "cli";
+
+fn cli_inbound_message(content: &str) -> InboundMessage {
+    InboundMessage::new(CLI_CHANNEL, CLI_SENDER_ID, CLI_CHAT_ID, content)
+}
+
+fn cli_session_key() -> String {
+    format!("{}:{}", CLI_CHANNEL, CLI_CHAT_ID)
+}
+
+fn active_model_override(
+    model_override: &Option<(Option<String>, String)>,
+    default_model: &str,
+) -> Option<ModelOverride> {
+    model_override
+        .as_ref()
+        .map(|(provider, model)| ModelOverride {
+            provider: provider.clone().or_else(|| {
+                default_model
+                    .split_once(':')
+                    .map(|(provider, _)| provider.to_string())
+            }),
+            model: model.clone(),
+        })
+}
+
+fn format_tool_list(tool_names: &[&str]) -> String {
+    if tool_names.is_empty() {
+        return "No tools registered.".to_string();
+    }
+
+    let mut out = format!("Available tools ({}):\n\n", tool_names.len());
+    for name in tool_names {
+        out.push_str("  ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
 
 /// Interactive or single-message agent mode.
 pub(crate) async fn cmd_agent(
@@ -98,7 +144,7 @@ pub(crate) async fn cmd_agent(
 
     if let Some(msg) = message {
         // Single message mode
-        let inbound = InboundMessage::new("cli", "user", "cli", &msg);
+        let inbound = cli_inbound_message(&msg);
         let streaming = stream || config.agents.defaults.streaming;
 
         if streaming {
@@ -138,84 +184,290 @@ pub(crate) async fn cmd_agent(
             }
         }
     } else {
-        // Interactive mode
+        // Interactive mode with rustyline (tab completion for slash commands)
         println!("ZeptoClaw Interactive Agent");
-        println!("Type your message and press Enter. Type 'quit' or 'exit' to stop.");
+        println!("Type your message and press Enter. Type /help for commands, /quit to exit.");
         println!();
 
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
+        // Track model/persona overrides set via /model and /persona commands.
+        // Injected into InboundMessage metadata so the agent loop uses them.
+        let mut model_override: Option<(Option<String>, String)> = None; // (provider, model)
+        let mut persona_override: Option<String> = None;
+
+        // Try rustyline; fall back to raw stdin if terminal is unavailable.
+        let mut rl = match Editor::new() {
+            Ok(mut editor) => {
+                editor.set_helper(Some(SlashHelper::new()));
+                // Persist history across sessions
+                let history_path =
+                    dirs::home_dir().map(|h| h.join(".zeptoclaw/state/repl_history"));
+                if let Some(ref path) = history_path {
+                    let _ = editor.load_history(path);
+                }
+                Some((editor, history_path))
+            }
+            Err(_) => None,
+        };
 
         loop {
-            print!("> ");
-            stdout.flush()?;
-
-            let mut input = String::new();
-            match stdin.lock().read_line(&mut input) {
-                Ok(0) => {
-                    // EOF
-                    println!();
-                    break;
-                }
-                Ok(_) => {
-                    let input = input.trim();
-                    if input.is_empty() {
-                        continue;
-                    }
-                    if input == "quit" || input == "exit" {
+            let input = if let Some((ref mut editor, _)) = rl {
+                match editor.readline("> ") {
+                    Ok(line) => line,
+                    Err(ReadlineError::Eof | ReadlineError::Interrupted) => {
                         println!("Goodbye!");
                         break;
                     }
-
-                    // Process message
-                    let inbound = InboundMessage::new("cli", "user", "cli", input);
-                    let streaming = stream || config.agents.defaults.streaming;
-
-                    if streaming {
-                        use zeptoclaw::providers::StreamEvent;
-                        match agent.process_message_streaming(&inbound).await {
-                            Ok(mut rx) => {
-                                println!();
-                                while let Some(event) = rx.recv().await {
-                                    match event {
-                                        StreamEvent::Delta(text) => {
-                                            print!("{}", text);
-                                            let _ = io::stdout().flush();
-                                        }
-                                        StreamEvent::Done { .. } => break,
-                                        StreamEvent::Error(e) => {
-                                            eprintln!("{}", format_cli_error(&e));
-                                        }
-                                        StreamEvent::ToolCalls(_) => {}
-                                    }
-                                }
-                                println!();
-                                println!();
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_cli_error(&e));
-                                eprintln!();
-                            }
-                        }
-                    } else {
-                        match agent.process_message(&inbound).await {
-                            Ok(response) => {
-                                println!();
-                                println!("{}", response);
-                                println!();
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_cli_error(&e));
-                                eprintln!();
-                            }
-                        }
+                    Err(e) => {
+                        eprintln!("Error reading input: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading input: {}", e);
-                    break;
+            } else {
+                // Fallback: raw stdin (piped/non-TTY) — no prompt to avoid
+                // contaminating piped output.
+                let mut buf = String::new();
+                match io::stdin().lock().read_line(&mut buf) {
+                    Ok(0) => {
+                        println!();
+                        break;
+                    }
+                    Ok(_) => buf,
+                    Err(e) => {
+                        eprintln!("Error reading input: {}", e);
+                        break;
+                    }
+                }
+            };
+
+            let input = input.trim();
+            if input.is_empty() {
+                continue;
+            }
+
+            // Add to history
+            if let Some((ref mut editor, _)) = rl {
+                let _ = editor.add_history_entry(input);
+            }
+
+            // Handle slash commands
+            if let Some(cmd) = input.strip_prefix('/') {
+                match cmd {
+                    "quit" | "exit" => {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    "help" => {
+                        println!("{}", super::slash::format_help());
+                        continue;
+                    }
+                    _ if cmd == "model" || cmd.starts_with("model ") => {
+                        use zeptoclaw::channels::model_switch::{
+                            format_model_list, parse_model_command, ModelCommand,
+                        };
+                        use zeptoclaw::providers::configured_provider_models;
+                        if let Some(mcmd) = parse_model_command(input) {
+                            match mcmd {
+                                ModelCommand::Show => {
+                                    if let Some((ref p, ref m)) = model_override {
+                                        let provider = p.as_deref().unwrap_or("auto");
+                                        println!("Current model: {}:{} (override)", provider, m);
+                                    } else {
+                                        println!(
+                                            "Current model: {} (default)",
+                                            config.agents.defaults.model
+                                        );
+                                    }
+                                }
+                                ModelCommand::List => {
+                                    let providers = configured_provider_names(&config)
+                                        .into_iter()
+                                        .map(|s| s.to_string())
+                                        .collect::<Vec<_>>();
+                                    let models = configured_provider_models(&config);
+                                    let current = active_model_override(
+                                        &model_override,
+                                        &config.agents.defaults.model,
+                                    );
+                                    let list =
+                                        format_model_list(&providers, current.as_ref(), &models);
+                                    println!("{}", list);
+                                }
+                                ModelCommand::Set(ov) => {
+                                    // Store override; injected via InboundMessage metadata
+                                    // so the agent loop uses it (same pattern as Telegram).
+                                    model_override = Some((ov.provider.clone(), ov.model.clone()));
+                                    if let Some(p) = &ov.provider {
+                                        println!("Switched to {}:{}", p, ov.model);
+                                    } else {
+                                        println!("Switched to {}", ov.model);
+                                    }
+                                }
+                                ModelCommand::Reset => {
+                                    model_override = None;
+                                    println!(
+                                        "Model reset to default: {}",
+                                        config.agents.defaults.model
+                                    );
+                                }
+                            }
+                        } else {
+                            println!("Current model: {}", config.agents.defaults.model);
+                        }
+                        continue;
+                    }
+                    _ if cmd == "persona" || cmd.starts_with("persona ") => {
+                        use zeptoclaw::channels::persona_switch::{
+                            parse_persona_command, PersonaCommand, PERSONA_PRESETS,
+                        };
+                        if let Some(pcmd) = parse_persona_command(input) {
+                            match pcmd {
+                                PersonaCommand::Show => {
+                                    if let Some(ref p) = persona_override {
+                                        println!("Current persona: {} (override)", p);
+                                    } else {
+                                        println!("Current persona: default");
+                                    }
+                                }
+                                PersonaCommand::List => {
+                                    println!("Available personas:\n");
+                                    for preset in PERSONA_PRESETS {
+                                        let marker =
+                                            if persona_override.as_deref() == Some(preset.name) {
+                                                " (active)"
+                                            } else {
+                                                ""
+                                            };
+                                        println!(
+                                            "  {:<16} {}{}",
+                                            preset.name, preset.label, marker
+                                        );
+                                    }
+                                }
+                                PersonaCommand::Set(name) => {
+                                    persona_override = Some(name.clone());
+                                    println!("Persona set to: {}", name);
+                                }
+                                PersonaCommand::Reset => {
+                                    persona_override = None;
+                                    println!("Persona reset to default.");
+                                }
+                            }
+                        } else {
+                            println!("Current persona: default");
+                        }
+                        continue;
+                    }
+                    "tools" => {
+                        let tool_names = agent.tool_names().await;
+                        let refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+                        println!("{}", format_tool_list(&refs));
+                        continue;
+                    }
+                    _ if cmd == "template" || cmd.starts_with("template ") => {
+                        use zeptoclaw::config::templates::TemplateRegistry;
+                        if cmd == "template list" || cmd == "template" {
+                            let registry = TemplateRegistry::new();
+                            println!("Available templates:\n");
+                            for t in registry.list() {
+                                println!("  {:<16} {}", t.name, t.description);
+                            }
+                        } else {
+                            println!("Usage: /template list");
+                        }
+                        continue;
+                    }
+                    "history" => {
+                        println!("Use 'zeptoclaw history list' for full history.");
+                        println!("This session's messages are tracked automatically.");
+                        continue;
+                    }
+                    "memory" => {
+                        println!(
+                            "Use 'zeptoclaw memory list' or 'zeptoclaw memory search <query>'."
+                        );
+                        continue;
+                    }
+                    "clear" => {
+                        match agent.session_manager().delete(&cli_session_key()).await {
+                            Ok(_) => println!("Conversation cleared."),
+                            Err(e) => eprintln!("Warning: failed to clear session: {}", e),
+                        }
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("Unknown command: /{}", cmd);
+                        eprintln!("Type /help to see available commands.");
+                        continue;
+                    }
                 }
             }
+
+            // Legacy quit/exit support (without slash)
+            if input == "quit" || input == "exit" {
+                println!("Goodbye!");
+                break;
+            }
+
+            // Process message through agent, injecting any active overrides
+            let mut inbound = cli_inbound_message(input);
+            if let Some((ref provider, ref model)) = model_override {
+                inbound = inbound.with_metadata("model_override", model);
+                if let Some(ref p) = provider {
+                    inbound = inbound.with_metadata("provider_override", p);
+                }
+            }
+            if let Some(ref persona) = persona_override {
+                inbound = inbound.with_metadata("persona_override", persona);
+            }
+            let streaming = stream || config.agents.defaults.streaming;
+
+            if streaming {
+                use zeptoclaw::providers::StreamEvent;
+                match agent.process_message_streaming(&inbound).await {
+                    Ok(mut rx) => {
+                        println!();
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                StreamEvent::Delta(text) => {
+                                    print!("{}", text);
+                                    let _ = io::stdout().flush();
+                                }
+                                StreamEvent::Done { .. } => break,
+                                StreamEvent::Error(e) => {
+                                    eprintln!("{}", format_cli_error(&e));
+                                }
+                                StreamEvent::ToolCalls(_) => {}
+                            }
+                        }
+                        println!();
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format_cli_error(&e));
+                        eprintln!();
+                    }
+                }
+            } else {
+                match agent.process_message(&inbound).await {
+                    Ok(response) => {
+                        println!();
+                        println!("{}", response);
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format_cli_error(&e));
+                        eprintln!();
+                    }
+                }
+            }
+        }
+
+        // Save history on exit
+        if let Some((ref mut editor, Some(ref path))) = rl {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = editor.save_history(path);
         }
     }
 
@@ -364,5 +616,59 @@ mod tests {
         let msg = format_cli_error(&e);
         assert_eq!(msg, "Something went wrong");
         assert!(!msg.contains("Fix:"));
+    }
+
+    #[test]
+    fn test_cli_session_key_matches_inbound_message() {
+        let inbound = cli_inbound_message("hello");
+        assert_eq!(inbound.session_key, cli_session_key());
+    }
+
+    #[test]
+    fn test_format_tool_list_lists_each_tool() {
+        let output = format_tool_list(&["echo", "filesystem", "web_fetch"]);
+        assert!(output.contains("Available tools (3):"));
+        assert!(output.contains("  echo"));
+        assert!(output.contains("  filesystem"));
+        assert!(output.contains("  web_fetch"));
+    }
+
+    #[test]
+    fn test_format_tool_list_handles_empty_registry() {
+        assert_eq!(format_tool_list(&[]), "No tools registered.");
+    }
+
+    #[test]
+    fn test_active_model_override_uses_explicit_provider() {
+        let current = active_model_override(
+            &Some((Some("openai".to_string()), "gpt-5.1".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        )
+        .unwrap();
+        assert_eq!(current.provider.as_deref(), Some("openai"));
+        assert_eq!(current.model, "gpt-5.1");
+    }
+
+    #[test]
+    fn test_active_model_override_falls_back_to_default_provider() {
+        let current = active_model_override(
+            &Some((None, "claude-haiku-4-5-20251001".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        )
+        .unwrap();
+        assert_eq!(current.provider.as_deref(), Some("anthropic"));
+        assert_eq!(current.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_active_model_override_marks_current_in_formatted_list() {
+        let current = active_model_override(
+            &Some((Some("openai".to_string()), "gpt-5.1".to_string())),
+            "anthropic:claude-sonnet-4-5-20250929",
+        );
+        let providers = vec!["openai".to_string()];
+        let list =
+            zeptoclaw::channels::model_switch::format_model_list(&providers, current.as_ref(), &[]);
+        assert!(list.contains("gpt-5.1 GPT-5.1 (current)"));
     }
 }

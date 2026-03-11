@@ -25,6 +25,7 @@ pub mod secrets;
 #[cfg(feature = "panel")]
 pub mod serve;
 pub mod skills;
+pub mod slash;
 pub mod status;
 pub mod template;
 pub mod tools;
