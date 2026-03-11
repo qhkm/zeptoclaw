@@ -407,11 +407,14 @@ fn resolve_credential(
     #[cfg(not(test))]
     if result.is_none() && spec.name == "anthropic" {
         if let Some(token_set) = crate::auth::claude_import::read_claude_credentials() {
-            tracing::warn!(
-                "Using Claude subscription token (unofficial). \
-                 This may violate Anthropic's Terms of Service. \
-                 Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY for official API access."
-            );
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "Using Claude subscription token (unofficial). \
+                     This may violate Anthropic's Terms of Service. \
+                     Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY for official API access."
+                );
+            });
 
             let credential = ResolvedCredential::BearerToken {
                 access_token: token_set.access_token,
