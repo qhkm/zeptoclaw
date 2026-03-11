@@ -97,7 +97,7 @@ impl Completer for SlashHelper {
         }
 
         // Strip the leading '/' for matching
-        let query = &line[1..pos];
+        let query = line.get(1..pos).unwrap_or("");
 
         let mut matches: Vec<Pair> = self
             .commands

@@ -24,7 +24,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# default build: lib 3090 total (3084 passed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
+# default build: lib 3106 total (3100 passed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
 
 # Version
 ./target/release/zeptoclaw --version
@@ -277,6 +277,7 @@ src/
 │   ├── tools.rs    # Tool discovery list/info + dynamic status summary
 │   ├── hand.rs     # Hands-lite list/activate/deactivate/status commands
 │   ├── provider.rs # Provider chain status introspection (resolved providers, wrappers, quota)
+│   ├── slash.rs     # Slash command registry, completer, help formatter (rustyline)
 │   ├── uninstall.rs # State removal + guarded binary uninstall command
 │   └── watch.rs    # URL change monitoring with channel notification
 ├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
@@ -833,6 +834,7 @@ Key crates:
 - `async-trait` - Async trait support
 - `tracing` - Structured logging
 - `clap` - CLI argument parsing
+- `rustyline` - Readline with tab-completion for interactive CLI
 - `scraper` - HTML parsing for web_fetch
 - `aho-corasick` - Multi-pattern string matching for safety layer
 - `quick-xml` - XML parsing for Android uiautomator dumps (optional, `android` feature)

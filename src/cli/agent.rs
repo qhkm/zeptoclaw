@@ -206,9 +206,8 @@ pub(crate) async fn cmd_agent(
                     }
                 }
             } else {
-                // Fallback: raw stdin (piped/non-TTY)
-                print!("> ");
-                io::stdout().flush()?;
+                // Fallback: raw stdin (piped/non-TTY) — no prompt to avoid
+                // contaminating piped output.
                 let mut buf = String::new();
                 match io::stdin().lock().read_line(&mut buf) {
                     Ok(0) => {
