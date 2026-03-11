@@ -184,6 +184,29 @@ View heartbeat service status.
 zeptoclaw heartbeat --show
 ```
 
+## uninstall
+
+Remove ZeptoClaw state and optionally the current binary.
+
+```bash
+zeptoclaw uninstall [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--remove-binary` | Remove the current binary for direct installs in `~/.local/bin` or `/usr/local/bin` |
+| `-y, --yes` | Skip the confirmation prompt |
+
+### Examples
+
+```bash
+# Remove ~/.zeptoclaw
+zeptoclaw uninstall --yes
+
+# Remove ~/.zeptoclaw and a direct-install binary
+zeptoclaw uninstall --remove-binary --yes
+```
+
 ## skills
 
 Manage agent skills.
