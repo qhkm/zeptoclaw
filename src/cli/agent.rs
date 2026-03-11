@@ -203,8 +203,7 @@ pub(crate) async fn cmd_agent(
             }
 
             // Handle slash commands
-            if input.starts_with('/') {
-                let cmd = &input[1..]; // strip leading /
+            if let Some(cmd) = input.strip_prefix('/') {
                 match cmd {
                     "quit" | "exit" => {
                         println!("Goodbye!");
@@ -222,10 +221,7 @@ pub(crate) async fn cmd_agent(
                         if let Some(mcmd) = parse_model_command(input) {
                             match mcmd {
                                 ModelCommand::Show => {
-                                    println!(
-                                        "Current model: {}",
-                                        config.agents.defaults.model
-                                    );
+                                    println!("Current model: {}", config.agents.defaults.model);
                                 }
                                 ModelCommand::List => {
                                     let providers = configured_provider_names(&config)
@@ -233,8 +229,7 @@ pub(crate) async fn cmd_agent(
                                         .map(|s| s.to_string())
                                         .collect::<Vec<_>>();
                                     let models = configured_provider_models(&config);
-                                    let list =
-                                        format_model_list(&providers, None, &models);
+                                    let list = format_model_list(&providers, None, &models);
                                     println!("{}", list);
                                 }
                                 ModelCommand::Set(ov) => {
@@ -247,8 +242,7 @@ pub(crate) async fn cmd_agent(
                                 }
                                 ModelCommand::Reset => {
                                     if let Ok(fresh) = Config::load() {
-                                        config.agents.defaults.model =
-                                            fresh.agents.defaults.model;
+                                        config.agents.defaults.model = fresh.agents.defaults.model;
                                     }
                                     println!(
                                         "Model reset to default: {}",
@@ -257,10 +251,7 @@ pub(crate) async fn cmd_agent(
                                 }
                             }
                         } else {
-                            println!(
-                                "Current model: {}",
-                                config.agents.defaults.model
-                            );
+                            println!("Current model: {}", config.agents.defaults.model);
                         }
                         continue;
                     }
@@ -276,10 +267,7 @@ pub(crate) async fn cmd_agent(
                                 PersonaCommand::List => {
                                     println!("Available personas:\n");
                                     for preset in PERSONA_PRESETS {
-                                        println!(
-                                            "  {:<16} {}",
-                                            preset.name, preset.label
-                                        );
+                                        println!("  {:<16} {}", preset.name, preset.label);
                                     }
                                 }
                                 PersonaCommand::Set(name) => {
@@ -318,12 +306,8 @@ pub(crate) async fn cmd_agent(
                         continue;
                     }
                     "history" => {
-                        println!(
-                            "Use 'zeptoclaw history list' for full history."
-                        );
-                        println!(
-                            "This session's messages are tracked automatically."
-                        );
+                        println!("Use 'zeptoclaw history list' for full history.");
+                        println!("This session's messages are tracked automatically.");
                         continue;
                     }
                     "memory" => {
