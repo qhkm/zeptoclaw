@@ -439,6 +439,7 @@ Message input channels via `Channel` trait:
 - `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth, HMAC-SHA256 body signing, and fixed server-side sender/chat identity by default
 - `WhatsAppWebChannel` - WhatsApp Web via wa-rs native client (QR pairing, feature: whatsapp-web)
 - `WhatsAppCloudChannel` - WhatsApp Cloud API (signed webhook inbound + REST outbound, no bridge)
+- `EmailChannel` - IMAP IDLE + SMTP email channel; sender allowlist is parsed From-header trust only and warns accordingly
 - `MqttChannel` - MQTT messaging for IoT devices over WiFi/network (rumqttc, feature: mqtt)
 - `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
 - CLI mode via direct agent invocation

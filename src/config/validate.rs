@@ -260,6 +260,20 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
                     });
                 }
 
+                if name == "email"
+                    && enabled
+                    && channel_obj
+                        .get("allowed_senders")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|senders| !senders.is_empty())
+                {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Warn,
+                        path: "channels.email.allowed_senders".to_string(),
+                        message: "Email sender allowlists trust the parsed From header only; enforce SPF/DKIM/DMARC upstream if sender authenticity matters".to_string(),
+                    });
+                }
+
                 if name == "telegram" {
                     let allow_usernames = channel_obj
                         .get("allow_usernames")
@@ -557,6 +571,28 @@ mod tests {
         let diags = validate_config(&raw);
         assert!(diags.iter().any(|d| {
             d.level == DiagnosticLevel::Warn && d.message.contains("anyone can message")
+        }));
+    }
+
+    #[test]
+    fn test_validate_email_allowed_senders_warns_header_only_trust() {
+        let raw = json!({
+            "channels": {
+                "email": {
+                    "enabled": true,
+                    "imap_host": "imap.example.com",
+                    "smtp_host": "smtp.example.com",
+                    "username": "bot@example.com",
+                    "password": "secret",
+                    "allowed_senders": ["@example.com"]
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "channels.email.allowed_senders"
+                && d.message.contains("From header")
         }));
     }
 

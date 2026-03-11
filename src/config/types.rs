@@ -2919,6 +2919,10 @@ pub struct EmailConfig {
     #[serde(default)]
     pub display_name: Option<String>,
     /// Allowlist of sender email addresses or domains.
+    ///
+    /// These entries are matched against the parsed inbound `From` header.
+    /// Use upstream authenticated-mail enforcement (SPF/DKIM/DMARC) if sender
+    /// authenticity matters.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     /// When `true` and `allowed_senders` is empty, all senders are denied.

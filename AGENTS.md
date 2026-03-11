@@ -23,6 +23,7 @@ Project-level guidance for coding agents working in this repository.
 - Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
 - Webhook auth hardening: generic webhook supports optional HMAC-SHA256 body signatures plus fixed server-side sender/chat identity by default (`trust_payload_identity` is an explicit legacy escape hatch); WhatsApp Cloud verifies `X-Hub-Signature-256` when `app_secret` is configured
 - Telegram allowlist hardening: numeric user IDs are the safe default for new setups; legacy username matching remains available only through `channels.telegram.allow_usernames` for compatibility and emits warnings when non-numeric allowlist entries are present
+- Email allowlist limitation surfaced: `channels.email.allowed_senders` matches the parsed `From` header only and now emits config/runtime warnings so authenticated-mail enforcement is pushed upstream
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success

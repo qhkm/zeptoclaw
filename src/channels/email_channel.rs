@@ -21,6 +21,11 @@
 //!   }
 //! }
 //! ```
+//!
+//! `allowed_senders` is matched against the parsed inbound `From` header.
+//! This is a trust-model limitation of IMAP/header-based ingestion, not a
+//! cryptographic sender-authentication guarantee. If sender authenticity
+//! matters, enforce SPF/DKIM/DMARC upstream before messages reach this channel.
 
 #[cfg(feature = "channel-email")]
 use futures::FutureExt;
@@ -65,6 +70,14 @@ pub struct EmailChannel {
 impl EmailChannel {
     /// Create a new `EmailChannel` from configuration.
     pub fn new(config: EmailConfig, bus: Arc<MessageBus>) -> Self {
+        #[cfg(feature = "channel-email")]
+        if config.enabled && !config.allowed_senders.is_empty() {
+            warn!(
+                "Email allowed_senders relies on the parsed From header only. \
+                 Enforce SPF/DKIM/DMARC upstream if sender authenticity matters."
+            );
+        }
+
         let base_config = BaseChannelConfig {
             name: "email".to_string(),
             allowlist: config.allowed_senders.clone(),
@@ -447,6 +460,12 @@ impl Channel for EmailChannel {
                 "Email channel starting (IMAP IDLE on {})",
                 self.config.imap_host
             );
+            if !self.config.allowed_senders.is_empty() {
+                warn!(
+                    "Email allowed_senders checks parsed From headers only; \
+                     configure authenticated-mail enforcement upstream if sender authenticity matters."
+                );
+            }
             Ok(())
         }
     }
