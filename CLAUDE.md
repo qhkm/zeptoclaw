@@ -642,6 +642,18 @@ Environment variables override config:
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` — enable WhatsApp Web channel (default: false)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` — session persistence directory (default: ~/.zeptoclaw/state/whatsapp_web)
 
+### Keyless Providers
+
+Ollama and vLLM do not require an API key. Just add the provider section to config:
+
+```json
+{"providers": {"ollama": {}}}
+{"providers": {"ollama": {"api_base": "https://my-cloud-ollama.example.com/v1"}}}
+{"providers": {"ollama": {"api_key": "secret", "api_base": "https://my-cloud-ollama.example.com/v1"}}}
+```
+
+When no `api_key` is set, no Authorization header is sent. When `api_key` is set, it sends `Authorization: Bearer <key>` as normal.
+
 ### Cargo Features
 
 - `android` — Enable Android device control tool via ADB
