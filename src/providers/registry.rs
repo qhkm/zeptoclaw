@@ -23,6 +23,9 @@ pub struct ProviderSpec {
     pub default_auth_header: Option<&'static str>,
     /// Default API version query param. None = no query param.
     pub default_api_version: Option<&'static str>,
+    /// Whether this provider requires an API key to resolve.
+    /// Set to `false` for local/keyless providers (e.g. Ollama, vLLM) that run without auth.
+    pub api_key_required: bool,
 }
 
 /// Runtime-ready provider selection.
@@ -58,6 +61,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "anthropic",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "openai",
@@ -67,6 +71,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "openrouter",
@@ -76,6 +81,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "groq",
@@ -85,6 +91,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "zhipu",
@@ -94,6 +101,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "vllm",
@@ -103,6 +111,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: false,
     },
     ProviderSpec {
         name: "gemini",
@@ -112,6 +121,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "ollama",
@@ -121,6 +131,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: false,
     },
     ProviderSpec {
         name: "nvidia",
@@ -130,6 +141,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "deepseek",
@@ -139,6 +151,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "kimi",
@@ -148,6 +161,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "azure",
@@ -157,6 +171,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: Some("api-key"),
         default_api_version: Some("2024-08-01-preview"),
+        api_key_required: true,
     },
     ProviderSpec {
         name: "bedrock",
@@ -166,6 +181,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None, // AWS SigV4 required; not yet implemented natively
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "xai",
@@ -175,6 +191,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
     ProviderSpec {
         name: "qianfan",
@@ -184,6 +201,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         backend: "openai",
         default_auth_header: None,
         default_api_version: None,
+        api_key_required: true,
     },
 ];
 
@@ -215,24 +233,38 @@ fn configured_api_key(provider: Option<&ProviderConfig>) -> Option<&str> {
 }
 
 /// Returns all configured provider ids in registry order.
+///
+/// Key-required providers are included only when an API key is present.
+/// Keyless providers (e.g. Ollama, vLLM) are included whenever a config section is present,
+/// even without an API key.
 pub fn configured_provider_names(config: &Config) -> Vec<&'static str> {
     PROVIDER_REGISTRY
         .iter()
         .filter_map(|spec| {
-            configured_api_key(provider_config_by_name(config, spec.name)).map(|_| spec.name)
+            let provider = provider_config_by_name(config, spec.name)?;
+            if !spec.api_key_required || configured_api_key(Some(provider)).is_some() {
+                Some(spec.name)
+            } else {
+                None
+            }
         })
         .collect()
 }
 
 /// Returns `(provider_name, model)` pairs for each configured provider that has an
 /// explicit `model` field set. Useful for showing user-configured models in `/model list`.
+///
+/// Key-required providers must have an API key to appear. Keyless providers (e.g. Ollama, vLLM)
+/// are eligible whenever a config section with a model is present.
 pub fn configured_provider_models(config: &Config) -> Vec<(String, String)> {
     PROVIDER_REGISTRY
         .iter()
         .filter_map(|spec| {
             let prov = provider_config_by_name(config, spec.name)?;
-            // Only include providers that have both an API key and an explicit model set.
-            configured_api_key(Some(prov))?;
+            // For key-required providers, must have an API key. Keyless providers are always eligible.
+            if spec.api_key_required && configured_api_key(Some(prov)).is_none() {
+                return None;
+            }
             let model = prov.model.as_ref()?.clone();
             if model.is_empty() {
                 return None;
@@ -288,7 +320,7 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
 
         // Resolve credential based on auth method
         let (credential, api_key_str) =
-            match resolve_credential(spec.name, &auth_method, provider, token_store.as_ref()) {
+            match resolve_credential(spec, &auth_method, provider, token_store.as_ref()) {
                 Some(pair) => pair,
                 None => continue, // No credential available for this provider
             };
@@ -335,11 +367,12 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
 ///
 /// Returns `Some((credential, api_key_string))` or `None` if no credential is available.
 fn resolve_credential(
-    provider_name: &str,
+    spec: &ProviderSpec,
     auth_method: &AuthMethod,
     provider_config: Option<&ProviderConfig>,
     token_store: Option<&crate::auth::store::TokenStore>,
 ) -> Option<(ResolvedCredential, String)> {
+    let provider_name = spec.name;
     let api_key = configured_api_key(provider_config);
 
     let result = match auth_method {
@@ -362,10 +395,17 @@ fn resolve_credential(
         }
     };
 
+    // Keyless fallback: providers that don't require an API key (e.g. Ollama, vLLM)
+    // resolve with an empty credential when no key/OAuth token is configured,
+    // as long as the provider section is present in config.
+    if result.is_none() && !spec.api_key_required && provider_config.is_some() {
+        return Some((ResolvedCredential::ApiKey(String::new()), String::new()));
+    }
+
     // Last-resort fallback: import from Claude CLI (Keychain / ~/.claude.json).
     // Disabled in test builds to avoid picking up real credentials from the host.
     #[cfg(not(test))]
-    if result.is_none() && provider_name == "anthropic" {
+    if result.is_none() && spec.name == "anthropic" {
         if let Some(token_set) = crate::auth::claude_import::read_claude_credentials() {
             tracing::warn!(
                 "Using Claude subscription token (unofficial). \
@@ -672,13 +712,14 @@ mod tests {
             ..Default::default()
         };
 
-        let (credential, api_key) = resolve_credential(
-            "anthropic",
-            &AuthMethod::Auto,
-            Some(&provider),
-            Some(&store),
-        )
-        .expect("credential should resolve");
+        let spec = PROVIDER_REGISTRY
+            .iter()
+            .find(|s| s.name == "anthropic")
+            .expect("anthropic spec must exist");
+
+        let (credential, api_key) =
+            resolve_credential(spec, &AuthMethod::Auto, Some(&provider), Some(&store))
+                .expect("credential should resolve");
 
         assert_eq!(api_key, "sk-ant-fallback");
         assert!(matches!(credential, ResolvedCredential::ApiKey(_)));
@@ -895,5 +936,96 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].name, "xai");
         assert_eq!(resolved[1].name, "qianfan");
+    }
+
+    #[test]
+    fn test_ollama_resolves_without_api_key() {
+        let mut config = Config::default();
+        config.providers.ollama = Some(ProviderConfig {
+            api_base: Some("http://localhost:11434/v1".to_string()),
+            ..Default::default()
+        });
+
+        let selected =
+            resolve_runtime_provider(&config).expect("ollama should resolve without api key");
+        assert_eq!(selected.name, "ollama");
+        assert_eq!(selected.api_key, "");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    #[test]
+    fn test_vllm_resolves_without_api_key() {
+        let mut config = Config::default();
+        config.providers.vllm = Some(ProviderConfig {
+            api_base: Some("http://gpu-server:8000/v1".to_string()),
+            ..Default::default()
+        });
+
+        let selected =
+            resolve_runtime_provider(&config).expect("vllm should resolve without api key");
+        assert_eq!(selected.name, "vllm");
+        assert_eq!(selected.api_key, "");
+    }
+
+    #[test]
+    fn test_ollama_bare_config_resolves_with_defaults() {
+        let mut config = Config::default();
+        config.providers.ollama = Some(ProviderConfig::default());
+
+        let selected =
+            resolve_runtime_provider(&config).expect("bare ollama config should resolve");
+        assert_eq!(selected.name, "ollama");
+        assert_eq!(selected.api_key, "");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    #[test]
+    fn test_ollama_with_api_key_still_resolves_with_key() {
+        let mut config = Config::default();
+        config.providers.ollama = Some(ProviderConfig {
+            api_key: Some("secret-cloud-key".to_string()),
+            api_base: Some("https://cloud-ollama.example.com/v1".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("ollama with key should resolve");
+        assert_eq!(selected.name, "ollama");
+        assert_eq!(selected.api_key, "secret-cloud-key");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://cloud-ollama.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn test_configured_provider_names_includes_keyless_ollama() {
+        let mut config = Config::default();
+        config.providers.ollama = Some(ProviderConfig::default());
+
+        let names = configured_provider_names(&config);
+        assert!(
+            names.contains(&"ollama"),
+            "keyless ollama should appear in configured providers"
+        );
+    }
+
+    #[test]
+    fn test_configured_provider_models_includes_keyless_provider_with_model() {
+        let mut config = Config::default();
+        config.providers.ollama = Some(ProviderConfig {
+            model: Some("llama3.3".to_string()),
+            ..Default::default()
+        });
+
+        let models = configured_provider_models(&config);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].0, "ollama");
+        assert_eq!(models[0].1, "llama3.3");
     }
 }

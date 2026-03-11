@@ -95,6 +95,24 @@ zeptoclaw --help
 # Shows available commands
 ```
 
+## Uninstall
+
+Use the built-in uninstall command to remove ZeptoClaw state:
+
+```bash
+zeptoclaw uninstall --yes
+
+# Also remove a direct-install binary from ~/.local/bin or /usr/local/bin
+zeptoclaw uninstall --remove-binary --yes
+```
+
+If you installed ZeptoClaw with a package manager, remove the binary with the same tool:
+
+```bash
+brew uninstall qhkm/tap/zeptoclaw
+cargo uninstall zeptoclaw
+```
+
 ## Next steps
 
 Now that ZeptoClaw is installed, follow the [quick start guide](/docs/getting-started/quick-start/) to run your first agent interaction.
