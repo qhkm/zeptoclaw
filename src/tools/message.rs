@@ -23,6 +23,7 @@ const ALLOWED_CHANNELS: &[&str] = &[
     "discord",
     "webhook",
     "whatsapp",
+    "whatsapp_web",
     "whatsapp_cloud",
 ];
 
@@ -74,7 +75,7 @@ impl Tool for MessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Destination channel name (telegram, discord, slack, whatsapp, webhook). Omit when replying — the originating channel is used automatically."
+                    "description": "Destination channel name (telegram, discord, slack, whatsapp_web, webhook). Omit when replying — the originating channel is used automatically."
                 },
                 "chat_id": {
                     "type": "string",
@@ -124,6 +125,11 @@ impl Tool for MessageTool {
             .map(str::to_string)
             .or_else(|| ctx.channel.clone())
             .ok_or_else(|| ZeptoError::Tool("No target channel specified".to_string()))?;
+        let channel = if channel.eq_ignore_ascii_case("whatsapp") {
+            "whatsapp_web".to_string()
+        } else {
+            channel
+        };
 
         let chat_id = args
             .get("chat_id")
@@ -423,6 +429,7 @@ mod tests {
             "discord",
             "webhook",
             "whatsapp",
+            "whatsapp_web",
             "whatsapp_cloud",
         ] {
             let bus = Arc::new(MessageBus::new());
@@ -445,20 +452,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_tool_allows_whatsapp_channels() {
-        for channel in &["whatsapp", "whatsapp_cloud"] {
+        for (requested, published) in &[
+            ("whatsapp", "whatsapp_web"),
+            ("whatsapp_web", "whatsapp_web"),
+            ("whatsapp_cloud", "whatsapp_cloud"),
+        ] {
             let bus = Arc::new(MessageBus::new());
             let tool = MessageTool::new(bus.clone());
 
             let result = tool
                 .execute(
-                    json!({"content": "Hi from WhatsApp", "channel": channel, "chat_id": "123"}),
+                    json!({"content": "Hi from WhatsApp", "channel": requested, "chat_id": "123"}),
                     &ToolContext::new(),
                 )
                 .await;
 
-            assert!(result.is_ok(), "Channel '{}' should be allowed", channel);
+            assert!(result.is_ok(), "Channel '{}' should be allowed", requested);
             let outbound = bus.consume_outbound().await.expect("outbound message");
-            assert_eq!(outbound.channel, *channel);
+            assert_eq!(outbound.channel, *published);
             assert_eq!(outbound.content, "Hi from WhatsApp");
         }
     }
