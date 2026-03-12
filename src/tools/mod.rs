@@ -60,6 +60,7 @@
 pub mod android;
 pub mod approval;
 pub mod binary_plugin;
+pub mod clarification;
 pub mod composed;
 pub mod cron;
 pub mod custom;
@@ -102,6 +103,7 @@ pub mod whatsapp;
 #[cfg(feature = "android")]
 pub use android::AndroidTool;
 pub use binary_plugin::BinaryPluginTool;
+pub use clarification::AskClarificationTool;
 pub use composed::{ComposedTool, CreateToolTool};
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
