@@ -1173,6 +1173,12 @@ impl Config {
                 .map(str::to_string)
                 .collect();
         }
+
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SKILLS_GITHUB_TOKEN") {
+            if !val.trim().is_empty() {
+                self.skills.github_token = Some(val);
+            }
+        }
     }
 
     /// Apply safety-layer environment variable overrides.
