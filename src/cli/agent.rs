@@ -103,19 +103,74 @@ pub(crate) async fn cmd_agent(
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
     agent.set_tool_feedback(feedback_tx).await;
 
-    // Spawn feedback printer to stderr
+    // Spawn feedback printer with shimmer + step tracking
     tokio::spawn(async move {
+        use super::shimmer::{
+            extract_args_hint, format_tool_done, format_tool_failed, format_tool_start,
+            print_response_separator, ShimmerSpinner,
+        };
         use zeptoclaw::agent::ToolFeedbackPhase;
+
+        let mut step: usize = 0;
+        let mut shimmer: Option<ShimmerSpinner> = None;
+        let mut had_tools = false;
+
         while let Some(fb) = feedback_rx.recv().await {
             match fb.phase {
+                ToolFeedbackPhase::Thinking => {
+                    shimmer = Some(ShimmerSpinner::start());
+                }
+                ToolFeedbackPhase::ThinkingDone => {
+                    if let Some(s) = shimmer.take() {
+                        s.stop();
+                    }
+                }
                 ToolFeedbackPhase::Starting => {
-                    eprint!("  [{}] Running...", fb.tool_name);
+                    // Stop shimmer if still running (LLM returned tool calls)
+                    if let Some(s) = shimmer.take() {
+                        s.stop();
+                    }
+                    step += 1;
+                    had_tools = true;
+                    let hint = fb
+                        .args_json
+                        .as_deref()
+                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
+                    let line = format_tool_start(step, &fb.tool_name, hint.as_deref());
+                    eprintln!("{}", line);
                 }
                 ToolFeedbackPhase::Done { elapsed_ms } => {
-                    eprintln!(" done ({:.1}s)", elapsed_ms as f64 / 1000.0);
+                    let hint = fb
+                        .args_json
+                        .as_deref()
+                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
+                    // Move cursor up and overwrite the "Starting" line
+                    eprint!("\x1b[1A\x1b[2K");
+                    let line = format_tool_done(step, &fb.tool_name, hint.as_deref(), elapsed_ms);
+                    eprintln!("{}", line);
                 }
                 ToolFeedbackPhase::Failed { elapsed_ms, error } => {
-                    eprintln!(" failed ({:.1}s): {}", elapsed_ms as f64 / 1000.0, error);
+                    let hint = fb
+                        .args_json
+                        .as_deref()
+                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
+                    eprint!("\x1b[1A\x1b[2K");
+                    let line = format_tool_failed(
+                        step,
+                        &fb.tool_name,
+                        hint.as_deref(),
+                        elapsed_ms,
+                        &error,
+                    );
+                    eprintln!("{}", line);
+                }
+                ToolFeedbackPhase::ResponseReady => {
+                    if let Some(s) = shimmer.take() {
+                        s.stop();
+                    }
+                    if had_tools {
+                        print_response_separator();
+                    }
                 }
             }
         }

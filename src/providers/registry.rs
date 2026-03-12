@@ -409,10 +409,10 @@ fn resolve_credential(
         if let Some(token_set) = crate::auth::claude_import::read_claude_credentials() {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
             WARN_ONCE.call_once(|| {
-                tracing::warn!(
-                    "Using Claude subscription token (unofficial). \
-                     This may violate Anthropic's Terms of Service. \
-                     Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY for official API access."
+                // Dim the warning so it doesn't dominate CLI output
+                eprintln!(
+                    "\x1b[2mUsing Claude subscription token (unofficial). \
+                     Set ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY for official API access.\x1b[0m"
                 );
             });
 

@@ -24,6 +24,7 @@ pub mod quota;
 pub mod secrets;
 #[cfg(feature = "panel")]
 pub mod serve;
+pub(crate) mod shimmer;
 pub mod skills;
 pub mod slash;
 pub mod status;

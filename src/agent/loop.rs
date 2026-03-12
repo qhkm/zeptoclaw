@@ -308,11 +308,17 @@ pub struct ToolFeedback {
     pub tool_name: String,
     /// Current phase of execution.
     pub phase: ToolFeedbackPhase,
+    /// Raw JSON arguments for extracting display hints.
+    pub args_json: Option<String>,
 }
 
 /// Phase of tool execution feedback.
 #[derive(Debug, Clone)]
 pub enum ToolFeedbackPhase {
+    /// LLM is processing (shimmer should start).
+    Thinking,
+    /// LLM finished thinking (shimmer should stop).
+    ThinkingDone,
     /// Tool execution is starting.
     Starting,
     /// Tool execution completed successfully.
@@ -327,6 +333,8 @@ pub enum ToolFeedbackPhase {
         /// Error description.
         error: String,
     },
+    /// All tool execution and LLM processing complete; final response follows.
+    ResponseReady,
 }
 
 /// The main agent loop that processes messages and coordinates with LLM providers.
@@ -968,10 +976,29 @@ impl AgentLoop {
             return Ok(cached_response);
         }
 
+        // Send thinking feedback
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::Thinking,
+                args_json: None,
+            });
+        }
+
         // Call LLM -- provider lock is NOT held during this await
         let mut response = provider
             .chat(messages, tool_definitions, model, options.clone())
             .await?;
+
+        // Send thinking done feedback
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::ThinkingDone,
+                args_json: None,
+            });
+        }
+
         if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref()) {
             metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
         }
@@ -1198,6 +1225,7 @@ impl AgentLoop {
                             let _ = tx.send(ToolFeedback {
                                 tool_name: name.clone(),
                                 phase: ToolFeedbackPhase::Starting,
+                                args_json: Some(raw_args.clone()),
                             });
                         }
                         #[cfg(feature = "panel")]
@@ -1266,6 +1294,7 @@ impl AgentLoop {
                                 let _ = tx.send(ToolFeedback {
                                     tool_name: name.clone(),
                                     phase: ToolFeedbackPhase::Done { elapsed_ms: latency_ms },
+                                    args_json: Some(raw_args.clone()),
                                 });
                             }
                             #[cfg(feature = "panel")]
@@ -1288,6 +1317,7 @@ impl AgentLoop {
                                         elapsed_ms: latency_ms,
                                         error: result.clone(),
                                     },
+                                    args_json: Some(raw_args.clone()),
                                 });
                             }
                             #[cfg(feature = "panel")]
@@ -1419,9 +1449,28 @@ impl AgentLoop {
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
 
+            // Send thinking feedback for tool-loop LLM call
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::Thinking,
+                    args_json: None,
+                });
+            }
+
             response = provider
                 .chat(messages, tool_definitions, model, options.clone())
                 .await?;
+
+            // Send thinking done feedback
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::ThinkingDone,
+                    args_json: None,
+                });
+            }
+
             if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref())
             {
                 metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
@@ -1439,6 +1488,15 @@ impl AgentLoop {
                 iterations = iteration,
                 "Tool loop reached maximum iterations, returning partial response"
             );
+        }
+
+        // Signal that tools are done and response is ready
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::ResponseReady,
+                args_json: None,
+            });
         }
 
         // Add final assistant response
@@ -1765,6 +1823,7 @@ impl AgentLoop {
                             let _ = tx.send(ToolFeedback {
                                 tool_name: name.clone(),
                                 phase: ToolFeedbackPhase::Starting,
+                                args_json: Some(raw_args.clone()),
                             });
                         }
                         #[cfg(feature = "panel")]
@@ -1830,6 +1889,7 @@ impl AgentLoop {
                                     phase: ToolFeedbackPhase::Done {
                                         elapsed_ms: latency_ms,
                                     },
+                                    args_json: Some(raw_args.clone()),
                                 });
                             } else {
                                 let _ = tx.send(ToolFeedback {
@@ -1838,6 +1898,7 @@ impl AgentLoop {
                                         elapsed_ms: latency_ms,
                                         error: result.clone(),
                                     },
+                                    args_json: Some(raw_args.clone()),
                                 });
                             }
                         }
@@ -2951,6 +3012,7 @@ mod tests {
         let fb = ToolFeedback {
             tool_name: "shell".to_string(),
             phase: ToolFeedbackPhase::Starting,
+            args_json: None,
         };
         let debug_str = format!("{:?}", fb);
         assert!(debug_str.contains("shell"));
