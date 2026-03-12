@@ -123,6 +123,14 @@ pub(crate) async fn cmd_agent(
     // Load configuration
     let mut config = Config::load().with_context(|| "Failed to load configuration")?;
 
+    // In CLI mode, default workspace to CWD so file tools resolve relative
+    // paths against the directory the user ran the command from.
+    if config.agents.defaults.workspace == "~/.zeptoclaw/workspace" {
+        if let Ok(cwd) = std::env::current_dir() {
+            config.agents.defaults.workspace = cwd.to_string_lossy().to_string();
+        }
+    }
+
     // Override agent mode from CLI flag if provided
     if let Some(ref mode_str) = mode {
         config.agent_mode.mode = mode_str.clone();

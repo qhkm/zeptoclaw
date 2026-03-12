@@ -44,9 +44,26 @@ pub async fn execute_tool(
     let start = Instant::now();
 
     // Step 1: Safety check on input
+    //
+    // For file-writing tools (write_file, edit_file), strip the "content" /
+    // "new_text" fields before scanning so the policy engine only checks
+    // paths and metadata — not file body text that legitimately contains
+    // patterns like `$(...)` or backticks in code.
     if let Some(safety_layer) = safety {
-        let input_str = serde_json::to_string(&input).unwrap_or_default();
-        let result = safety_layer.scan(&input_str, CheckDirection::Input);
+        let scan_input = match name {
+            "write_file" | "edit_file" => {
+                // Only scan the "path" field — file body text legitimately
+                // contains code patterns (backticks, `$(...)`, etc.) that
+                // would false-positive on shell_injection.
+                input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+            _ => serde_json::to_string(&input).unwrap_or_default(),
+        };
+        let result = safety_layer.scan(&scan_input, CheckDirection::Input);
         if result.blocked {
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(ToolOutput::error(format!(
