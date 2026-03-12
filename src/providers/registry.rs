@@ -651,6 +651,23 @@ mod tests {
     }
 
     #[test]
+    fn test_zhipu_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.zhipu = Some(ProviderConfig {
+            api_key: Some("zhipu-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "zhipu");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://open.bigmodel.cn/api/paas/v4")
+        );
+    }
+
+    #[test]
     fn test_openai_has_no_default_base_url() {
         let mut config = Config::default();
         config.providers.openai = Some(ProviderConfig {

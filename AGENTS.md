@@ -18,6 +18,7 @@ Project-level guidance for coding agents working in this repository.
 - Library facade: `ZeptoAgent::builder()` for embedding as a crate (Tauri, GUI apps)
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
 - Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
+- Provider onboarding validation: Anthropic uses `GET /v1/models`; OpenAI-compatible presets validate keys with read-only endpoint checks, including Zhipu/GLM via `GET /models`
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
 - Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
