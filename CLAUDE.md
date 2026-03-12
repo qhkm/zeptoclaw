@@ -331,7 +331,7 @@ src/
 ├── migrate/        # OpenClaw migration (config, skills import)
 ├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
 ├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (32 built-in + MCP + binary plugins + android)
+├── tools/          # Agent tools (33 built-in + MCP + binary plugins + android)
 │   ├── android/     # Android device control via ADB (feature-gated: --features android)
 │   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
 │   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
@@ -365,6 +365,7 @@ src/
 │   ├── cron.rs        # Cron job scheduling
 │   ├── spawn.rs       # Background task delegation
 │   ├── delegate.rs    # Agent swarm delegation (DelegateTool) — parallel + sequential modes
+│   ├── clarification.rs # Ask clarification tool (pause for user input)
 │   ├── composed.rs    # Natural language tool composition (CreateToolTool + ComposedTool)
 │   ├── plugin.rs      # Plugin tool adapter (PluginTool)
 │   ├── skills_install.rs # Skill installation tool
@@ -481,7 +482,7 @@ Message input channels via `Channel` trait:
 - `DepFetcher` trait — abstracts network calls for testability
 
 ### Tools (`src/tools/`)
-32 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
+33 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
 
 **Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
 - `CreateToolTool` — agent tool with create/list/delete/run actions
@@ -825,7 +826,7 @@ Verified on Apple Silicon (release build):
 
 Skills are OpenClaw-compatible — the loader reads `metadata.zeptoclaw`, `metadata.openclaw`, or raw metadata objects (in that priority order). Supported extensions: `os` platform filter, `requires.anyBins` (alias `any_bins`).
 
-**Core skills** (bundled in this repo — `skills/`): `github`, `skill-creator`
+**Core skills** (bundled in this repo — `skills/`): `github`, `skill-creator`, `deep-research`
 - Only skills essential to ZeptoClaw's own dev workflow belong here.
 
 **Community skills** (third-party integrations, platform-specific, utilities):
