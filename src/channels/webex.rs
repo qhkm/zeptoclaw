@@ -2,19 +2,23 @@
 //!
 //! Supports:
 //! - Outbound messaging via Webex REST API (`POST /messages`)
-//! - Inbound messaging via Webex Webhooks
+//! - Inbound messaging via Webex Webhooks (requires public HTTPS endpoint)
+//! - Inbound messaging via Message Polling (no webhook needed, works behind firewall)
 //! 
 //! Based on Cisco Webex Teams/Messaging API
 //! Reference: https://developer.webex.com/docs/api/basics
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
@@ -28,6 +32,26 @@ const WEBEX_MESSAGES_ENDPOINT: &str = "/messages";
 const WEBEX_PEOPLE_ENDPOINT: &str = "/people/me";
 const WEBEX_WEBHOOKS_ENDPOINT: &str = "/webhooks";
 const SHA1_BLOCK_SIZE: usize = 64;
+
+#[derive(Debug, Deserialize)]
+struct WebexMessageList {
+    items: Vec<WebexMessageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebexRoomList {
+    items: Vec<WebexRoom>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct WebexRoom {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    room_type: String,  // "direct" or "group"
+}
 
 /// Parsed HTTP request structure
 #[derive(Debug)]
@@ -84,6 +108,8 @@ struct WebexOutboundMessage {
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     markdown: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "parentId")]
     parent_id: Option<String>,
@@ -197,6 +223,8 @@ pub struct WebexChannel {
     shutdown_tx: Option<mpsc::Sender<()>>,
     bot_id: Option<String>,
     webhook_id: Option<String>,
+    processed_message_ids: Arc<Mutex<HashSet<String>>>,
+    startup_time: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
 impl WebexChannel {
@@ -217,6 +245,8 @@ impl WebexChannel {
             shutdown_tx: None,
             bot_id: None,
             webhook_id: None,
+            processed_message_ids: Arc::new(Mutex::new(HashSet::new())),
+            startup_time: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -436,6 +466,264 @@ impl WebexChannel {
         }
     }
 
+    /// Fetch all rooms the bot is in
+    async fn get_rooms(&self) -> Result<Vec<WebexRoom>> {
+        let url = format!("{}/rooms", WEBEX_API_BASE);
+        
+        let response = self.client
+            .get(&url)
+            .bearer_auth(&self.config.access_token)
+            .query(&[("max", "100")])
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Failed to fetch rooms: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(ZeptoError::Channel(format!(
+                "Webex API error fetching rooms ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let room_list: WebexRoomList = response
+            .json()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Failed to parse rooms: {}", e)))?;
+
+        Ok(room_list.items)
+    }
+
+    /// Poll for new messages in a specific room
+    async fn poll_room_messages(&self, room_id: &str, is_direct: bool) -> Result<Vec<WebexMessageData>> {
+        let url = format!("{}{}", WEBEX_API_BASE, WEBEX_MESSAGES_ENDPOINT);
+        
+        let bot_id = self.bot_id.as_ref()
+            .ok_or_else(|| ZeptoError::Channel("Bot ID not set".to_string()))?;
+        
+        let mut request = self.client
+            .get(&url)
+            .bearer_auth(&self.config.access_token)
+            .query(&[("roomId", room_id)]);
+        
+        // For group spaces, only get messages that mention the bot
+        // For direct messages, get all messages
+        if !is_direct {
+            request = request.query(&[("mentionedPeople", bot_id.as_str())]);
+        }
+        
+        let response = request
+            .query(&[("max", "50")])
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Failed to poll messages: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            
+            // Handle rate limiting
+            if status.as_u16() == 429 {
+                let retry_after = response.headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(60);
+                warn!("Rate limited, should retry after {} seconds", retry_after);
+            }
+            
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(ZeptoError::Channel(format!(
+                "Webex API error ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let message_list: WebexMessageList = response
+            .json()
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Failed to parse messages: {}", e)))?;
+
+        Ok(message_list.items)
+    }
+
+    /// Poll for new messages across all rooms
+    async fn poll_messages(&self) -> Result<Vec<WebexMessageData>> {
+        // Get all rooms the bot is in
+        let rooms = self.get_rooms().await?;
+        
+        let mut all_messages = Vec::new();
+        
+        // Poll each room for messages
+        for room in rooms {
+            let is_direct = room.room_type == "direct";
+            match self.poll_room_messages(&room.id, is_direct).await {
+                Ok(mut messages) => all_messages.append(&mut messages),
+                Err(e) => {
+                    // Don't spam logs for rate limiting - already logged in poll_room_messages
+                    if !e.to_string().contains("429") {
+                        warn!("Failed to poll room {}: {}", room.title, e);
+                    }
+                    // Continue with other rooms even if one fails
+                }
+            }
+        }
+        
+        Ok(all_messages)
+    }
+
+    /// Process a polled message
+    async fn process_message(&self, data: WebexMessageData) -> Result<()> {
+        // Ignore messages from bot itself
+        if let Some(ref bot_id) = self.bot_id {
+            if data.person_id == *bot_id {
+                debug!("Skipping bot's own message: {}", data.id);
+                return Ok(());
+            }
+        }
+
+        // Skip messages created before bot startup (historical messages)
+        if let Some(startup_time) = *self.startup_time.lock().await {
+            if let Ok(msg_time) = chrono::DateTime::parse_from_rfc3339(&data.created) {
+                if msg_time.with_timezone(&Utc) < startup_time {
+                    debug!("Skipping historical message: {} from {} (created before startup)", 
+                           data.id, data.person_email);
+                    return Ok(());
+                }
+            }
+        }
+
+        // Check if we've already processed this message
+        let mut processed_ids = self.processed_message_ids.lock().await;
+        if processed_ids.contains(&data.id) {
+            debug!("Skipping already-processed message: {} from {}", data.id, data.person_email);
+            return Ok(());
+        }
+
+        // Mark message as processed
+        info!("Processing NEW message: {} from {}", data.id, data.person_email);
+        processed_ids.insert(data.id.clone());
+        
+        // Keep the set from growing indefinitely - keep last 1000 message IDs
+        if processed_ids.len() > 1000 {
+            // Remove oldest half (crude but effective)
+            let to_remove: Vec<String> = processed_ids.iter().take(500).cloned().collect();
+            for id in to_remove {
+                processed_ids.remove(&id);
+            }
+        }
+        drop(processed_ids);
+
+        // Check allowlist
+        if !self.base_config.is_allowed(&data.person_id) {
+            debug!("User {} not in allowlist, ignoring", data.person_id);
+            return Ok(());
+        }
+
+        // Extract message text (prefer text over markdown)
+        let content = data.text.clone()
+            .or_else(|| data.markdown.clone())
+            .unwrap_or_default();
+
+        if content.is_empty() && data.files.is_empty() {
+            return Ok(());
+        }
+
+        info!("Webex message from {} (room_type={}): {}", data.person_email, data.room_type, content);
+
+        // Process file attachments
+        let mut attachments = Vec::new();
+        for file_url in &data.files {
+            match self.download_file(file_url).await {
+                Ok(attachment) => attachments.push(attachment),
+                Err(e) => warn!("Failed to download Webex file: {}", e),
+            }
+        }
+
+        let mut inbound_msg = InboundMessage::new(
+            "webex",
+            &data.person_id,
+            &data.room_id,
+            &content,
+        );
+        inbound_msg.media = attachments;
+        inbound_msg.metadata.insert("person_email".to_string(), data.person_email.clone());
+        inbound_msg.metadata.insert("room_type".to_string(), data.room_type.clone());
+        if let Ok(raw) = serde_json::to_string(&data) {
+            inbound_msg.metadata.insert("raw_message_data".to_string(), raw);
+        }
+
+        self.bus.publish_inbound(inbound_msg).await;
+        Ok(())
+    }
+
+    /// Start message polling loop
+    async fn start_polling(&mut self) -> Result<mpsc::Sender<()>> {
+        info!("Webex channel using polling mode (interval: {}s)", self.config.poll_interval_secs);
+
+        // Record startup time - only process messages created after this
+        let startup_time = Utc::now();
+        *self.startup_time.lock().await = Some(startup_time);
+        info!("Webex polling will ignore messages before {}", startup_time.to_rfc3339());
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
+        // Clone data for async task
+        let running = Arc::clone(&self.running);
+        let bus = Arc::clone(&self.bus);
+        let config = self.config.clone();
+        let base_config = self.base_config.clone();
+        let client = self.client.clone();
+        let bot_id = self.bot_id.clone();
+        let processed_message_ids = Arc::clone(&self.processed_message_ids);
+        let startup_time = Arc::clone(&self.startup_time);
+        let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
+
+        tokio::spawn(async move {
+            let channel = WebexChannel {
+                config,
+                base_config,
+                bus,
+                running: running.clone(),
+                client,
+                shutdown_tx: None,
+                bot_id,
+                webhook_id: None,
+                processed_message_ids: processed_message_ids.clone(),
+                startup_time: startup_time.clone(),
+            };
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("Webex polling shutting down");
+                        break;
+                    }
+                    _ = sleep(poll_interval) => {
+                        match channel.poll_messages().await {
+                            Ok(messages) => {
+                                if !messages.is_empty() {
+                                    debug!("Polled {} messages from Webex", messages.len());
+                                }
+                                // Process messages in reverse order (oldest first)
+                                for msg in messages.into_iter().rev() {
+                                    if let Err(e) = channel.process_message(msg).await {
+                                        error!("Failed to process Webex message: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to poll Webex messages: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(shutdown_tx)
+    }
+
     /// Start webhook HTTP server
     async fn start_webhook_server(&mut self) -> Result<mpsc::Sender<()>> {
         let webhook_url = self.config.webhook_url.as_ref()
@@ -473,6 +761,8 @@ impl WebexChannel {
                 shutdown_tx: None,
                 bot_id,
                 webhook_id: None,
+                processed_message_ids: Arc::new(Mutex::new(HashSet::new())),
+                startup_time: Arc::new(Mutex::new(None)),
             };
 
             loop {
@@ -514,6 +804,8 @@ impl WebexChannel {
             shutdown_tx: None,
             bot_id: self.bot_id.clone(),
             webhook_id: None,
+            processed_message_ids: Arc::clone(&self.processed_message_ids),
+            startup_time: Arc::clone(&self.startup_time),
         }
     }
 
@@ -585,16 +877,16 @@ impl Channel for WebexChannel {
         // Get bot ID
         self.bot_id = Some(self.get_bot_id().await?);
 
-        // Start webhook server
-        if self.config.webhook_url.is_none() {
-            return Err(ZeptoError::Channel(
-                "Webex requires webhook_url to be configured".to_string(),
-            ));
-        }
-
-        let shutdown_tx = self.start_webhook_server().await?;
+        // Choose between webhook and polling mode
+        let shutdown_tx = if self.config.webhook_url.is_some() {
+            // Webhook mode
+            self.start_webhook_server().await?
+        } else {
+            // Polling mode
+            self.start_polling().await?
+        };
+        
         self.shutdown_tx = Some(shutdown_tx);
-
         self.running.store(true, Ordering::SeqCst);
         info!("Webex channel started");
 
@@ -628,10 +920,37 @@ impl Channel for WebexChannel {
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         let url = format!("{}{}", WEBEX_API_BASE, WEBEX_MESSAGES_ENDPOINT);
 
+        // Check if this is a group space and we should mention the user
+        let room_type = msg.metadata.get("room_type");
+        let sender_id = msg.metadata.get("sender_id");
+        let sender_email = msg.metadata.get("sender_email");
+        
+        debug!("Sending to room_type={:?}, sender_id={:?}", room_type, sender_id);
+        
+        let (text, html) = if room_type.map(|s| s.as_str()) == Some("group") {
+            // For group spaces, mention the user in the response
+            if let (Some(person_id), Some(email)) = (sender_id, sender_email)  {
+                let display_name = email.split('@').next().unwrap_or(email);
+                let html_content = format!(
+                    "<spark-mention data-object-type=\"person\" data-object-id=\"{}\">{}</spark-mention> {}",
+                    person_id, display_name, msg.content
+                );
+                info!("Sending group message with mention to {}", display_name);
+                (None, Some(html_content))
+            } else {
+                (Some(msg.content.clone()), None)
+            }
+        } else {
+            // For direct messages, just send the text
+            info!("Sending direct message (room_type={:?})", room_type);
+            (Some(msg.content.clone()), None)
+        };
+
         let outbound = WebexOutboundMessage {
             room_id: msg.chat_id.clone(),
-            text: Some(msg.content.clone()),
+            text,
             markdown: None,
+            html,
             parent_id: msg.reply_to.clone(),
         };
 

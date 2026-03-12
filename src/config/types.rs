@@ -1106,7 +1106,7 @@ pub struct WebexConfig {
     pub enabled: bool,
     /// Bot access token from Webex Developer Portal
     pub access_token: String,
-    /// Webhook URL for receiving events (optional, uses websocket if not set)
+    /// Webhook URL for receiving events (optional, uses polling if not set)
     #[serde(default)]
     pub webhook_url: Option<String>,
     /// Webhook secret for signature verification (optional but recommended)
@@ -1118,6 +1118,9 @@ pub struct WebexConfig {
     /// Port for webhook HTTP server (default: 8084)
     #[serde(default = "default_webex_port")]
     pub port: u16,
+    /// Polling interval in seconds when webhook_url is not set (default: 15)
+    #[serde(default = "default_webex_poll_interval")]
+    pub poll_interval_secs: u64,
     /// Allowlist of user IDs (empty = allow all unless `deny_by_default` is set)
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -1132,6 +1135,10 @@ fn default_webex_bind() -> String {
 
 fn default_webex_port() -> u16 {
     8084
+}
+
+fn default_webex_poll_interval() -> u64 {
+    15  // Poll every 15 seconds to avoid rate limiting
 }
 
 /// WhatsApp Cloud API channel configuration (official Meta API).
