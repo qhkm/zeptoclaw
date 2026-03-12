@@ -104,6 +104,15 @@ impl Drop for ShimmerSpinner {
     }
 }
 
+/// Format elapsed time: show milliseconds for fast ops, seconds for slower ones.
+fn fmt_elapsed(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1000 {
+        format!("{}ms", elapsed_ms)
+    } else {
+        format!("{:.1}s", elapsed_ms as f64 / 1000.0)
+    }
+}
+
 /// Format a tool step line with checkmark, step number, tool name, and argument hint.
 ///
 /// `step` is 1-based. `args_hint` is an optional short description extracted from
@@ -129,11 +138,11 @@ pub fn format_tool_done(
         .map(|h| format!(" \x1b[38;5;245m→ {}\x1b[0m", h))
         .unwrap_or_default();
     format!(
-        "  \x1b[32m✓\x1b[0m \x1b[2mStep {}\x1b[0m · {}{} \x1b[2m({:.1}s)\x1b[0m",
+        "  \x1b[32m✓\x1b[0m \x1b[2mStep {}\x1b[0m · {}{} \x1b[2m({})\x1b[0m",
         step,
         tool_name,
         hint,
-        elapsed_ms as f64 / 1000.0
+        fmt_elapsed(elapsed_ms)
     )
 }
 
@@ -155,11 +164,11 @@ pub fn format_tool_failed(
         error.to_string()
     };
     format!(
-        "  \x1b[31m✗\x1b[0m \x1b[2mStep {}\x1b[0m · {}{} \x1b[31m({:.1}s: {})\x1b[0m",
+        "  \x1b[31m✗\x1b[0m \x1b[2mStep {}\x1b[0m · {}{} \x1b[31m({}: {})\x1b[0m",
         step,
         tool_name,
         hint,
-        elapsed_ms as f64 / 1000.0,
+        fmt_elapsed(elapsed_ms),
         short_error,
     )
 }
@@ -248,7 +257,7 @@ mod tests {
         let long = "a".repeat(60);
         let args = format!(r#"{{"path": "{}"}}"#, long);
         let hint = extract_args_hint("read_file", &args).unwrap();
-        assert!(hint.len() <= 52); // 50 chars + "…"
+        assert!(hint.len() <= 54); // 50 chars + "…" (3 bytes in UTF-8)
         assert!(hint.ends_with('…'));
     }
 
@@ -283,7 +292,7 @@ mod tests {
         assert!(line.contains("Step 1"));
         assert!(line.contains("read_file"));
         assert!(line.contains("main.rs"));
-        assert!(line.contains("0.2s"));
+        assert!(line.contains("150ms"));
     }
 
     #[test]
@@ -294,6 +303,21 @@ mod tests {
         assert!(line.contains("shell"));
         assert!(line.contains("5.0s"));
         assert!(line.contains("exit code 1"));
+    }
+
+    #[test]
+    fn test_fmt_elapsed_milliseconds() {
+        assert_eq!(fmt_elapsed(0), "0ms");
+        assert_eq!(fmt_elapsed(3), "3ms");
+        assert_eq!(fmt_elapsed(150), "150ms");
+        assert_eq!(fmt_elapsed(999), "999ms");
+    }
+
+    #[test]
+    fn test_fmt_elapsed_seconds() {
+        assert_eq!(fmt_elapsed(1000), "1.0s");
+        assert_eq!(fmt_elapsed(1500), "1.5s");
+        assert_eq!(fmt_elapsed(5000), "5.0s");
     }
 
     #[test]
