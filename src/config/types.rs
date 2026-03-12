@@ -823,6 +823,8 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot configuration
     pub slack: Option<SlackConfig>,
+    /// Webex bot configuration
+    pub webex: Option<WebexConfig>,
     /// WhatsApp Web native channel configuration (requires `whatsapp-web` feature).
     #[serde(alias = "whatsapp")]
     pub whatsapp_web: Option<WhatsAppWebConfig>,
@@ -1094,6 +1096,42 @@ pub struct SlackConfig {
     /// When true, empty `allow_from` rejects all senders (strict mode).
     #[serde(default)]
     pub deny_by_default: bool,
+}
+
+/// Webex channel configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebexConfig {
+    /// Whether the channel is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bot access token from Webex Developer Portal
+    pub access_token: String,
+    /// Webhook URL for receiving events (optional, uses websocket if not set)
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Webhook secret for signature verification (optional but recommended)
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Address to bind webhook HTTP server to (default: 0.0.0.0)
+    #[serde(default = "default_webex_bind")]
+    pub bind_address: String,
+    /// Port for webhook HTTP server (default: 8084)
+    #[serde(default = "default_webex_port")]
+    pub port: u16,
+    /// Allowlist of user IDs (empty = allow all unless `deny_by_default` is set)
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_webex_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_webex_port() -> u16 {
+    8084
 }
 
 /// WhatsApp Cloud API channel configuration (official Meta API).

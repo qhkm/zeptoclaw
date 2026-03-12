@@ -14,7 +14,7 @@ use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppCloudChannel;
-use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel};
+use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel, WebexChannel};
 
 /// Register all configured channels that currently have implementations.
 ///
@@ -81,6 +81,24 @@ pub async fn register_configured_channels(
             }
         }
     }
+
+    // Webex
+    if let Some(ref webex_config) = config.channels.webex {
+        if webex_config.enabled {
+            if webex_config.access_token.is_empty() {
+                warn!("Webex channel enabled but access_token is empty");
+            } else {
+                manager
+                    .register(Box::new(WebexChannel::new(
+                        webex_config.clone(),
+                        bus.clone(),
+                    )))
+                    .await;
+                info!("Registered Webex channel");
+            }
+        }
+    }
+
     // Webhook
     if let Some(ref webhook_config) = config.channels.webhook {
         if webhook_config.enabled {

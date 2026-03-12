@@ -123,6 +123,7 @@ pub mod serial;
 pub mod slack;
 pub mod telegram;
 mod types;
+pub mod webex;
 pub mod webhook;
 pub mod whatsapp_cloud;
 #[cfg(feature = "whatsapp-web")]
@@ -141,6 +142,7 @@ pub use serial::SerialChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};
+pub use webex::WebexChannel;
 pub use webhook::{WebhookChannel, WebhookChannelConfig};
 pub use whatsapp_cloud::WhatsAppCloudChannel;
 #[cfg(feature = "whatsapp-web")]
