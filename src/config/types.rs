@@ -707,7 +707,7 @@ impl Default for AgentDefaults {
             agent_timeout_secs: 300,
             tool_timeout_secs: 0,
             message_queue_mode: MessageQueueMode::default(),
-            streaming: false,
+            streaming: true,
             token_budget: 0,
             compact_tools: false,
             tool_profile: None,
@@ -2340,9 +2340,9 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_defaults_to_false() {
+    fn test_streaming_defaults_to_true() {
         let defaults = AgentDefaults::default();
-        assert!(!defaults.streaming);
+        assert!(defaults.streaming);
     }
 
     #[test]
