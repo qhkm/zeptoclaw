@@ -1094,7 +1094,7 @@ impl AgentLoop {
             let tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
                 .with_workspace(&workspace_str)
-                .with_batch(msg.metadata.get("is_batch").map_or(false, |v| v == "true"));
+                .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer = self.safety_layer.clone();
@@ -1269,7 +1269,7 @@ impl AgentLoop {
                             }
                         };
 
-                        let pause = tool_output.as_ref().map_or(false, |o| o.pause_for_input);
+                        let pause = tool_output.as_ref().is_some_and(|o| o.pause_for_input);
                         let elapsed = tool_start.elapsed();
                         let latency_ms = elapsed.as_millis() as u64;
                         // Send to user if tool opted in
@@ -1425,9 +1425,16 @@ impl AgentLoop {
                 }
 
                 // Record outcomes for outcome-aware blocking.
-                let results_for_guard: Vec<(String, String)> =
-                    results.iter().map(|(id, r, _)| (id.clone(), r.clone())).collect();
-                if check_loop_guard_outcomes(guard, &response.tool_calls, &results_for_guard, &mut session) {
+                let results_for_guard: Vec<(String, String)> = results
+                    .iter()
+                    .map(|(id, r, _)| (id.clone(), r.clone()))
+                    .collect();
+                if check_loop_guard_outcomes(
+                    guard,
+                    &response.tool_calls,
+                    &results_for_guard,
+                    &mut session,
+                ) {
                     response.content =
                         "Stopped tool loop due to repeated identical outcomes.".to_string();
                     break;
@@ -1721,7 +1728,7 @@ impl AgentLoop {
             let tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
                 .with_workspace(&workspace_str)
-                .with_batch(msg.metadata.get("is_batch").map_or(false, |v| v == "true"));
+                .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer_stream = self.safety_layer.clone();
@@ -1874,7 +1881,7 @@ impl AgentLoop {
                                 (format!("Error: Tool '{}' timed out after {}s", name, tool_timeout.as_secs()), false, None)
                             }
                         };
-                        let pause = tool_output.as_ref().map_or(false, |o| o.pause_for_input);
+                        let pause = tool_output.as_ref().is_some_and(|o| o.pause_for_input);
                         if let Some(output) = tool_output {
                             // Send to user if tool opted in
                             if let Some(ref user_msg) = output.for_user {
@@ -1989,9 +1996,16 @@ impl AgentLoop {
                 }
 
                 // Record outcomes for outcome-aware blocking.
-                let results_for_guard: Vec<(String, String)> =
-                    results.iter().map(|(id, r, _)| (id.clone(), r.clone())).collect();
-                if check_loop_guard_outcomes(guard, &response.tool_calls, &results_for_guard, &mut session) {
+                let results_for_guard: Vec<(String, String)> = results
+                    .iter()
+                    .map(|(id, r, _)| (id.clone(), r.clone()))
+                    .collect();
+                if check_loop_guard_outcomes(
+                    guard,
+                    &response.tool_calls,
+                    &results_for_guard,
+                    &mut session,
+                ) {
                     response.content =
                         "Stopped tool loop due to repeated identical outcomes.".to_string();
                     break;

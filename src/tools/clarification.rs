@@ -65,7 +65,9 @@ impl Tool for AskClarificationTool {
         let question = args
             .get("question")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| crate::error::ZeptoError::Tool("Missing required field: question".into()))?;
+            .ok_or_else(|| {
+                crate::error::ZeptoError::Tool("Missing required field: question".into())
+            })?;
 
         let context = args.get("context").and_then(|v| v.as_str());
         let options: Vec<&str> = args
@@ -118,7 +120,10 @@ mod tests {
 
     #[test]
     fn test_compact_description() {
-        assert_eq!(AskClarificationTool.compact_description(), "Ask user for clarification");
+        assert_eq!(
+            AskClarificationTool.compact_description(),
+            "Ask user for clarification"
+        );
     }
 
     #[test]
@@ -145,7 +150,10 @@ mod tests {
         let args = json!({"question": "What format do you want?"});
         let out = AskClarificationTool.execute(args, &ctx()).await.unwrap();
 
-        assert_eq!(out.for_llm, "Clarification requested. Waiting for user response before proceeding.");
+        assert_eq!(
+            out.for_llm,
+            "Clarification requested. Waiting for user response before proceeding."
+        );
         assert_eq!(out.for_user.as_deref(), Some("What format do you want?"));
         assert!(out.pause_for_input);
     }
@@ -247,7 +255,10 @@ mod tests {
     #[tokio::test]
     async fn test_batch_mode_fallback() {
         let args = json!({"question": "What format?"});
-        let out = AskClarificationTool.execute(args, &batch_ctx()).await.unwrap();
+        let out = AskClarificationTool
+            .execute(args, &batch_ctx())
+            .await
+            .unwrap();
 
         assert!(!out.pause_for_input);
         assert!(out.for_llm.contains("batch mode"));
