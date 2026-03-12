@@ -1,7 +1,7 @@
 ---
 name: deep-research
 description: Systematic multi-phase web research producing thorough, cited reports
-metadata: {"zeptoclaw":{"tags":["research","web","analysis"],"requires":{}}}
+metadata: {"zeptoclaw":{"requires":{}}}
 ---
 
 # Deep Research Skill
