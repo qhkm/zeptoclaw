@@ -468,7 +468,12 @@ pub async fn register_all_tools(
         info!("Memory tools are disabled");
     }
 
-    // --- Group 10: Scheduling/cron ---
+    // --- Group 10: Interaction tools ---
+    if filter.is_enabled("ask_clarification") {
+        registry.register(Box::new(crate::tools::clarification::AskClarificationTool));
+    }
+
+    // --- Group 11: Scheduling/cron ---
     if filter.is_enabled("cron") {
         registry.register(Box::new(crate::tools::cron::CronTool::new(Arc::clone(
             &deps.cron_service,
