@@ -1093,7 +1093,8 @@ impl AgentLoop {
             let workspace_str = workspace.to_string_lossy();
             let tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
-                .with_workspace(&workspace_str);
+                .with_workspace(&workspace_str)
+                .with_batch(msg.metadata.get("is_batch").map_or(false, |v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer = self.safety_layer.clone();
@@ -1711,7 +1712,8 @@ impl AgentLoop {
             let workspace_str = workspace.to_string_lossy();
             let tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
-                .with_workspace(&workspace_str);
+                .with_workspace(&workspace_str)
+                .with_batch(msg.metadata.get("is_batch").map_or(false, |v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let safety_layer_stream = self.safety_layer.clone();

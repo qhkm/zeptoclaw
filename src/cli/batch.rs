@@ -46,7 +46,8 @@ pub(crate) async fn cmd_batch(
 
     for (index, prompt) in prompts.into_iter().enumerate() {
         let start = Instant::now();
-        let inbound = InboundMessage::new("cli", "batch", &format!("batch-{}", index), &prompt);
+        let mut inbound = InboundMessage::new("cli", "batch", &format!("batch-{}", index), &prompt);
+        inbound.metadata.insert("is_batch".into(), "true".into());
 
         let response = if use_streaming {
             process_streaming(&agent, &inbound).await
