@@ -85,6 +85,9 @@ struct AcpConn {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
+    /// Monotonically increasing id used by helpers so every request gets a
+    /// unique, non-conflicting id regardless of how many times they are called.
+    next_id: u64,
 }
 
 impl AcpConn {
@@ -108,6 +111,8 @@ impl AcpConn {
             child,
             stdin,
             reader: BufReader::new(stdout),
+            // Start at 2: initialize() hardcodes id=1, so helper calls begin here.
+            next_id: 2,
         }
     }
 
@@ -191,14 +196,16 @@ impl AcpConn {
 
     /// Create a new session, returning the `sessionId` string.
     async fn new_session(&mut self, cwd: &str) -> String {
+        let id = self.next_id;
+        self.next_id += 1;
         self.send(serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": id,
             "method": "session/new",
             "params": { "cwd": cwd, "mcpServers": [] }
         }))
         .await;
-        let resp = self.recv_for_id(&serde_json::json!(2)).await;
+        let resp = self.recv_for_id(&serde_json::json!(id)).await;
         let result = resp
             .get("result")
             .unwrap_or_else(|| panic!("session/new returned error: {resp}"));

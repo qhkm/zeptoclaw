@@ -965,12 +965,14 @@ impl Config {
             http.port = port;
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN") {
-            let channel = self
-                .channels
-                .acp
-                .get_or_insert_with(AcpChannelConfig::default);
-            let http = channel.http.get_or_insert_with(AcpHttpConfig::default);
-            http.auth_token = Some(val);
+            if !val.is_empty() {
+                let channel = self
+                    .channels
+                    .acp
+                    .get_or_insert_with(AcpChannelConfig::default);
+                let http = channel.http.get_or_insert_with(AcpHttpConfig::default);
+                http.auth_token = Some(val);
+            }
         }
 
         // Runtime: Apple Container

@@ -164,8 +164,9 @@ No changes were required to the generic bus or agent loop; they only see standar
 ### 4.4 session/cancel
 
 - **Params:** `sessionId`.
-- **Behavior:** If the session is not in `state.sessions`, the notification is silently ignored (no response — this is correct per spec for notifications). If the session exists and has a pending prompt, set `cancelled: true`. No response in either case.
-- **Design:** This ensures a cancel for a fabricated or already-closed session does not accidentally affect pending state for other sessions.
+- **Behavior (notification — no `id`):** If the session is not in `state.sessions`, silently ignore (no output — correct per JSON-RPC 2.0 for notifications). If the session exists and has a pending prompt, set `cancelled: true` on that entry. No response is ever written for the notification form.
+- **Behavior (request — `id` present):** Perform the same state mutation as the notification path, then write a JSON-RPC result (`{}` acknowledgement) using the same `id` so the caller can correlate. Fabricated or already-closed sessions are treated the same as in the notification path (no state change) but still receive a result response rather than silence, because the caller must receive a reply for every request.
+- **Design:** `state.sessions` is the only thing mutated. The `cancelled` flag is read in `send()` when the agent reply arrives; if it is set the prompt response uses `stopReason: "cancelled"` instead of `"end_turn"`. Separating notification from request handling keeps the protocol correct: the spec forbids sending a response to a notification but requires one for a request.
 
 ### 4.5 session/list
 

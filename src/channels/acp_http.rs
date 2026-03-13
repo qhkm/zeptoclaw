@@ -412,8 +412,15 @@ impl AcpHttpChannel {
             );
         }
         // Parse params; apply cwd filter when present (cursor/pagination not yet implemented).
-        let list_params: Option<SessionListParams> =
-            params.and_then(|p| serde_json::from_value(p).ok());
+        let list_params: Option<SessionListParams> = match params {
+            None => None,
+            Some(p) => match serde_json::from_value::<SessionListParams>(p) {
+                Ok(lp) => Some(lp),
+                Err(e) => {
+                    return Self::json_rpc_error(id, -32602, &format!("Invalid params: {}", e));
+                }
+            },
+        };
         let cwd_filter = list_params.and_then(|p| p.cwd);
         let sessions: Vec<SessionInfo> = st
             .sessions
@@ -427,7 +434,7 @@ impl AcpHttpChannel {
             })
             .map(|(sid, cwd)| SessionInfo {
                 session_id: sid.clone(),
-                cwd: cwd.clone().unwrap_or_default(),
+                cwd: cwd.clone().unwrap_or_else(|| "unknown".to_string()),
                 title: None,
                 updated_at: None,
                 meta: Some(serde_json::json!({ "pending": st.pending.contains_key(sid) })),
@@ -858,18 +865,24 @@ impl AcpHttpChannel {
                     let bus = Arc::clone(&bus);
                     let state = Arc::clone(&state);
                     let pending_http = Arc::clone(&pending_http);
-                    conn_tasks.lock().await.spawn(async move {
-                        Self::handle_connection(
-                            stream,
-                            config,
-                            http_config,
-                            base_config,
-                            bus,
-                            state,
-                            pending_http,
-                        )
-                        .await;
-                    });
+                    {
+                        let mut tasks = conn_tasks.lock().await;
+                        // Reap any already-finished handlers before registering
+                        // the new one, preventing unbounded JoinSet growth.
+                        while tasks.try_join_next().is_some() {}
+                        tasks.spawn(async move {
+                            Self::handle_connection(
+                                stream,
+                                config,
+                                http_config,
+                                base_config,
+                                bus,
+                                state,
+                                pending_http,
+                            )
+                            .await;
+                        });
+                    }
                 }
                 Ok(Err(e)) => {
                     error!("ACP-HTTP: accept error: {}", e);

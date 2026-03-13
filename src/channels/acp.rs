@@ -472,8 +472,25 @@ impl AcpChannel {
             return self.write_response(&response).await;
         }
         // Parse params; apply cwd filter when present (cursor/pagination not yet implemented).
-        let list_params: Option<SessionListParams> =
-            params.and_then(|p| serde_json::from_value(p).ok());
+        let list_params: Option<SessionListParams> = match params {
+            None => None,
+            Some(p) => match serde_json::from_value::<SessionListParams>(p) {
+                Ok(lp) => Some(lp),
+                Err(e) => {
+                    let response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: None,
+                        error: Some(super::acp_protocol::JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {}", e),
+                            data: None,
+                        }),
+                    };
+                    return self.write_response(&response).await;
+                }
+            },
+        };
         let cwd_filter = list_params.and_then(|p| p.cwd);
         let sessions: Vec<SessionInfo> = state
             .sessions
@@ -487,7 +504,7 @@ impl AcpChannel {
             })
             .map(|(sid, cwd)| SessionInfo {
                 session_id: sid.clone(),
-                cwd: cwd.clone().unwrap_or_default(),
+                cwd: cwd.clone().unwrap_or_else(|| "unknown".to_string()),
                 title: None,
                 updated_at: None,
                 meta: Some(serde_json::json!({ "pending": state.pending.contains_key(sid) })),
