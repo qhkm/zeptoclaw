@@ -1,0 +1,2 @@
+# clippy.toml
+allow-mixed-uninlined-format-args = true
