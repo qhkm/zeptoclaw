@@ -42,14 +42,14 @@ Two transports are supported:
 
 ACP is implemented as a **normal ZeptoClaw channel** (the `Channel` trait). There are two entry points:
 
-1. **`zeptoclaw gateway`** — When `channels.acp.enabled` is true, the ACP channel is registered with `ChannelManager` and shares the same `MessageBus` as Telegram, Discord, etc.
+1. **`zeptoclaw gateway`** — ACP stdio is **not** registered here; the gateway's stdin is the terminal, not an ACP client. To expose ACP in gateway mode, set `channels.acp.http.enabled = true`, which registers the `acp_http` channel alongside Telegram, Discord, etc. on the shared `MessageBus`.
 2. **`zeptoclaw acp`** — Standalone subcommand that starts just the ACP stdio agent without the full gateway. Calls `AcpChannel::run_stdio()`, which blocks until stdin closes. This is the entry point used by `acpx` and other ACP clients that spawn the agent as a subprocess.
 
 **Rationale:**
 
 - Reuses the existing channel lifecycle (start/stop), bus subscription, and outbound dispatch.
-- `run_stdio()` blocks for the subprocess model; `start()` spawns a background task for the gateway model.
-- Allows consistent allowlist/deny behavior via `BaseChannelConfig` and future multi-channel gateways if needed.
+- `run_stdio()` blocks for the subprocess model; HTTP `start()` spawns a background task for the gateway model.
+- Registering stdio in gateway mode would consume the terminal's stdin and produce parse errors or immediate EOF — never a valid ACP session.
 
 ### 2.2 Session and identity mapping
 
