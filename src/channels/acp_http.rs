@@ -313,9 +313,9 @@ impl AcpHttpChannel {
                 }),
             },
             agent_info: Some(AgentInfo {
-                name: Some("zeptoclaw".to_string()),
+                name: "zeptoclaw".to_string(),
                 title: Some("ZeptoClaw".to_string()),
-                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             auth_methods: vec![],
         };

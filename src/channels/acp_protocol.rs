@@ -80,7 +80,7 @@ pub struct AgentCapabilities {
     pub load_session: Option<bool>,
     #[serde(rename = "promptCapabilities", skip_serializing_if = "Option::is_none")]
     pub prompt_capabilities: Option<serde_json::Value>,
-    #[serde(rename = "mcp", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "mcpCapabilities", skip_serializing_if = "Option::is_none")]
     pub mcp_capabilities: Option<serde_json::Value>,
     #[serde(
         rename = "sessionCapabilities",
@@ -91,9 +91,10 @@ pub struct AgentCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
-    pub name: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    pub version: Option<String>,
+    pub version: String,
 }
 
 // --- session/new ---
