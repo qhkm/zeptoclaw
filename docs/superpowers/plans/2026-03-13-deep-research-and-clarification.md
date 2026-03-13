@@ -239,7 +239,7 @@ with_pause() sets the flag."
 
 **Files:**
 - Modify: `src/tools/types.rs`
-- Modify: `src/batch.rs`
+- Modify: `src/cli/batch.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -847,7 +847,7 @@ Expected: No diff
 
 In the `src/tools/` section of CLAUDE.md architecture, add:
 
-```
+```text
 │   ├── clarification.rs # Ask clarification tool (pause for user input)
 ```
 
@@ -855,7 +855,7 @@ In the `src/tools/` section of CLAUDE.md architecture, add:
 
 Update the core skills line:
 
-```
+```text
 **Core skills** (bundled in this repo — `skills/`): `github`, `skill-creator`, `deep-research`
 ```
 

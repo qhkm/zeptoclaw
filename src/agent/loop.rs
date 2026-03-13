@@ -539,7 +539,6 @@ impl AgentLoop {
     /// ```
     pub fn new(config: Config, session_manager: SessionManager, bus: Arc<MessageBus>) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
-        let streaming_default = config.agents.defaults.streaming;
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
@@ -610,7 +609,6 @@ impl AgentLoop {
         context_builder: ContextBuilder,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
-        let streaming_default = config.agents.defaults.streaming;
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));

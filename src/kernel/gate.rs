@@ -55,16 +55,26 @@ pub async fn execute_tool(
                 // Only scan the "path" field — file body text legitimately
                 // contains code patterns (backticks, `$(...)`, etc.) that
                 // would false-positive on shell_injection.
-                input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
+                let path = input.get("path").and_then(|v| v.as_str());
+                if path.is_none() {
+                    tracing::warn!(
+                        tool = name,
+                        "write_file input missing 'path' field; safety pre-check effectively skipped"
+                    );
+                }
+                path.unwrap_or("").to_string()
             }
             "edit_file" => {
                 // Scan path + old_text (user-supplied search input) but skip
                 // new_text (file body text that legitimately contains code patterns).
-                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let path = input.get("path").and_then(|v| v.as_str());
+                if path.is_none() {
+                    tracing::warn!(
+                        tool = name,
+                        "edit_file input missing 'path' field; safety pre-check effectively skipped"
+                    );
+                }
+                let path = path.unwrap_or("");
                 let old_text = input.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
                 format!("{} {}", path, old_text)
             }
