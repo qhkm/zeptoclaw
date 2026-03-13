@@ -40,8 +40,8 @@ cargo fmt
 # Run agent
 ./target/release/zeptoclaw agent -m "Hello"
 
-# Run agent with streaming
-./target/release/zeptoclaw agent -m "Hello" --stream
+# Run agent without streaming (streaming is on by default)
+./target/release/zeptoclaw agent -m "Hello" --no-stream
 
 # Interactive slash commands (inside `zeptoclaw agent`)
 /help                    # Show available slash commands
@@ -806,7 +806,7 @@ Priority manual checks:
 2. Config path: `config check` handles missing, invalid, and valid config clearly
 3. Provider path: `provider status` shows one usable provider or a specific failure reason
 4. Core agent path: `agent -m "Hello"` returns a response on repeated runs
-5. Streaming path: `agent --stream -m "Hello"` streams and exits cleanly
+5. Streaming path: `agent -m "Hello"` streams by default and exits cleanly
 6. Interactive path: `agent` accepts input and exits with `quit`
 7. Error path: missing API key or bad model fails cleanly with actionable stderr
 8. Tool safety path: `agent --dry-run -m "..."` works and tool failure does not crash the process

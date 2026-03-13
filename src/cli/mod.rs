@@ -65,9 +65,9 @@ enum Commands {
         /// Apply an agent template (built-in or ~/.zeptoclaw/templates/*.json)
         #[arg(long)]
         template: Option<String>,
-        /// Stream the response token-by-token
+        /// Disable streaming (streaming is on by default)
         #[arg(long)]
-        stream: bool,
+        no_stream: bool,
         /// Show what tools would be called without executing them
         #[arg(long)]
         dry_run: bool,
@@ -578,11 +578,11 @@ pub async fn run() -> Result<()> {
         Some(Commands::Agent {
             message,
             template,
-            stream,
+            no_stream,
             dry_run,
             mode,
         }) => {
-            agent::cmd_agent(message, template, stream, dry_run, mode).await?;
+            agent::cmd_agent(message, template, no_stream, dry_run, mode).await?;
         }
         Some(Commands::Batch {
             input,

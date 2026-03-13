@@ -116,12 +116,20 @@ fn has_interactive_cli_terminal() -> bool {
 pub(crate) async fn cmd_agent(
     message: Option<String>,
     template_name: Option<String>,
-    stream: bool,
+    no_stream: bool,
     dry_run: bool,
     mode: Option<String>,
 ) -> Result<()> {
     // Load configuration
     let mut config = Config::load().with_context(|| "Failed to load configuration")?;
+
+    // In CLI mode, default workspace to CWD so file tools resolve relative
+    // paths against the directory the user ran the command from.
+    if config.agents.defaults.workspace == "~/.zeptoclaw/workspace" {
+        if let Ok(cwd) = std::env::current_dir() {
+            config.agents.defaults.workspace = cwd.to_string_lossy().to_string();
+        }
+    }
 
     // Override agent mode from CLI flag if provided
     if let Some(ref mode_str) = mode {
@@ -251,7 +259,12 @@ pub(crate) async fn cmd_agent(
     if let Some(msg) = message {
         // Single message mode
         let inbound = cli_inbound_message(&msg);
-        let streaming = stream || config.agents.defaults.streaming;
+        // Streaming is ON by default; --no-stream disables it.
+        // Config `streaming: false` also disables unless overridden.
+        let streaming = !no_stream && config.agents.defaults.streaming;
+
+        let metrics = agent.metrics_collector();
+        let wall_start = std::time::Instant::now();
 
         if streaming {
             use zeptoclaw::providers::StreamEvent;
@@ -289,6 +302,13 @@ pub(crate) async fn cmd_agent(
                 }
             }
         }
+
+        // Print response metadata footer
+        let wall_elapsed = wall_start.elapsed();
+        let (tokens_in, tokens_out) = metrics.total_tokens();
+        let total_tokens = tokens_in + tokens_out;
+        let tool_calls = metrics.total_tool_calls();
+        super::shimmer::print_metadata_footer(total_tokens, tool_calls, wall_elapsed);
     } else {
         // Interactive mode with rustyline (tab completion for slash commands)
         println!("ZeptoClaw Interactive Agent");
@@ -582,7 +602,7 @@ pub(crate) async fn cmd_agent(
             if let Some(ref persona) = persona_override {
                 inbound = inbound.with_metadata("persona_override", persona);
             }
-            let streaming = stream || config.agents.defaults.streaming;
+            let streaming = !no_stream && config.agents.defaults.streaming;
 
             if streaming {
                 use zeptoclaw::providers::StreamEvent;

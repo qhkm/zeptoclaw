@@ -150,14 +150,13 @@ New Rust tool + ToolOutput enhancement + agent loop change + system prompt updat
 
 **File:** `src/tools/mod.rs` (or `src/tools/types.rs`, wherever `ToolOutput` is defined)
 
-Add field:
+Add field to the **existing** `ToolOutput` struct (which already has `is_error`, `is_async`, etc.):
 ```rust
-pub struct ToolOutput {
-    pub for_llm: String,
-    pub for_user: Option<String>,
-    pub pause_for_input: bool,  // NEW — default false
-}
+// Add this field to the existing struct — do NOT replace the struct.
+pub pause_for_input: bool,  // NEW — default false
 ```
+
+All existing constructors (`new`, `llm_only`, `error`, `async_task`, `split`) must initialize `pause_for_input: false`.
 
 Add builder method:
 ```rust

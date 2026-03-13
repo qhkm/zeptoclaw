@@ -2253,6 +2253,15 @@ impl AgentLoop {
                 tools.definitions_with_options(self.config.agents.defaults.compact_tools)
             };
 
+            // Signal that tools are done and response is ready (streaming path)
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::ResponseReady,
+                    args_json: None,
+                });
+            }
+
             let stream_rx = provider
                 .chat_stream(messages, tool_definitions, model, options)
                 .await?;
@@ -3455,7 +3464,7 @@ mod tests {
         let session_manager = SessionManager::new_memory();
         let bus = Arc::new(MessageBus::new());
         let agent = AgentLoop::new(config, session_manager, bus);
-        assert!(!agent.is_streaming());
+        assert!(agent.is_streaming());
     }
 
     #[tokio::test]
@@ -3464,8 +3473,8 @@ mod tests {
         let session_manager = SessionManager::new_memory();
         let bus = Arc::new(MessageBus::new());
         let agent = AgentLoop::new(config, session_manager, bus);
-        agent.set_streaming(true);
-        assert!(agent.is_streaming());
+        agent.set_streaming(false);
+        assert!(!agent.is_streaming());
     }
 
     #[tokio::test]

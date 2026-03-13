@@ -180,6 +180,53 @@ pub fn print_response_separator() {
     eprintln!();
 }
 
+/// Print a compact metadata footer after the response.
+///
+/// Example: `⠿ 1,247 tokens · 3 tool calls · 2.1s`
+pub fn print_metadata_footer(total_tokens: u64, tool_calls: u64, elapsed: std::time::Duration) {
+    // Skip footer entirely when there is nothing meaningful to report
+    if total_tokens == 0 && tool_calls == 0 {
+        return;
+    }
+
+    let mut parts = Vec::with_capacity(3);
+
+    if total_tokens > 0 {
+        parts.push(format_number_with_commas(total_tokens) + " tokens");
+    }
+
+    if tool_calls > 0 {
+        let label = if tool_calls == 1 {
+            "tool call"
+        } else {
+            "tool calls"
+        };
+        parts.push(format!("{} {}", tool_calls, label));
+    }
+
+    let elapsed_ms = elapsed.as_millis() as u64;
+    parts.push(fmt_elapsed(elapsed_ms));
+
+    eprintln!();
+    eprintln!(
+        "  \x1b[38;5;245m⠿ {}\x1b[0m",
+        parts.join(" \x1b[38;5;240m·\x1b[38;5;245m ")
+    );
+}
+
+/// Format a number with comma separators (e.g. 1247 → "1,247").
+fn format_number_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
 /// Extract a short argument hint from tool call arguments JSON.
 ///
 /// Looks for common keys like `path`, `file`, `filename`, `command`, `action`,
@@ -341,5 +388,15 @@ mod tests {
         let long_error = "e".repeat(120);
         let line = format_tool_failed(1, "shell", None, 100, &long_error);
         assert!(line.contains('…'));
+    }
+
+    #[test]
+    fn test_format_number_with_commas() {
+        assert_eq!(format_number_with_commas(0), "0");
+        assert_eq!(format_number_with_commas(42), "42");
+        assert_eq!(format_number_with_commas(999), "999");
+        assert_eq!(format_number_with_commas(1000), "1,000");
+        assert_eq!(format_number_with_commas(1247), "1,247");
+        assert_eq!(format_number_with_commas(1_000_000), "1,000,000");
     }
 }

@@ -31,7 +31,9 @@ pub(crate) async fn cmd_batch(
     })?;
 
     let config = Config::load().with_context(|| "Failed to load configuration")?;
-    let use_streaming = stream || config.agents.defaults.streaming;
+    // Batch mode does not inherit the streaming default — only stream when
+    // explicitly requested via --stream, to avoid session-save race conditions.
+    let use_streaming = stream;
 
     let bus = Arc::new(MessageBus::new());
     let agent = if let Some(name) = template.as_deref() {
