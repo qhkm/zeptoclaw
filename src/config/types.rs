@@ -840,7 +840,7 @@ pub struct AcpChannelConfig {
 /// listener that accepts JSON-RPC 2.0 messages via `POST /acp`. `session/prompt`
 /// responses are streamed back as Server-Sent Events; all other methods return
 /// synchronous JSON responses. `channels.acp.enabled` is not required.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AcpHttpConfig {
     /// Whether the HTTP transport is active.
@@ -852,6 +852,20 @@ pub struct AcpHttpConfig {
     /// Optional Bearer token. When set, all requests must supply
     /// `Authorization: Bearer <token>`.
     pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for AcpHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpHttpConfig")
+            .field("enabled", &self.enabled)
+            .field("port", &self.port)
+            .field("bind", &self.bind)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for AcpHttpConfig {

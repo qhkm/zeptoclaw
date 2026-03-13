@@ -228,6 +228,7 @@ async fn test_initialize_protocol_version_is_integer_one() {
         Some(1),
         "protocolVersion must equal 1, got: {version}"
     );
+    conn.shutdown().await;
 }
 
 /// ACP spec: InitializeResponse.agentCapabilities.sessionCapabilities.list MUST
@@ -243,6 +244,7 @@ async fn test_initialize_advertises_session_list_capability() {
         caps.get("list").is_some(),
         "sessionCapabilities.list must be advertised; got: {caps}"
     );
+    conn.shutdown().await;
 }
 
 /// ACP spec: agentInfo.name and agentInfo.version are required strings.
@@ -260,6 +262,7 @@ async fn test_initialize_agent_info_fields_are_strings() {
         "agentInfo.version must be a non-null string; got: {info}"
     );
     assert_eq!(info["name"].as_str().unwrap(), "zeptoclaw");
+    conn.shutdown().await;
 }
 
 /// ACP spec: agentCapabilities.mcpCapabilities uses field name "mcpCapabilities"
@@ -279,6 +282,7 @@ async fn test_initialize_mcp_capabilities_field_name() {
         caps.get("mcpCapabilities").is_some(),
         "mcpCapabilities must be present in agentCapabilities; got: {caps}"
     );
+    conn.shutdown().await;
 }
 
 /// ACP spec: authMethods defaults to empty array when no auth is configured.
@@ -296,6 +300,7 @@ async fn test_initialize_auth_methods_defaults_to_empty_array() {
         auth.is_empty(),
         "no auth methods should be advertised by default"
     );
+    conn.shutdown().await;
 }
 
 /// session/new before initialize must return a JSON-RPC error.
@@ -314,6 +319,7 @@ async fn test_session_new_before_initialize_returns_error() {
         resp.get("error").is_some(),
         "session/new before initialize must return an error; got: {resp}"
     );
+    conn.shutdown().await;
 }
 
 /// session/prompt before initialize must return a JSON-RPC error.
@@ -335,6 +341,7 @@ async fn test_session_prompt_before_initialize_returns_error() {
         resp.get("error").is_some(),
         "session/prompt before initialize must return an error; got: {resp}"
     );
+    conn.shutdown().await;
 }
 
 /// An unknown JSON-RPC method must return error code -32601 (Method not found).
@@ -358,6 +365,7 @@ async fn test_unknown_method_returns_method_not_found() {
         Some(-32601),
         "unknown method must return -32601; got: {err}"
     );
+    conn.shutdown().await;
 }
 
 /// Malformed JSON must return error code -32700 (Parse error).
@@ -379,6 +387,7 @@ async fn test_malformed_json_returns_parse_error() {
         Some(-32700),
         "malformed JSON must return -32700; got: {err}"
     );
+    conn.shutdown().await;
 }
 
 /// session/new must return a non-empty string sessionId.
@@ -391,6 +400,7 @@ async fn test_session_new_returns_session_id() {
         !session_id.is_empty(),
         "sessionId must be a non-empty string"
     );
+    conn.shutdown().await;
 }
 
 /// session/new with same cwd must return distinct session IDs.
@@ -418,6 +428,7 @@ async fn test_session_new_returns_unique_ids() {
     let id2 = r2["result"]["sessionId"].as_str().unwrap().to_string();
 
     assert_ne!(id1, id2, "each session/new must produce a unique sessionId");
+    conn.shutdown().await;
 }
 
 /// session/list must return a `sessions` array containing known session IDs.
@@ -447,6 +458,7 @@ async fn test_session_list_contains_created_sessions() {
         found,
         "session/list must include created session {session_id}; got: {sessions:?}"
     );
+    conn.shutdown().await;
 }
 
 /// session/list with cwd filter must only return sessions matching that cwd.
@@ -481,6 +493,7 @@ async fn test_session_list_cwd_filter() {
         !has_b,
         "cwd filter must exclude session from non-matching cwd"
     );
+    conn.shutdown().await;
 }
 
 /// session/list results must include the `cwd` field on each SessionInfo.
@@ -510,6 +523,7 @@ async fn test_session_list_session_info_has_cwd() {
             "each SessionInfo must have a sessionId string; got: {s}"
         );
     }
+    conn.shutdown().await;
 }
 
 /// session/list before initialize must return a JSON-RPC error.
@@ -527,6 +541,7 @@ async fn test_session_list_before_initialize_returns_error() {
         resp.get("error").is_some(),
         "session/list before initialize must return an error; got: {resp}"
     );
+    conn.shutdown().await;
 }
 
 /// session/prompt with an unknown sessionId must return a JSON-RPC error.
@@ -553,6 +568,7 @@ async fn test_session_prompt_unknown_session_returns_error() {
         code, -32000,
         "unknown session must return -32000 (not -32602 invalid params); got code {code}"
     );
+    conn.shutdown().await;
 }
 
 /// session/cancel is a notification (no id); the server must NOT send a response.
@@ -619,6 +635,7 @@ async fn test_double_initialize_is_idempotent() {
         Some(1),
         "second initialize must still return protocolVersion 1"
     );
+    conn.shutdown().await;
 }
 
 /// A session/prompt with a ResourceLink content block (MUST be supported) must
@@ -650,6 +667,7 @@ async fn test_session_prompt_accepts_resource_link_content() {
         );
     }
     // result is also fine (would mean the prompt was accepted and processed)
+    conn.shutdown().await;
 }
 
 /// Full session lifecycle in a single connection:
@@ -931,6 +949,10 @@ fn test_acpx_sessions_list_after_exec() {
         ])
         .env("RUST_LOG", "")
         .env("PATH", acpx_path_env(&acpx))
+        .env(
+            "ZEPTOCLAW_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
         .output()
         .expect("failed to run acpx sessions list");
     assert!(

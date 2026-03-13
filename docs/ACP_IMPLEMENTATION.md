@@ -100,7 +100,7 @@ src/channels/
 
 **AcpChannel** holds:
 
-- `config: AcpChannelConfig` — enabled, protocol_version, allow_from, deny_by_default.
+- `config: AcpChannelConfig` — enabled, allow_from, deny_by_default.
 - `base_config: BaseChannelConfig` — channel name and allowlist/deny for `is_allowed()`.
 - `bus: Arc<MessageBus>` — for publishing inbound and receiving outbound.
 - `running: Arc<AtomicBool>` — so the stdin loop and supervisor can see if the channel is up.
@@ -132,7 +132,7 @@ No changes were required to the generic bus or agent loop; they only see standar
 - **Client info:** If the client sends `clientInfo` (name, version) and `protocolVersion` in the request params, they are parsed and logged at `info!`/`debug!` level for diagnostics. Missing or malformed params are accepted without error.
 - **State:** Sets `state.initialized = true`. Until this is called, `session/new` and `session/prompt` return `-32600` Invalid Request.
 - **Response fields (schema-authoritative):**
-  - `protocolVersion: 1` — integer per schema.md (ProtocolVersion type is `uint16`); the `protocol_version` config field is ignored.
+  - `protocolVersion: 1` — integer per schema.md (ProtocolVersion type is `uint16`).
   - `agentCapabilities.loadSession: false`
   - `agentCapabilities.promptCapabilities` — image/audio/embeddedContext all false
   - `agentCapabilities.mcpCapabilities` — http/sse both false (field name is `"mcpCapabilities"`, not `"mcp"`)

@@ -65,25 +65,17 @@ const HTTP_204_CORS: &str = "HTTP/1.1 204 No Content\r\n\
 const HTTP_400_PREFIX: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
      Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
 
-const HTTP_401: &str = "HTTP/1.1 401 Unauthorized\r\n\
-    Content-Type: application/json\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Content-Length: 26\r\nConnection: close\r\n\r\n{\"error\":\"unauthorized\"}";
-
-const HTTP_404: &str = "HTTP/1.1 404 Not Found\r\n\
-    Content-Type: application/json\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Content-Length: 23\r\nConnection: close\r\n\r\n{\"error\":\"not found\"}";
-
-const HTTP_405: &str = "HTTP/1.1 405 Method Not Allowed\r\n\
-    Content-Type: application/json\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Content-Length: 32\r\nConnection: close\r\n\r\n{\"error\":\"method not allowed\"}";
-
-const HTTP_413: &str = "HTTP/1.1 413 Payload Too Large\r\n\
-    Content-Type: application/json\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Content-Length: 31\r\nConnection: close\r\n\r\n{\"error\":\"payload too large\"}";
+/// Build a self-contained HTTP error response with a correct Content-Length.
+fn build_http_error(status_line: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\n\
+         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{}",
+        status_line,
+        body.len(),
+        body
+    )
+}
 
 // --- Internal state ---
 
@@ -146,6 +138,9 @@ pub struct AcpHttpChannel {
     /// Session ID → sender half of the oneshot that bridges `send()` to the
     /// HTTP connection handler waiting for the agent reply.
     pending_http: PromptMap,
+    /// Handle to the spawned accept-loop task; held so `stop()` can abort and
+    /// await it, ensuring the TcpListener is released before returning.
+    accept_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AcpHttpChannel {
@@ -163,6 +158,7 @@ impl AcpHttpChannel {
             running: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(AcpHttpState::new())),
             pending_http: Arc::new(Mutex::new(HashMap::new())),
+            accept_handle: None,
         }
     }
 
@@ -646,7 +642,9 @@ impl AcpHttpChannel {
         let mut total = 0usize;
         loop {
             if total >= buf.len() {
-                let _ = stream.write_all(HTTP_413.as_bytes()).await;
+                let resp =
+                    build_http_error("413 Payload Too Large", r#"{"error":"payload too large"}"#);
+                let _ = stream.write_all(resp.as_bytes()).await;
                 return;
             }
             match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf[total..]))
@@ -696,17 +694,23 @@ impl AcpHttpChannel {
 
         // Only POST /acp or POST / is accepted.
         if req.path != "/acp" && req.path != "/" {
-            let _ = stream.write_all(HTTP_404.as_bytes()).await;
+            let resp = build_http_error("404 Not Found", r#"{"error":"not found"}"#);
+            let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
         if req.method != "POST" {
-            let _ = stream.write_all(HTTP_405.as_bytes()).await;
+            let resp = build_http_error(
+                "405 Method Not Allowed",
+                r#"{"error":"method not allowed"}"#,
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
 
         // Bearer token auth.
         if !Self::validate_auth(&req.headers, &http_config.auth_token) {
-            let _ = stream.write_all(HTTP_401.as_bytes()).await;
+            let resp = build_http_error("401 Unauthorized", r#"{"error":"unauthorized"}"#);
+            let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
 
@@ -730,6 +734,19 @@ impl AcpHttpChannel {
 
         let id = rpc.id.clone();
         let params = rpc.params.clone();
+
+        // Notifications (id absent) are only valid for session/cancel.
+        // All other methods require a request id so the response can be correlated.
+        if id.is_none() && rpc.method.as_str() != "session/cancel" {
+            let body = Self::json_rpc_error(
+                None,
+                -32600,
+                "Invalid Request: notifications are not supported for this method",
+            );
+            let resp = Self::http_200(&body);
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return;
+        }
 
         match rpc.method.as_str() {
             "initialize" => {
@@ -883,7 +900,7 @@ impl Channel for AcpHttpChannel {
         let pending_http = Arc::clone(&self.pending_http);
         let running = Arc::clone(&self.running);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             Self::run_accept_loop(
                 listener,
                 config,
@@ -896,6 +913,7 @@ impl Channel for AcpHttpChannel {
             )
             .await;
         });
+        self.accept_handle = Some(handle);
         info!(
             "ACP-HTTP channel started on {}:{}",
             self.http_config.bind, self.http_config.port
@@ -912,6 +930,12 @@ impl Channel for AcpHttpChannel {
         // Clear state.pending so sessions are not permanently marked in-flight
         // across a stop/restart cycle (supervisor may restart the channel).
         self.state.lock().await.pending.clear();
+        // Abort and await the accept-loop task so the TcpListener is released
+        // before this method returns (mirrors the stdio AcpChannel pattern).
+        if let Some(handle) = self.accept_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         Ok(())
     }
 

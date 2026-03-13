@@ -567,7 +567,12 @@ pub async fn run() -> Result<()> {
     // Any tracing output to stdout would corrupt the JSON-RPC stream that the
     // ACP client reads line-by-line. Users who want debug logs should redirect:
     //   RUST_LOG=debug zeptoclaw acp 2>acp.log
-    if matches!(cli.command, Some(Commands::Acp)) && std::env::var("RUST_LOG").is_err() {
+    if matches!(cli.command, Some(Commands::Acp))
+        && std::env::var("RUST_LOG")
+            .ok()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+    {
         logging_cfg.level = "off".to_string();
     }
 

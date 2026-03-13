@@ -517,6 +517,22 @@ impl AcpChannel {
             let id = request.id.clone();
             let params = request.params.clone();
             let result = match method {
+                "initialize" | "session/new" | "session/prompt" | "session/list"
+                    if id.is_none() =>
+                {
+                    // Notifications (missing id) are not valid for request-only
+                    // methods. Return an error and skip handler invocation to avoid
+                    // queuing work that can never be correlated to a response.
+                    let _ = Self::write_error_response(
+                        &stdout,
+                        None,
+                        -32600,
+                        "Invalid Request: notifications are not supported for this method"
+                            .to_string(),
+                    )
+                    .await;
+                    Ok(())
+                }
                 "initialize" => {
                     let channel =
                         Self::channel_ref(&bus, &state, &stdout, &config, &base_config, &running);
