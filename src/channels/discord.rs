@@ -572,7 +572,9 @@ impl DiscordChannel {
         }
 
         let content = msg.content.trim().to_string();
-        if content.is_empty() {
+        
+        // Only reject if both content is empty AND there are no attachments
+        if content.is_empty() && msg.attachments.is_empty() {
             return None;
         }
 
@@ -600,8 +602,40 @@ impl DiscordChannel {
             return None;
         }
 
-        let inbound = InboundMessage::new("discord", &sender_id, &channel_id, &content)
+        let mut inbound = InboundMessage::new("discord", &sender_id, &channel_id, &content)
             .with_metadata("discord_message_id", &msg.id);
+
+        // Process attachments and add them to the inbound message
+        for attachment in msg.attachments {
+            // Determine media type from content_type or filename
+            let media_type = if let Some(ref ct) = attachment.content_type {
+                if ct.starts_with("image/") {
+                    MediaType::Image
+                } else if ct.starts_with("audio/") {
+                    MediaType::Audio
+                } else if ct.starts_with("video/") {
+                    MediaType::Video
+                } else {
+                    MediaType::Document
+                }
+            } else {
+                // Fallback: try to infer from filename extension
+                MediaType::Document
+            };
+
+            let mut media = MediaAttachment::new(media_type)
+                .with_url(&attachment.url);
+
+            if let Some(filename) = attachment.filename {
+                media = media.with_filename(&filename);
+            }
+
+            if let Some(content_type) = attachment.content_type {
+                media = media.with_mime_type(&content_type);
+            }
+
+            inbound = inbound.with_media(media);
+        }
 
         Some(inbound)
     }
@@ -1962,8 +1996,68 @@ mod tests {
         });
 
         let result = DiscordChannel::parse_message_create(&data, &[], false);
-        // Empty content should be filtered out.
+        // Empty content with no attachments should be filtered out.
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_message_create_with_image_only() {
+        // Message with an image attachment but no text content should be accepted
+        let data = json!({
+            "id": "msg-img-only",
+            "content": "",
+            "channel_id": "ch-300",
+            "author": { "id": "user-99", "bot": false },
+            "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/123/456/image.png",
+                "content_type": "image/png",
+                "filename": "image.png",
+                "size": 102400
+            }]
+        });
+
+        let result = DiscordChannel::parse_message_create(&data, &[], false);
+        assert!(result.is_some());
+        
+        let inbound = result.unwrap();
+        assert_eq!(inbound.content, "");
+        assert_eq!(inbound.media.len(), 1);
+        assert_eq!(inbound.media[0].media_type, MediaType::Image);
+        assert_eq!(inbound.media[0].url, Some("https://cdn.discordapp.com/attachments/123/456/image.png".to_string()));
+        assert_eq!(inbound.media[0].filename, Some("image.png".to_string()));
+        assert_eq!(inbound.media[0].mime_type, Some("image/png".to_string()));
+    }
+
+    #[test]
+    fn test_message_create_with_multiple_attachments() {
+        // Message with multiple attachments
+        let data = json!({
+            "id": "msg-multi",
+            "content": "Check these out!",
+            "channel_id": "ch-400",
+            "author": { "id": "user-88", "bot": false },
+            "attachments": [
+                {
+                    "url": "https://cdn.discordapp.com/attachments/1/2/photo.jpg",
+                    "content_type": "image/jpeg",
+                    "filename": "photo.jpg"
+                },
+                {
+                    "url": "https://cdn.discordapp.com/attachments/1/2/doc.pdf",
+                    "content_type": "application/pdf",
+                    "filename": "document.pdf"
+                }
+            ]
+        });
+
+        let result = DiscordChannel::parse_message_create(&data, &[], false);
+        assert!(result.is_some());
+        
+        let inbound = result.unwrap();
+        assert_eq!(inbound.content, "Check these out!");
+        assert_eq!(inbound.media.len(), 2);
+        assert_eq!(inbound.media[0].media_type, MediaType::Image);
+        assert_eq!(inbound.media[1].media_type, MediaType::Document);
     }
 
     #[test]
