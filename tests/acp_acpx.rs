@@ -652,6 +652,100 @@ async fn test_session_prompt_accepts_resource_link_content() {
     // result is also fine (would mean the prompt was accepted and processed)
 }
 
+/// Full session lifecycle in a single connection:
+///   initialize → list (empty) → session/new → list (has id) →
+///   session/prompt with new id (ok) → session/prompt with bad id (error)
+#[tokio::test]
+async fn test_session_lifecycle_full() {
+    let mut conn = AcpConn::spawn().await;
+    conn.initialize().await;
+
+    // 1. list sessions before creating any — must return an empty array.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 200,
+        "method": "session/list",
+        "params": {}
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(200)).await;
+    let sessions = resp["result"]["sessions"]
+        .as_array()
+        .expect("sessions must be an array before any session is created");
+    assert!(
+        sessions.is_empty(),
+        "session/list must be empty before any session is created; got: {sessions:?}"
+    );
+
+    // 2. create a new session.
+    let session_id = conn.new_session("/tmp/acp-lifecycle").await;
+    assert!(!session_id.is_empty(), "sessionId must be non-empty");
+
+    // 3. list sessions — must now include the new session id.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 201,
+        "method": "session/list",
+        "params": {}
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(201)).await;
+    let sessions = resp["result"]["sessions"]
+        .as_array()
+        .expect("sessions must be an array after session/new");
+    let found = sessions
+        .iter()
+        .any(|s| s["sessionId"].as_str() == Some(&session_id));
+    assert!(
+        found,
+        "session/list must include the newly created session; got: {sessions:?}"
+    );
+
+    // 4. session/prompt with an unknown id must return error -32000.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 202,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": "does-not-exist",
+            "prompt": [{ "type": "text", "text": "hello" }]
+        }
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(202)).await;
+    assert!(
+        resp.get("error").is_some(),
+        "session/prompt with unknown id must return an error; got: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["code"].as_i64(),
+        Some(-32000),
+        "unknown session must return -32000; got: {}",
+        resp["error"]
+    );
+
+    // 5. session/prompt with the real session id must be accepted (no error).
+    //    We don't wait for an LLM reply — just confirm no immediate error.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 203,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "hello" }]
+        }
+    }))
+    .await;
+    // The server queues the prompt and responds when the agent replies.
+    // We only assert that no immediate protocol-level error is returned
+    // (the request was accepted, not rejected).  Use a short deadline so the
+    // test doesn't block indefinitely in CI without a live LLM.
+    if let Some(early) = conn.try_recv().await {
+        assert!(
+            early.get("error").is_none(),
+            "session/prompt with valid session must not return an immediate error; got: {early}"
+        );
+    }
+
+    conn.shutdown().await;
+}
+
 // ============================================================================
 // acpx end-to-end tests — require a configured LLM provider
 // ============================================================================
@@ -855,4 +949,148 @@ fn test_acpx_sessions_list_after_exec() {
         list_json.is_array(),
         "sessions list must output a JSON array; got: {list_stdout}"
     );
+}
+
+/// acpx session lifecycle via acpx CLI subcommands.
+///
+/// What acpx can cover:
+///   - `sessions list` for a fresh cwd returns no entry for that cwd
+///   - `sessions new` creates and registers a session (ID visible in the list)
+///   - `sessions list` after `sessions new` includes the new session
+///   - `exec` completes a conversation successfully
+///
+/// What acpx cannot cover (exec always issues session/new internally; there is
+/// no --session-id flag to target an existing or fake session):
+///   - converse via the exact ACP session ID from sessions new
+///   - converse with a non-existent ACP session ID → expect error
+/// Both are covered by the raw wire test `test_session_lifecycle_full`.
+#[test]
+fn test_acpx_session_lifecycle() {
+    if !e2e_live() {
+        eprintln!("Skipping: set ZEPTOCLAW_E2E_LIVE=1 to run");
+        return;
+    }
+    let acpx = match acpx_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("acpx not found; skipping");
+            return;
+        }
+    };
+    let agent_cmd = format!("{} acp", bin());
+    // Use a timestamp-derived cwd so this run's sessions don't collide with
+    // previous runs that left entries in the acpx local registry (~/.acpx/).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cwd = std::env::temp_dir().join(format!("acp-lifecycle-{ts}"));
+    std::fs::create_dir_all(&cwd).ok();
+    let cwd_str = cwd.to_str().unwrap();
+
+    let master_key = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    // Helper: run an acpx subcommand with standard env, return (success, stdout, stderr).
+    let run_acpx = |args: &[&str]| -> (bool, String, String) {
+        let out = std::process::Command::new(&acpx)
+            .args(args)
+            .env("RUST_LOG", "")
+            .env("ZEPTOCLAW_MASTER_KEY", master_key)
+            .env("PATH", acpx_path_env(&acpx))
+            .output()
+            .expect("acpx command failed to spawn");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // ── Step 1: sessions list for a brand-new cwd ── should have no entry for it ──
+    let (ok, stdout, _) = run_acpx(&[
+        "--agent", &agent_cmd, "--cwd", cwd_str, "--format", "json", "sessions", "list",
+    ]);
+    assert!(
+        ok,
+        "sessions list must succeed before any session is created"
+    );
+    let all_sessions: Vec<serde_json::Value> =
+        serde_json::from_str(stdout.trim()).expect("sessions list must return JSON array");
+    let for_cwd: Vec<_> = all_sessions
+        .iter()
+        .filter(|s| s["cwd"].as_str() == Some(cwd_str))
+        .collect();
+    assert!(
+        for_cwd.is_empty(),
+        "no acpx sessions expected for fresh cwd {cwd_str}; got: {for_cwd:?}"
+    );
+
+    // ── Step 2: sessions new ── creates and registers a session ──
+    let (ok, stdout, stderr) = run_acpx(&[
+        "--agent", &agent_cmd, "--cwd", cwd_str, "--format", "json", "sessions", "new",
+    ]);
+    assert!(ok, "sessions new must succeed; stderr: {stderr}");
+    let new_obj: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("sessions new must return JSON");
+    let session_id = new_obj
+        .get("acpxSessionId")
+        .or_else(|| new_obj.get("acpxRecordId"))
+        .and_then(|v| v.as_str())
+        .expect("sessions new must return a session id")
+        .to_string();
+    assert!(!session_id.is_empty(), "session id must not be empty");
+
+    // ── Step 3: sessions list after new ── must include the created session ──
+    let (ok, stdout, _) = run_acpx(&[
+        "--agent", &agent_cmd, "--cwd", cwd_str, "--format", "json", "sessions", "list",
+    ]);
+    assert!(ok, "sessions list must succeed after sessions new");
+    let all_sessions: Vec<serde_json::Value> =
+        serde_json::from_str(stdout.trim()).expect("sessions list must return JSON array");
+    let found = all_sessions.iter().any(|s| {
+        s.get("acpxSessionId").and_then(|v| v.as_str()) == Some(&session_id)
+            || s.get("acpxRecordId").and_then(|v| v.as_str()) == Some(&session_id)
+    });
+    assert!(
+        found,
+        "sessions list must include the session created by sessions new ({session_id}); \
+         got: {all_sessions:?}"
+    );
+
+    // ── Step 4: exec for the same cwd ── conversation must succeed ──
+    // (acpx exec issues session/new internally; it doesn't reuse the ACP
+    //  session from step 2, but the conversation round-trip must work.)
+    let (ok, stdout, stderr) = run_acpx(&[
+        "--agent",
+        &agent_cmd,
+        "--cwd",
+        cwd_str,
+        "--format",
+        "json",
+        "--approve-all",
+        "--timeout",
+        "30",
+        "exec",
+        "say: HELLO",
+    ]);
+    assert!(ok, "exec must succeed; stderr: {stderr}");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let has_text = events.iter().any(|e| {
+        e.pointer("/params/update/content/text")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    });
+    assert!(
+        has_text,
+        "exec must produce a non-empty text reply; events: {events:?}"
+    );
+
+    // Steps 5–6 (converse via exact ACP session ID / non-existent session ID)
+    // are not reachable via acpx CLI — see test_session_lifecycle_full for
+    // full coverage at the raw JSON-RPC wire level.
 }
