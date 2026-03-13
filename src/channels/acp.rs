@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_acp_prompt_blocks_to_text() {
-        use super::acp_protocol::PromptContentBlock;
+        use crate::channels::acp_protocol::PromptContentBlock;
         let blocks = vec![
             PromptContentBlock::Text {
                 text: "Hello".to_string(),
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_acp_prompt_blocks_to_text_skips_non_text() {
-        use super::acp_protocol::PromptContentBlock;
+        use crate::channels::acp_protocol::PromptContentBlock;
         let blocks = vec![
             PromptContentBlock::Text {
                 text: "Only this".to_string(),
