@@ -71,6 +71,23 @@ pub struct AcpChannel {
     stdio_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Clone for AcpChannel {
+    /// Shallow clone that shares all `Arc` state but does not inherit the
+    /// `stdio_handle`.  Used to give the outbound dispatcher its own handle
+    /// to the channel without interfering with the stdin loop.
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            base_config: self.base_config.clone(),
+            bus: Arc::clone(&self.bus),
+            running: Arc::clone(&self.running),
+            state: Arc::clone(&self.state),
+            stdout: Arc::clone(&self.stdout),
+            stdio_handle: None,
+        }
+    }
+}
+
 impl AcpChannel {
     /// Create a new ACP channel.
     pub fn new(

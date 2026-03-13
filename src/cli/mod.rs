@@ -723,6 +723,7 @@ async fn cmd_acp() -> Result<()> {
     use std::sync::Arc;
 
     use zeptoclaw::bus::MessageBus;
+    use zeptoclaw::channels::Channel;
     use zeptoclaw::{AcpChannel, BaseChannelConfig, Config};
 
     let config = tokio::task::spawn_blocking(Config::load)
@@ -737,19 +738,48 @@ async fn cmd_acp() -> Result<()> {
 
     let bus = Arc::new(MessageBus::new());
 
-    // Boot the kernel so the agent loop and LLM provider are ready.
-    let kernel = zeptoclaw::kernel::ZeptoKernel::boot(config, Arc::clone(&bus), None, None).await?;
-    let _kernel = Arc::new(kernel);
+    // Create and wire the agent loop (boots kernel: provider, tools, safety).
+    let agent = common::create_agent(config.clone(), Arc::clone(&bus)).await?;
+
+    // Start agent loop in background: consumes inbound bus messages, runs LLM,
+    // publishes outbound bus messages.
+    let agent_handle = {
+        let agent_clone = Arc::clone(&agent);
+        tokio::spawn(async move {
+            if let Err(e) = agent_clone.start().await {
+                tracing::error!(error = %e, "ACP: agent loop error");
+            }
+        })
+    };
 
     let base_config = BaseChannelConfig {
         name: "acp".to_string(),
         allowlist: acp_config.allow_from.clone(),
         deny_by_default: acp_config.deny_by_default,
     };
-    let channel = AcpChannel::new(acp_config, base_config, bus);
+    let channel = AcpChannel::new(acp_config, base_config, Arc::clone(&bus));
+
+    // Start outbound dispatcher: routes bus outbound messages → ACP channel
+    // send(), which emits session/update + session/prompt response.
+    let dispatch_handle = {
+        let channel_for_dispatch = channel.clone();
+        let bus_for_dispatch = Arc::clone(&bus);
+        tokio::spawn(async move {
+            while let Some(msg) = bus_for_dispatch.consume_outbound().await {
+                if let Err(e) = channel_for_dispatch.send(msg).await {
+                    tracing::error!(error = %e, "ACP: outbound dispatch error");
+                }
+            }
+        })
+    };
+
     // run_stdio() blocks until stdin closes — keeps the process alive for the
     // full session rather than returning immediately like start() would.
     channel.run_stdio().await?;
+
+    agent.stop();
+    agent_handle.abort();
+    dispatch_handle.abort();
 
     Ok(())
 }
