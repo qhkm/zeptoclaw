@@ -59,6 +59,18 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Show available templates",
         },
         SlashCommand {
+            name: "trust",
+            description: "Show local trusted-session status",
+        },
+        SlashCommand {
+            name: "trust on",
+            description: "Bypass approvals for this interactive CLI session",
+        },
+        SlashCommand {
+            name: "trust off",
+            description: "Disable trusted-session bypass",
+        },
+        SlashCommand {
             name: "clear",
             description: "Clear conversation context",
         },
@@ -229,6 +241,7 @@ mod tests {
         assert!(help.contains("/model"));
         assert!(help.contains("/persona"));
         assert!(help.contains("/help"));
+        assert!(help.contains("/trust"));
         assert!(help.contains("/quit"));
         // Subcommands should NOT appear as top-level entries
         assert!(!help.contains("/model list"));
@@ -246,9 +259,11 @@ mod tests {
         let template = cmds.iter().find(|cmd| cmd.name == "template").unwrap();
         let history = cmds.iter().find(|cmd| cmd.name == "history").unwrap();
         let memory = cmds.iter().find(|cmd| cmd.name == "memory").unwrap();
+        let trust = cmds.iter().find(|cmd| cmd.name == "trust").unwrap();
 
         assert_eq!(template.description, "List available templates");
         assert_eq!(history.description, "Show history command hints");
         assert_eq!(memory.description, "Show memory command hints");
+        assert_eq!(trust.description, "Show local trusted-session status");
     }
 }

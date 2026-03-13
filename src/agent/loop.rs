@@ -4,6 +4,8 @@
 //! calls LLM providers, and executes tools.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ use crate::health::UsageMetrics;
 use crate::providers::{ChatOptions, LLMProvider, LLMToolCall};
 use crate::safety::SafetyLayer;
 use crate::session::{Message, Role, SessionManager, ToolCall};
-use crate::tools::approval::ApprovalGate;
+use crate::tools::approval::{ApprovalGate, ApprovalRequest, ApprovalResponse};
 use crate::tools::{Tool, ToolCategory, ToolContext, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
 
@@ -39,6 +41,59 @@ Be selective: only save what would be useful in future conversations.";
 
 /// Maximum wall-clock time (in seconds) allowed for the memory flush LLM turn.
 const MEMORY_FLUSH_TIMEOUT_SECS: u64 = 10;
+
+const INTERACTIVE_CLI_METADATA_KEY: &str = "interactive_cli";
+const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
+
+type ApprovalFuture = Pin<Box<dyn Future<Output = ApprovalResponse> + Send>>;
+type ApprovalHandler = Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>;
+
+fn is_trusted_local_session(msg: &InboundMessage) -> bool {
+    msg.channel == "cli"
+        && msg
+            .metadata
+            .get(INTERACTIVE_CLI_METADATA_KEY)
+            .is_some_and(|value| value == "true")
+        && msg
+            .metadata
+            .get(TRUSTED_LOCAL_SESSION_METADATA_KEY)
+            .is_some_and(|value| value == "true")
+        && msg
+            .metadata
+            .get("is_batch")
+            .is_none_or(|value| value != "true")
+}
+
+async fn resolve_tool_approval(
+    gate: &ApprovalGate,
+    approval_handler: Option<&ApprovalHandler>,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<String> {
+    if !gate.requires_approval(tool_name) {
+        return None;
+    }
+
+    if let Some(handler) = approval_handler {
+        match handler(gate.create_request(tool_name, args)).await {
+            ApprovalResponse::Approved => None,
+            ApprovalResponse::Denied(reason) => Some(format!(
+                "Tool '{}' was denied by user approval. {}",
+                tool_name, reason
+            )),
+            ApprovalResponse::TimedOut => Some(format!(
+                "Tool '{}' approval timed out and was not executed.",
+                tool_name
+            )),
+        }
+    } else {
+        let prompt = gate.format_approval_request(tool_name, args);
+        Some(format!(
+            "Tool '{}' requires user approval and was not executed. {}",
+            tool_name, prompt
+        ))
+    }
+}
 
 /// Returns `true` if any tool in the batch may cause ordering-sensitive side effects
 /// (filesystem writes, shell commands) and the batch should be executed sequentially
@@ -406,6 +461,8 @@ pub struct AgentLoop {
     tool_call_limit: ToolCallLimitTracker,
     /// Tool approval gate for policy-based tool gating.
     approval_gate: Arc<ApprovalGate>,
+    /// Optional handler used by interactive frontends to resolve approval prompts inline.
+    approval_handler: Arc<RwLock<Option<ApprovalHandler>>>,
     /// Agent mode for category-based tool enforcement.
     agent_mode: crate::security::AgentMode,
     /// Optional safety layer for tool output sanitization.
@@ -522,6 +579,7 @@ impl AgentLoop {
             token_budget,
             tool_call_limit,
             approval_gate,
+            approval_handler: Arc::new(RwLock::new(None)),
             agent_mode,
             safety_layer,
             context_monitor,
@@ -590,6 +648,7 @@ impl AgentLoop {
             token_budget,
             tool_call_limit,
             approval_gate,
+            approval_handler: Arc::new(RwLock::new(None)),
             agent_mode,
             safety_layer,
             context_monitor,
@@ -732,6 +791,17 @@ impl AgentLoop {
     pub async fn register_tool(&self, tool: Box<dyn Tool>) {
         let mut tools = self.tools.write().await;
         tools.register(tool);
+    }
+
+    /// Install an approval handler used to resolve approval requests inline.
+    pub async fn set_approval_handler<F, Fut>(&self, handler: F)
+    where
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ApprovalResponse> + Send + 'static,
+    {
+        let wrapped: ApprovalHandler = Arc::new(move |request| handler(request).boxed());
+        let mut slot = self.approval_handler.write().await;
+        *slot = Some(wrapped);
     }
 
     /// Merge all tools from a kernel ToolRegistry and register MCP clients.
@@ -1097,6 +1167,7 @@ impl AgentLoop {
                 .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
+            let approval_handler = self.approval_handler.read().await.clone();
             let safety_layer = self.safety_layer.clone();
             let taint_engine = self.taint.clone();
             let hook_engine = Arc::new(
@@ -1120,9 +1191,15 @@ impl AgentLoop {
             let event_bus_clone = self.event_bus.clone();
             let is_dry_run = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode = self.agent_mode;
+            let trusted_local_session = is_trusted_local_session(msg);
 
-            let run_sequential =
-                needs_sequential_execution(&self.tools, &response.tool_calls).await;
+            let run_sequential = (!trusted_local_session
+                && approval_handler.is_some()
+                && response
+                    .tool_calls
+                    .iter()
+                    .any(|tool_call| approval_gate.requires_approval(&tool_call.name)))
+                || needs_sequential_execution(&self.tools, &response.tool_calls).await;
             let tool_timeout_secs = if self.config.agents.defaults.tool_timeout_secs > 0 {
                 self.config.agents.defaults.tool_timeout_secs
             } else {
@@ -1145,6 +1222,7 @@ impl AgentLoop {
                     let usage_metrics = usage_metrics.clone();
                     let metrics_collector = Arc::clone(&metrics_collector);
                     let gate = Arc::clone(&approval_gate);
+                    let approval_handler = approval_handler.clone();
                     let hooks = Arc::clone(&hook_engine);
                     let safety = safety_layer.clone();
                     let taint = taint_engine.clone();
@@ -1195,7 +1273,9 @@ impl AgentLoop {
                                         ), false);
                                     }
                                     crate::security::CategoryPermission::RequiresApproval => {
-                                        if !gate.requires_approval(&name) {
+                                        if trusted_local_session {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Trusted local session bypassed approval-gated tool");
+                                        } else if !gate.requires_approval(&name) {
                                             info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
                                             return (id, format!(
                                                 "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
@@ -1210,10 +1290,18 @@ impl AgentLoop {
                         }
 
                         // Check approval gate before executing
-                        if gate.requires_approval(&name) {
-                            let prompt = gate.format_approval_request(&name, &args);
-                            info!(tool = %name, "Tool requires approval, blocking execution");
-                            return (id, format!("Tool '{}' requires user approval and was not executed. {}", name, prompt), false);
+                        if !trusted_local_session {
+                            if let Some(message) = resolve_tool_approval(
+                                &gate,
+                                approval_handler.as_ref(),
+                                &name,
+                                &args,
+                            )
+                            .await
+                            {
+                                info!(tool = %name, "Tool requires approval, blocking execution");
+                                return (id, message, false);
+                            }
                         }
 
                         // Dry-run mode: describe what would happen without executing
@@ -1590,6 +1678,10 @@ impl AgentLoop {
             .resolve_provider_for_message(msg)
             .await
             .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
+        let usage_metrics = {
+            let metrics = self.usage_metrics.read().await;
+            metrics.clone()
+        };
         let metrics_collector = Arc::clone(&self.metrics_collector);
 
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
@@ -1658,11 +1750,31 @@ impl AgentLoop {
             )));
         }
 
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::Thinking,
+                args_json: None,
+            });
+        }
+
         // First call: non-streaming to see if there are tool calls
         let mut response = provider
             .chat(messages, tool_definitions, model, options.clone())
             .await?;
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::ThinkingDone,
+                args_json: None,
+            });
+        }
+        if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref()) {
+            metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+        }
         if let Some(usage) = response.usage.as_ref() {
+            metrics_collector
+                .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
             self.token_budget
                 .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
         }
@@ -1684,6 +1796,7 @@ impl AgentLoop {
 
         while response.has_tool_calls() && iteration < max_iterations {
             iteration += 1;
+            debug!("Tool iteration {} of {}", iteration, max_iterations);
 
             // Enforce tool call limit BEFORE adding assistant message to session
             // (streaming path). Same rationale as non-streaming: avoids orphaned
@@ -1706,6 +1819,10 @@ impl AgentLoop {
                     );
                     response.tool_calls.truncate(allowed);
                 }
+            }
+
+            if let Some(metrics) = usage_metrics.as_ref() {
+                metrics.record_tool_calls(response.tool_calls.len() as u64);
             }
 
             // Add assistant message with tool calls (post-truncation).
@@ -1731,8 +1848,13 @@ impl AgentLoop {
                 .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
 
             let approval_gate = Arc::clone(&self.approval_gate);
+            let approval_handler = self.approval_handler.read().await.clone();
             let safety_layer_stream = self.safety_layer.clone();
             let taint_engine_stream = self.taint.clone();
+            let hook_engine = Arc::new(
+                crate::hooks::HookEngine::new(self.config.hooks.clone())
+                    .with_bus(Arc::clone(&self.bus)),
+            );
 
             // Compute dynamic tool result budget based on remaining context space
             let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
@@ -1750,9 +1872,15 @@ impl AgentLoop {
             let event_bus_clone_stream = self.event_bus.clone();
             let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
             let current_agent_mode_stream = self.agent_mode;
+            let trusted_local_session = is_trusted_local_session(msg);
 
-            let run_sequential =
-                needs_sequential_execution(&self.tools, &response.tool_calls).await;
+            let run_sequential = (!trusted_local_session
+                && approval_handler.is_some()
+                && response
+                    .tool_calls
+                    .iter()
+                    .any(|tool_call| approval_gate.requires_approval(&tool_call.name)))
+                || needs_sequential_execution(&self.tools, &response.tool_calls).await;
             let tool_timeout_secs = if self.config.agents.defaults.tool_timeout_secs > 0 {
                 self.config.agents.defaults.tool_timeout_secs
             } else {
@@ -1772,8 +1900,11 @@ impl AgentLoop {
                     let name = tool_call.name.clone();
                     let id = tool_call.id.clone();
                     let raw_args = tool_call.arguments.clone();
+                    let usage_metrics = usage_metrics.clone();
                     let metrics_collector = Arc::clone(&metrics_collector);
                     let gate = Arc::clone(&approval_gate);
+                    let approval_handler = approval_handler.clone();
+                    let hooks = Arc::clone(&hook_engine);
                     let safety = safety_layer_stream.clone();
                     let taint = taint_engine_stream.clone();
                     let budget = result_budget_stream;
@@ -1786,8 +1917,21 @@ impl AgentLoop {
                     let inbound_meta = inbound_metadata_stream.clone();
 
                     async move {
-                        let args: serde_json::Value = serde_json::from_str(&raw_args)
-                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let args: serde_json::Value = match serde_json::from_str(&raw_args) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(tool = %name, error = %e, "Invalid JSON in tool arguments");
+                                serde_json::json!({"_parse_error": format!("Invalid arguments JSON: {}", e)})
+                            }
+                        };
+
+                        let channel_name = ctx.channel.as_deref().unwrap_or("cli");
+                        let chat_id = ctx.chat_id.as_deref().unwrap_or(channel_name);
+                        if let crate::hooks::HookResult::Block(msg) =
+                            hooks.before_tool(&name, &args, channel_name, chat_id)
+                        {
+                            return (id, format!("Tool '{}' blocked by hook: {}", name, msg), false);
+                        }
 
                         // Agent mode enforcement — same fail-closed logic as non-streaming path.
                         {
@@ -1804,7 +1948,9 @@ impl AgentLoop {
                                         ), false);
                                     }
                                     crate::security::CategoryPermission::RequiresApproval => {
-                                        if !gate.requires_approval(&name) {
+                                        if trusted_local_session {
+                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Trusted local session bypassed approval-gated tool");
+                                        } else if !gate.requires_approval(&name) {
                                             info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
                                             return (id, format!(
                                                 "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
@@ -1818,17 +1964,18 @@ impl AgentLoop {
                         }
 
                         // Check approval gate before executing
-                        if gate.requires_approval(&name) {
-                            let prompt = gate.format_approval_request(&name, &args);
-                            info!(tool = %name, "Tool requires approval, blocking execution");
-                            return (
-                                id,
-                                format!(
-                                    "Tool '{}' requires user approval and was not executed. {}",
-                                    name, prompt
-                                ),
-                                false,
-                            );
+                        if !trusted_local_session {
+                            if let Some(message) = resolve_tool_approval(
+                                &gate,
+                                approval_handler.as_ref(),
+                                &name,
+                                &args,
+                            )
+                            .await
+                            {
+                                info!(tool = %name, "Tool requires approval, blocking execution");
+                                return (id, message, false);
+                            }
                         }
 
                         // Dry-run mode: describe what would happen without executing
@@ -1882,6 +2029,8 @@ impl AgentLoop {
                             }
                         };
                         let pause = tool_output.as_ref().is_some_and(|o| o.pause_for_input);
+                        let elapsed = tool_start.elapsed();
+                        let latency_ms = elapsed.as_millis() as u64;
                         if let Some(output) = tool_output {
                             // Send to user if tool opted in
                             if let Some(ref user_msg) = output.for_user {
@@ -1899,10 +2048,10 @@ impl AgentLoop {
                                 let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
                         }
-                        // Send tool done/failed feedback
-                        let latency_ms = tool_start.elapsed().as_millis() as u64;
-                        if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                            if success {
+                        if success {
+                            debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
+                            hooks.after_tool(&name, &result, elapsed, channel_name, chat_id);
+                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
                                 let _ = tx.send(ToolFeedback {
                                     tool_name: name.clone(),
                                     phase: ToolFeedbackPhase::Done {
@@ -1910,7 +2059,21 @@ impl AgentLoop {
                                     },
                                     args_json: Some(raw_args.clone()),
                                 });
-                            } else {
+                            }
+                            #[cfg(feature = "panel")]
+                            if let Some(bus) = &event_bus {
+                                bus.send(crate::api::events::PanelEvent::ToolDone {
+                                    tool: name.clone(),
+                                    duration_ms: latency_ms,
+                                });
+                            }
+                        } else {
+                            error!(tool = %name, latency_ms = latency_ms, error = %result, "Tool execution failed");
+                            hooks.on_error(&name, &result, channel_name, chat_id);
+                            if let Some(metrics) = usage_metrics.as_ref() {
+                                metrics.record_error();
+                            }
+                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
                                 let _ = tx.send(ToolFeedback {
                                     tool_name: name.clone(),
                                     phase: ToolFeedbackPhase::Failed {
@@ -1920,15 +2083,8 @@ impl AgentLoop {
                                     args_json: Some(raw_args.clone()),
                                 });
                             }
-                        }
-                        #[cfg(feature = "panel")]
-                        if let Some(bus) = &event_bus {
-                            if success {
-                                bus.send(crate::api::events::PanelEvent::ToolDone {
-                                    tool: name.clone(),
-                                    duration_ms: latency_ms,
-                                });
-                            } else {
+                            #[cfg(feature = "panel")]
+                            if let Some(bus) = &event_bus {
                                 bus.send(crate::api::events::PanelEvent::ToolFailed {
                                     tool: name.clone(),
                                     error: result.clone(),
@@ -2034,15 +2190,42 @@ impl AgentLoop {
                 .filter(|m| !(m.role == Role::User && m.content.is_empty()))
                 .collect();
 
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::Thinking,
+                    args_json: None,
+                });
+            }
+
             response = provider
                 .chat(messages, tool_definitions, model, options.clone())
                 .await?;
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::ThinkingDone,
+                    args_json: None,
+                });
+            }
+            if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref())
+            {
+                metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+            }
             if let Some(usage) = response.usage.as_ref() {
                 metrics_collector
                     .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
                 self.token_budget
                     .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
             }
+        }
+
+        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+            let _ = tx.send(ToolFeedback {
+                tool_name: String::new(),
+                phase: ToolFeedbackPhase::ResponseReady,
+                args_json: None,
+            });
         }
 
         // Final call: if no more tool calls, use streaming
@@ -2076,6 +2259,7 @@ impl AgentLoop {
             let (out_tx, out_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
             let session_manager = Arc::clone(&self.session_manager);
             let session_clone = session.clone();
+            let usage_metrics = usage_metrics.clone();
             let metrics_collector = Arc::clone(&metrics_collector);
 
             tokio::spawn(async move {
@@ -2086,6 +2270,12 @@ impl AgentLoop {
                     match &event {
                         StreamEvent::Done { content, usage } => {
                             if let Some(usage) = usage.as_ref() {
+                                if let Some(metrics) = usage_metrics.as_ref() {
+                                    metrics.record_tokens(
+                                        usage.prompt_tokens as u64,
+                                        usage.completion_tokens as u64,
+                                    );
+                                }
                                 metrics_collector.record_tokens(
                                     usage.prompt_tokens as u64,
                                     usage.completion_tokens as u64,
@@ -2681,13 +2871,20 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{LLMResponse, ToolDefinition};
+    use crate::hooks::{HookAction, HookRule};
+    use crate::providers::{LLMResponse, StreamEvent, ToolDefinition, Usage};
     use async_trait::async_trait;
 
     #[derive(Debug)]
     struct TestProvider {
         name: &'static str,
         model: &'static str,
+    }
+
+    struct ToolThenTextProvider {
+        calls: std::sync::Mutex<u8>,
+        tool_name: &'static str,
+        tool_args: &'static str,
     }
 
     #[async_trait]
@@ -2709,6 +2906,54 @@ mod tests {
         ) -> Result<LLMResponse> {
             Ok(LLMResponse::text("ok"))
         }
+    }
+
+    #[async_trait]
+    impl LLMProvider for ToolThenTextProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn default_model(&self) -> &str {
+            "test-model"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            let mut calls = self.calls.lock().expect("provider call counter poisoned");
+            *calls += 1;
+            if *calls == 1 {
+                Ok(LLMResponse::with_tools(
+                    "",
+                    vec![LLMToolCall::new("call_1", self.tool_name, self.tool_args)],
+                )
+                .with_usage(Usage::new(10, 1)))
+            } else {
+                let call_num = *calls as u32;
+                Ok(LLMResponse::text("done").with_usage(Usage::new(10 + call_num, call_num)))
+            }
+        }
+    }
+
+    async fn collect_stream_done(
+        mut rx: tokio::sync::mpsc::Receiver<StreamEvent>,
+    ) -> (String, Option<Usage>) {
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Done { content, usage } => return (content, usage),
+                StreamEvent::Delta(_) => {}
+                StreamEvent::ToolCalls(tool_calls) => {
+                    panic!("unexpected tool calls in final stream: {:?}", tool_calls)
+                }
+                StreamEvent::Error(err) => panic!("unexpected stream error: {err}"),
+            }
+        }
+        panic!("stream ended without a Done event");
     }
 
     #[tokio::test]
@@ -2835,6 +3080,187 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ZeptoError::Provider(_)));
         assert!(err.to_string().contains("No provider configured"));
+    }
+
+    #[tokio::test]
+    async fn test_process_message_approval_handler_allows_tool_execution() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        agent
+            .set_provider(Box::new(ToolThenTextProvider {
+                calls: std::sync::Mutex::new(0),
+                tool_name: "shell",
+                tool_args: "{}",
+            }))
+            .await;
+        agent
+            .register_tool(Box::new(StubTool {
+                name: "shell",
+                category: ToolCategory::Shell,
+            }))
+            .await;
+        agent
+            .set_approval_handler(|_| async { ApprovalResponse::Approved })
+            .await;
+
+        let msg = InboundMessage::new("cli", "user", "cli", "run a tool")
+            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true");
+        let result = agent
+            .process_message(&msg)
+            .await
+            .expect("message should succeed");
+
+        assert_eq!(result, "done");
+    }
+
+    #[tokio::test]
+    async fn test_process_message_trusted_local_session_bypasses_approval() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        agent
+            .set_provider(Box::new(ToolThenTextProvider {
+                calls: std::sync::Mutex::new(0),
+                tool_name: "shell",
+                tool_args: "{}",
+            }))
+            .await;
+        agent
+            .register_tool(Box::new(StubTool {
+                name: "shell",
+                category: ToolCategory::Shell,
+            }))
+            .await;
+
+        let msg = InboundMessage::new("cli", "user", "cli", "run a tool")
+            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true")
+            .with_metadata(TRUSTED_LOCAL_SESSION_METADATA_KEY, "true");
+        let result = agent
+            .process_message(&msg)
+            .await
+            .expect("message should succeed");
+
+        assert_eq!(result, "done");
+    }
+
+    #[test]
+    fn test_trusted_local_session_requires_cli_channel() {
+        let msg = InboundMessage::new("telegram", "user", "chat", "hello")
+            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true")
+            .with_metadata(TRUSTED_LOCAL_SESSION_METADATA_KEY, "true");
+
+        assert!(!is_trusted_local_session(&msg));
+    }
+
+    #[tokio::test]
+    async fn test_process_message_streaming_respects_before_tool_hooks() {
+        let mut config = Config::default();
+        config.hooks.enabled = true;
+        config.hooks.before_tool.push(HookRule {
+            action: HookAction::Block,
+            tools: vec!["read_file".to_string()],
+            channels: vec![],
+            level: None,
+            message: Some("hook blocked".to_string()),
+            channel: None,
+            chat_id: None,
+        });
+
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        agent
+            .set_provider(Box::new(ToolThenTextProvider {
+                calls: std::sync::Mutex::new(0),
+                tool_name: "read_file",
+                tool_args: "{}",
+            }))
+            .await;
+        agent
+            .register_tool(Box::new(InstrumentedTool {
+                name: "read_file",
+                category: ToolCategory::FilesystemRead,
+                calls: Arc::clone(&tool_calls),
+                fail: false,
+                last_args: None,
+            }))
+            .await;
+
+        let msg = InboundMessage::new("cli", "user", "cli", "run a tool");
+        let stream = agent
+            .process_message_streaming(&msg)
+            .await
+            .expect("streaming message should succeed");
+        let (content, _) = collect_stream_done(stream).await;
+
+        assert_eq!(content, "done");
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_streaming_records_usage_metrics_and_parse_errors() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+        let metrics = Arc::new(UsageMetrics::new());
+        let tool_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_args = Arc::new(std::sync::Mutex::new(None));
+
+        agent.set_usage_metrics(Arc::clone(&metrics)).await;
+        agent
+            .set_provider(Box::new(ToolThenTextProvider {
+                calls: std::sync::Mutex::new(0),
+                tool_name: "read_file",
+                tool_args: "{bad json",
+            }))
+            .await;
+        agent
+            .register_tool(Box::new(InstrumentedTool {
+                name: "read_file",
+                category: ToolCategory::FilesystemRead,
+                calls: Arc::clone(&tool_calls),
+                fail: true,
+                last_args: Some(Arc::clone(&last_args)),
+            }))
+            .await;
+
+        let msg = InboundMessage::new("cli", "user", "cli", "run a tool");
+        let stream = agent
+            .process_message_streaming(&msg)
+            .await
+            .expect("streaming message should succeed");
+        let (content, usage) = collect_stream_done(stream).await;
+        let observed_args = last_args
+            .lock()
+            .expect("args mutex poisoned")
+            .clone()
+            .expect("tool should receive arguments");
+        let usage = usage.expect("stream should include usage");
+
+        assert_eq!(content, "done");
+        assert_eq!(usage.prompt_tokens, 13);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 16);
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.errors.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.input_tokens.load(Ordering::Relaxed), 35);
+        assert_eq!(metrics.output_tokens.load(Ordering::Relaxed), 6);
+        assert!(
+            observed_args
+                .get("_parse_error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|msg| msg.contains("Invalid arguments JSON")),
+            "streaming path should preserve parse errors for downstream policy and tooling"
+        );
     }
 
     #[tokio::test]
@@ -3386,6 +3812,46 @@ mod tests {
             _ctx: &ToolContext,
         ) -> std::result::Result<crate::tools::ToolOutput, crate::error::ZeptoError> {
             Ok(crate::tools::ToolOutput::llm_only("ok"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct InstrumentedTool {
+        name: &'static str,
+        category: ToolCategory,
+        calls: Arc<std::sync::atomic::AtomicU64>,
+        fail: bool,
+        last_args: Option<Arc<std::sync::Mutex<Option<serde_json::Value>>>>,
+    }
+
+    #[async_trait]
+    impl Tool for InstrumentedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn category(&self) -> ToolCategory {
+            self.category
+        }
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> std::result::Result<crate::tools::ToolOutput, crate::error::ZeptoError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(last_args) = &self.last_args {
+                *last_args.lock().expect("args mutex poisoned") = Some(args);
+            }
+            if self.fail {
+                Err(crate::error::ZeptoError::Tool("boom".into()))
+            } else {
+                Ok(crate::tools::ToolOutput::llm_only("ok"))
+            }
         }
     }
 

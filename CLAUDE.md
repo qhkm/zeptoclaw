@@ -2,6 +2,8 @@
 
 Ultra-lightweight personal AI assistant. The best of OpenClaw's integrations, NanoClaw's security, and PicoClaw's minimalism — without their tradeoffs.
 
+Fresh configs default to `assistant` mode with dangerous tool approvals enabled.
+
 ## Quick Reference
 
 ```bash
@@ -17,6 +19,12 @@ cargo build --release --features mqtt
 # Run tests (use nextest to avoid OOM kills on low-RAM machines)
 cargo nextest run --lib
 
+# Run the agent-comparison coding fixture
+python3 -m unittest test-coding/test_calculator.py -v
+
+# Run the pristine failing benchmark copy
+python3 -m unittest test-coding-pristine/test_calculator.py -v
+
 # Lint
 cargo clippy -- -D warnings
 
@@ -24,7 +32,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# default build: lib 3106 total (3100 passed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
+# current local build: lib 3156 total (3149 passed, 1 failed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
 
 # Version
 ./target/release/zeptoclaw --version
@@ -47,8 +55,13 @@ cargo fmt
 /template                # List available templates
 /history                 # Show history command hints
 /memory                  # Show memory command hints
+/trust                   # Show trusted local-session status
+/trust on                # Bypass approval prompts for this local interactive session
+/trust off               # Turn trusted local-session bypass back off
 /clear                   # Clear conversation
 /quit                    # Exit
+
+Interactive approval prompts and `/trust` are only active when both stdin and stdout are real TTYs.
 
 # Run gateway (Telegram bot)
 ./target/release/zeptoclaw gateway
@@ -323,7 +336,7 @@ src/
 ├── routines/       # Event/webhook/cron triggered automations
 ├── safety/         # Prompt injection detection, secret leak scanning, policy engine, chain alerting
 ├── security/       # Shell blocklist, path validation, mount policy, secret encryption
-│   ├── agent_mode.rs # Agent modes (Observer, Assistant, Autonomous) — category-based tool access
+│   ├── agent_mode.rs # Agent modes (Observer, Assistant, Autonomous) — defaults to Assistant for safer fresh configs
 │   └── encryption.rs # XChaCha20-Poly1305 + Argon2id secret encryption at rest
 ├── session/        # Session, message persistence, conversation history
 ├── tunnel/         # Tunnel providers (Cloudflare, ngrok, Tailscale)
@@ -370,7 +383,7 @@ src/
 │   ├── plugin.rs      # Plugin tool adapter (PluginTool)
 │   ├── skills_install.rs # Skill installation tool
 │   ├── skills_search.rs  # Skill discovery/search tool
-│   ├── approval.rs    # Tool approval gate (ApprovalGate)
+│   ├── approval.rs    # Tool approval gate (ApprovalGate) — defaults to enabled + require_for_dangerous
 │   ├── r8r.rs         # R8r workflow integration
 │   ├── reminder.rs    # Persistent reminders (add/complete/snooze/overdue) with cron delivery
 │   └── mcp/           # MCP (Model Context Protocol) client tools
@@ -417,6 +430,16 @@ panel/
 ├── index.html
 ├── package.json
 └── vite.config.ts
+
+test-coding/
+├── calculator.py       # Intentionally buggy coding benchmark fixture
+├── test_calculator.py  # Stdlib unittest verification for the fixture
+└── README.md           # Prompt and verification command for agent comparisons
+
+test-coding-pristine/
+├── calculator.py       # Original buggy benchmark kept unchanged for fresh comparisons
+├── test_calculator.py  # Stdlib unittest verification for the pristine fixture
+└── README.md           # Prompt and reset guidance for repeatable head-to-head runs
 ```
 
 ## Key Modules
@@ -517,6 +540,7 @@ Message input channels via `Channel` trait:
 
 ### Agent (`src/agent/`)
 - `AgentLoop` - Core message processing loop with tool execution + pre-compaction memory flush + per-message LTM memory injection override
+- `process_message_streaming()` now mirrors the non-streaming tool loop for hook callbacks, usage metrics, success/failure logging, feedback phases, and malformed tool-argument parse preservation
 - `ContextBuilder` - System prompt and conversation context builder + optional per-message memory override API
 - `TokenBudget` - Atomic per-session token budget tracker (lock-free via `AtomicU64`)
 - `ContextMonitor` - Token estimation (`words * 1.3 + 4/msg`), threshold-based compaction triggers

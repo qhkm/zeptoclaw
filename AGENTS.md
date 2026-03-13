@@ -9,6 +9,8 @@ Project-level guidance for coding agents working in this repository.
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
+- Agent coding benchmark fixture: `test-coding/` with intentionally buggy Python code and stdlib verification tests
+- Pristine agent comparison fixture: `test-coding-pristine/` preserves the original failing state for repeatable head-to-head runs
 - Codebase: ~106,000+ lines of Rust
 - Channels: 10 (Telegram, Slack, Discord, WhatsApp, WhatsApp Web, WhatsApp Cloud, Lark, Email, Webhook, Serial)
 - Runtimes: 6 (Native, Docker, Apple Container, Landlock, Firejail, Bubblewrap)
@@ -29,14 +31,16 @@ Project-level guidance for coding agents working in this repository.
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
-- CLI interactive mode: rustyline-backed slash commands with tab completion, persisted REPL history, `/model` and `/persona` overrides, `/tools`, `/template`, and `/clear`
+- CLI interactive mode: TTY-gated local slash commands with rustyline tab completion when available, persisted REPL history, inline tool approval prompts, session-scoped `/trust` override for local use, `/model` and `/persona` overrides, `/tools`, `/template`, and `/clear`
 - Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
 - Tool execution convergence: agent loop and MCP server both route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording)
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows
+- Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
 - Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
+- Streaming tool parity: `process_message_streaming()` now mirrors non-streaming hook callbacks, usage-metric accounting, success/failure logging, thinking/response feedback, and malformed tool-argument parse preservation
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
@@ -45,7 +49,7 @@ Project-level guidance for coding agents working in this repository.
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: default build runs 3106 lib (3100 passed, 6 ignored) + 92 main + 24 cli_smoke + 13 e2e + 70 integration + 127 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
+- Tests: current local build runs 3156 lib (3149 passed, 1 failed, 6 ignored) + 92 main + 24 cli_smoke + 13 e2e + 70 integration + 127 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
 
 ## Task Tracking Protocol
 
