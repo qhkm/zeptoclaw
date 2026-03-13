@@ -109,6 +109,7 @@
 //! ```
 
 pub mod acp;
+pub mod acp_http;
 mod acp_protocol;
 pub mod discord;
 pub mod email_channel;
@@ -131,6 +132,7 @@ pub mod whatsapp_cloud;
 pub mod whatsapp_web;
 
 pub use acp::AcpChannel;
+pub use acp_http::AcpHttpChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
 pub use factory::register_configured_channels;

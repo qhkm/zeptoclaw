@@ -20,12 +20,14 @@ ZeptoClaw implements a **minimal** ACP agent surface:
 | `session/cancel` | Cancel in-flight prompt; client → agent | Yes — notification; validates session existence |
 | `session/update` | Agent progress / result; agent → client | Yes — text chunks for both prompted and proactive replies |
 
-Transport is **stdio only**: the client launches ZeptoClaw as a subprocess and communicates over stdin (client → agent) and stdout (agent → client) using newline-delimited JSON-RPC 2.0 messages.
+Two transports are supported:
+
+- **stdio** (`"acp"`) — The client launches ZeptoClaw as a subprocess and communicates over stdin (client → agent) and stdout (agent → client) using newline-delimited JSON-RPC 2.0 messages.
+- **Streamable HTTP** (`"acp_http"`) — The client sends `POST /acp` requests over a TCP connection. `session/prompt` responses stream back as Server-Sent Events (`text/event-stream`); all other methods return synchronous JSON. The two transports are independent channels with separate session namespaces.
 
 ### 1.2 Out of scope (v1)
 
 - **Client filesystem / terminal callbacks** — No `filesystem/*` or `terminal/*` request handling; the agent does not invoke client-side filesystem or terminal APIs.
-- **HTTP transport** — Only stdio is supported; the design allows for a future streamable HTTP transport without changing the channel abstraction.
 - **Streaming token-by-token** — Agent replies are delivered as a single `session/update` with the full text plus a single `session/prompt` response; incremental streaming of tokens is not implemented.
 - **MCP over ACP** — MCP server discovery/capabilities are advertised as disabled in `initialize`; no ACP-specific MCP wiring.
 - **Session loading / persistence** — `loadSession` is reported as `false`; the agent does not restore prior session state from the client.
@@ -79,13 +81,15 @@ This matches the ACP stdio transport and keeps parsing simple and robust.
 
 ```
 src/channels/
-├── mod.rs           # exports acp, acp_protocol (private)
-├── acp.rs           # AcpChannel (Channel impl), AcpState, stdin loop, send()
+├── mod.rs           # exports acp, acp_http, acp_protocol (private)
+├── acp.rs           # AcpChannel (stdio, Channel impl), AcpState, stdin loop, send()
+├── acp_http.rs      # AcpHttpChannel (HTTP, Channel impl), TCP accept loop, SSE streaming
 └── acp_protocol.rs  # JSON-RPC and ACP method types (request/response/notification)
 ```
 
 - **acp_protocol.rs** — Pure types: `JsonRpcRequest`, `JsonRpcResponse`, `InitializeParams`/`InitializeResult`, `SessionNewParams`/`SessionNewResult`, `SessionPromptParams`/`SessionPromptResult`, `SessionCancelParams`, `SessionUpdateParams`/`SessionUpdatePayload`, `ContentBlock`, `PromptContentBlock`, etc. No I/O or bus logic.
-- **acp.rs** — Channel implementation: holds config, `MessageBus`, shared `AcpState`, and locked stdout; runs the stdin loop in a spawned task; implements `Channel::send()` to turn `OutboundMessage` into `session/update` + prompt response.
+- **acp.rs** — stdio channel: holds config, `MessageBus`, shared `AcpState`, and locked stdout; runs the stdin loop in a spawned task; implements `Channel::send()` to turn `OutboundMessage` into `session/update` + prompt response.
+- **acp_http.rs** — HTTP channel: raw TCP listener; parses HTTP/1.1 requests; handles synchronous methods with plain JSON responses; for `session/prompt` keeps the connection open and streams SSE events. Uses a `PromptMap` (`Arc<Mutex<HashMap<String, oneshot::Sender>>>`) to bridge `send()` to the waiting connection handler.
 
 ### 3.2 AcpChannel and AcpState
 
@@ -180,12 +184,40 @@ Config lives under `channels.acp` (`AcpChannelConfig`):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | false | If true, register the ACP channel when the gateway starts. |
-| `protocol_version` | string | `"2024-11-05"` | Version advertised in `initialize` (used for display/parsing). |
-| `allow_from` | list of string | [] | If non-empty, only these sender IDs are allowed (we use `acp_client`; this can be used if we later distinguish clients). |
-| `deny_by_default` | bool | false | If true, empty `allow_from` means no sender is allowed. |
+| `enabled` | bool | false | If true, register the ACP stdio channel when the gateway starts. |
+| `protocol_version` | string | `"2024-11-05"` | Version advertised in `initialize`. |
+| `allow_from` | list of string | [] | If non-empty, only these sender IDs are allowed. |
+| `deny_by_default` | bool | false | If true, empty `allow_from` rejects all senders. |
+| `http` | `AcpHttpConfig` or null | null | HTTP transport config (see below). |
 
-Allowlist/deny is applied via `BaseChannelConfig` built from `allow_from` and `deny_by_default`; `is_allowed("acp_client")` is used for any access checks. In the minimal single-client stdio setup, typically `allow_from` is empty and `deny_by_default` is false.
+### HTTP transport (`channels.acp.http`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | false | If true (and `channels.acp.enabled` is also true), start the HTTP listener. |
+| `port` | u16 | 8765 | TCP port to listen on. |
+| `bind` | string | `"127.0.0.1"` | Bind address. Use `"0.0.0.0"` to expose on all interfaces. |
+| `auth_token` | string or null | null | When set, all requests must carry `Authorization: Bearer <token>`. |
+
+**Example config:**
+
+```json
+{
+  "channels": {
+    "acp": {
+      "enabled": true,
+      "http": {
+        "enabled": true,
+        "port": 8765,
+        "bind": "127.0.0.1",
+        "auth_token": "my-secret-token"
+      }
+    }
+  }
+}
+```
+
+Allowlist/deny is applied via `BaseChannelConfig` built from `allow_from` and `deny_by_default`. Both the stdio and HTTP transports inherit the same allowlist. In the typical single-client setup, `allow_from` is empty and `deny_by_default` is false.
 
 ---
 
@@ -222,7 +254,7 @@ Allowlist/deny is applied via `BaseChannelConfig` built from `allow_from` and `d
 - **One pending prompt per session:** Only one `session/prompt` may be in flight per session at a time. A second prompt while one is in flight is rejected with `-32602`. Clients must wait for the `session/prompt` response before sending the next prompt on the same session (or use separate sessions for concurrent conversations).
 - **No session deletion:** Sessions live until the gateway process exits. There is no `session/delete` or equivalent; the cap of 1 000 sessions is the only bound on memory growth.
 - **No streaming:** The full agent reply is sent in one `session/update`. Streaming would require either multiple `session/update` notifications or a different update type and client support.
-- **No HTTP transport:** Only stdio is implemented.
+- **HTTP transport: no persistent connection between prompts:** The HTTP channel holds the TCP connection open only for the duration of a single `session/prompt`; proactive messages (from cron, spawned tasks) cannot be delivered to the client because there is no long-lived SSE subscription separate from the request.
 - **Text-only prompts:** Only `text` content blocks are used; image/resource blocks are silently ignored.
 - **No loadSession:** We always report `load_session: false`; session persistence would require additional protocol and storage design.
 
@@ -234,8 +266,8 @@ The following are candidate improvements and extensions, not commitments.
 
 ### 8.1 Transport
 
-- **HTTP / SSE transport:** Add a transport that accepts JSON-RPC over HTTP (e.g. POST for requests, Server-Sent Events or WebSocket for notifications). Reuse the same `AcpChannel` request/response and state logic behind a transport abstraction so stdio and HTTP share one code path.
-- **Streamable HTTP:** If the ACP spec or community settles on a streamable HTTP binding, support incremental delivery of agent output (e.g. chunked `session/update` over SSE) for lower latency in IDEs.
+- **Persistent SSE subscription:** Add a `GET /acp/events?session=<id>` endpoint so the HTTP client can maintain a long-lived event stream and receive proactive agent messages (from cron, spawned tasks) between `session/prompt` turns.
+- **WebSocket transport:** Optional alternative to raw SSE for clients that prefer full-duplex framing.
 
 ### 8.2 Protocol and capabilities
 
@@ -283,9 +315,27 @@ The following are candidate improvements and extensions, not commitments.
 | `test_send_proactive_known_session_does_not_remove_session` | Proactive `send()` keeps the session in `state.sessions` |
 | `test_session_cap_does_not_insert_beyond_limit` | Session cap prevents insertion beyond `MAX_ACP_SESSIONS` |
 
-**Factory test:** `test_register_configured_channels_registers_acp` verifies that when `channels.acp.enabled` is true, exactly one channel is registered and `has_channel("acp")` is true.
+**Factory tests:**
+- `test_register_configured_channels_registers_acp` — `channels.acp.enabled: true` registers exactly one `"acp"` channel.
+- `test_register_configured_channels_registers_acp_http` — `channels.acp.http.enabled: true` registers both `"acp"` and `"acp_http"` (count = 2).
 
-Integration or end-to-end tests would require driving stdin and parsing stdout; those can be added in a separate test harness.
+**HTTP channel unit tests (`acp_http.rs`):**
+
+| Test | What it covers |
+|------|---------------|
+| `test_channel_name` | `name()` returns `"acp_http"` |
+| `test_is_not_running_initially` | `is_running()` is false before `start()` |
+| `test_prompt_blocks_to_text_*` | Text extraction (shared logic with stdio channel) |
+| `test_send_ignores_wrong_channel` | Wrong-channel `send()` does not consume the pending entry |
+| `test_send_skips_unknown_session` | `send()` for an unknown session is a no-op |
+| `test_send_delivers_via_oneshot` | `send()` delivers content + cancelled=false through the oneshot channel |
+| `test_send_marks_cancelled` | `send()` propagates cancelled=true from `state.pending` |
+| `test_deny_by_default_blocks_session_new` | `deny_by_default: true` rejects `session/new` |
+| `test_constant_time_eq_*` | Auth token comparison helpers |
+| `test_sse_event_format` | SSE event `data:` line formatting |
+| `test_http_200_content_length` | `Content-Length` header matches body length |
+
+Integration or end-to-end tests (driving TCP connections and parsing HTTP/SSE responses) can be added in a separate test harness.
 
 ---
 

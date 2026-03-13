@@ -10,6 +10,7 @@ use crate::config::{Config, MemoryBackend};
 use crate::providers::{configured_provider_models, configured_provider_names};
 
 use super::acp::AcpChannel;
+use super::acp_http::AcpHttpChannel;
 use super::email_channel::EmailChannel;
 use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
@@ -271,7 +272,7 @@ pub async fn register_configured_channels(
         }
     }
 
-    // ACP (Agent Client Protocol) stdio
+    // ACP (Agent Client Protocol) stdio + optional HTTP transport
     if let Some(ref acp_config) = config.channels.acp {
         if acp_config.enabled {
             let base_config = BaseChannelConfig {
@@ -287,6 +288,30 @@ pub async fn register_configured_channels(
                 )))
                 .await;
             info!("Registered ACP channel (stdio)");
+
+            // HTTP transport — registered as a separate channel ("acp_http") so
+            // that sessions are independent and bus routing is unambiguous.
+            if let Some(ref http_cfg) = acp_config.http {
+                if http_cfg.enabled {
+                    let http_base = BaseChannelConfig {
+                        name: "acp_http".to_string(),
+                        allowlist: acp_config.allow_from.clone(),
+                        deny_by_default: acp_config.deny_by_default,
+                    };
+                    manager
+                        .register(Box::new(AcpHttpChannel::new(
+                            acp_config.clone(),
+                            http_cfg.clone(),
+                            http_base,
+                            bus.clone(),
+                        )))
+                        .await;
+                    info!(
+                        "Registered ACP channel (HTTP on {}:{})",
+                        http_cfg.bind, http_cfg.port
+                    );
+                }
+            }
         }
     }
 
@@ -386,6 +411,7 @@ mod tests {
             protocol_version: "2024-11-05".to_string(),
             allow_from: Vec::new(),
             deny_by_default: false,
+            http: None,
         });
 
         let manager = ChannelManager::new(bus.clone(), config.clone());
@@ -393,5 +419,30 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(manager.has_channel("acp").await);
+    }
+
+    #[tokio::test]
+    async fn test_register_configured_channels_registers_acp_http() {
+        use crate::config::AcpHttpConfig;
+        let bus = Arc::new(MessageBus::new());
+        let mut config = Config::default();
+        // Use port 0 so the OS assigns an ephemeral port; the channel is
+        // registered but start() is not called in this test.
+        config.channels.acp = Some(AcpChannelConfig {
+            enabled: true,
+            http: Some(AcpHttpConfig {
+                enabled: true,
+                port: 0,
+                ..AcpHttpConfig::default()
+            }),
+            ..AcpChannelConfig::default()
+        });
+
+        let manager = ChannelManager::new(bus.clone(), config.clone());
+        let count = register_configured_channels(&manager, bus, &config).await;
+
+        assert_eq!(count, 2, "both acp (stdio) and acp_http must be registered");
+        assert!(manager.has_channel("acp").await);
+        assert!(manager.has_channel("acp_http").await);
     }
 }

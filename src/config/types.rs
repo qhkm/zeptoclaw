@@ -819,6 +819,10 @@ pub struct AcpChannelConfig {
     /// When true, empty allow_from rejects all senders.
     #[serde(default)]
     pub deny_by_default: bool,
+    /// Optional HTTP transport configuration. When present and enabled, the ACP
+    /// HTTP channel is registered alongside (or instead of) the stdio channel.
+    #[serde(default)]
+    pub http: Option<AcpHttpConfig>,
 }
 
 impl Default for AcpChannelConfig {
@@ -828,6 +832,38 @@ impl Default for AcpChannelConfig {
             protocol_version: "2024-11-05".to_string(),
             allow_from: Vec::new(),
             deny_by_default: false,
+            http: None,
+        }
+    }
+}
+
+/// ACP streamable HTTP transport configuration.
+///
+/// When `channels.acp.http.enabled` is true (and `channels.acp.enabled` is also
+/// true), ZeptoClaw starts an HTTP listener that accepts JSON-RPC 2.0 messages
+/// via `POST /acp`. `session/prompt` responses are streamed back as
+/// Server-Sent Events; all other methods return synchronous JSON responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpHttpConfig {
+    /// Whether the HTTP transport is active.
+    pub enabled: bool,
+    /// TCP port to listen on. Default: 8765.
+    pub port: u16,
+    /// Bind address. Default: "127.0.0.1".
+    pub bind: String,
+    /// Optional Bearer token. When set, all requests must supply
+    /// `Authorization: Bearer <token>`.
+    pub auth_token: Option<String>,
+}
+
+impl Default for AcpHttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8765,
+            bind: "127.0.0.1".to_string(),
+            auth_token: None,
         }
     }
 }
