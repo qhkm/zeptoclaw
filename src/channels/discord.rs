@@ -602,40 +602,8 @@ impl DiscordChannel {
             return None;
         }
 
-        let mut inbound = InboundMessage::new("discord", &sender_id, &channel_id, &content)
+        let inbound = InboundMessage::new("discord", &sender_id, &channel_id, &content)
             .with_metadata("discord_message_id", &msg.id);
-
-        // Process attachments and add them to the inbound message
-        for attachment in msg.attachments {
-            // Determine media type from content_type or filename
-            let media_type = if let Some(ref ct) = attachment.content_type {
-                if ct.starts_with("image/") {
-                    MediaType::Image
-                } else if ct.starts_with("audio/") {
-                    MediaType::Audio
-                } else if ct.starts_with("video/") {
-                    MediaType::Video
-                } else {
-                    MediaType::Document
-                }
-            } else {
-                // Fallback: try to infer from filename extension
-                MediaType::Document
-            };
-
-            let mut media = MediaAttachment::new(media_type)
-                .with_url(&attachment.url);
-
-            if let Some(filename) = attachment.filename {
-                media = media.with_filename(&filename);
-            }
-
-            if let Some(content_type) = attachment.content_type {
-                media = media.with_mime_type(&content_type);
-            }
-
-            inbound = inbound.with_media(media);
-        }
 
         Some(inbound)
     }
@@ -2002,7 +1970,8 @@ mod tests {
 
     #[test]
     fn test_message_create_with_image_only() {
-        // Message with an image attachment but no text content should be accepted
+        // Message with an image attachment but no text content should be accepted.
+        // The actual attachment processing happens later in the gateway loop.
         let data = json!({
             "id": "msg-img-only",
             "content": "",
@@ -2021,43 +1990,8 @@ mod tests {
         
         let inbound = result.unwrap();
         assert_eq!(inbound.content, "");
-        assert_eq!(inbound.media.len(), 1);
-        assert_eq!(inbound.media[0].media_type, MediaType::Image);
-        assert_eq!(inbound.media[0].url, Some("https://cdn.discordapp.com/attachments/123/456/image.png".to_string()));
-        assert_eq!(inbound.media[0].filename, Some("image.png".to_string()));
-        assert_eq!(inbound.media[0].mime_type, Some("image/png".to_string()));
-    }
-
-    #[test]
-    fn test_message_create_with_multiple_attachments() {
-        // Message with multiple attachments
-        let data = json!({
-            "id": "msg-multi",
-            "content": "Check these out!",
-            "channel_id": "ch-400",
-            "author": { "id": "user-88", "bot": false },
-            "attachments": [
-                {
-                    "url": "https://cdn.discordapp.com/attachments/1/2/photo.jpg",
-                    "content_type": "image/jpeg",
-                    "filename": "photo.jpg"
-                },
-                {
-                    "url": "https://cdn.discordapp.com/attachments/1/2/doc.pdf",
-                    "content_type": "application/pdf",
-                    "filename": "document.pdf"
-                }
-            ]
-        });
-
-        let result = DiscordChannel::parse_message_create(&data, &[], false);
-        assert!(result.is_some());
-        
-        let inbound = result.unwrap();
-        assert_eq!(inbound.content, "Check these out!");
-        assert_eq!(inbound.media.len(), 2);
-        assert_eq!(inbound.media[0].media_type, MediaType::Image);
-        assert_eq!(inbound.media[1].media_type, MediaType::Document);
+        // Attachments are processed later in the gateway loop, not in parse_message_create
+        assert_eq!(inbound.media.len(), 0);
     }
 
     #[test]
