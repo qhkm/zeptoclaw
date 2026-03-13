@@ -6,7 +6,6 @@
 //! produces a reply.
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,6 +25,10 @@ use super::{BaseChannelConfig, Channel};
 
 const ACP_CHANNEL_NAME: &str = "acp";
 const ACP_SENDER_ID: &str = "acp_client";
+/// Maximum prompt content size in bytes (matches the safety validator limit).
+const MAX_PROMPT_BYTES: usize = 102_400;
+/// Maximum number of live ACP sessions at once.
+const MAX_ACP_SESSIONS: usize = 1_000;
 
 /// Pending session/prompt request: (JSON-RPC id, cancelled flag).
 struct PendingPrompt {
@@ -35,6 +38,8 @@ struct PendingPrompt {
 
 /// Shared state for the ACP channel (sessions and pending prompt per session).
 struct AcpState {
+    /// Whether the client has called initialize.
+    initialized: bool,
     /// Session IDs created via session/new.
     sessions: std::collections::HashSet<String>,
     /// Per-session pending prompt: we respond when we get the matching outbound message.
@@ -44,6 +49,7 @@ struct AcpState {
 impl AcpState {
     fn new() -> Self {
         Self {
+            initialized: false,
             sessions: std::collections::HashSet::new(),
             pending: HashMap::new(),
         }
@@ -122,11 +128,50 @@ impl AcpChannel {
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> Result<()> {
+        if !self.is_allowed(ACP_SENDER_ID) {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32000,
+                    message: "Unauthorized".to_string(),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
         let _params: Option<super::acp_protocol::SessionNewParams> =
             params.and_then(|p| serde_json::from_value(p).ok());
         let session_id = format!("acp_{}", uuid::Uuid::new_v4().simple());
         {
             let mut state = self.state.lock().await;
+            if !state.initialized {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(super::acp_protocol::JsonRpcError {
+                        code: -32600,
+                        message: "initialize must be called before session/new".to_string(),
+                        data: None,
+                    }),
+                };
+                return self.write_response(&response).await;
+            }
+            if state.sessions.len() >= MAX_ACP_SESSIONS {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(super::acp_protocol::JsonRpcError {
+                        code: -32000,
+                        message: format!("Too many sessions (limit: {})", MAX_ACP_SESSIONS),
+                        data: None,
+                    }),
+                };
+                return self.write_response(&response).await;
+            }
             state.sessions.insert(session_id.clone());
         }
         let result = SessionNewResult {
@@ -162,6 +207,35 @@ impl AcpChannel {
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> Result<()> {
+        if !self.is_allowed(ACP_SENDER_ID) {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32000,
+                    message: "Unauthorized".to_string(),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
+        {
+            let state = self.state.lock().await;
+            if !state.initialized {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: None,
+                    error: Some(super::acp_protocol::JsonRpcError {
+                        code: -32600,
+                        message: "initialize must be called before session/prompt".to_string(),
+                        data: None,
+                    }),
+                };
+                return self.write_response(&response).await;
+            }
+        }
         let params: super::acp_protocol::SessionPromptParams = params
             .and_then(|p| serde_json::from_value(p).ok())
             .ok_or_else(|| {
@@ -182,6 +256,23 @@ impl AcpChannel {
             };
             return self.write_response(&response).await;
         }
+        if content.len() > MAX_PROMPT_BYTES {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: id.clone(),
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "session/prompt: content too large ({} bytes, limit {} bytes)",
+                        content.len(),
+                        MAX_PROMPT_BYTES
+                    ),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
         {
             let mut state = self.state.lock().await;
             if !state.sessions.contains(&session_id) {
@@ -192,6 +283,20 @@ impl AcpChannel {
                     error: Some(super::acp_protocol::JsonRpcError {
                         code: -32602,
                         message: format!("ACP: unknown session {}", session_id),
+                        data: None,
+                    }),
+                };
+                return self.write_response(&response).await;
+            }
+            if state.pending.contains_key(&session_id) {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: None,
+                    error: Some(super::acp_protocol::JsonRpcError {
+                        code: -32602,
+                        message: "session/prompt: a prompt is already in flight for this session"
+                            .to_string(),
                         data: None,
                     }),
                 };
@@ -226,6 +331,10 @@ impl AcpChannel {
                 ZeptoError::Channel("ACP: session/cancel missing or invalid params".into())
             })?;
         let mut state = self.state.lock().await;
+        if !state.sessions.contains(&params.session_id) {
+            debug!(session_id = %params.session_id, "ACP: session/cancel for unknown session, ignoring");
+            return Ok(());
+        }
         if let Some(pending) = state.pending.get_mut(&params.session_id) {
             pending.cancelled = true;
             debug!(session_id = %params.session_id, "ACP: marked prompt as cancelled");
@@ -284,7 +393,11 @@ impl AcpChannel {
             let id = request.id.clone();
             let params = request.params.clone();
             let result = match method {
-                "initialize" => Self::handle_initialize_static(&stdout, &config, id.clone()).await,
+                "initialize" => {
+                    let channel =
+                        Self::channel_ref(&bus, &state, &stdout, &config, &base_config, &running);
+                    channel.handle_initialize(id.clone(), params).await
+                }
                 "session/new" => {
                     let channel =
                         Self::channel_ref(&bus, &state, &stdout, &config, &base_config, &running);
@@ -322,6 +435,32 @@ impl AcpChannel {
                 .await;
             }
         }
+        // Graceful shutdown: complete any in-flight session/prompt requests with
+        // stopReason "error" so clients don't hang waiting for a reply forever.
+        let orphans: Vec<(String, PendingPrompt)> = {
+            let mut st = state.lock().await;
+            st.pending.drain().collect()
+        };
+        for (session_id, pending) in orphans {
+            let result = SessionPromptResult {
+                stop_reason: "error".to_string(),
+            };
+            if let Ok(result_val) = serde_json::to_value(result) {
+                let response = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(pending.request_id),
+                    result: Some(result_val),
+                    error: None,
+                };
+                if let Ok(line) = serde_json::to_string(&response) {
+                    let mut out = stdout.lock().await;
+                    let _ = out.write_all(line.as_bytes()).await;
+                    let _ = out.write_all(b"\n").await;
+                    let _ = out.flush().await;
+                    debug!(session_id = %session_id, "ACP: sent shutdown error for orphaned prompt");
+                }
+            }
+        }
         running.store(false, Ordering::SeqCst);
         info!("ACP: stdin loop exited");
         Ok(())
@@ -345,14 +484,36 @@ impl AcpChannel {
         }
     }
 
-    async fn handle_initialize_static(
-        stdout: &Arc<Mutex<tokio::io::Stdout>>,
-        config: &AcpChannelConfig,
+    /// Handle initialize: log client info, set initialized flag, return capabilities.
+    async fn handle_initialize(
+        &self,
         id: Option<serde_json::Value>,
+        params: Option<serde_json::Value>,
     ) -> Result<()> {
-        let protocol_version = config.protocol_version.parse::<i64>().unwrap_or(1);
+        // Parse client info for diagnostics; missing or malformed params are fine.
+        if let Some(init_params) = params
+            .and_then(|p| serde_json::from_value::<super::acp_protocol::InitializeParams>(p).ok())
+        {
+            if let Some(ref client_info) = init_params.client_info {
+                info!(
+                    client_name = ?client_info.name,
+                    client_version = ?client_info.version,
+                    protocol_version = ?init_params.protocol_version,
+                    "ACP: client initialized"
+                );
+            } else {
+                debug!(
+                    protocol_version = ?init_params.protocol_version,
+                    "ACP: client initialized (no clientInfo)"
+                );
+            }
+        }
+        {
+            let mut state = self.state.lock().await;
+            state.initialized = true;
+        }
         let result = InitializeResult {
-            protocol_version: serde_json::json!(protocol_version),
+            protocol_version: serde_json::json!(self.config.protocol_version),
             agent_capabilities: AgentCapabilities {
                 load_session: Some(false),
                 prompt_capabilities: Some(
@@ -377,13 +538,7 @@ impl AcpChannel {
                 })?),
                 error: None,
             };
-        let line = serde_json::to_string(&response)
-            .map_err(|e| ZeptoError::Channel(format!("ACP: serialize response: {}", e)))?;
-        let mut out = stdout.lock().await;
-        out.write_all(line.as_bytes()).await?;
-        out.write_all(b"\n").await?;
-        out.flush().await?;
-        Ok(())
+        self.write_response(&response).await
     }
 
     async fn write_error_response(
@@ -428,18 +583,12 @@ impl Channel for AcpChannel {
         let stdout = Arc::clone(&self.stdout);
         let config = self.config.clone();
         let base_config = self.base_config.clone();
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = Arc::clone(&running);
+        let running = Arc::clone(&self.running);
         tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(async {
-                Self::run_stdin_loop(bus, state, stdout, config, base_config, running_clone).await
-            })
-            .catch_unwind()
-            .await;
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => error!(error = %e, "ACP stdin loop error"),
-                Err(e) => error!(error = ?e, "ACP stdin loop panicked"),
+            if let Err(e) =
+                Self::run_stdin_loop(bus, state, stdout, config, base_config, running).await
+            {
+                error!(error = %e, "ACP stdin loop error");
             }
         });
         info!("ACP channel started (stdio)");
@@ -456,15 +605,16 @@ impl Channel for AcpChannel {
             return Ok(());
         }
         let session_id = msg.chat_id.clone();
-        let pending = {
+        let (pending, session_exists) = {
             let mut state = self.state.lock().await;
-            state.pending.remove(&session_id)
+            let exists = state.sessions.contains(&session_id);
+            (state.pending.remove(&session_id), exists)
         };
-        let Some(pending) = pending else {
-            debug!(session_id = %session_id, "ACP: no pending prompt for outbound, skipping");
+        if !session_exists {
+            debug!(session_id = %session_id, "ACP: outbound for unknown session, skipping");
             return Ok(());
-        };
-        // session/update (agent_message_chunk)
+        }
+        // session/update (agent_message_chunk) — sent for both prompted and proactive replies
         let update = SessionUpdateParams {
             session_id: session_id.clone(),
             update: SessionUpdatePayload {
@@ -479,6 +629,11 @@ impl Channel for AcpChannel {
         let params = serde_json::to_value(&update)
             .map_err(|e| ZeptoError::Channel(format!("ACP: serialize session/update: {}", e)))?;
         self.write_notification("session/update", &params).await?;
+        // For proactive messages there is no pending prompt to complete.
+        let Some(pending) = pending else {
+            debug!(session_id = %session_id, "ACP: proactive session/update sent");
+            return Ok(());
+        };
         // session/prompt response
         let stop_reason = if pending.cancelled {
             "cancelled"
@@ -513,13 +668,40 @@ mod tests {
     use super::*;
     use crate::config::AcpChannelConfig;
 
-    #[test]
-    fn test_acp_channel_name() {
+    #[tokio::test]
+    async fn test_send_ignores_wrong_channel() {
+        // send() with a channel other than "acp" must be a no-op: the pending
+        // prompt must not be consumed and the session must remain intact.
         let config = AcpChannelConfig::default();
         let base = BaseChannelConfig::new("acp");
         let bus = Arc::new(MessageBus::new());
         let channel = AcpChannel::new(config, base, bus);
-        assert_eq!(channel.name(), ACP_CHANNEL_NAME);
+        let session_id = "acp_some_session".to_string();
+        {
+            let mut state = channel.state.lock().await;
+            state.sessions.insert(session_id.clone());
+            state.pending.insert(
+                session_id.clone(),
+                PendingPrompt {
+                    request_id: serde_json::json!(1),
+                    cancelled: false,
+                },
+            );
+        }
+        let msg = OutboundMessage {
+            channel: "telegram".to_string(),
+            chat_id: session_id.clone(),
+            content: "hello".to_string(),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let result = channel.send(msg).await;
+        assert!(result.is_ok());
+        let state = channel.state.lock().await;
+        assert!(
+            state.pending.contains_key(&session_id),
+            "wrong-channel send must not consume the pending prompt"
+        );
     }
 
     #[test]
@@ -551,12 +733,273 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_acp_channel_is_allowed() {
-        let config = AcpChannelConfig::default();
-        let base = BaseChannelConfig::with_allowlist("acp", vec!["acp_client".to_string()]);
+    async fn test_deny_by_default_blocks_session_new() {
+        // With deny_by_default=true and an empty allowlist, handle_session_new
+        // must reject the request before creating any session.
+        let config = AcpChannelConfig {
+            deny_by_default: true,
+            ..AcpChannelConfig::default()
+        };
+        let base = BaseChannelConfig {
+            name: "acp".to_string(),
+            allowlist: vec![],
+            deny_by_default: true,
+        };
         let bus = Arc::new(MessageBus::new());
         let channel = AcpChannel::new(config, base, bus);
-        assert!(channel.is_allowed("acp_client"));
-        assert!(!channel.is_allowed("other"));
+        {
+            let mut state = channel.state.lock().await;
+            state.initialized = true;
+        }
+        let _ = channel
+            .handle_session_new(Some(serde_json::json!(1)), None)
+            .await;
+        let state = channel.state.lock().await;
+        assert!(
+            state.sessions.is_empty(),
+            "deny_by_default must prevent session creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_size_limit_does_not_insert_pending() {
+        // An oversized prompt must be rejected before state is touched: no pending entry.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let session_id = "acp_test_size".to_string();
+        {
+            let mut state = channel.state.lock().await;
+            state.initialized = true;
+            state.sessions.insert(session_id.clone());
+        }
+        let oversized = "a".repeat(MAX_PROMPT_BYTES + 1);
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": oversized}]
+        });
+        let _ = channel
+            .handle_session_prompt(Some(serde_json::json!(1)), Some(params))
+            .await;
+        let state = channel.state.lock().await;
+        assert!(
+            !state.pending.contains_key(&session_id),
+            "oversized prompt must not insert a pending entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_in_flight_prompt_guard_preserves_first_request_id() {
+        // A second session/prompt while one is in flight must be rejected and must
+        // not overwrite the first request's id in state.pending.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let session_id = "acp_test_inflight".to_string();
+        {
+            let mut state = channel.state.lock().await;
+            state.initialized = true;
+            state.sessions.insert(session_id.clone());
+            state.pending.insert(
+                session_id.clone(),
+                PendingPrompt {
+                    request_id: serde_json::json!(1),
+                    cancelled: false,
+                },
+            );
+        }
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "second prompt"}]
+        });
+        let _ = channel
+            .handle_session_prompt(Some(serde_json::json!(2)), Some(params))
+            .await;
+        let state = channel.state.lock().await;
+        let pending = state
+            .pending
+            .get(&session_id)
+            .expect("original pending entry must still exist");
+        assert_eq!(
+            pending.request_id,
+            serde_json::json!(1),
+            "first request_id must not be overwritten by the second prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_sets_initialized_flag() {
+        // handle_initialize must set state.initialized = true.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        assert!(!channel.state.lock().await.initialized);
+        let _ = channel
+            .handle_initialize(Some(serde_json::json!(1)), None)
+            .await;
+        assert!(
+            channel.state.lock().await.initialized,
+            "initialized must be true after handle_initialize"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_new_requires_initialize() {
+        // session/new must be rejected when initialize has not been called.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let _ = channel
+            .handle_session_new(Some(serde_json::json!(1)), None)
+            .await;
+        let state = channel.state.lock().await;
+        assert!(
+            state.sessions.is_empty(),
+            "no session must be created before initialize"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_prompt_requires_initialize() {
+        // session/prompt must be rejected when initialize has not been called.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let session_id = "acp_test_noinit".to_string();
+        {
+            // Seed a session directly to isolate the initialized check.
+            let mut state = channel.state.lock().await;
+            state.sessions.insert(session_id.clone());
+        }
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "hello"}]
+        });
+        let _ = channel
+            .handle_session_prompt(Some(serde_json::json!(1)), Some(params))
+            .await;
+        let state = channel.state.lock().await;
+        assert!(
+            !state.pending.contains_key(&session_id),
+            "no pending entry must be created before initialize"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_cancel_unknown_does_not_affect_known_pending() {
+        // Cancelling an unknown session must not touch pending entries for other sessions.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let known = "acp_known".to_string();
+        {
+            let mut state = channel.state.lock().await;
+            state.sessions.insert(known.clone());
+            state.pending.insert(
+                known.clone(),
+                PendingPrompt {
+                    request_id: serde_json::json!(42),
+                    cancelled: false,
+                },
+            );
+        }
+        let params = serde_json::json!({"sessionId": "acp_nonexistent"});
+        let result = channel.handle_session_cancel(Some(params)).await;
+        assert!(result.is_ok());
+        let state = channel.state.lock().await;
+        let pending = state
+            .pending
+            .get(&known)
+            .expect("known session pending must be untouched");
+        assert!(
+            !pending.cancelled,
+            "cancel of unknown session must not mark a different session as cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_skips_unknown_session() {
+        // send() for a session not in state.sessions must return Ok without
+        // adding the session to state.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        // Deliberately do not seed any session.
+        let msg = OutboundMessage {
+            channel: ACP_CHANNEL_NAME.to_string(),
+            chat_id: "acp_ghost".to_string(),
+            content: "hello".to_string(),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let result = channel.send(msg).await;
+        assert!(result.is_ok());
+        let state = channel.state.lock().await;
+        assert!(
+            state.sessions.is_empty(),
+            "send to unknown session must not create the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_proactive_known_session_does_not_remove_session() {
+        // send() for a known session with no pending prompt (proactive path) must
+        // succeed and leave the session in state so it can accept future prompts.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        let session_id = "acp_proactive".to_string();
+        {
+            let mut state = channel.state.lock().await;
+            state.sessions.insert(session_id.clone());
+        }
+        let msg = OutboundMessage {
+            channel: ACP_CHANNEL_NAME.to_string(),
+            chat_id: session_id.clone(),
+            content: "proactive message".to_string(),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let result = channel.send(msg).await;
+        assert!(result.is_ok());
+        let state = channel.state.lock().await;
+        assert!(
+            state.sessions.contains(&session_id),
+            "proactive send must not remove the session from state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_cap_does_not_insert_beyond_limit() {
+        // When state.sessions is full, session/new must be rejected and must not
+        // add a new entry.
+        let config = AcpChannelConfig::default();
+        let base = BaseChannelConfig::new("acp");
+        let bus = Arc::new(MessageBus::new());
+        let channel = AcpChannel::new(config, base, bus);
+        {
+            let mut state = channel.state.lock().await;
+            state.initialized = true;
+            for i in 0..MAX_ACP_SESSIONS {
+                state.sessions.insert(format!("acp_{}", i));
+            }
+        }
+        let _ = channel
+            .handle_session_new(Some(serde_json::json!(1)), None)
+            .await;
+        let state = channel.state.lock().await;
+        assert_eq!(
+            state.sessions.len(),
+            MAX_ACP_SESSIONS,
+            "session count must not exceed the cap"
+        );
     }
 }
