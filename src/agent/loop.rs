@@ -1479,16 +1479,22 @@ impl AgentLoop {
                         "Tool call limit reached. Token budget exceeded.".to_string();
                     break;
                 }
-                let messages: Vec<_> = self
-                    .context_builder
-                    .build_messages_with_memory_override(
-                        &session.messages,
-                        "",
-                        memory_override.as_deref(),
-                    )
-                    .into_iter()
-                    .filter(|m| !(m.role == Role::User && m.content.is_empty()))
-                    .collect();
+                let messages: Vec<_> = {
+                    let mut msgs = self
+                        .context_builder
+                        .build_messages_with_memory_override(
+                            &session.messages,
+                            "",
+                            memory_override.as_deref(),
+                        )
+                        .into_iter()
+                        .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
+                        .collect::<Vec<_>>();
+                    if let Some(dir) = self.session_manager.sessions_dir() {
+                        resolve_images_to_base64(&mut msgs, dir);
+                    }
+                    msgs
+                };
                 response = provider
                     .chat(messages, vec![], model, options.clone())
                     .await?;
@@ -1544,16 +1550,22 @@ impl AgentLoop {
             }
 
             // Call LLM again with tool results -- provider lock NOT held
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty()))
-                .collect();
+            let messages: Vec<_> = {
+                let mut msgs = self
+                    .context_builder
+                    .build_messages_with_memory_override(
+                        &session.messages,
+                        "",
+                        memory_override.as_deref(),
+                    )
+                    .into_iter()
+                    .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
+                    .collect::<Vec<_>>();
+                if let Some(dir) = self.session_manager.sessions_dir() {
+                    resolve_images_to_base64(&mut msgs, dir);
+                }
+                msgs
+            };
 
             // Send thinking feedback for tool-loop LLM call
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -2181,16 +2193,22 @@ impl AgentLoop {
                 break;
             }
 
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty()))
-                .collect();
+            let messages: Vec<_> = {
+                let mut msgs = self
+                    .context_builder
+                    .build_messages_with_memory_override(
+                        &session.messages,
+                        "",
+                        memory_override.as_deref(),
+                    )
+                    .into_iter()
+                    .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
+                    .collect::<Vec<_>>();
+                if let Some(dir) = self.session_manager.sessions_dir() {
+                    resolve_images_to_base64(&mut msgs, dir);
+                }
+                msgs
+            };
 
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
@@ -2235,16 +2253,22 @@ impl AgentLoop {
             // Re-issue the final call via chat_stream.
             // If the tool call limit was hit, pass empty tools so the model
             // cannot emit further tool calls after the cap was enforced.
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty()))
-                .collect();
+            let messages: Vec<_> = {
+                let mut msgs = self
+                    .context_builder
+                    .build_messages_with_memory_override(
+                        &session.messages,
+                        "",
+                        memory_override.as_deref(),
+                    )
+                    .into_iter()
+                    .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
+                    .collect::<Vec<_>>();
+                if let Some(dir) = self.session_manager.sessions_dir() {
+                    resolve_images_to_base64(&mut msgs, dir);
+                }
+                msgs
+            };
 
             let tool_definitions = if tool_limit_hit {
                 vec![]
