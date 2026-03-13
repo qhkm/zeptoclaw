@@ -84,7 +84,7 @@ This matches the ACP stdio transport and keeps parsing simple and robust.
 
 ### 3.1 Module layout
 
-```
+```text
 src/channels/
 ├── mod.rs           # exports acp, acp_http, acp_protocol (private)
 ├── acp.rs           # AcpChannel (stdio, Channel impl), AcpState, stdin loop, send()
@@ -255,9 +255,9 @@ Allowlist/deny is applied via `BaseChannelConfig` built from `allow_from` and `d
 ### 6.1 Stdin loop
 
 - **Entry points:** Two ways to run the loop:
-  - `Channel::start()` — spawns the loop as a Tokio background task and returns immediately. Used when ACP is one channel among many inside `zeptoclaw gateway`.
-  - `AcpChannel::run_stdio()` — runs the loop directly on the caller's task and blocks until stdin closes. Used by `zeptoclaw acp` so the standalone subprocess stays alive for the full client session.
-- Runs in a task spawned from `Channel::start()`. The spawned task holds `Arc::clone(&self.running)` — the same atomic as the `AcpChannel` struct — so `is_running()` and `stop()` observe the same state as the task.
+  - `Channel::start()` — spawns the loop as a Tokio background task and returns immediately. Required by the `Channel` trait; available but not called in gateway mode (ACP stdio is never registered there).
+  - `AcpChannel::run_stdio()` — runs the loop directly on the caller's task and blocks until stdin closes. This is the only production entry point, used by `zeptoclaw acp` so the standalone subprocess stays alive for the full client session.
+- The spawned task (from `start()`) holds `Arc::clone(&self.running)` — the same atomic as the `AcpChannel` struct — so `is_running()` and `stop()` observe the same state as the task.
 - Uses `BufReader::new(stdin).lines()` and `next_line()` in a loop while `running` is true. The loop exits on stdin EOF, read error, or `stop()` setting the flag.
 - Blank lines are skipped. Each non-blank line is parsed as JSON into `JsonRpcRequest`; then we dispatch by `method` and call the appropriate handler. Handlers that need channel/state/stdout receive an `AcpChannel` value built via `channel_ref()` so they can call the same methods as the main struct.
 - Errors returned by handlers are logged and a `-32603` Internal error response is sent to stdout with the original request `id`.

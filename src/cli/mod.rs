@@ -733,7 +733,11 @@ async fn cmd_acp() -> Result<()> {
     let kernel = zeptoclaw::kernel::ZeptoKernel::boot(config, Arc::clone(&bus), None, None).await?;
     let _kernel = Arc::new(kernel);
 
-    let base_config = BaseChannelConfig::default();
+    let base_config = BaseChannelConfig {
+        name: "acp".to_string(),
+        allowlist: acp_config.allow_from.clone(),
+        deny_by_default: acp_config.deny_by_default,
+    };
     let channel = AcpChannel::new(acp_config, base_config, bus);
     // run_stdio() blocks until stdin closes — keeps the process alive for the
     // full session rather than returning immediately like start() would.

@@ -387,9 +387,13 @@ impl AcpHttpChannel {
     /// Handle session/list: return all live sessions with per-session metadata.
     async fn do_session_list(
         state: &Arc<Mutex<AcpHttpState>>,
+        base_config: &BaseChannelConfig,
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> String {
+        if !base_config.is_allowed(ACP_HTTP_SENDER_ID) {
+            return Self::json_rpc_error(id, -32000, "Unauthorized");
+        }
         let st = state.lock().await;
         if !st.initialized {
             return Self::json_rpc_error(
@@ -496,7 +500,7 @@ impl AcpHttpChannel {
             if !st.sessions.contains_key(&session_id) {
                 return Ok(Err(Self::json_rpc_error(
                     id,
-                    -32602,
+                    -32000,
                     &format!("ACP: unknown session {}", session_id),
                 )));
             }
@@ -679,7 +683,7 @@ impl AcpHttpChannel {
         let req = match Self::parse_request(&buf[..total]) {
             Some(r) => r,
             None => {
-                let _ = stream.write_all(HTTP_400_PREFIX.as_bytes()).await;
+                let _ = stream.write_all(Self::http_400("{}").as_bytes()).await;
                 return;
             }
         };
@@ -744,7 +748,7 @@ impl AcpHttpChannel {
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/list" => {
-                let body = Self::do_session_list(&state, id, params).await;
+                let body = Self::do_session_list(&state, &base_config, id, params).await;
                 let resp = Self::http_200(&body);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
@@ -899,6 +903,10 @@ impl Channel for AcpHttpChannel {
 
     async fn stop(&mut self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
+        // Drain pending_http: dropping the oneshot senders causes any connection
+        // handlers currently awaiting a prompt response to receive RecvError and
+        // return, so no HTTP connection is left hanging after stop().
+        self.pending_http.lock().await.clear();
         Ok(())
     }
 
@@ -1205,8 +1213,13 @@ mod tests {
     #[tokio::test]
     async fn test_session_list_requires_initialize() {
         let ch = make_channel();
-        let body =
-            AcpHttpChannel::do_session_list(&ch.state, Some(serde_json::json!(1)), None).await;
+        let body = AcpHttpChannel::do_session_list(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(1)),
+            None,
+        )
+        .await;
         assert!(
             body.contains("-32600"),
             "session/list before initialize must return -32600"
@@ -1217,8 +1230,13 @@ mod tests {
     async fn test_session_list_empty() {
         let ch = make_channel();
         ch.state.lock().await.initialized = true;
-        let body =
-            AcpHttpChannel::do_session_list(&ch.state, Some(serde_json::json!(1)), None).await;
+        let body = AcpHttpChannel::do_session_list(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(1)),
+            None,
+        )
+        .await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["sessions"], serde_json::json!([]));
     }
@@ -1236,8 +1254,13 @@ mod tests {
             st.pending
                 .insert(sid_a.clone(), PendingPrompt { cancelled: false });
         }
-        let body =
-            AcpHttpChannel::do_session_list(&ch.state, Some(serde_json::json!(1)), None).await;
+        let body = AcpHttpChannel::do_session_list(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(1)),
+            None,
+        )
+        .await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let sessions = v["result"]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);

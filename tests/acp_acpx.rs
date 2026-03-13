@@ -65,7 +65,6 @@ fn acpx_bin() -> Option<String> {
 
 /// A raw JSON-RPC connection to `zeptoclaw acp` over stdin/stdout.
 struct AcpConn {
-    #[allow(dead_code)]
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
@@ -141,6 +140,18 @@ impl AcpConn {
                 _ => continue,
             }
         }
+    }
+
+    /// Drop stdin (signals EOF to the agent) and wait for the child to exit.
+    /// Must be called instead of just dropping `AcpConn` to avoid zombie processes.
+    async fn shutdown(mut self) {
+        drop(self.stdin);
+        let _ = self.child.wait().await;
+    }
+
+    /// Try to receive one message within a short deadline; returns `None` on timeout.
+    async fn try_recv(&mut self) -> Option<serde_json::Value> {
+        timeout(Duration::from_millis(200), self.recv()).await.ok()
     }
 
     /// Perform the mandatory ACP `initialize` handshake, returning the result.
@@ -523,8 +534,8 @@ async fn test_session_prompt_unknown_session_returns_error() {
 }
 
 /// session/cancel is a notification (no id); the server must NOT send a response.
-/// We verify this by sending cancel then a known method and checking only one
-/// response arrives within the timeout.
+/// We verify this with a bounded read immediately after sending cancel, asserting
+/// that nothing arrives, then confirm the channel is still usable.
 #[tokio::test]
 async fn test_session_cancel_sends_no_response() {
     let mut conn = AcpConn::spawn().await;
@@ -539,8 +550,14 @@ async fn test_session_cancel_sends_no_response() {
     }))
     .await;
 
-    // Send a known follow-up request. If cancel had a response, recv_for_id
-    // would skip it. Either way, this must succeed.
+    // A bounded read must time out: the server must not respond to a notification.
+    let stray = conn.try_recv().await;
+    assert!(
+        stray.is_none(),
+        "server must not send a response to session/cancel (notification), got: {stray:?}"
+    );
+
+    // Channel must still be usable after a cancel.
     conn.send(serde_json::json!({
         "jsonrpc": "2.0", "id": 90,
         "method": "session/list",
@@ -552,6 +569,7 @@ async fn test_session_cancel_sends_no_response() {
         resp.get("result").is_some(),
         "session/list after cancel must still succeed; got: {resp}"
     );
+    conn.shutdown().await;
 }
 
 /// Duplicate initialize calls must succeed (idempotent).
@@ -682,7 +700,7 @@ fn test_acpx_exec_basic_prompt() {
     );
 }
 
-/// acpx exec: session/update notifications carry `session_update` type field.
+/// acpx exec: session/update notifications carry content text.
 #[test]
 fn test_acpx_exec_produces_session_update_events() {
     if !e2e_live() {
@@ -690,9 +708,26 @@ fn test_acpx_exec_produces_session_update_events() {
         return;
     }
     let events = run_acpx_exec("say hello");
-    // In json format, acpx emits events derived from session/update notifications.
-    // We expect message_part or similar events.
     assert!(!events.is_empty(), "must produce events");
+    // At least one event must carry a non-empty "content" or "text" field,
+    // indicating a session/update notification reached the client.
+    let has_content = events.iter().any(|e| {
+        let content_nonempty = e
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let text_nonempty = e
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        content_nonempty || text_nonempty
+    });
+    assert!(
+        has_content,
+        "at least one event must carry non-empty content/text from a session/update; events: {events:?}"
+    );
 }
 
 /// acpx exec: the final turn must conclude with a stop reason of end_turn.
@@ -703,20 +738,20 @@ fn test_acpx_exec_ends_with_end_turn() {
         return;
     }
     let events = run_acpx_exec("say: DONE");
-    // acpx JSON output includes a run_completed or similar event.
-    // Any event with stopReason=end_turn is acceptable.
+    assert!(
+        !events.is_empty(),
+        "acpx exec must complete and produce events"
+    );
+    // The final event or any event in the stream must contain stopReason=end_turn.
     let has_end_turn = events.iter().any(|e| {
         e.get("stopReason")
             .and_then(|v| v.as_str())
             .map(|s| s == "end_turn")
             .unwrap_or(false)
     });
-    // This is a best-effort check; acpx may present the reason differently.
-    // At minimum the run must complete without hanging.
-    let _ = has_end_turn;
     assert!(
-        !events.is_empty(),
-        "acpx exec must complete and produce events"
+        has_end_turn,
+        "at least one event must have stopReason=end_turn; events: {events:?}"
     );
 }
 

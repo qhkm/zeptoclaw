@@ -247,11 +247,23 @@ impl AcpChannel {
                 return self.write_response(&response).await;
             }
         }
-        let params: super::acp_protocol::SessionPromptParams = params
-            .and_then(|p| serde_json::from_value(p).ok())
-            .ok_or_else(|| {
-                ZeptoError::Channel("ACP: session/prompt missing or invalid params".into())
-            })?;
+        let params: super::acp_protocol::SessionPromptParams =
+            match params.and_then(|p| serde_json::from_value(p).ok()) {
+                Some(p) => p,
+                None => {
+                    let response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: None,
+                        error: Some(super::acp_protocol::JsonRpcError {
+                            code: -32602,
+                            message: "session/prompt: missing or invalid params".to_string(),
+                            data: None,
+                        }),
+                    };
+                    return self.write_response(&response).await;
+                }
+            };
         let session_id = params.session_id;
         let content = Self::prompt_blocks_to_text(&params.prompt);
         if content.is_empty() {
@@ -359,6 +371,19 @@ impl AcpChannel {
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> Result<()> {
+        if !self.is_allowed(ACP_SENDER_ID) {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32000,
+                    message: "Unauthorized".to_string(),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
         let state = self.state.lock().await;
         if !state.initialized {
             let response = JsonRpcResponse {
