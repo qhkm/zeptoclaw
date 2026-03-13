@@ -815,15 +815,13 @@ impl Default for SerialChannelConfig {
 /// **`zeptoclaw acp`:** reads `allow_from`, `deny_by_default`, and `http` from
 /// this config. The `enabled` field is accepted but ignored (the subcommand always
 /// runs ACP stdio regardless).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AcpChannelConfig {
     /// Accepted for backward compatibility but has no effect in gateway mode.
     /// `zeptoclaw acp` always starts ACP stdio regardless of this flag.
     #[serde(default)]
     pub enabled: bool,
-    /// Protocol version to advertise (e.g. "2024-11-05"). Default from ACP spec.
-    pub protocol_version: String,
     /// Allow only specific sender/client IDs (empty = allow all unless deny_by_default).
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -834,18 +832,6 @@ pub struct AcpChannelConfig {
     /// HTTP channel is registered alongside (or instead of) the stdio channel.
     #[serde(default)]
     pub http: Option<AcpHttpConfig>,
-}
-
-impl Default for AcpChannelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            protocol_version: "2024-11-05".to_string(),
-            allow_from: Vec::new(),
-            deny_by_default: false,
-            http: None,
-        }
-    }
 }
 
 /// ACP streamable HTTP transport configuration.

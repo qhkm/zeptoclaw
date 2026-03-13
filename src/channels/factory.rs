@@ -405,7 +405,6 @@ mod tests {
         let mut config = Config::default();
         config.channels.acp = Some(AcpChannelConfig {
             enabled: true,
-            protocol_version: "2024-11-05".to_string(),
             allow_from: Vec::new(),
             deny_by_default: false,
             http: None,

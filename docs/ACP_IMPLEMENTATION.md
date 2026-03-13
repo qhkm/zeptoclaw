@@ -213,7 +213,6 @@ Config lives under `channels.acp` (`AcpChannelConfig`):
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | false | **No-op in gateway mode.** Accepted for backward compatibility; `zeptoclaw acp` always starts ACP stdio regardless of this flag. |
-| `protocol_version` | string | `"2024-11-05"` | Stored but not used: `initialize` always advertises `protocolVersion: 1` (integer) per the ACP schema. |
 | `allow_from` | list of string | [] | If non-empty, only these sender IDs are allowed. |
 | `deny_by_default` | bool | false | If true, empty `allow_from` rejects all senders. |
 | `http` | `AcpHttpConfig` or null | null | HTTP transport config (see below). `channels.acp.enabled` is not required for HTTP. |
