@@ -1440,9 +1440,9 @@ async fn test_delegate_tool_in_registry() {
 // ============================================================================
 
 #[test]
-fn test_streaming_config_default_false() {
+fn test_streaming_config_default_true() {
     let config = Config::default();
-    assert!(!config.agents.defaults.streaming);
+    assert!(config.agents.defaults.streaming);
 }
 
 #[test]
@@ -1459,9 +1459,9 @@ async fn test_agent_loop_streaming_accessors() {
     let bus = Arc::new(MessageBus::new());
     let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus);
 
-    assert!(!agent.is_streaming());
-    agent.set_streaming(true);
     assert!(agent.is_streaming());
     agent.set_streaming(false);
     assert!(!agent.is_streaming());
+    agent.set_streaming(true);
+    assert!(agent.is_streaming());
 }

@@ -539,6 +539,7 @@ impl AgentLoop {
     /// ```
     pub fn new(config: Config, session_manager: SessionManager, bus: Arc<MessageBus>) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let streaming_default = config.agents.defaults.streaming;
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
@@ -609,6 +610,7 @@ impl AgentLoop {
         context_builder: ContextBuilder,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        let streaming_default = config.agents.defaults.streaming;
         let token_budget = Arc::new(TokenBudget::new(config.agents.defaults.token_budget));
         let tool_call_limit = ToolCallLimitTracker::new(config.agents.defaults.max_tool_calls);
         let approval_gate = Arc::new(ApprovalGate::new(config.approval.clone()));
@@ -3455,7 +3457,7 @@ mod tests {
         let session_manager = SessionManager::new_memory();
         let bus = Arc::new(MessageBus::new());
         let agent = AgentLoop::new(config, session_manager, bus);
-        assert!(!agent.is_streaming());
+        assert!(agent.is_streaming());
     }
 
     #[tokio::test]
@@ -3464,8 +3466,8 @@ mod tests {
         let session_manager = SessionManager::new_memory();
         let bus = Arc::new(MessageBus::new());
         let agent = AgentLoop::new(config, session_manager, bus);
-        agent.set_streaming(true);
-        assert!(agent.is_streaming());
+        agent.set_streaming(false);
+        assert!(!agent.is_streaming());
     }
 
     #[tokio::test]
