@@ -2255,6 +2255,15 @@ impl AgentLoop {
                 tools.definitions_with_options(self.config.agents.defaults.compact_tools)
             };
 
+            // Signal that tools are done and response is ready (streaming path)
+            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
+                let _ = tx.send(ToolFeedback {
+                    tool_name: String::new(),
+                    phase: ToolFeedbackPhase::ResponseReady,
+                    args_json: None,
+                });
+            }
+
             let stream_rx = provider
                 .chat_stream(messages, tool_definitions, model, options)
                 .await?;

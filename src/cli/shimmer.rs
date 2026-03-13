@@ -184,6 +184,11 @@ pub fn print_response_separator() {
 ///
 /// Example: `⠿ 1,247 tokens · 3 tool calls · 2.1s`
 pub fn print_metadata_footer(total_tokens: u64, tool_calls: u64, elapsed: std::time::Duration) {
+    // Skip footer entirely when there is nothing meaningful to report
+    if total_tokens == 0 && tool_calls == 0 {
+        return;
+    }
+
     let mut parts = Vec::with_capacity(3);
 
     if total_tokens > 0 {

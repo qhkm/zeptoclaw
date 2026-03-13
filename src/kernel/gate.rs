@@ -51,7 +51,7 @@ pub async fn execute_tool(
     // patterns like `$(...)` or backticks in code.
     if let Some(safety_layer) = safety {
         let scan_input = match name {
-            "write_file" | "edit_file" => {
+            "write_file" => {
                 // Only scan the "path" field — file body text legitimately
                 // contains code patterns (backticks, `$(...)`, etc.) that
                 // would false-positive on shell_injection.
@@ -60,6 +60,13 @@ pub async fn execute_tool(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string()
+            }
+            "edit_file" => {
+                // Scan path + old_text (user-supplied search input) but skip
+                // new_text (file body text that legitimately contains code patterns).
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let old_text = input.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
+                format!("{} {}", path, old_text)
             }
             _ => serde_json::to_string(&input).unwrap_or_default(),
         };
