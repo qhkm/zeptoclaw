@@ -9,6 +9,7 @@ use crate::bus::MessageBus;
 use crate::config::{Config, MemoryBackend};
 use crate::providers::{configured_provider_models, configured_provider_names};
 
+use super::acp::AcpChannel;
 use super::email_channel::EmailChannel;
 use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
@@ -270,6 +271,25 @@ pub async fn register_configured_channels(
         }
     }
 
+    // ACP (Agent Client Protocol) stdio
+    if let Some(ref acp_config) = config.channels.acp {
+        if acp_config.enabled {
+            let base_config = BaseChannelConfig {
+                name: "acp".to_string(),
+                allowlist: acp_config.allow_from.clone(),
+                deny_by_default: acp_config.deny_by_default,
+            };
+            manager
+                .register(Box::new(AcpChannel::new(
+                    acp_config.clone(),
+                    base_config,
+                    bus.clone(),
+                )))
+                .await;
+            info!("Registered ACP channel (stdio)");
+        }
+    }
+
     // Channel plugins
     let plugin_dir: Option<PathBuf> = config
         .channels
@@ -296,7 +316,9 @@ pub async fn register_configured_channels(
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
-    use crate::config::{Config, SlackConfig, TelegramConfig, WhatsAppCloudConfig};
+    use crate::config::{
+        AcpChannelConfig, Config, SlackConfig, TelegramConfig, WhatsAppCloudConfig,
+    };
 
     #[tokio::test]
     async fn test_register_configured_channels_registers_telegram() {
@@ -353,5 +375,23 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(manager.has_channel("whatsapp_cloud").await);
+    }
+
+    #[tokio::test]
+    async fn test_register_configured_channels_registers_acp() {
+        let bus = Arc::new(MessageBus::new());
+        let mut config = Config::default();
+        config.channels.acp = Some(AcpChannelConfig {
+            enabled: true,
+            protocol_version: "2024-11-05".to_string(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        });
+
+        let manager = ChannelManager::new(bus.clone(), config.clone());
+        let count = register_configured_channels(&manager, bus, &config).await;
+
+        assert_eq!(count, 1);
+        assert!(manager.has_channel("acp").await);
     }
 }

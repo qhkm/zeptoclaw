@@ -768,6 +768,8 @@ pub struct ChannelsConfig {
     pub serial: Option<SerialChannelConfig>,
     /// MQTT channel configuration. Requires `mqtt` feature.
     pub mqtt: Option<MqttChannelConfig>,
+    /// ACP (Agent Client Protocol) stdio channel configuration.
+    pub acp: Option<AcpChannelConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -797,6 +799,33 @@ impl Default for SerialChannelConfig {
             enabled: false,
             port: String::new(),
             baud_rate: 115_200,
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+/// ACP (Agent Client Protocol) stdio channel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpChannelConfig {
+    /// Whether the ACP channel is enabled.
+    pub enabled: bool,
+    /// Protocol version to advertise (e.g. "2024-11-05"). Default from ACP spec.
+    pub protocol_version: String,
+    /// Allow only specific sender/client IDs (empty = allow all unless deny_by_default).
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty allow_from rejects all senders.
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+impl Default for AcpChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            protocol_version: "2024-11-05".to_string(),
             allow_from: Vec::new(),
             deny_by_default: false,
         }

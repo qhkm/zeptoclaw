@@ -108,6 +108,8 @@
 //! # })
 //! ```
 
+pub mod acp;
+mod acp_protocol;
 pub mod discord;
 pub mod email_channel;
 mod factory;
@@ -128,6 +130,7 @@ pub mod whatsapp_cloud;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_web;
 
+pub use acp::AcpChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
 pub use factory::register_configured_channels;
