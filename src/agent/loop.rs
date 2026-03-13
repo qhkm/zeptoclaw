@@ -503,6 +503,7 @@ impl AgentLoop {
         };
         let cache = Self::build_cache(&config);
         let pairing = Self::build_pairing(&config);
+        let streaming_default = config.agents.defaults.streaming;
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -517,7 +518,7 @@ impl AgentLoop {
             shutdown_tx,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
-            streaming: AtomicBool::new(false),
+            streaming: AtomicBool::new(streaming_default),
             dry_run: AtomicBool::new(false),
             token_budget,
             tool_call_limit,
@@ -571,6 +572,7 @@ impl AgentLoop {
         };
         let cache = Self::build_cache(&config);
         let pairing = Self::build_pairing(&config);
+        let streaming_default = config.agents.defaults.streaming;
         Self {
             config,
             session_manager: Arc::new(session_manager),
@@ -585,7 +587,7 @@ impl AgentLoop {
             shutdown_tx,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
-            streaming: AtomicBool::new(false),
+            streaming: AtomicBool::new(streaming_default),
             dry_run: AtomicBool::new(false),
             token_budget,
             tool_call_limit,
@@ -3037,6 +3039,16 @@ mod tests {
         let bus = Arc::new(MessageBus::new());
         let agent = AgentLoop::new(config, session_manager, bus);
         agent.set_streaming(true);
+        assert!(agent.is_streaming());
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_streaming_respects_config() {
+        let mut config = Config::default();
+        config.agents.defaults.streaming = true;
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
         assert!(agent.is_streaming());
     }
 
