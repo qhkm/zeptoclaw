@@ -717,6 +717,11 @@ pub struct AgentDefaults {
     /// Maximum total tool calls allowed per agent run. None = unlimited.
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
+    /// Custom system prompt injected into ContextBuilder. Takes priority over
+    /// template and hand system prompts when set. Useful for gateway/headless
+    /// mode where the system prompt must come from config, not CLI flags.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 /// Detect the system's IANA timezone.
@@ -771,6 +776,7 @@ impl Default for AgentDefaults {
             loop_guard: LoopGuardConfig::default(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             max_tool_calls: None,
+            system_prompt: None,
         }
     }
 }
