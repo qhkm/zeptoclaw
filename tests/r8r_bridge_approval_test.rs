@@ -124,15 +124,15 @@ fn test_format_approval_message() {
         "should contain start of execution id"
     );
     // short_id is first 8 chars of execution_id
-    assert!(
-        msg.contains("exec_123"),
-        "short_id should be first 8 chars"
-    );
+    assert!(msg.contains("exec_123"), "short_id should be first 8 chars");
     assert!(
         msg.contains("Deploy to production?"),
         "should contain the message body"
     );
-    assert!(msg.contains("approve"), "should contain approve instruction");
+    assert!(
+        msg.contains("approve"),
+        "should contain approve instruction"
+    );
     assert!(msg.contains("reject"), "should contain reject instruction");
 }
 
@@ -201,8 +201,5 @@ fn test_format_help_message() {
         msg.contains("approve"),
         "help message should mention approve"
     );
-    assert!(
-        msg.contains("reject"),
-        "help message should mention reject"
-    );
+    assert!(msg.contains("reject"), "help message should mention reject");
 }
