@@ -132,6 +132,9 @@ pub struct Config {
     /// Panel (control panel) configuration.
     #[serde(default)]
     pub panel: PanelConfig,
+    /// r8r workflow-engine bridge configuration.
+    #[serde(default)]
+    pub r8r_bridge: R8rBridgeConfig,
 }
 
 // ============================================================================
@@ -238,6 +241,58 @@ impl Default for PanelConfig {
             api_port: 9091,
             auth_mode: AuthMode::Token,
             bind: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// r8r Bridge Configuration
+// ============================================================================
+
+/// Channel target for routing r8r events to a specific messaging channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTarget {
+    /// Channel name (e.g. "telegram", "slack").
+    pub channel: String,
+    /// Chat/channel ID on that platform.
+    pub chat_id: String,
+}
+
+/// Configuration for the r8r workflow-engine bridge.
+///
+/// When enabled, ZeptoClaw connects to an r8r instance over WebSocket to
+/// receive workflow events (approvals, execution results, health) and send
+/// back decisions and workflow triggers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct R8rBridgeConfig {
+    /// Whether the r8r bridge is enabled.
+    pub enabled: bool,
+    /// WebSocket endpoint for the r8r event stream.
+    pub endpoint: String,
+    /// Bearer token for authenticating with r8r.
+    pub token: Option<String>,
+    /// Default channel target for events that have no specific routing.
+    pub default_channel: Option<ChannelTarget>,
+    /// Per-workflow approval routing overrides (workflow name -> channel target).
+    #[serde(default)]
+    pub approval_routing: HashMap<String, ChannelTarget>,
+    /// Maximum reconnect backoff interval in seconds.
+    pub reconnect_max_interval_secs: u64,
+    /// Interval between health pings in seconds.
+    pub health_ping_interval_secs: u64,
+}
+
+impl Default for R8rBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "ws://localhost:8080/api/ws/events".to_string(),
+            token: None,
+            default_channel: None,
+            approval_routing: HashMap::new(),
+            reconnect_max_interval_secs: 30,
+            health_ping_interval_secs: 60,
         }
     }
 }
