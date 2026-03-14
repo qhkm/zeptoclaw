@@ -22,7 +22,6 @@ use uuid::Uuid;
 #[serde(untagged)]
 pub enum BridgeEvent {
     // r8r -> ZeptoClaw
-
     /// An approval gate has been reached and is waiting for a decision.
     ApprovalRequested {
         approval_id: String,
@@ -73,7 +72,6 @@ pub enum BridgeEvent {
     },
 
     // ZeptoClaw -> r8r
-
     /// An approval decision from ZeptoClaw.
     ApprovalDecision {
         approval_id: String,

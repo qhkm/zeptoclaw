@@ -38,8 +38,7 @@ async fn start_mock_server() -> (String, mpsc::Receiver<String>) {
 
                 // If it's a health ping, respond with a HealthStatus event.
                 if let Ok(parsed) = serde_json::from_str::<Value>(&text_str) {
-                    if parsed.get("type").and_then(|t| t.as_str())
-                        == Some("zeptoclaw.health.ping")
+                    if parsed.get("type").and_then(|t| t.as_str()) == Some("zeptoclaw.health.ping")
                     {
                         let health_event = BridgeEvent::HealthStatus {
                             version: "0.1.0-test".to_string(),

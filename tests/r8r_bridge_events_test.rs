@@ -114,8 +114,7 @@ fn test_envelope_round_trip() {
     let parsed: BridgeEventEnvelope = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.event_type, "zeptoclaw.approval.decision");
 
-    let reconstructed =
-        BridgeEvent::from_type_and_data(&parsed.event_type, &parsed.data).unwrap();
+    let reconstructed = BridgeEvent::from_type_and_data(&parsed.event_type, &parsed.data).unwrap();
     match reconstructed {
         BridgeEvent::ApprovalDecision {
             decision, reason, ..
@@ -137,8 +136,7 @@ fn test_health_ping_event() {
     let json = serde_json::to_string(&envelope).unwrap();
     let parsed: BridgeEventEnvelope = serde_json::from_str(&json).unwrap();
 
-    let reconstructed =
-        BridgeEvent::from_type_and_data(&parsed.event_type, &parsed.data).unwrap();
+    let reconstructed = BridgeEvent::from_type_and_data(&parsed.event_type, &parsed.data).unwrap();
     assert!(matches!(reconstructed, BridgeEvent::HealthPing));
 }
 
