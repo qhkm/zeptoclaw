@@ -934,6 +934,47 @@ impl Config {
             channel.enabled = enabled;
         }
 
+        // ACP
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_ACP_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .acp
+                .get_or_insert_with(AcpChannelConfig::default);
+            channel.enabled = enabled;
+        }
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_ACP_HTTP_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .acp
+                .get_or_insert_with(AcpChannelConfig::default);
+            let http = channel.http.get_or_insert_with(AcpHttpConfig::default);
+            http.enabled = enabled;
+        }
+        if let Ok(Ok(port)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_ACP_HTTP_PORT").map(|v| v.parse::<u16>())
+        {
+            let channel = self
+                .channels
+                .acp
+                .get_or_insert_with(AcpChannelConfig::default);
+            let http = channel.http.get_or_insert_with(AcpHttpConfig::default);
+            http.port = port;
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN") {
+            if !val.is_empty() {
+                let channel = self
+                    .channels
+                    .acp
+                    .get_or_insert_with(AcpChannelConfig::default);
+                let http = channel.http.get_or_insert_with(AcpHttpConfig::default);
+                http.auth_token = Some(val);
+            }
+        }
+
         // Runtime: Apple Container
         if let Ok(val) = std::env::var("ZEPTOCLAW_RUNTIME_APPLE_ALLOW_EXPERIMENTAL") {
             if let Ok(v) = val.parse() {

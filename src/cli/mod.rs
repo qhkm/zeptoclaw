@@ -280,6 +280,8 @@ enum Commands {
         #[arg(long)]
         http: Option<String>,
     },
+    /// Start ACP agent on stdio (for use with acpx or any ACP client)
+    Acp,
 }
 
 #[derive(Subcommand)]
@@ -561,6 +563,19 @@ pub async fn run() -> Result<()> {
         logging_cfg.level = "warn".to_string();
     }
 
+    // ACP stdio mode: suppress all logging unless RUST_LOG is explicitly set.
+    // Any tracing output to stdout would corrupt the JSON-RPC stream that the
+    // ACP client reads line-by-line. Users who want debug logs should redirect:
+    //   RUST_LOG=debug zeptoclaw acp 2>acp.log
+    if matches!(cli.command, Some(Commands::Acp))
+        && std::env::var("RUST_LOG")
+            .ok()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+    {
+        logging_cfg.level = "off".to_string();
+    }
+
     zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
     match cli.command {
@@ -697,9 +712,82 @@ pub async fn run() -> Result<()> {
         Some(Commands::McpServer { http }) => {
             cmd_mcp_server(http).await?;
         }
+        Some(Commands::Acp) => {
+            cmd_acp().await?;
+        }
     }
 
     Ok(())
+}
+
+/// Run the ACP stdio agent (JSON-RPC over stdin/stdout).
+///
+/// Starts the full agent kernel then hands control to the ACP stdio loop.
+/// Compatible with `acpx --agent 'zeptoclaw acp'` and any other ACP client.
+async fn cmd_acp() -> Result<()> {
+    use std::sync::Arc;
+
+    use zeptoclaw::bus::MessageBus;
+    use zeptoclaw::channels::Channel;
+    use zeptoclaw::{AcpChannel, BaseChannelConfig, Config};
+
+    let config = tokio::task::spawn_blocking(Config::load)
+        .await
+        .map_err(|e| anyhow::anyhow!("Config loader task panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+
+    // Build ACP config: enabled by default for standalone mode regardless of
+    // what the config file says, inheriting all other fields (allow_from, etc).
+    let mut acp_config = config.channels.acp.clone().unwrap_or_default();
+    acp_config.enabled = true;
+
+    let bus = Arc::new(MessageBus::new());
+
+    // Create and wire the agent loop (boots kernel: provider, tools, safety).
+    let agent = common::create_agent(config.clone(), Arc::clone(&bus)).await?;
+
+    // Start agent loop in background: consumes inbound bus messages, runs LLM,
+    // publishes outbound bus messages.
+    let agent_handle = {
+        let agent_clone = Arc::clone(&agent);
+        tokio::spawn(async move {
+            if let Err(e) = agent_clone.start().await {
+                tracing::error!(error = %e, "ACP: agent loop error");
+            }
+        })
+    };
+
+    let base_config = BaseChannelConfig {
+        name: "acp".to_string(),
+        allowlist: acp_config.allow_from.clone(),
+        deny_by_default: acp_config.deny_by_default,
+    };
+    let channel = AcpChannel::new(acp_config, base_config, Arc::clone(&bus));
+
+    // Start outbound dispatcher: routes bus outbound messages → ACP channel
+    // send(), which emits session/update + session/prompt response.
+    let dispatch_handle = {
+        let channel_for_dispatch = channel.clone();
+        let bus_for_dispatch = Arc::clone(&bus);
+        tokio::spawn(async move {
+            while let Some(msg) = bus_for_dispatch.consume_outbound().await {
+                if let Err(e) = channel_for_dispatch.send(msg).await {
+                    tracing::error!(error = %e, "ACP: outbound dispatch error");
+                }
+            }
+        })
+    };
+
+    // run_stdio() blocks until stdin closes — keeps the process alive for the
+    // full session rather than returning immediately like start() would.
+    // Capture the result so teardown always runs on both success and error paths.
+    let res = channel.run_stdio().await;
+
+    agent.stop();
+    agent_handle.abort();
+    dispatch_handle.abort();
+
+    Ok(res?)
 }
 
 /// Display version information

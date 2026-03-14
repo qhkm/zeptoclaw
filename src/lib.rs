@@ -47,7 +47,7 @@ pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMe
 #[cfg(feature = "whatsapp-web")]
 pub use channels::WhatsAppWebChannel;
 pub use channels::{
-    BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,
+    AcpChannel, BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,
     TelegramChannel, WhatsAppCloudChannel,
 };
 pub use config::Config;

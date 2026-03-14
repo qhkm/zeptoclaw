@@ -1,0 +1,12 @@
+[profile.default]
+
+# Limit concurrency for the ACP integration tests — they each spawn a
+# `zeptoclaw acp` subprocess that boots the full kernel (config load, cron,
+# tool registry). Running too many in parallel causes file-system contention
+# at startup and produces flaky failures.
+#
+# threads-required = 4 means each test consumes 4 slots from the global pool,
+# so at most 2 run in parallel on an 8-thread machine.
+[[profile.default.overrides]]
+filter = "binary(acp_acpx)"
+threads-required = 4
