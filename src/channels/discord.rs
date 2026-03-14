@@ -572,7 +572,7 @@ impl DiscordChannel {
         }
 
         let content = msg.content.trim().to_string();
-        
+
         // Only reject if both content is empty AND there are no attachments
         if content.is_empty() && msg.attachments.is_empty() {
             return None;
@@ -1987,7 +1987,7 @@ mod tests {
 
         let result = DiscordChannel::parse_message_create(&data, &[], false);
         assert!(result.is_some());
-        
+
         let inbound = result.unwrap();
         assert_eq!(inbound.content, "");
         // Attachments are processed later in the gateway loop, not in parse_message_create
