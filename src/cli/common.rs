@@ -288,7 +288,9 @@ pub(crate) async fn create_agent_with_template(
         }
     }
 
-    if let Some(tpl) = &template {
+    if let Some(sp) = &config.agents.defaults.system_prompt {
+        context_builder = context_builder.with_system_prompt(sp);
+    } else if let Some(tpl) = &template {
         context_builder = context_builder.with_system_prompt(&tpl.system_prompt);
     } else if let Some(hand) = active_hand.as_ref() {
         context_builder = context_builder.with_system_prompt(&hand.manifest.system_prompt);
