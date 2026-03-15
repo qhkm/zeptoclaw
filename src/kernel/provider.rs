@@ -94,6 +94,33 @@ pub fn provider_from_runtime_selection(
             );
             Some(Box::new(provider))
         }
+        "vertex" => {
+            // For Vertex: api_key holds the GCP project ID, api_base holds the location.
+            let project_id = if selection.api_key.is_empty() {
+                std::env::var("GOOGLE_CLOUD_PROJECT")
+                    .or_else(|_| std::env::var("VERTEX_PROJECT_ID"))
+                    .ok()?
+            } else {
+                selection.api_key.clone()
+            };
+            let location = selection
+                .api_base
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .unwrap_or("us-central1");
+            let bearer_token = std::env::var("VERTEX_ACCESS_TOKEN").ok()?;
+            let model = if configured_model.is_empty() {
+                "gemini-2.5-flash"
+            } else {
+                configured_model
+            };
+            Some(Box::new(crate::providers::vertex::VertexProvider::new(
+                &project_id,
+                location,
+                &bearer_token,
+                model,
+            )))
+        }
         _ => None,
     }
 }

@@ -1353,6 +1353,9 @@ pub struct ProvidersConfig {
     /// Baidu Qianfan configuration (OpenAI-compatible v2 endpoint).
     #[serde(default)]
     pub qianfan: Option<ProviderConfig>,
+    /// Google Vertex AI configuration (Gemini API via Vertex regional endpoint).
+    #[serde(default)]
+    pub vertex: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
