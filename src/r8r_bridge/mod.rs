@@ -89,8 +89,8 @@ impl R8rBridge {
     ///    - Dispatches events by type.
     pub async fn connect(&self) -> Result<(), String> {
         // Parse endpoint to extract host for the Host header.
-        let parsed = Url::parse(&self.endpoint)
-            .map_err(|e| format!("Invalid endpoint URL: {e}"))?;
+        let parsed =
+            Url::parse(&self.endpoint).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| "Endpoint URL has no host".to_string())?;
@@ -112,10 +112,9 @@ impl R8rBridge {
             .insert("Host", host_with_port.parse().unwrap());
 
         if let Some(ref token) = self.token {
-            request.headers_mut().insert(
-                "Authorization",
-                format!("Bearer {token}").parse().unwrap(),
-            );
+            request
+                .headers_mut()
+                .insert("Authorization", format!("Bearer {token}").parse().unwrap());
         }
 
         // Connect.
@@ -206,44 +205,55 @@ impl R8rBridge {
 
                 // Dispatch by event type.
                 match BridgeEvent::from_type_and_data(&envelope.event_type, &envelope.data) {
-                    Ok(event) => {
-                        match &event {
-                            BridgeEvent::HealthStatus { .. } => {
-                                let mut hs = health_status.lock().await;
-                                *hs = Some(event);
-                            }
-                            BridgeEvent::ApprovalRequested { workflow, execution_id, .. } => {
-                                info!(
-                                    "r8r bridge: approval requested for {} ({})",
-                                    workflow, execution_id
-                                );
-                            }
-                            BridgeEvent::ApprovalTimeout { workflow, execution_id, .. } => {
-                                info!(
-                                    "r8r bridge: approval timeout for {} ({})",
-                                    workflow, execution_id
-                                );
-                            }
-                            BridgeEvent::ExecutionCompleted { workflow, execution_id, .. } => {
-                                info!(
-                                    "r8r bridge: execution completed for {} ({})",
-                                    workflow, execution_id
-                                );
-                            }
-                            BridgeEvent::ExecutionFailed { workflow, execution_id, .. } => {
-                                info!(
-                                    "r8r bridge: execution failed for {} ({})",
-                                    workflow, execution_id
-                                );
-                            }
-                            _ => {
-                                info!(
-                                    "r8r bridge: received event type {}",
-                                    envelope.event_type
-                                );
-                            }
+                    Ok(event) => match &event {
+                        BridgeEvent::HealthStatus { .. } => {
+                            let mut hs = health_status.lock().await;
+                            *hs = Some(event);
                         }
-                    }
+                        BridgeEvent::ApprovalRequested {
+                            workflow,
+                            execution_id,
+                            ..
+                        } => {
+                            info!(
+                                "r8r bridge: approval requested for {} ({})",
+                                workflow, execution_id
+                            );
+                        }
+                        BridgeEvent::ApprovalTimeout {
+                            workflow,
+                            execution_id,
+                            ..
+                        } => {
+                            info!(
+                                "r8r bridge: approval timeout for {} ({})",
+                                workflow, execution_id
+                            );
+                        }
+                        BridgeEvent::ExecutionCompleted {
+                            workflow,
+                            execution_id,
+                            ..
+                        } => {
+                            info!(
+                                "r8r bridge: execution completed for {} ({})",
+                                workflow, execution_id
+                            );
+                        }
+                        BridgeEvent::ExecutionFailed {
+                            workflow,
+                            execution_id,
+                            ..
+                        } => {
+                            info!(
+                                "r8r bridge: execution failed for {} ({})",
+                                workflow, execution_id
+                            );
+                        }
+                        _ => {
+                            info!("r8r bridge: received event type {}", envelope.event_type);
+                        }
+                    },
                     Err(e) => {
                         warn!("r8r bridge: failed to parse event: {e}");
                     }
