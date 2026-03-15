@@ -1024,7 +1024,7 @@ impl Channel for TelegramChannel {
 
         let rendered = render_telegram_html(&msg.content);
         let mut req = bot
-            .send_message(ChatId(chat_id), rendered)
+            .send_message(ChatId(chat_id), &rendered)
             .parse_mode(ParseMode::Html);
 
         // Route reply to the correct forum topic when thread metadata is present.
@@ -1035,8 +1035,26 @@ impl Channel for TelegramChannel {
             }
         }
 
-        req.await
-            .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
+        match req.await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("Telegram HTML send failed, retrying as plain text: {}", e);
+                let mut fallback = bot.send_message(ChatId(chat_id), &msg.content);
+                if let Some(thread_id_str) = msg.metadata.get("telegram_thread_id") {
+                    if let Ok(tid) = thread_id_str.parse::<i32>() {
+                        fallback = fallback.message_thread_id(teloxide::types::ThreadId(
+                            teloxide::types::MessageId(tid),
+                        ));
+                    }
+                }
+                fallback.await.map_err(|e2| {
+                    ZeptoError::Channel(format!(
+                        "Failed to send Telegram message (both HTML and plain): {}",
+                        e2
+                    ))
+                })?;
+            }
+        }
 
         info!("Telegram: Message sent successfully to chat {}", chat_id);
         Ok(())
