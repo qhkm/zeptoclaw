@@ -1116,6 +1116,18 @@ impl Channel for TelegramChannel {
     }
 }
 
+impl Drop for TelegramChannel {
+    fn drop(&mut self) {
+        // Best-effort abort of typing tasks without async.
+        // In async context, stop() should be called instead.
+        if let Ok(mut map) = self.typing_tasks.try_lock() {
+            for (_, handle) in map.drain() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
