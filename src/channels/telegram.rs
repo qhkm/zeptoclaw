@@ -64,6 +64,87 @@ use super::model_switch::{
 use super::persona_switch::{self, PersonaCommand, PersonaOverrideStore};
 use super::{BaseChannelConfig, Channel};
 
+use std::sync::LazyLock;
+
+static RE_FENCED: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?ms)^```(\w*)\n(.*?)^```").unwrap());
+static RE_INLINE_CODE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"`([^`\n]+)`").unwrap());
+static RE_BOLD: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\*\*([^\n]+?)\*\*").unwrap());
+/// Replace single-asterisk italic markers (*text*) with <i>text</i>.
+///
+/// Rules (no look-around needed):
+/// - Opening `*` must NOT be preceded by `*` or a word char
+/// - Opening `*` must NOT be followed by whitespace or `*`
+/// - Content: at least one char, no newlines, no `*`
+/// - Closing `*` must NOT be preceded by whitespace
+/// - Closing `*` must NOT be followed by `*` or a word char
+fn replace_italic(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'*' {
+            // Skip if preceded by `*` or word char
+            let prev_ok = i == 0 || {
+                let p = bytes[i - 1];
+                p != b'*' && !p.is_ascii_alphanumeric() && p != b'_'
+            };
+            // Skip if this is `**` (bold marker)
+            let next_not_star = i + 1 < len && bytes[i + 1] != b'*';
+            // Opening `*` must not be followed by whitespace
+            let next_not_ws = i + 1 < len && !bytes[i + 1].is_ascii_whitespace();
+
+            if prev_ok && next_not_star && next_not_ws {
+                // Search for closing `*`
+                if let Some(close) = find_italic_close(bytes, i + 1) {
+                    // Closing `*` must not be followed by `*` or word char
+                    let after_ok = close + 1 >= len || {
+                        let a = bytes[close + 1];
+                        a != b'*' && !a.is_ascii_alphanumeric() && a != b'_'
+                    };
+                    if after_ok {
+                        out.push_str("<i>");
+                        // content is bytes[i+1..close]
+                        out.push_str(&input[i + 1..close]);
+                        out.push_str("</i>");
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(input[i..].chars().next().unwrap());
+        i += input[i..].chars().next().unwrap().len_utf8();
+    }
+    out
+}
+
+/// Find closing `*` for italic: no newlines or `*` in content, char before
+/// closing `*` must not be whitespace. Returns byte index of the closing `*`.
+fn find_italic_close(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\n' => return None,
+            b'*' => {
+                // Char before closing `*` must not be whitespace
+                if j > start && !bytes[j - 1].is_ascii_whitespace() {
+                    return Some(j);
+                }
+                return None;
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+static RE_SPOILER: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\|\|(.+?)\|\|").unwrap());
+
 /// Newtype wrappers to disambiguate `Vec<String>` / `String` in dptree's
 /// type-based DI. Without these, the last registered value of a given type
 /// silently overwrites earlier ones.
@@ -87,22 +168,69 @@ struct OverridesDep {
 }
 
 fn render_telegram_html(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 16);
-    let mut chars = content.chars().peekable();
-    let mut spoiler_open = false;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
 
-    while let Some(ch) = chars.next() {
-        if ch == '|' && chars.peek() == Some(&'|') {
-            let _ = chars.next();
-            if spoiler_open {
-                out.push_str("</tg-spoiler>");
-            } else {
-                out.push_str("<tg-spoiler>");
-            }
-            spoiler_open = !spoiler_open;
-            continue;
-        }
+    // Phase 1: Extract fenced code blocks into placeholders
+    let mut fenced_blocks: Vec<String> = Vec::new();
+    let text = RE_FENCED.replace_all(content, |caps: &regex::Captures| {
+        let lang = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let code = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let idx = fenced_blocks.len();
+        let escaped_code = html_escape(code.trim_end_matches('\n'));
+        let html = if lang.is_empty() {
+            format!("<pre><code>{}</code></pre>", escaped_code)
+        } else {
+            format!(
+                "<pre><code class=\"language-{}\">{}</code></pre>",
+                html_escape(lang),
+                escaped_code
+            )
+        };
+        fenced_blocks.push(html);
+        format!("\x02F{}_{}\x03", nonce, idx)
+    });
 
+    // Phase 2: Extract inline code into placeholders
+    let mut inline_blocks: Vec<String> = Vec::new();
+    let text = RE_INLINE_CODE.replace_all(&text, |caps: &regex::Captures| {
+        let code = &caps[1];
+        let idx = inline_blocks.len();
+        inline_blocks.push(format!("<code>{}</code>", html_escape(code)));
+        format!("\x02I{}_{}\x03", nonce, idx)
+    });
+
+    // Phase 3: HTML-escape the remaining text
+    let text = html_escape(&text);
+
+    // Phase 4: Bold (**text**) — must not cross newlines
+    let text = RE_BOLD.replace_all(&text, "<b>$1</b>");
+
+    // Phase 5: Italic (*text*) — non-whitespace adjacent, no bullet lists
+    let text = replace_italic(&text);
+
+    // Phase 6: Spoiler (||text||)
+    let text = RE_SPOILER.replace_all(&text, "<tg-spoiler>$1</tg-spoiler>");
+
+    // Phase 7: Restore placeholders
+    let mut result = text.into_owned();
+    for (idx, html) in fenced_blocks.iter().enumerate() {
+        let placeholder = format!("\x02F{}_{}\x03", nonce, idx);
+        result = result.replace(&placeholder, html);
+    }
+    for (idx, html) in inline_blocks.iter().enumerate() {
+        let placeholder = format!("\x02I{}_{}\x03", nonce, idx);
+        result = result.replace(&placeholder, html);
+    }
+
+    result
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -110,12 +238,6 @@ fn render_telegram_html(content: &str) -> String {
             _ => out.push(ch),
         }
     }
-
-    // Graceful fallback for unmatched spoiler marker.
-    if spoiler_open {
-        out.push_str("</tg-spoiler>");
-    }
-
     out
 }
 
@@ -1104,7 +1226,7 @@ mod tests {
     #[test]
     fn test_render_telegram_html_unmatched_spoiler() {
         let rendered = render_telegram_html("Dangling ||spoiler");
-        assert_eq!(rendered, "Dangling <tg-spoiler>spoiler</tg-spoiler>");
+        assert_eq!(rendered, "Dangling ||spoiler");
     }
 
     #[tokio::test]
@@ -1308,5 +1430,138 @@ mod tests {
             msg.metadata.get("telegram_thread_id"),
             Some(&"42".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Markdown-to-HTML formatting tests
+    // -----------------------------------------------------------------------
+
+    // --- Fenced code block tests ---
+
+    #[test]
+    fn test_render_html_fenced_code_block() {
+        let input = "Here is code:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nDone.";
+        let result = render_telegram_html(input);
+        assert!(result.contains("<pre><code class=\"language-rust\">"));
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("</code></pre>"));
+        assert!(result.contains("Done."));
+    }
+
+    #[test]
+    fn test_render_html_fenced_code_block_no_lang() {
+        let input = "```\nsome code\n```";
+        let result = render_telegram_html(input);
+        assert!(result.contains("<pre><code>"));
+        assert!(result.contains("some code"));
+        assert!(result.contains("</code></pre>"));
+    }
+
+    #[test]
+    fn test_render_html_code_block_html_escaped() {
+        let input = "```\n<script>alert('xss')</script>\n```";
+        let result = render_telegram_html(input);
+        assert!(result.contains("&lt;script&gt;"));
+        assert!(!result.contains("<script>"));
+    }
+
+    #[test]
+    fn test_render_html_code_block_no_inner_formatting() {
+        let input = "```\n**not bold** and *not italic*\n```";
+        let result = render_telegram_html(input);
+        assert!(!result.contains("<b>"));
+        assert!(!result.contains("<i>"));
+        assert!(result.contains("**not bold**"));
+    }
+
+    // --- Inline code tests ---
+
+    #[test]
+    fn test_render_html_inline_code() {
+        let result = render_telegram_html("Use `println!` to print");
+        assert_eq!(result, "Use <code>println!</code> to print");
+    }
+
+    #[test]
+    fn test_render_html_inline_code_html_escaped() {
+        let result = render_telegram_html("Try `x < 5` here");
+        assert_eq!(result, "Try <code>x &lt; 5</code> here");
+    }
+
+    #[test]
+    fn test_render_html_inline_code_no_inner_formatting() {
+        let result = render_telegram_html("The `**bold**` stays literal");
+        assert!(result.contains("<code>**bold**</code>"));
+        assert!(!result.contains("<b>"));
+    }
+
+    // --- Bold and italic tests ---
+
+    #[test]
+    fn test_render_html_bold() {
+        let result = render_telegram_html("This is **bold** text");
+        assert_eq!(result, "This is <b>bold</b> text");
+    }
+
+    #[test]
+    fn test_render_html_italic() {
+        let result = render_telegram_html("This is *italic* text");
+        assert_eq!(result, "This is <i>italic</i> text");
+    }
+
+    #[test]
+    fn test_render_html_bold_does_not_cross_newlines() {
+        let result = render_telegram_html("**start\nend**");
+        assert!(!result.contains("<b>"));
+    }
+
+    #[test]
+    fn test_render_html_italic_not_bullet_list() {
+        let result = render_telegram_html("Options:\n* Buy now\n* Wait");
+        assert!(!result.contains("<i>"));
+    }
+
+    #[test]
+    fn test_render_html_italic_requires_non_whitespace() {
+        let result = render_telegram_html("a * spaced * b");
+        assert!(!result.contains("<i>"));
+    }
+
+    #[test]
+    fn test_render_html_bold_and_italic_mixed() {
+        let result = render_telegram_html("**bold** and *italic* here");
+        assert_eq!(result, "<b>bold</b> and <i>italic</i> here");
+    }
+
+    #[test]
+    fn test_render_html_bold_with_html_entities() {
+        let result = render_telegram_html("**a < b**");
+        assert_eq!(result, "<b>a &lt; b</b>");
+    }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_render_html_empty_input() {
+        assert_eq!(render_telegram_html(""), "");
+    }
+
+    #[test]
+    fn test_render_html_plain_text_passthrough() {
+        let input = "Hello, how are you today?";
+        assert_eq!(render_telegram_html(input), input);
+    }
+
+    #[test]
+    fn test_render_html_unclosed_bold() {
+        let result = render_telegram_html("**unclosed bold");
+        assert!(!result.contains("<b>"));
+        assert!(result.contains("**unclosed bold"));
+    }
+
+    #[test]
+    fn test_render_html_unclosed_code_fence() {
+        let result = render_telegram_html("```rust\nfn main() {");
+        assert!(!result.contains("<pre>"));
     }
 }
