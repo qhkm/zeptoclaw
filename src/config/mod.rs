@@ -139,6 +139,9 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_ACTIVE_HAND") {
             self.agents.defaults.active_hand = if val.is_empty() { None } else { Some(val) };
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_SYSTEM_PROMPT") {
+            self.agents.defaults.system_prompt = if val.is_empty() { None } else { Some(val) };
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE") {
             self.agents.defaults.timezone = val;
         }

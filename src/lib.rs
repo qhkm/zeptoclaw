@@ -34,6 +34,7 @@ pub use agent::{CompactionStrategy, ContextMonitor};
 pub use config::CompactionConfig;
 pub use safety::taint::{TaintConfig, TaintEngine, TaintLabel, TaintViolation};
 pub use safety::{SafetyConfig, SafetyLayer, SafetyResult};
+pub mod r8r_bridge;
 pub mod security;
 pub mod session;
 pub mod skills;
