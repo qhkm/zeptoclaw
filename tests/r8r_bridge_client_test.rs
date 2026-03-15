@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use zeptoclaw::r8r_bridge::{BridgeEvent, BridgeEventEnvelope, R8rBridge};
+use zeptoclaw::r8r_bridge::{Ack, BridgeEvent, BridgeEventEnvelope, R8rBridge};
 
 /// Start a mock WebSocket server that:
 /// 1. Accepts a single connection.
@@ -112,4 +112,70 @@ async fn test_bridge_connects_and_sends_health_ping() {
     // Clean up.
     bridge.disconnect().await;
     assert!(!bridge.is_connected(), "bridge should be disconnected");
+}
+
+#[tokio::test]
+async fn test_bridge_acks_duplicate_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://127.0.0.1:{}", addr.port());
+    let (tx, mut rx) = mpsc::channel::<String>(8);
+
+    let duplicate_event = BridgeEventEnvelope::new(
+        BridgeEvent::HealthStatus {
+            version: "0.1.0-test".to_string(),
+            uptime_secs: 42,
+            active_executions: 1,
+            pending_approvals: 0,
+            workflows_loaded: 3,
+        },
+        None,
+    );
+    let duplicate_event_id = duplicate_event.id.clone();
+    let duplicate_json = serde_json::to_string(&duplicate_event).unwrap();
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+        ws_stream
+            .send(WsMessage::Text(duplicate_json.clone().into()))
+            .await
+            .unwrap();
+        ws_stream
+            .send(WsMessage::Text(duplicate_json.into()))
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            if let Some(Ok(WsMessage::Text(text))) = ws_stream.next().await {
+                let _ = tx.send(text.to_string()).await;
+            }
+        }
+    });
+
+    let bridge = R8rBridge::new(ws_url, None);
+    bridge.connect().await.expect("connect should succeed");
+
+    let ack_one = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("should receive first ack")
+        .expect("first ack channel item");
+    let ack_two = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("should receive second ack")
+        .expect("second ack channel item");
+
+    let ack_one: Ack = serde_json::from_str(&ack_one).unwrap();
+    let ack_two: Ack = serde_json::from_str(&ack_two).unwrap();
+    assert_eq!(ack_one.event_id, duplicate_event_id);
+    assert_eq!(ack_two.event_id, duplicate_event_id);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(matches!(
+        bridge.last_health_status().await,
+        Some(BridgeEvent::HealthStatus { .. })
+    ));
+
+    bridge.disconnect().await;
 }

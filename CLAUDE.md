@@ -334,6 +334,7 @@ src/
 │   ├── quota.rs       # QuotaProvider decorator + QuotaStore for per-provider cost/token limits
 ├── runtime/        # Container runtimes (Native, Docker, Apple)
 ├── routines/       # Event/webhook/cron triggered automations
+├── r8r_bridge/     # WebSocket bridge for r8r workflow approvals, health, and event deduplication
 ├── safety/         # Prompt injection detection, secret leak scanning, policy engine, chain alerting
 ├── security/       # Shell blocklist, path validation, mount policy, secret encryption
 │   ├── agent_mode.rs # Agent modes (Observer, Assistant, Autonomous) — defaults to Assistant for safer fresh configs
@@ -624,7 +625,7 @@ Panel web dashboard backend:
 
 Config file: `~/.zeptoclaw/config.json`
 
-`./target/release/zeptoclaw config check` validates top-level sections such as `tunnel` and agent defaults including `timezone` and `tool_timeout_secs`.
+`./target/release/zeptoclaw config check` validates top-level sections such as `tunnel` and `r8r_bridge`, plus agent defaults including `timezone`, `tool_timeout_secs`, and `system_prompt`.
 
 Environment variables override config:
 - `ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY`
@@ -634,6 +635,7 @@ Environment variables override config:
 - `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
 - `ZEPTOCLAW_AGENTS_DEFAULTS_AGENT_TIMEOUT_SECS` — wall-clock timeout for agent runs (default: 300)
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_TIMEOUT_SECS` — wall-clock timeout for tool calls (default: 0 = inherit agent timeout)
+- `ZEPTOCLAW_AGENTS_DEFAULTS_SYSTEM_PROMPT` — override the default ContextBuilder system prompt from config or environment
 - `ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE` — IANA timezone for prompts and timestamps (default: system timezone or `UTC`)
 - `ZEPTOCLAW_AGENTS_DEFAULTS_MESSAGE_QUEUE_MODE` — "collect" (default) or "followup"
 - `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` — enable retry wrapper (default: false)

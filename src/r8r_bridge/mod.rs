@@ -25,6 +25,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, Request};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{info, warn};
 use url::Url;
@@ -53,6 +54,33 @@ pub struct R8rBridge {
     health_status: Arc<Mutex<Option<BridgeEvent>>>,
     /// Whether the bridge is currently connected.
     connected: Arc<AtomicBool>,
+}
+
+fn build_ws_request(endpoint: &str, token: Option<&str>) -> Result<Request<()>, String> {
+    let parsed = Url::parse(endpoint).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Endpoint URL has no host".to_string())?;
+    let host_with_port = if let Some(port) = parsed.port() {
+        format!("{host}:{port}")
+    } else {
+        host.to_string()
+    };
+
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|e| format!("Failed to build WS request: {e}"))?;
+    let host_header =
+        HeaderValue::from_str(&host_with_port).map_err(|e| format!("Invalid Host header: {e}"))?;
+    request.headers_mut().insert("Host", host_header);
+
+    if let Some(token) = token {
+        let auth_header = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|e| format!("Invalid Authorization header: {e}"))?;
+        request.headers_mut().insert("Authorization", auth_header);
+    }
+
+    Ok(request)
 }
 
 impl R8rBridge {
@@ -88,34 +116,7 @@ impl R8rBridge {
     ///    - Sends acknowledgments back.
     ///    - Dispatches events by type.
     pub async fn connect(&self) -> Result<(), String> {
-        // Parse endpoint to extract host for the Host header.
-        let parsed =
-            Url::parse(&self.endpoint).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| "Endpoint URL has no host".to_string())?;
-        let host_with_port = if let Some(port) = parsed.port() {
-            format!("{host}:{port}")
-        } else {
-            host.to_string()
-        };
-
-        // Build HTTP upgrade request.
-        let mut request = self
-            .endpoint
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("Failed to build WS request: {e}"))?;
-
-        request
-            .headers_mut()
-            .insert("Host", host_with_port.parse().unwrap());
-
-        if let Some(ref token) = self.token {
-            request
-                .headers_mut()
-                .insert("Authorization", format!("Bearer {token}").parse().unwrap());
-        }
+        let request = build_ws_request(&self.endpoint, self.token.as_deref())?;
 
         // Connect.
         let (ws_stream, _response) = tokio_tungstenite::connect_async(request)
@@ -183,16 +184,8 @@ impl R8rBridge {
                     }
                 };
 
-                // Dedup check.
-                {
-                    let mut dd = dedup.lock().await;
-                    if !dd.is_new(&envelope.id) {
-                        info!("r8r bridge: skipping duplicate event {}", envelope.id);
-                        continue;
-                    }
-                }
-
-                // Send ack.
+                // Ack every well-formed envelope, including duplicates, so replayed
+                // deliveries are drained cleanly on reconnect.
                 let ack = Ack {
                     event_id: envelope.id.clone(),
                 };
@@ -200,6 +193,15 @@ impl R8rBridge {
                     let mut writer = ws_write.lock().await;
                     if let Err(e) = writer.send(WsMessage::Text(ack_json.into())).await {
                         warn!("r8r bridge: failed to send ack: {e}");
+                    }
+                }
+
+                // Dedup check.
+                {
+                    let mut dd = dedup.lock().await;
+                    if !dd.is_new(&envelope.id) {
+                        info!("r8r bridge: acknowledged duplicate event {}", envelope.id);
+                        continue;
                     }
                 }
 
@@ -332,5 +334,26 @@ impl R8rBridge {
             tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
             backoff_secs = (backoff_secs * 2).min(max_interval_secs);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_ws_request_sets_host_and_authorization_headers() {
+        let request =
+            build_ws_request("ws://localhost:8080/api/ws/events", Some("secret-token")).unwrap();
+
+        assert_eq!(request.headers()["Host"], "localhost:8080");
+        assert_eq!(request.headers()["Authorization"], "Bearer secret-token");
+    }
+
+    #[test]
+    fn test_build_ws_request_rejects_invalid_authorization_header() {
+        let err = build_ws_request("ws://localhost:8080/api/ws/events", Some("bad\nvalue"))
+            .expect_err("invalid header should return an error");
+        assert!(err.contains("Authorization"));
     }
 }
