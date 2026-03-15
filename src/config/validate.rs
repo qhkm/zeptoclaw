@@ -40,6 +40,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "health",
     "devices",
     "logging",
+    "r8r_bridge",
 ];
 
 /// Known fields for each section. Nested as section.field.
@@ -61,6 +62,7 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "loop_guard",
     "max_tool_result_bytes",
     "max_tool_calls",
+    "system_prompt",
 ];
 
 const KNOWN_LOOP_GUARD: &[&str] = &[
@@ -531,14 +533,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_accepts_tunnel_and_agent_default_fields() {
+    fn test_validate_accepts_tunnel_r8r_bridge_and_agent_default_fields() {
         let raw = json!({
             "agents": {
                 "defaults": {
                     "model": "gpt-4",
                     "timezone": "Asia/Kuala_Lumpur",
-                    "tool_timeout_secs": 30
+                    "tool_timeout_secs": 30,
+                    "system_prompt": "You are a workflow assistant."
                 }
+            },
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://localhost:8080/api/ws/events"
             },
             "tunnel": {
                 "provider": "cloudflare"
