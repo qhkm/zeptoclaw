@@ -1,881 +1,114 @@
 # ZeptoClaw
 
-Ultra-lightweight personal AI assistant. The best of OpenClaw's integrations, NanoClaw's security, and PicoClaw's minimalism — without their tradeoffs.
-
-Fresh configs default to `assistant` mode with dangerous tool approvals enabled.
+Ultra-lightweight personal AI assistant. Fresh configs default to `assistant` mode with dangerous tool approvals enabled.
 
 ## Quick Reference
 
 ```bash
-# Build
-cargo build --release
-
-# Build with Android device control
-cargo build --release --features android
-
-# Build with MQTT IoT channel
-cargo build --release --features mqtt
-
-# Run tests (use nextest to avoid OOM kills on low-RAM machines)
-cargo nextest run --lib
-
-# Run the agent-comparison coding fixture
-python3 -m unittest test-coding/test_calculator.py -v
-
-# Run the pristine failing benchmark copy
-python3 -m unittest test-coding-pristine/test_calculator.py -v
-
-# Lint
-cargo clippy -- -D warnings
-
-# Format
-cargo fmt
-
-# Test counts (cargo test)
-# current local build: lib 3163 total (3157 passed, 0 failed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
-
-# Version
-./target/release/zeptoclaw --version
-
-# Run agent
-./target/release/zeptoclaw agent -m "Hello"
-
-# Run agent without streaming (streaming is on by default)
-./target/release/zeptoclaw agent -m "Hello" --no-stream
-
-# Interactive slash commands (inside `zeptoclaw agent`)
-/help                    # Show available slash commands
-/model                   # Show current model
-/model list              # Show available models
-/model <provider:model>  # Switch model
-/persona                 # Show current persona
-/persona list            # Show persona presets
-/persona <name>          # Switch persona
-/tools                   # List available tools
-/template                # List available templates
-/history                 # Show history command hints
-/memory                  # Show memory command hints
-/trust                   # Show trusted local-session status
-/trust on                # Bypass approval prompts for this local interactive session
-/trust off               # Turn trusted local-session bypass back off
-/clear                   # Clear conversation
-/quit                    # Exit
-
-Interactive approval prompts and `/trust` are only active when both stdin and stdout are real TTYs.
-
-# Run gateway (Telegram bot)
-./target/release/zeptoclaw gateway
-
-# Telegram model switching (in chat)
-/model
-/model list
-/model reset
-/model <provider:model>
-
-# Telegram persona switching (in chat)
-/persona              # show current persona
-/persona list         # show available presets
-/persona concise      # switch to preset
-/persona Be a pirate  # set custom persona
-/persona reset        # clear per-chat override
-
-# Run gateway with container isolation
-./target/release/zeptoclaw gateway --containerized          # auto-detect
-./target/release/zeptoclaw gateway --containerized docker   # force Docker
-./target/release/zeptoclaw gateway --containerized apple    # force Apple Container (macOS)
-
-# Validate configuration
-./target/release/zeptoclaw config check
-
-# Heartbeat and skills
-./target/release/zeptoclaw heartbeat --show
-./target/release/zeptoclaw skills list
-
-# Conversation history
-./target/release/zeptoclaw history list [--limit 20]
-./target/release/zeptoclaw history show <query>
-./target/release/zeptoclaw history cleanup [--keep 50]
-
-# Agent templates
-./target/release/zeptoclaw template list
-./target/release/zeptoclaw template show coder
-./target/release/zeptoclaw agent --template researcher -m "Search for..."
-./target/release/zeptoclaw agent --template task-manager -m "Add task: finish proposal by Friday"
-
-# Hands-lite
-./target/release/zeptoclaw hand list
-./target/release/zeptoclaw hand activate researcher
-./target/release/zeptoclaw hand deactivate
-./target/release/zeptoclaw hand status
-
-# Batch mode (process multiple prompts from file)
-./target/release/zeptoclaw batch --input prompts.txt
-./target/release/zeptoclaw batch --input prompts.jsonl --output results.jsonl --format jsonl
-./target/release/zeptoclaw batch --input prompts.txt --template coder --stop-on-error
-
-# Secret encryption
-./target/release/zeptoclaw secrets encrypt   # Encrypt plaintext secrets in config
-./target/release/zeptoclaw secrets decrypt   # Decrypt for editing
-./target/release/zeptoclaw secrets rotate    # Re-encrypt with new key
-
-# Gateway with tunnel
-./target/release/zeptoclaw gateway --tunnel cloudflare
-./target/release/zeptoclaw gateway --tunnel ngrok
-./target/release/zeptoclaw gateway --tunnel tailscale
-./target/release/zeptoclaw gateway --tunnel auto
-
-# Channel management
-./target/release/zeptoclaw channel list
-./target/release/zeptoclaw channel setup whatsapp_web
-./target/release/zeptoclaw channel test whatsapp_web
-
-# Onboard (express setup by default)
-./target/release/zeptoclaw onboard
-./target/release/zeptoclaw onboard --full    # full 10-step wizard
-
-# Memory management
-./target/release/zeptoclaw memory list [--category user]
-./target/release/zeptoclaw memory search "project name"
-./target/release/zeptoclaw memory set user:name "Your Name" --category user --tags "profile,name"
-./target/release/zeptoclaw memory delete user:name
-./target/release/zeptoclaw memory stats
-
-# Tool discovery
-./target/release/zeptoclaw tools list
-./target/release/zeptoclaw tools info web_search
-
-# MCP server discovery (HTTP + stdio)
-# ~/.mcp/servers.json or .mcp.json:
-# {"mcpServers":{"web":{"url":"http://localhost:3000"}}}
-# {"mcpServers":{"fs":{"command":"node","args":["server.js"]}}}
-
-# Watch URLs for changes
-./target/release/zeptoclaw watch https://example.com --interval 1h --notify telegram
-
-# Panel (control panel web UI)
-./target/release/zeptoclaw panel                    # Start panel API server
-./target/release/zeptoclaw panel install             # Install panel frontend (build from source)
-./target/release/zeptoclaw panel auth set-password   # Set panel password
-./target/release/zeptoclaw panel auth show-token     # Show API token
-./target/release/zeptoclaw panel uninstall           # Remove panel frontend
-
-# Release (requires cargo-release: cargo install cargo-release)
-cargo release patch          # bug fixes only; no new user-visible capability (dry-run by default)
-cargo release minor          # backward-compatible new functionality
-cargo release patch --execute  # actually bump, commit, tag, push, publish to crates.io
-
-Release policy:
-- Use `patch` for backward-compatible bug fixes, reliability hardening, docs corrections, and internal refactors that do not add user-visible capability.
-- Use `minor` for backward-compatible new functionality such as new commands, flags, config fields, tools, providers, runtimes, channels, or other opt-in capabilities.
-- If an upgrade should only give existing users fixes, choose `patch`.
-- If an upgrade gives existing users new capabilities without requiring migration, choose `minor`.
-
-# Self-update
-./target/release/zeptoclaw update              # update to latest
-./target/release/zeptoclaw update --check      # check without downloading
-./target/release/zeptoclaw update --version v0.5.2  # specific version
-./target/release/zeptoclaw update --force      # re-download even if current
-
-# Uninstall
-./target/release/zeptoclaw uninstall --yes
-./target/release/zeptoclaw uninstall --remove-binary --yes
-
-# Per-provider quota management
-./target/release/zeptoclaw quota status
-./target/release/zeptoclaw quota reset
-./target/release/zeptoclaw quota reset anthropic
-
-# Provider chain status
-./target/release/zeptoclaw provider status
+cargo build --release                      # Build
+cargo nextest run --lib                    # Test (use nextest to avoid OOM)
+cargo clippy -- -D warnings && cargo fmt   # Lint & format
+./target/release/zeptoclaw agent -m "Hello"  # Run agent
+./target/release/zeptoclaw config check      # Validate config
+./target/release/zeptoclaw provider status   # Check providers
 ```
+
+For full CLI reference, slash commands, and gateway commands see `docs/claude/commands.md`.
 
 ## Agent Workflow — Task Tracking Protocol
 
-Every Claude Code session in this repo MUST follow these three rules:
+Every Claude Code session MUST follow these rules:
 
 ### 1. Session Start — Check open issues
-
-Before starting any work, run:
-
 ```bash
 gh issue list --repo qhkm/zeptoclaw --state open --limit 20
 ```
-
-Present the open issues to the user and ask what they want to work on. If they pick an existing issue, reference it throughout the session.
+Present issues, ask what to work on.
 
 ### 2. New Work — Create issue first
-
-When the user requests work that has no matching open issue (new feature, bug fix, refactor), create one **before writing code**:
-
 ```bash
 gh issue create --repo qhkm/zeptoclaw \
   --title "feat: short description" \
   --label "feat,area:tools" \
   --body "Brief description of the work."
 ```
-
-Use labels from: `bug`, `feat`, `rfc`, `chore`, `docs` + `area:tools`, `area:channels`, `area:providers`, `area:safety`, `area:config`, `area:cli`, `area:memory` + `P1-critical`, `P2-high`, `P3-normal`.
-
-Skip issue creation only for trivial changes (typo fixes, one-line tweaks).
+Labels: `bug`, `feat`, `rfc`, `chore`, `docs` + `area:tools`, `area:channels`, `area:providers`, `area:safety`, `area:config`, `area:cli`, `area:memory` + `P1-critical`, `P2-high`, `P3-normal`. Skip for trivial changes.
 
 ### 3. Session End — Link and close
-
-- If creating a PR: include `Closes #N` in the PR body
-- **NEVER merge PRs without explicit user approval.** After creating a PR:
-  1. Wait for CI to pass
-  2. Present the PR URL to the user for review
-  3. Only merge after the user explicitly says to merge
-- Merge command (after user approval): `gh pr merge <number> --squash --delete-branch --admin`
-- If committing directly to main: close the issue with `gh issue close N --comment "Done in <commit-sha>"`
+- PR body: include `Closes #N`
+- **NEVER merge PRs without explicit user approval.** Wait for CI, present URL, merge only after user says to
+- Merge: `gh pr merge <number> --squash --delete-branch --admin`
+- Direct commit: `gh issue close N --comment "Done in <commit-sha>"`
 - Update `CLAUDE.md` and `AGENTS.md` per the post-implementation checklist
 
 ## Pre-Push Checklist (MANDATORY)
 
-Before EVERY `git push`, run these checks **in the worktree you are pushing from**. Do NOT skip any step. CI will reject the PR if these fail.
-
-```bash
-# 1. Format (MUST pass — CI fails on any diff)
-cargo fmt
-
-# 2. Clippy (MUST pass — CI fails on any warning)
-cargo clippy -- -D warnings
-
-# 3. Tests (MUST pass)
-cargo nextest run --lib
-
-# 4. Verify clean format (no unstaged changes from fmt)
-cargo fmt -- --check
-```
-
-**When delegating to subagents:** The parent agent MUST run `cargo fmt` and `cargo fmt -- --check` after the subagent completes, before committing. Subagents frequently skip formatting.
-
-**Quick one-liner for CI parity:**
 ```bash
 cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo test --doc && cargo fmt -- --check
 ```
+
+**After subagent work:** ALWAYS run `cargo fmt` before committing.
 
 ## Architecture
 
 ```
 src/
-├── agent/          # Agent loop, context builder, token budget, context compaction, per-tool timeout/panic isolation
-├── api/            # Panel API server (axum)
-│   ├── auth.rs         # Token generation, JWT, bcrypt password hashing
-│   ├── config.rs       # PanelConfig with AuthMode enum
-│   ├── events.rs       # EventBus (tokio::broadcast) for real-time panel events
-│   ├── middleware.rs    # Auth middleware, CSRF validation
-│   ├── routes/         # REST API route handlers
-│   │   ├── auth.rs     # Login endpoint
-│   │   ├── channels.rs # Channel status
-│   │   ├── cron.rs     # Cron job CRUD + trigger
-│   │   ├── health.rs   # Health endpoint
-│   │   ├── metrics.rs  # Metrics endpoint
-│   │   ├── routines.rs # Routine CRUD + toggle
-│   │   ├── sessions.rs # Session list + detail
-│   │   ├── tasks.rs    # Kanban task CRUD + move
-│   │   └── ws.rs       # WebSocket event streaming
-│   ├── server.rs       # AppState, router builder, server startup
-│   └── tasks.rs        # KanbanTask model + TaskStore persistence
-├── auth/           # OAuth (PKCE), token refresh, encrypted token store, Claude CLI import
-├── bus/            # Async message bus (pub/sub)
-├── channels/       # Input channels (Telegram, Slack, WhatsApp, etc.) with spawned-task panic isolation
-│   ├── factory.rs  # Channel factory/registry
-│   ├── manager.rs  # Channel lifecycle management
-│   ├── model_switch.rs # /model command parsing + model registry + persistence
-│   ├── persona_switch.rs # /persona command parsing + preset registry + LTM persistence
-│   ├── telegram.rs # Telegram bot channel (HTML parse mode + ||spoiler|| support, numeric-ID allowlist default for new setups)
-│   ├── slack.rs    # Slack outbound channel
-│   ├── discord.rs  # Discord Gateway WebSocket + REST (reply + thread create)
-│   ├── webhook.rs  # Generic HTTP webhook inbound with optional Bearer + HMAC auth and fixed server-side identity
-│   ├── whatsapp_web.rs # WhatsApp Web via wa-rs native (feature: whatsapp-web)
-│   ├── whatsapp_cloud.rs # WhatsApp Cloud API (official signed webhook + REST)
-│   ├── lark.rs     # Lark/Feishu messaging (WS long-connection)
-│   ├── email_channel.rs # Email channel (IMAP IDLE + SMTP)
-│   ├── mqtt.rs    # MQTT channel for IoT device messaging (feature: mqtt)
-│   └── serial.rs  # Serial (UART) channel for embedded device messaging (feature: hardware)
-├── cli/            # Clap command parsing + command handlers
-│   ├── memory.rs   # Memory list/search/set/delete/stats commands
-│   ├── tools.rs    # Tool discovery list/info + dynamic status summary
-│   ├── hand.rs     # Hands-lite list/activate/deactivate/status commands
-│   ├── provider.rs # Provider chain status introspection (resolved providers, wrappers, quota)
-│   ├── slash.rs     # Slash command registry, completer, help formatter (rustyline)
-│   ├── uninstall.rs # State removal + guarded binary uninstall command
-│   └── watch.rs    # URL change monitoring with channel notification
-├── config/         # Configuration types/loading + hot-reload watcher (mtime polling)
-├── hands/          # HAND.toml manifest parsing + built-in hands registry
-├── cron/           # Persistent cron scheduler service (dispatch timeout + error backoff)
-├── deps/           # Dependency manager (install, start, stop, health check)
-│   ├── types.rs    # Dependency, DepKind, HealthCheck, HasDependencies
-│   ├── registry.rs # JSON registry (installed state tracking)
-│   ├── fetcher.rs  # DepFetcher trait + real/mock implementations
-│   └── manager.rs  # DepManager lifecycle orchestrator
-├── gateway/        # Containerized agent proxy (Docker/Apple)
-├── health.rs       # Health server, HealthRegistry, UsageMetrics, get_rss_bytes()
-├── heartbeat/      # Periodic background task service
-├── memory/         # Workspace memory + long-term memory with pluggable search backends
-│   ├── traits.rs         # MemorySearcher trait
-│   ├── builtin_searcher.rs # Default substring scorer (always compiled)
-│   ├── bm25_searcher.rs  # BM25 keyword scorer (feature: memory-bm25)
-│   ├── factory.rs        # create_searcher() factory from config
-│   ├── longterm.rs       # Persistent KV store with pluggable searcher
-│   └── mod.rs            # Workspace markdown search with pluggable searcher
-├── peripherals/    # Hardware peripherals (serial boards, GPIO, I2C, NVS)
-│   ├── traits.rs         # Peripheral trait (always compiled)
-│   ├── board_profile.rs  # BoardProfile registry — pin ranges, capabilities per board
-│   ├── serial.rs         # SerialTransport + SerialPeripheral + GPIO tools (feature: hardware)
-│   ├── i2c.rs            # I2C tools — scan, read, write (feature: hardware)
-│   ├── nvs.rs            # NVS tools — get, set, delete (feature: hardware)
-│   ├── esp32.rs          # ESP32 peripheral wrapper (feature: peripheral-esp32)
-│   ├── rpi.rs            # RPi GPIO peripheral + pin validation (feature: peripheral-rpi, Linux)
-│   ├── rpi_i2c.rs        # RPi native I2C tools — scan, read, write via rppal (feature: peripheral-rpi, Linux)
-│   ├── arduino.rs        # Arduino peripheral wrapper (feature: hardware)
-│   └── nucleo.rs         # STM32 Nucleo peripheral wrapper (feature: hardware)
-├── providers/      # LLM providers (Claude, OpenAI, Retry, Fallback, Quota)
-│   ├── quota.rs       # QuotaProvider decorator + QuotaStore for per-provider cost/token limits
-├── runtime/        # Container runtimes (Native, Docker, Apple)
-├── routines/       # Event/webhook/cron triggered automations
-├── r8r_bridge/     # WebSocket bridge for r8r workflow approvals, health, and event deduplication
-├── safety/         # Prompt injection detection, secret leak scanning, policy engine, chain alerting
-├── security/       # Shell blocklist, path validation, mount policy, secret encryption
-│   ├── agent_mode.rs # Agent modes (Observer, Assistant, Autonomous) — defaults to Assistant for safer fresh configs
-│   └── encryption.rs # XChaCha20-Poly1305 + Argon2id secret encryption at rest
-├── session/        # Session, message persistence, conversation history
-├── tunnel/         # Tunnel providers (Cloudflare, ngrok, Tailscale)
-├── hooks/          # Config-driven hooks (before_tool, after_tool, on_error)
-├── migrate/        # OpenClaw migration (config, skills import)
-├── skills/         # Markdown-based skill system (OpenClaw-compatible, loader, types)
-├── plugins/        # Plugin system (JSON manifest, discovery, registry, binary mode)
-├── tools/          # Agent tools (33 built-in + MCP + binary plugins + android)
-│   ├── android/     # Android device control via ADB (feature-gated: --features android)
-│   │   ├── mod.rs      # AndroidTool struct, Tool trait impl, action dispatch
-│   │   ├── types.rs    # UIElement, ScreenState, StuckAlert
-│   │   ├── adb.rs      # AdbExecutor: async subprocess, retry, device detection
-│   │   ├── screen.rs   # XML parser (quick-xml), scoring, dedup, compact JSON
-│   │   ├── actions.rs  # Action handlers, text escaping, coordinate sanitization
-│   │   └── stuck.rs    # Screen hash, repetition/drift detection, alerts
-│   ├── binary_plugin.rs # Binary plugin adapter (JSON-RPC 2.0 stdin/stdout)
-│   ├── shell.rs       # Shell execution with runtime isolation
-│   ├── diff.rs        # Unified diff parser/applier (used by edit_file)
-│   ├── filesystem.rs  # Read, write, list, edit files with secure parent-dir creation and no-follow writes
-│   ├── find.rs        # File discovery by glob pattern (FindTool)
-│   ├── grep.rs        # Codebase search by regex pattern (GrepTool)
-│   ├── web.rs         # Web search (Brave + DuckDuckGo + SearXNG) and fetch with SSRF protection
-│   ├── git.rs         # Git operations (status, diff, log, commit)
-│   ├── stripe.rs      # Stripe API integration for payment operations
-│   ├── pdf_read.rs    # PDF text extraction (PdfReadTool)
-│   ├── docx_read.rs   # DOCX text extraction (DocxReadTool)
-│   ├── transcribe.rs  # Audio transcription with provider abstraction
-│   ├── http_request.rs # General-purpose HTTP client tool
-│   ├── project.rs     # Project scaffolding and management
-│   ├── screenshot.rs  # Web screenshot capture (feature: screenshot)
-│   ├── custom.rs      # CLI-defined tools via custom_tools config
-│   ├── hardware.rs    # GPIO, serial, USB peripheral operations (feature: hardware)
-│   ├── whatsapp.rs    # WhatsApp Cloud API messaging
-│   ├── google.rs      # Google Workspace tool — Gmail + Calendar actions (feature: google)
-│   ├── gsheets.rs     # Google Sheets read/write
-│   ├── message.rs     # Proactive channel messaging (reply/thread hints)
-│   ├── memory.rs      # Workspace memory get/search (2 tools)
-│   ├── longterm_memory.rs # Long-term memory tool (set/get/search/delete/list/categories/pin)
-│   ├── cron.rs        # Cron job scheduling
-│   ├── spawn.rs       # Background task delegation
-│   ├── delegate.rs    # Agent swarm delegation (DelegateTool) — parallel + sequential modes
-│   ├── clarification.rs # Ask clarification tool (pause for user input)
-│   ├── composed.rs    # Natural language tool composition (CreateToolTool + ComposedTool)
-│   ├── plugin.rs      # Plugin tool adapter (PluginTool)
-│   ├── skills_install.rs # Skill installation tool
-│   ├── skills_search.rs  # Skill discovery/search tool
-│   ├── approval.rs    # Tool approval gate (ApprovalGate) — defaults to enabled + require_for_dangerous
-│   ├── r8r.rs         # R8r workflow integration
-│   ├── reminder.rs    # Persistent reminders (add/complete/snooze/overdue) with cron delivery
-│   └── mcp/           # MCP (Model Context Protocol) client tools
-│       ├── protocol.rs   # JSON-RPC 2.0 types, content blocks
-│       ├── transport.rs  # McpTransport trait + HttpTransport + StdioTransport
-│       ├── client.rs     # Transport-agnostic MCP client, tools cache
-│       └── wrapper.rs    # McpToolWrapper adapts MCP tools to Tool trait
-├── utils/          # Utility functions (sanitize, metrics, telemetry, cost)
-├── batch.rs        # Batch mode (load prompts from file, format results)
-├── error.rs        # Error types (ZeptoError)
-├── lib.rs          # Library exports
-└── main.rs         # Thin entry point delegating to cli::run()
+├── agent/       # Agent loop, context builder, token budget, compaction
+├── api/         # Panel API server (axum)
+├── auth/        # OAuth (PKCE), token refresh, Claude CLI import
+├── bus/         # Async message bus
+├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp, Lark, Email, MQTT, Serial
+├── cli/         # Clap commands + handlers
+├── config/      # Config types/loading + hot-reload
+├── cron/        # Persistent cron scheduler
+├── deps/        # Dependency manager
+├── gateway/     # Containerized agent proxy
+├── health.rs    # Health server + metrics
+├── memory/      # Workspace + long-term memory (pluggable search)
+├── peripherals/ # Hardware: GPIO, I2C, NVS (ESP32, RPi, Arduino)
+├── providers/   # Claude, OpenAI, Retry, Fallback, Quota
+├── runtime/     # Native, Docker, Apple, Landlock, Firejail, Bubblewrap
+├── routines/    # Event/webhook/cron automations
+├── r8r_bridge/  # WebSocket bridge for r8r workflow approvals
+├── safety/      # Injection detection, leak scanning, policy engine
+├── security/    # Shell blocklist, path validation, secret encryption
+├── session/     # Session persistence, history, auto-repair
+├── tools/       # 33 built-in + MCP + plugins + android
+├── utils/       # sanitize, metrics, telemetry, cost
+└── main.rs      # Entry point → cli::run()
 
-landing/
-└── zeptoclaw/
-    ├── index.html        # Static landing page (hero, sections, interactive animations)
-    └── mascot-no-bg.png  # README mascot asset used in landing hero
-
-panel/
-├── src/
-│   ├── components/     # Reusable UI components
-│   │   ├── AgentDesk.tsx     # Live agent session card
-│   │   ├── ChatBubble.tsx    # Chat message bubble
-│   │   ├── KanbanCard.tsx    # Draggable kanban card
-│   │   ├── KanbanColumn.tsx  # Droppable kanban column
-│   │   ├── Layout.tsx        # Full-height flex layout
-│   │   ├── Sidebar.tsx       # Navigation sidebar
-│   │   └── ToolCallBlock.tsx # Collapsible tool call display
-│   ├── hooks/          # React hooks
-│   │   ├── useAuth.ts        # Auth state + login/logout
-│   │   ├── useHealth.ts      # Health polling (5s)
-│   │   ├── useMetrics.ts     # Metrics polling (10s)
-│   │   └── useWebSocket.ts   # Auto-reconnecting WebSocket
-│   ├── lib/
-│   │   └── api.ts            # Fetch wrapper with auth headers
-│   └── pages/          # Route pages
-│       ├── Agents.tsx        # Live agent office grid
-│       ├── CronRoutines.tsx  # Cron + routine management
-│       ├── Dashboard.tsx     # Health, stats, activity feed
-│       ├── Kanban.tsx        # Drag-and-drop task board
-│       ├── Login.tsx         # Password login form
-│       ├── Logs.tsx          # Real-time event log viewer
-│       └── Sessions.tsx      # Session list + chat viewer
-├── index.html
-├── package.json
-└── vite.config.ts
-
-test-coding/
-├── calculator.py       # Intentionally buggy coding benchmark fixture
-├── test_calculator.py  # Stdlib unittest verification for the fixture
-└── README.md           # Prompt and verification command for agent comparisons
-
-test-coding-pristine/
-├── calculator.py       # Original buggy benchmark kept unchanged for fresh comparisons
-├── test_calculator.py  # Stdlib unittest verification for the pristine fixture
-└── README.md           # Prompt and reset guidance for repeatable head-to-head runs
+panel/           # React + Vite dashboard
+landing/         # Static landing page
 ```
 
-## Key Modules
-
-### Runtime (`src/runtime/`)
-Selectable container isolation for shell commands:
-- `NativeRuntime` - Direct execution (default)
-- `DockerRuntime` - Docker container isolation
-- `AppleContainerRuntime` - macOS 15+ native containers
-- `LandlockRuntime` - Linux kernel LSM (5.13+), pure-Rust, no binary dep (`--features sandbox-landlock`)
-- `FirejailRuntime` - Linux namespace + seccomp via `firejail` binary (`--features sandbox-firejail`)
-- `BubblewrapRuntime` - OCI-compatible `bwrap` sandbox (`--features sandbox-bubblewrap`)
-
-### Gateway (`src/gateway/`)
-Containerized agent proxy for full request isolation:
-- Stdin/stdout IPC with containerized agent
-- Semaphore-based concurrency limiting (`max_concurrent` config)
-- Mount allowlist validation, docker binary verification
-- Warn-and-continue on dependency failures (non-blocking)
-
-### Providers (`src/providers/`)
-LLM provider abstraction via `LLMProvider` trait:
-- `ClaudeProvider` - Anthropic Claude API (120s timeout, SSE streaming)
-- `OpenAIProvider` - OpenAI Chat Completions API (120s timeout, SSE streaming); supports any OpenAI-compatible endpoint via `api_base` (Ollama, Groq, Zhipu/GLM, Together, Fireworks, LM Studio, vLLM, DeepSeek, Kimi/Moonshot, Azure OpenAI, Amazon Bedrock, xAI/Grok, Baidu Qianfan); custom auth header via `auth_header` config field; API version query param via `api_version` field; onboarding key validation includes OpenAI, OpenRouter, and Zhipu via read-only endpoint checks
-- `RetryProvider` - Decorator: exponential backoff on 429/5xx with structured `ProviderError` classification
-- `FallbackProvider` - Decorator: primary → secondary auto-failover with circuit breaker (Closed/Open/HalfOpen)
-- `QuotaProvider` - Decorator: wraps each provider to enforce configurable cost/token quotas; action can reject, failover (triggers FallbackProvider), or warn
-- Per-provider model mapping: `ProviderConfig.model` overrides `agents.defaults.model` per provider; `FallbackProvider` swaps model on failover via `with_fallback_model()`
-- `ProviderError` enum: Auth, RateLimit, Billing, ServerError, InvalidRequest, ModelNotFound, Timeout — enables smart retry/fallback
-- Runtime provider assembly in `create_agent()`: resolves configured runtime providers in registry order, builds fallback chain only when `providers.fallback.enabled`, honors `providers.fallback.provider` as preferred first fallback, and optionally wraps the chain with `RetryProvider` (`providers.retry.*`)
-- `StreamEvent` enum + `chat_stream()` on LLMProvider trait for token-by-token streaming
-- `OutputFormat` enum (Text/Json/JsonSchema) with `to_openai_response_format()` and `to_claude_system_suffix()`
-
-### Auth (`src/auth/`)
-OAuth support with PKCE, CSRF state validation, encrypted token persistence, and best-effort refresh before expiry.
-- `claude_import.rs` - Import credentials from Claude CLI (Keychain on macOS, `~/.claude.json` on all platforms); lowest-priority fallback for Anthropic provider when no API key or OAuth token is configured
-
-### Channels (`src/channels/`)
-Message input channels via `Channel` trait:
-- `TelegramChannel` - Telegram bot integration with numeric-ID allowlists by default for new setups and legacy username matching behind `allow_usernames`
-- `SlackChannel` - Slack outbound messaging
-- `DiscordChannel` - Discord Gateway WebSocket + REST API messaging (replies + thread creation)
-- `WebhookChannel` - Generic HTTP POST inbound with optional Bearer auth, HMAC-SHA256 body signing, and fixed server-side sender/chat identity by default
-- `WhatsAppWebChannel` - WhatsApp Web via wa-rs native client (QR pairing, feature: whatsapp-web)
-- `WhatsAppCloudChannel` - WhatsApp Cloud API (signed webhook inbound + REST outbound, no bridge)
-- `EmailChannel` - IMAP IDLE + SMTP email channel; sender allowlist is parsed From-header trust only and warns accordingly
-- `MqttChannel` - MQTT messaging for IoT devices over WiFi/network (rumqttc, feature: mqtt)
-- `SerialChannel` - UART serial messaging (line-delimited JSON, feature: hardware)
-- CLI mode via direct agent invocation
-- All channels support `deny_by_default` config option for sender allowlists
-- Per-chat persona override via `/persona` command (mirrors `/model` pattern)
-- `PersonaOverrideStore` + LTM persistence for per-chat personas
-- First-chat detection: `FIRST_RUN_PERSONA_PROMPT` constant for prompting persona selection on first message
-- `ChannelManager` stores channel handles as `Arc<Mutex<_>>`, so outbound dispatch does not hold the channel map lock across async `send()`
-- `ChannelManager` supervision: polling supervisor (15s) detects dead channels via `is_running()`, restarts with 60s cooldown, max 5 restarts, reports to `HealthRegistry`
-- All spawned channel tasks set `running = false` on exit to prevent stale `is_running()` flags
-
-### Deps (`src/deps/`)
-- `HasDependencies` trait — components declare external dependencies
-- `DepKind` enum: Binary (GitHub Releases), DockerImage, NpmPackage, PipPackage
-- `DepManager` — install, start, stop, health check lifecycle orchestrator
-- `Registry` — JSON file at `~/.zeptoclaw/deps/registry.json` tracks installed state
-- `DepFetcher` trait — abstracts network calls for testability
-
-### Tools (`src/tools/`)
-33 built-in tools + dynamic MCP tools + composed tools via `Tool` async trait. All filesystem tools require workspace.
-
-**Composed tools** (`src/tools/composed.rs`): Natural language tool composition.
-- `CreateToolTool` — agent tool with create/list/delete/run actions
-- `ComposedTool` — wraps a `ComposedToolDef`, interpolates `{{param}}` placeholders into action template, returns instructions for the agent to follow
-- `ComposedToolStore` — persistence at `~/.zeptoclaw/composed_tools.json`
-- Auto-loaded at startup in `create_agent()` as first-class tools
-
-**Delegate tool** (`src/tools/delegate.rs`): Multi-agent orchestration with parallel + sequential modes.
-- `DelegateTool` — `run` action delegates a single task to a sub-agent; `aggregate` action dispatches multiple tasks
-- `parallel: true` — concurrent fan-out via `futures::future::join_all`, bounded by semaphore (`config.swarm.max_concurrent`); no scratchpad context injection; partial results on per-agent errors
-- `parallel: false` (default) — sequential execution with `SwarmScratchpad` chaining (each sub-agent sees prior agents' outputs injected into system prompt)
-- Agent is instructed to ask the user which mode they prefer; respects explicit hints ("run in parallel", "one by one")
-- Recursion blocked: sub-agents cannot call `delegate` or `spawn`
-- `ProviderRef` wrapper shares `Arc<dyn LLMProvider>` across sub-agents without cloning
-- Config: `SwarmConfig` — `enabled` (default true), `max_depth` (1), `max_concurrent` (3), `roles` (HashMap of role presets with system prompts + tool whitelists)
-
-### Utils (`src/utils/`)
-- `sanitize.rs` - Tool result sanitization (strip base64, hex, truncate)
-- `metrics.rs` - MetricsCollector: per-tool call stats, token tracking, session summary (wired into AgentLoop)
-- `telemetry.rs` - Prometheus text exposition + JSON metrics rendering from MetricsCollector
-- `cost.rs` - Model pricing tables (8 models), CostTracker with per-provider/model cost accumulation
-
-### Batch (`src/batch.rs`)
-- Load prompts from text files or JSONL (one per line, `#` comments skipped)
-- `BatchResult` struct with index, prompt, response, error, duration
-- `format_results()` renders as plain text or JSONL
-
-### Session (`src/session/`)
-- `SessionManager` - Async session storage with file persistence
-- `ConversationHistory` - CLI session discovery, listing, fuzzy search by title/key, cleanup
-- `repair.rs` - Auto-repair malformed session history (orphans, empty/duplicate, alternation)
-
-### Agent (`src/agent/`)
-- `AgentLoop` - Core message processing loop with tool execution + pre-compaction memory flush + per-message LTM memory injection override
-- `process_message_streaming()` now mirrors the non-streaming tool loop for hook callbacks, usage metrics, success/failure logging, feedback phases, and malformed tool-argument parse preservation
-- `ContextBuilder` - System prompt and conversation context builder + optional per-message memory override API
-- `TokenBudget` - Atomic per-session token budget tracker (lock-free via `AtomicU64`)
-- `ContextMonitor` - Token estimation (`words * 1.3 + 4/msg`), threshold-based compaction triggers
-- `LoopGuard` - SHA256 tool-call repetition detection with warning + circuit breaker
-- `Compactor` - Summarize (LLM-based) or Truncate strategies for context window management
-- `SwarmScratchpad` - Thread-safe `Arc<RwLock<HashMap>>` for agent-to-agent context passing; `format_for_prompt()` injects prior outputs into sub-agent system prompts (truncated at 2000 chars per entry)
-- `start()` now routes inbound work through `process_inbound_message()` helper and calls `try_queue_or_process()` before processing
-
-### Memory (`src/memory/`)
-- `MemorySearcher` trait - Pluggable search/scoring backend (builtin, bm25, embedding, hnsw, tantivy)
-- `BuiltinSearcher` - Default substring + term-frequency scorer (always compiled, zero deps)
-- `Bm25Searcher` - Okapi BM25 keyword scorer (feature-gated: `memory-bm25`, zero deps)
-- `create_searcher()` - Factory maps `MemoryBackend` config to `Arc<dyn MemorySearcher>`
-- Workspace memory - Markdown search/read with pluggable searcher injection
-- `LongTermMemory` - Persistent key-value store at `~/.zeptoclaw/memory/longterm.json` with pluggable searcher, categories, tags, access tracking; injection guard on `set()` rejects values containing prompt injection patterns
-- `decay_score()` on `MemoryEntry` - 30-day half-life decay with importance weighting; pinned entries exempt (always 1.0)
-- `build_memory_injection()` - Pinned + query-matched memory injection for system prompt (2000 char budget), now applied per inbound message via shared LTM
-- Pre-compaction memory flush - Silent LLM turn saves important facts before context compaction (10s timeout)
-
-### Health (`src/health.rs`)
-- `HealthRegistry` — named component checks with restart count, last error
-- `UsageMetrics` — lock-free counters (requests, tool calls, tokens, errors)
-- `get_rss_bytes()` — platform RSS (macOS mach + Linux /proc/self/statm)
-- `/health` returns version, uptime, memory RSS, usage metrics, component checks
-- `/ready` returns boolean readiness (all checks not Down)
-- Raw TCP server — no web framework dependency
-
-### API Server (`src/api/`)
-Panel web dashboard backend:
-- `PanelConfig` — Auth mode (Token/Password/None), ports, bind address
-- `EventBus` — `tokio::broadcast` channel bridging agent events to WebSocket clients
-- `AppState` — Shared state: API token, EventBus, JWT secret, password hash, WS semaphore
-- Auth middleware: Bearer token + JWT validation, CSRF protection
-- REST routes for sessions, channels, cron, routines, kanban tasks, metrics, health
-- WebSocket route streams `PanelEvent`s (tool start/done/fail, agent lifecycle, etc.)
-- `TaskStore` — JSON file persistence for kanban tasks
-- `TaskTool` — Agent-accessible tool for kanban board operations
-
-### Landing (`landing/zeptoclaw/index.html`)
-- Hero ambient animation, mascot eye/pupil motion, and magnetic CTA interactions
-- Scroll-triggered feature-card reveal and stats count-up animations
-- Architecture pipeline flow packets and enhanced terminal typing/thinking feedback
-- `prefers-reduced-motion` support for accessibility fallback
-- README mascot parity: hero now uses `landing/zeptoclaw/mascot-no-bg.png` (bundled by `landing/deploy.sh`)
-
-### Safety (`src/safety/`)
-- `SafetyLayer` - Orchestrator: length check → leak detection → policy check → injection sanitization, with per-scan policy overrides for narrow carve-outs
-- `sanitizer.rs` - Aho-Corasick multi-pattern matcher for 17 prompt injection patterns + 4 regex patterns
-- `leak_detector.rs` - 22 regex patterns for API keys/tokens/secrets; Block, Redact, or Warn actions
-- `policy.rs` - 7 security policy rules (system file access, crypto keys, SQL, shell injection, encoded exploits) with selective ignore support for field-aware scans
-- `validator.rs` - Input length (100KB max), null byte, whitespace ratio, repetition detection
-- `chain_alert.rs` - Tool chain alerting: tracks tool call sequences per session, warns on dangerous patterns (write→execute, execute→fetch, memory→execute)
-- Tiered inbound injection scanning in agent loop: webhook channel blocked on injection, allowlisted channels (telegram, discord, etc.) warn-only
-
-### Security (`src/security/`)
-- `shell.rs` - Regex-based command blocklist + optional allowlist (`ShellAllowlistMode`: Off/Warn/Strict); includes `.zeptoclaw/config.json` blocklist to prevent LLM-driven config exfiltration
-- `path.rs` - Workspace path validation, symlink escape detection, and secure directory-chain creation for write paths
-- `mount.rs` - Mount allowlist validation, docker binary verification, host-path `..` traversal rejection, lightweight blocked-path checks on unresolved paths plus canonical host paths when the source exists, and Unix hardlink alias rejection for regular-file mounts in both blocked-path and allowlist validation flows
-- `encryption.rs` - `SecretEncryption`: XChaCha20-Poly1305 AEAD + Argon2id KDF, `ENC[...]` ciphertext format, `resolve_master_key()` for env/file/prompt sources, transparent config decrypt on load
-
-### Tunnel (`src/tunnel/`)
-- `TunnelProvider` trait with `start()` / `stop()` lifecycle
-- `CloudflareTunnel` - Cloudflare quick tunnels via `cloudflared`
-- `NgrokTunnel` - ngrok tunnels via `ngrok` CLI
-- `TailscaleTunnel` - Tailscale funnel via `tailscale`
-- Auto-detect mode: tries available providers in order
-
-### MCP Client (`src/tools/mcp/`)
-- `protocol.rs` - JSON-RPC 2.0 types: McpRequest, McpResponse, McpTool, ContentBlock (Text/Image/Resource)
-- `transport.rs` - `McpTransport` trait with `HttpTransport` and `StdioTransport` implementations
-- `client.rs` - Transport-agnostic `McpClient` with initialize/list_tools/call_tool + RwLock tools cache
-- `wrapper.rs` - McpToolWrapper implements Tool trait; prefixed tool names (`{server}_{tool}`)
-- Discovery and registration - `.mcp.json` / `~/.mcp/servers.json` now load both HTTP and stdio servers, and tools are registered in `create_agent()`
-
-### Routines (`src/routines/`)
-- `Routine` - Trigger enum (Cron/Event/Webhook/Manual), RoutineAction enum (Lightweight/FullJob)
-- `RoutineStore` - JSON file persistence, cooldown enforcement, CRUD operations
-- `RoutineEngine` - Compiled regex cache for event matching, webhook path matching, concurrent execution limits
-
-## Configuration
-
-Config file: `~/.zeptoclaw/config.json`
-
-`./target/release/zeptoclaw config check` validates top-level sections such as `tunnel` and `r8r_bridge`, plus agent defaults including `timezone`, `tool_timeout_secs`, and `system_prompt`.
-
-Environment variables override config:
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY`
-- `ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY`
-- `ZEPTOCLAW_OAUTH_CLIENT_ID` — OAuth client id (used by `auth login`)
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_OAUTH_CLIENT_ID` — provider-specific OAuth client id override
-- `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
-- `ZEPTOCLAW_AGENTS_DEFAULTS_AGENT_TIMEOUT_SECS` — wall-clock timeout for agent runs (default: 300)
-- `ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_TIMEOUT_SECS` — wall-clock timeout for tool calls (default: 0 = inherit agent timeout)
-- `ZEPTOCLAW_AGENTS_DEFAULTS_SYSTEM_PROMPT` — override the default ContextBuilder system prompt from config or environment
-- `ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE` — IANA timezone for prompts and timestamps (default: system timezone or `UTC`)
-- `ZEPTOCLAW_AGENTS_DEFAULTS_MESSAGE_QUEUE_MODE` — "collect" (default) or "followup"
-- `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` — enable retry wrapper (default: false)
-- `ZEPTOCLAW_PROVIDERS_RETRY_MAX_RETRIES` — max retry attempts (default: 3)
-- `ZEPTOCLAW_PROVIDERS_RETRY_BASE_DELAY_MS` — base delay in ms (default: 1000)
-- `ZEPTOCLAW_PROVIDERS_RETRY_MAX_DELAY_MS` — max delay in ms (default: 30000)
-- `ZEPTOCLAW_PROVIDERS_RETRY_BUDGET_MS` — total wall-clock retry budget in ms, 0 = unlimited (default: 45000)
-- `ZEPTOCLAW_PROVIDERS_FALLBACK_ENABLED` — enable fallback provider (default: false)
-- `ZEPTOCLAW_PROVIDERS_FALLBACK_PROVIDER` — fallback provider name
-- `ZEPTOCLAW_PROVIDERS_<NAME>_MODEL` — per-provider model override (e.g. `ZEPTOCLAW_PROVIDERS_NVIDIA_MODEL=nvidia/llama-3.3-70b`); used instead of `agents.defaults.model` for this provider in fallback chains
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD` — max monthly (or daily) cost in USD for Anthropic
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_TOKENS` — max token count for Anthropic
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_PERIOD` — quota period: "monthly" (default) or "daily"
-- `ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION` — quota action: "reject" (default), "fallback", "warn"
-- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_COST_USD` — max monthly (or daily) cost in USD for OpenAI
-- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_TOKENS` — max token count for OpenAI
-- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD` — quota period: "monthly" (default) or "daily"
-- `ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION` — quota action: "reject" (default), "fallback", "warn"
-- `ZEPTOCLAW_PROVIDERS_AZURE_API_KEY` (or `AZURE_OPENAI_API_KEY`) — Azure OpenAI API key
-- `ZEPTOCLAW_PROVIDERS_AZURE_API_BASE` (or `AZURE_OPENAI_ENDPOINT`) — Azure deployment base URL (e.g. `https://myco.openai.azure.com/openai/deployments/gpt-4o`)
-- `ZEPTOCLAW_PROVIDERS_AZURE_API_VERSION` — Azure API version (default preset: `2024-08-01-preview`)
-- `ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY` (or `AWS_ACCESS_KEY_ID`) — Amazon Bedrock credential placeholder (SigV4 required; use with proxy)
-- `ZEPTOCLAW_PROVIDERS_BEDROCK_API_BASE` — Bedrock regional endpoint (default: `https://bedrock-runtime.us-east-1.amazonaws.com/v1`)
-- `ZEPTOCLAW_PROVIDERS_XAI_API_KEY` (or `XAI_API_KEY`) — xAI (Grok) API key
-- `ZEPTOCLAW_PROVIDERS_XAI_API_BASE` — xAI base URL (default: `https://api.x.ai/v1`)
-- `ZEPTOCLAW_PROVIDERS_XAI_MODEL` — xAI model override
-- `ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY` (or `QIANFAN_API_KEY`) — Baidu Qianfan API key
-- `ZEPTOCLAW_PROVIDERS_QIANFAN_API_BASE` — Qianfan base URL (default: `https://qianfan.baidubce.com/v2`)
-- `ZEPTOCLAW_PROVIDERS_QIANFAN_MODEL` — Qianfan model override
-- `ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET` — per-session token budget (default: 0 = unlimited)
-- `ZEPTOCLAW_SAFETY_ENABLED` — enable safety layer (default: true)
-- `ZEPTOCLAW_SAFETY_LEAK_DETECTION_ENABLED` — enable secret leak detection (default: true)
-- `ZEPTOCLAW_COMPACTION_ENABLED` — enable context compaction (default: false)
-- `ZEPTOCLAW_COMPACTION_CONTEXT_LIMIT` — max tokens before compaction (default: 100000)
-- `ZEPTOCLAW_COMPACTION_THRESHOLD` — compaction trigger threshold (default: 0.80)
-- `ZEPTOCLAW_ROUTINES_ENABLED` — enable routines engine (default: false)
-- `ZEPTOCLAW_ROUTINES_CRON_INTERVAL_SECS` — cron tick interval (default: 60)
-- `ZEPTOCLAW_ROUTINES_MAX_CONCURRENT` — max concurrent routine executions (default: 3)
-- `ZEPTOCLAW_ROUTINES_JITTER_MS` — jitter window in ms for scheduled dispatches (default: 0)
-- `ZEPTOCLAW_ROUTINES_ON_MISS` — missed schedule policy: "skip" (default) or "run_once"
-- `ZEPTOCLAW_HEARTBEAT_DELIVER_TO` — channel for heartbeat result delivery (default: none)
-- `ZEPTOCLAW_MASTER_KEY` — hex-encoded 32-byte master encryption key for secret encryption
-- `ZEPTOCLAW_TUNNEL_PROVIDER` — tunnel provider (cloudflare, ngrok, tailscale, auto)
-- `ZEPTOCLAW_MEMORY_BACKEND` — memory search backend: builtin (default), bm25, embedding, hnsw, tantivy, none
-- `ZEPTOCLAW_MEMORY_EMBEDDING_PROVIDER` — embedding provider name (for embedding backend)
-- `ZEPTOCLAW_MEMORY_EMBEDDING_MODEL` — embedding model name (for embedding backend)
-- `ZEPTOCLAW_PANEL_ENABLED` — enable panel API server (default: false)
-- `ZEPTOCLAW_PANEL_PORT` — panel frontend port (default: 9092)
-- `ZEPTOCLAW_PANEL_API_PORT` — panel API port (default: 9091)
-- `ZEPTOCLAW_PANEL_BIND` — bind address (default: 127.0.0.1)
-- `ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER` — search provider: "brave", "searxng", "ddg" (default: auto-detect)
-- `ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL` — SearXNG instance URL (required when provider is "searxng")
-- `ZEPTOCLAW_TOOLS_CODING_TOOLS` — enable coding-specific tools: grep, find (default: false; auto-enabled by coder template)
-- `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` — enable WhatsApp Web channel (default: false)
-- `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` — session persistence directory (default: ~/.zeptoclaw/state/whatsapp_web)
-
-### Keyless Providers
-
-Ollama and vLLM do not require an API key. Just add the provider section to config:
-
-```json
-{"providers": {"ollama": {}}}
-{"providers": {"ollama": {"api_base": "https://my-cloud-ollama.example.com/v1"}}}
-{"providers": {"ollama": {"api_key": "secret", "api_base": "https://my-cloud-ollama.example.com/v1"}}}
-```
-
-When no `api_key` is set, no Authorization header is sent. When `api_key` is set, it sends `Authorization: Bearer <key>` as normal.
-
-### Cargo Features
-
-- `android` — Enable Android device control tool via ADB
-- `google` — Enable Google Workspace tools (Gmail + Calendar) via gogcli-rs
-- `mqtt` — Enable MQTT channel for IoT device communication (rumqttc async client)
-- `whatsapp-web` — Enable native WhatsApp Web channel via wa-rs (QR code pairing)
-- `memory-bm25` — Enable BM25 keyword scoring for memory search
-- `peripheral-esp32` — Enable ESP32 peripheral with I2C + NVS tools (implies `hardware`)
-- `peripheral-rpi` — Enable Raspberry Pi GPIO + native I2C tools via rppal (Linux only)
-- `sandbox-landlock` — Enable Landlock LSM runtime (Linux only, adds `landlock` crate)
-- `sandbox-firejail` — Enable Firejail runtime (Linux only, requires `firejail` binary)
-- `sandbox-bubblewrap` — Enable Bubblewrap runtime (Linux only, requires `bwrap` binary)
-
-```bash
-cargo build --release --features android
-
-# Native WhatsApp Web channel
-cargo build --release --features whatsapp-web
-
-# Linux sandbox runtimes
-cargo build --release --features sandbox-landlock
-cargo build --release --features sandbox-firejail
-cargo build --release --features sandbox-bubblewrap
-cargo build --release --features sandbox-landlock,sandbox-firejail,sandbox-bubblewrap
-```
-
-### Compile-time Configuration
-
-Default models can be set at compile time using environment variables:
-- `ZEPTOCLAW_DEFAULT_MODEL` - Default model for agent (default: claude-sonnet-4-5-20250929)
-- `ZEPTOCLAW_CLAUDE_DEFAULT_MODEL` - Default Claude model (default: claude-sonnet-4-5-20250929)
-- `ZEPTOCLAW_OPENAI_DEFAULT_MODEL` - Default OpenAI model (default: gpt-5.1)
-
-Example:
-```bash
-export ZEPTOCLAW_DEFAULT_MODEL=gpt-5.1
-cargo build --release
-```
-
-## Design Patterns
-
-- **Async-first**: All I/O uses Tokio async runtime
-- **Trait-based abstraction**: `LLMProvider`, `Channel`, `Tool`, `ContainerRuntime`
-- **Arc for shared state**: `Arc<dyn LLMProvider>`, `Arc<dyn ContainerRuntime>`
-- **Parallel tool execution**: `futures::future::join_all` for concurrent tool calls
-- **Tool result sanitization**: Strip base64 URIs, hex blobs, truncate to 50KB before LLM
-- **Agent-level timeout**: Wall-clock timeout wrapping entire agent runs (default 300s)
-- **Message queue modes**: Collect (concatenate) or Followup (replay) for busy sessions
-- **Per-session mutex map**: Prevents concurrent message race conditions
-- **Semaphore concurrency**: Container gateway limits concurrent requests
-- **spawn_blocking**: Wraps sync I/O (memory, filesystem) in async context
-- **Conditional compilation**: `#[cfg(target_os = "macos")]` for Apple-specific code
-
-## Testing
-
-Uses `cargo nextest` (process-per-test isolation, avoids OOM kills on low-RAM machines).
-Install: `cargo install cargo-nextest --locked`
-
-```bash
-# Unit tests
-cargo nextest run --lib
-
-# Main binary tests
-cargo nextest run --bin zeptoclaw
-
-# CLI smoke tests
-cargo nextest run --test cli_smoke
-
-# End-to-end tests
-cargo nextest run --test e2e
-
-# Integration tests
-cargo nextest run --test integration
-
-# All tests (excludes doc tests; run cargo test --doc separately)
-cargo nextest run
-
-# Specific test
-cargo nextest run test_name
-
-# With output
-cargo nextest run --no-capture
-
-# Fallback: plain cargo test (may OOM on low-RAM machines)
-cargo test --lib -- --test-threads=1
-```
-
-### Manual Stabilization Smoke
-
-Use this checklist when the goal is to stabilize the product rather than add surface area.
-The minimum path that must work is:
-
-```bash
-./target/release/zeptoclaw config check
-./target/release/zeptoclaw provider status
-./target/release/zeptoclaw agent -m "Hello"
-```
-
-Priority manual checks:
-
-1. Fresh install path: build, `--help`, `version`, first run without panic
-2. Config path: `config check` handles missing, invalid, and valid config clearly
-3. Provider path: `provider status` shows one usable provider or a specific failure reason
-4. Core agent path: `agent -m "Hello"` returns a response on repeated runs
-5. Streaming path: `agent -m "Hello"` streams by default and exits cleanly
-6. Interactive path: `agent` accepts input and exits with `quit`
-7. Error path: missing API key or bad model fails cleanly with actionable stderr
-8. Tool safety path: `agent --dry-run -m "..."` works and tool failure does not crash the process
-9. Batch path: a tiny `batch --input prompts.txt` run succeeds and reports failures clearly
-10. Persistence path: history and memory commands do not panic on empty state
-
-Turn any panic, hang, misleading success, inconsistent repeated run, or broken documented command into a GitHub issue.
-
-## Benchmarks
-
-Verified on Apple Silicon (release build):
-- Binary size: ~6MB (stripped, macos-aarch64)
-- Startup time: ~50ms
-- Memory (RSS): ~6MB
+For detailed module docs see `docs/claude/architecture.md`.
 
 ## Common Tasks
 
-### Add a new LLM provider
-1. Create `src/providers/newprovider.rs`
-2. Implement `LLMProvider` trait
-3. Export from `src/providers/mod.rs`
-4. Wire up provider resolution in `src/cli/common.rs` (`create_agent*`)
-
-### Add a new tool
-1. Create tool in `src/tools/`
-2. Implement `Tool` trait with `async fn execute()`
-3. Register in `src/tools/mod.rs` and `src/lib.rs`
-4. Register in agent setup in `src/cli/common.rs`
-
-### Add a new channel
-1. Create `src/channels/newchannel.rs`
-2. Implement `Channel` trait
-3. Export from `src/channels/mod.rs`
-4. Add to channel factory wiring used by `src/cli/gateway.rs`
+### Add a new provider/tool/channel
+1. Create file in `src/{providers,tools,channels}/`
+2. Implement trait (`LLMProvider`/`Tool`/`Channel`)
+3. Export from module's `mod.rs` (tools also need `src/lib.rs`)
+4. Wire in `src/cli/common.rs` (providers/tools) or `src/cli/gateway.rs` (channels)
 
 ### Add a new skill
-1. Create `~/.zeptoclaw/skills/<name>/SKILL.md`
-2. Add YAML frontmatter (name, description, metadata)
-3. Add markdown instructions for the agent
-4. Or use: `zeptoclaw skills create <name>`
+1. Create `~/.zeptoclaw/skills/<name>/SKILL.md` with YAML frontmatter
+2. Or: `zeptoclaw skills create <name>`
+3. Loader priority: `metadata.zeptoclaw` > `metadata.openclaw` > raw. Extensions: `os`, `requires.anyBins`
+4. Core skills in `skills/` (`github`, `skill-creator`, `deep-research`), community at github.com/qhkm/zeptoclaw-skills
 
-Skills are OpenClaw-compatible — the loader reads `metadata.zeptoclaw`, `metadata.openclaw`, or raw metadata objects (in that priority order). Supported extensions: `os` platform filter, `requires.anyBins` (alias `any_bins`).
+## Configuration
 
-**Core skills** (bundled in this repo — `skills/`): `github`, `skill-creator`, `deep-research`
-- Only skills essential to ZeptoClaw's own dev workflow belong here.
+Config: `~/.zeptoclaw/config.json`. Env vars override with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 
-**Community skills** (third-party integrations, platform-specific, utilities):
-- Maintained at: https://github.com/qhkm/zeptoclaw-skills
-- Discoverable via: `zeptoclaw skills search <query>`
-- Installable via: `zeptoclaw skills install --github qhkm/zeptoclaw-skills`
-- To contribute a skill, open a PR to that repo instead of this one.
+For full env var reference, cargo features, and compile-time config see `docs/claude/configuration.md`.
 
-## Dependencies
+## Testing
 
-Key crates:
-- `tokio` - Async runtime
-- `reqwest` - HTTP client (with 120s timeout)
-- `serde` / `serde_json` - Serialization
-- `async-trait` - Async trait support
-- `tracing` - Structured logging
-- `clap` - CLI argument parsing
-- `rustyline` - Readline with tab-completion for interactive CLI
-- `scraper` - HTML parsing for web_fetch
-- `aho-corasick` - Multi-pattern string matching for safety layer
-- `quick-xml` - XML parsing for Android uiautomator dumps (optional, `android` feature)
-- `rumqttc` - Async MQTT client for IoT device communication (optional, `mqtt` feature)
-- `axum` - Web framework for panel API (WebSocket support)
-- `tower-http` - CORS, static file serving, tracing
-- `jsonwebtoken` - JWT generation and validation for panel auth
-- `bcrypt` - Password hashing for panel auth
+```bash
+cargo nextest run --lib                    # Unit tests
+cargo nextest run --test cli_smoke | e2e | integration
+cargo nextest run test_name                # Specific test
+```
+
+For smoke checklist and benchmarks see `docs/claude/testing.md`.
