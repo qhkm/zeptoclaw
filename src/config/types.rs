@@ -263,7 +263,7 @@ pub struct ChannelTarget {
 /// When enabled, ZeptoClaw connects to an r8r instance over WebSocket to
 /// receive workflow events (approvals, execution results, health) and send
 /// back decisions and workflow triggers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct R8rBridgeConfig {
     /// Whether the r8r bridge is enabled.
@@ -281,6 +281,23 @@ pub struct R8rBridgeConfig {
     pub reconnect_max_interval_secs: u64,
     /// Interval between health pings in seconds.
     pub health_ping_interval_secs: u64,
+}
+
+impl std::fmt::Debug for R8rBridgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("R8rBridgeConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("default_channel", &self.default_channel)
+            .field("approval_routing", &self.approval_routing)
+            .field(
+                "reconnect_max_interval_secs",
+                &self.reconnect_max_interval_secs,
+            )
+            .field("health_ping_interval_secs", &self.health_ping_interval_secs)
+            .finish()
+    }
 }
 
 impl Default for R8rBridgeConfig {
@@ -2588,6 +2605,30 @@ mod tests {
         let ngrok = config.tunnel.ngrok.as_ref().unwrap();
         assert_eq!(ngrok.authtoken.as_deref(), Some("tok_123"));
         assert_eq!(ngrok.domain.as_deref(), Some("my.ngrok.io"));
+    }
+
+    #[test]
+    fn test_r8r_bridge_config_debug_redacts_token() {
+        let config = R8rBridgeConfig {
+            token: Some("super-secret-token".to_string()),
+            ..Default::default()
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(
+            !debug_output.contains("super-secret-token"),
+            "token must not appear in Debug output"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "Debug output should show [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_r8r_bridge_config_debug_none_token() {
+        let config = R8rBridgeConfig::default();
+        let debug_output = format!("{:?}", config);
+        assert!(debug_output.contains("None"));
     }
 
     #[test]

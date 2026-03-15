@@ -26,9 +26,16 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Request};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{info, warn};
 use url::Url;
+
+/// Maximum length for event IDs to prevent memory abuse.
+const MAX_EVENT_ID_LEN: usize = 256;
+
+/// Maximum WebSocket message size (1 MiB).
+const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // R8rBridge — WebSocket client for r8r event stream
@@ -83,6 +90,18 @@ fn build_ws_request(endpoint: &str, token: Option<&str>) -> Result<Request<()>, 
     Ok(request)
 }
 
+/// Sanitize an endpoint URL for logging by stripping any embedded credentials.
+fn sanitize_endpoint(endpoint: &str) -> String {
+    Url::parse(endpoint)
+        .ok()
+        .map(|mut u| {
+            let _ = u.set_password(None);
+            let _ = u.set_username("");
+            u.to_string()
+        })
+        .unwrap_or_else(|| "[invalid url]".to_string())
+}
+
 impl R8rBridge {
     /// Create a new bridge client.
     ///
@@ -118,10 +137,14 @@ impl R8rBridge {
     pub async fn connect(&self) -> Result<(), String> {
         let request = build_ws_request(&self.endpoint, self.token.as_deref())?;
 
-        // Connect.
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+        // Connect with message size limits to prevent memory exhaustion.
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_message_size = Some(MAX_WS_MESSAGE_SIZE);
+        ws_config.max_frame_size = Some(MAX_WS_MESSAGE_SIZE);
+        let (ws_stream, _response) =
+            tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
+                .await
+                .map_err(|e| format!("WebSocket connection failed: {e}"))?;
 
         let (ws_write, ws_read) = ws_stream.split();
 
@@ -133,7 +156,10 @@ impl R8rBridge {
         }
 
         self.connected.store(true, Ordering::Relaxed);
-        info!("r8r bridge connected to {}", self.endpoint);
+        info!(
+            "r8r bridge connected to {}",
+            sanitize_endpoint(&self.endpoint)
+        );
 
         // Spawn writer task: reads from mpsc, writes to WS.
         let ws_write = Arc::new(Mutex::new(ws_write));
@@ -183,6 +209,15 @@ impl R8rBridge {
                         continue;
                     }
                 };
+
+                // Reject oversized event IDs to prevent memory abuse.
+                if envelope.id.len() > MAX_EVENT_ID_LEN {
+                    warn!(
+                        "r8r bridge: event ID exceeds {} chars, dropping",
+                        MAX_EVENT_ID_LEN
+                    );
+                    continue;
+                }
 
                 // Ack every well-formed envelope, including duplicates, so replayed
                 // deliveries are drained cleanly on reconnect.
@@ -355,5 +390,30 @@ mod tests {
         let err = build_ws_request("ws://localhost:8080/api/ws/events", Some("bad\nvalue"))
             .expect_err("invalid header should return an error");
         assert!(err.contains("Authorization"));
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_strips_credentials() {
+        let sanitized = sanitize_endpoint("ws://user:secret@host:8080/path");
+        assert!(!sanitized.contains("secret"), "password should be stripped");
+        assert!(!sanitized.contains("user"), "username should be stripped");
+        assert!(sanitized.contains("host:8080/path"));
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_passes_clean_url() {
+        let sanitized = sanitize_endpoint("ws://localhost:8080/api/ws/events");
+        assert_eq!(sanitized, "ws://localhost:8080/api/ws/events");
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_handles_invalid_url() {
+        assert_eq!(sanitize_endpoint("not a url"), "[invalid url]");
+    }
+
+    #[test]
+    fn test_max_event_id_len_constant() {
+        assert!(MAX_EVENT_ID_LEN >= 64, "must allow standard evt_<uuid> IDs");
+        assert!(MAX_EVENT_ID_LEN <= 1024, "must not allow absurdly long IDs");
     }
 }

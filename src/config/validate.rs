@@ -312,6 +312,29 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
         }
     }
 
+    // r8r bridge warnings
+    if let Some(r8r) = obj.get("r8r_bridge").and_then(|v| v.as_object()) {
+        let enabled = r8r
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if enabled {
+            if let Some(endpoint) = r8r.get("endpoint").and_then(|v| v.as_str()) {
+                if endpoint.starts_with("ws://")
+                    && !endpoint.contains("localhost")
+                    && !endpoint.contains("127.0.0.1")
+                    && !endpoint.contains("[::1]")
+                {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Warn,
+                        path: "r8r_bridge.endpoint".to_string(),
+                        message: "Plaintext ws:// on non-loopback address \u{2014} bearer token will be sent in cleartext; use wss://".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     diagnostics
 }
 
@@ -856,5 +879,57 @@ mod tests {
     fn test_compat_openrouter_auto_on_openai() {
         let result = check_model_backend_compat("openrouter/auto", "openrouter", "openai");
         assert!(result.is_none(), "openrouter/auto should be fine");
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_ws_plaintext_non_loopback_warns() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "r8r_bridge.endpoint"
+                && d.message.contains("cleartext")
+        }));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_ws_localhost_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://localhost:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_wss_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "wss://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_disabled_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": false,
+                "endpoint": "ws://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
     }
 }
