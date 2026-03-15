@@ -32,7 +32,7 @@ cargo clippy -- -D warnings
 cargo fmt
 
 # Test counts (cargo test)
-# current local build: lib 3163 total (3157 passed, 0 failed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
+# current local build: lib 3187 total (3181 passed, 0 failed, 6 ignored), main 92, cli_smoke 24, e2e 13, integration 70, doc 127 passed (27 ignored); optional features such as whatsapp-web add feature-gated coverage
 
 # Version
 ./target/release/zeptoclaw --version
