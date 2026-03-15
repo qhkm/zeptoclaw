@@ -124,6 +124,16 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         api_key_required: true,
     },
     ProviderSpec {
+        name: "vertex",
+        model_keywords: &["vertex"],
+        runtime_supported: true,
+        default_base_url: None, // URL is constructed from project/location
+        backend: "vertex",
+        default_auth_header: None,
+        default_api_version: None,
+        api_key_required: false, // auth comes from bearer token / ADC
+    },
+    ProviderSpec {
         name: "ollama",
         model_keywords: &["ollama", "llama", "mistral", "phi", "qwen"],
         runtime_supported: true,
@@ -222,6 +232,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "bedrock" => config.providers.bedrock.as_ref(),
         "xai" => config.providers.xai.as_ref(),
         "qianfan" => config.providers.qianfan.as_ref(),
+        "vertex" => config.providers.vertex.as_ref(),
         _ => None,
     }
 }
