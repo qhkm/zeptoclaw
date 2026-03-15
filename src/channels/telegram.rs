@@ -309,6 +309,9 @@ pub struct TelegramChannel {
     configured_models: Vec<(String, String)>,
     /// Long-term memory backing store for model overrides (optional)
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
+    /// Active typing indicator tasks, keyed by chat_id.
+    /// Spawned on inbound message, aborted when outbound response is sent.
+    typing_tasks: Arc<Mutex<std::collections::HashMap<i64, tokio::task::JoinHandle<()>>>>,
 }
 
 impl TelegramChannel {
@@ -393,6 +396,7 @@ impl TelegramChannel {
             configured_providers,
             configured_models,
             longterm_memory,
+            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -491,6 +495,7 @@ impl Channel for TelegramChannel {
         let longterm_memory = self.longterm_memory.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
+        let typing_tasks = self.typing_tasks.clone();
 
         let bot = match Self::build_bot(&token) {
             Ok(bot) => bot,
@@ -570,16 +575,18 @@ impl Channel for TelegramChannel {
                 // Note: dptree injects dependencies separately, not as tuples
                 let handler =
                     Update::filter_message().endpoint(
-                        |bot: Bot,
-                         msg: Message,
-                         bus: Arc<MessageBus>,
-                         Allowlist(allowlist): Allowlist,
-                         AllowUsernames(allow_usernames): AllowUsernames,
-                         deny_by_default: bool,
-                         overrides_dep: OverridesDep,
-                         DefaultModel(default_model): DefaultModel,
-                         configured_providers_dep: ConfiguredProviders,
-                         longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
+                        move |bot: Bot,
+                              msg: Message,
+                              bus: Arc<MessageBus>,
+                              Allowlist(allowlist): Allowlist,
+                              AllowUsernames(allow_usernames): AllowUsernames,
+                              deny_by_default: bool,
+                              overrides_dep: OverridesDep,
+                              DefaultModel(default_model): DefaultModel,
+                              configured_providers_dep: ConfiguredProviders,
+                              longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| {
+                            let typing_tasks = typing_tasks.clone();
+                            async move {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
                             let configured_providers = configured_providers_dep.names;
@@ -648,6 +655,29 @@ impl Channel for TelegramChannel {
                                     chat_id,
                                     crate::utils::string::preview(text, 50)
                                 );
+
+                                // Start typing indicator loop for this chat.
+                                // Captured from outer spawn, not injected via dptree (arity limit).
+                                {
+                                    let mut map = typing_tasks.lock().await;
+                                    if let Some(old) = map.remove(&chat_id_num) {
+                                        old.abort();
+                                    }
+                                    let bot_clone = bot.clone();
+                                    let handle = tokio::spawn(async move {
+                                        let mut interval = tokio::time::interval(Duration::from_secs(4));
+                                        loop {
+                                            interval.tick().await;
+                                            let _ = bot_clone
+                                                .send_chat_action(
+                                                    teloxide::types::ChatId(chat_id_num),
+                                                    teloxide::types::ChatAction::Typing,
+                                                )
+                                                .await;
+                                        }
+                                    });
+                                    map.insert(chat_id_num, handle);
+                                }
 
                                 /// Helper to attach message_thread_id to a SendMessage request.
                                 fn apply_thread_id(
@@ -918,7 +948,7 @@ impl Channel for TelegramChannel {
 
                             // Acknowledge the message (required by teloxide)
                             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-                        },
+                        }},
                     );
 
                 // Build the dispatcher with dependencies
@@ -980,6 +1010,14 @@ impl Channel for TelegramChannel {
             }
         }
 
+        // Abort all active typing indicator tasks
+        {
+            let mut map = self.typing_tasks.lock().await;
+            for (_, handle) in map.drain() {
+                handle.abort();
+            }
+        }
+
         // Clear cached bot
         self.bot = None;
 
@@ -1013,6 +1051,11 @@ impl Channel for TelegramChannel {
         let chat_id: i64 = msg.chat_id.parse().map_err(|_| {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
+
+        // Cancel typing indicator for this chat (unconditionally, before any fallible ops)
+        if let Some(handle) = self.typing_tasks.lock().await.remove(&chat_id) {
+            handle.abort();
+        }
 
         info!("Telegram: Sending message to chat {}", chat_id);
 
@@ -1581,5 +1624,82 @@ mod tests {
     fn test_render_html_unclosed_code_fence() {
         let result = render_telegram_html("```rust\nfn main() {");
         assert!(!result.contains("<pre>"));
+    }
+
+    #[tokio::test]
+    async fn test_typing_map_insert_and_remove() {
+        use std::collections::HashMap;
+        let map: Arc<Mutex<HashMap<i64, tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let handle = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+        });
+
+        map.lock().await.insert(12345_i64, handle);
+        assert_eq!(map.lock().await.len(), 1);
+
+        if let Some(h) = map.lock().await.remove(&12345_i64) {
+            h.abort();
+        }
+        assert!(map.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_typing_map_replace_aborts_old() {
+        use std::collections::HashMap;
+        let map: Arc<Mutex<HashMap<i64, tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let handle1 = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+        });
+        map.lock().await.insert(12345_i64, handle1);
+
+        let old = map.lock().await.remove(&12345_i64);
+        if let Some(h) = old {
+            h.abort();
+        }
+
+        let handle2 = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+        });
+        map.lock().await.insert(12345_i64, handle2);
+
+        assert_eq!(map.lock().await.len(), 1);
+
+        let removed = map.lock().await.remove(&12345_i64);
+        if let Some(h) = removed {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_typing_map_cleanup_all() {
+        use std::collections::HashMap;
+        let map: Arc<Mutex<HashMap<i64, tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        for chat_id in [100_i64, 200, 300] {
+            let handle = tokio::spawn(async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                }
+            });
+            map.lock().await.insert(chat_id, handle);
+        }
+        assert_eq!(map.lock().await.len(), 3);
+
+        let mut guard = map.lock().await;
+        for (_, h) in guard.drain() {
+            h.abort();
+        }
+        assert!(guard.is_empty());
     }
 }
