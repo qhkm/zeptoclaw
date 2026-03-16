@@ -984,7 +984,9 @@ impl AgentLoop {
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
         let memory_override = self.build_memory_override(&msg.content).await;
-        let messages = self.build_resolved_messages(&session, memory_override.as_deref()).await;
+        let messages = self
+            .build_resolved_messages(&session, memory_override.as_deref())
+            .await;
 
         // Get tool definitions (short-lived read lock)
         let tool_definitions = {
