@@ -1479,16 +1479,7 @@ impl AgentLoop {
                         "Tool call limit reached. Token budget exceeded.".to_string();
                     break;
                 }
-                let messages: Vec<_> = self
-                    .context_builder
-                    .build_messages_with_memory_override(
-                        &session.messages,
-                        "",
-                        memory_override.as_deref(),
-                    )
-                    .into_iter()
-                    .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                    .collect();
+                let messages = self.build_resolved_messages(&session, memory_override.as_deref());
                 response = provider
                     .chat(messages, vec![], model, options.clone())
                     .await?;
@@ -1544,16 +1535,7 @@ impl AgentLoop {
             }
 
             // Call LLM again with tool results -- provider lock NOT held
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self.build_resolved_messages(&session, memory_override.as_deref());
 
             // Send thinking feedback for tool-loop LLM call
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -2181,16 +2163,7 @@ impl AgentLoop {
                 break;
             }
 
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self.build_resolved_messages(&session, memory_override.as_deref());
 
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
@@ -2235,16 +2208,7 @@ impl AgentLoop {
             // Re-issue the final call via chat_stream.
             // If the tool call limit was hit, pass empty tools so the model
             // cannot emit further tool calls after the cap was enforced.
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self.build_resolved_messages(&session, memory_override.as_deref());
 
             let tool_definitions = if tool_limit_hit {
                 vec![]
@@ -2435,6 +2399,33 @@ impl AgentLoop {
         }
 
         info!("memory_flush: completed");
+    }
+
+    /// Build messages with memory override, resolve image paths to base64,
+    /// and filter out empty user messages (after resolution).
+    ///
+    /// This centralizes the message preparation logic used in tool loops.
+    /// Images are resolved first so that if resolution fails and leaves a
+    /// message empty, it will be correctly filtered out.
+    fn build_resolved_messages(
+        &self,
+        session: &crate::session::Session,
+        memory_override: Option<&str>,
+    ) -> Vec<Message> {
+        let mut msgs = self
+            .context_builder
+            .build_messages_with_memory_override(&session.messages, "", memory_override);
+
+        // Resolve image file paths to base64 before filtering
+        if let Some(dir) = self.session_manager.sessions_dir() {
+            resolve_images_to_base64(&mut msgs, dir);
+        }
+
+        // Filter out empty user messages only after resolution
+        // (in case image resolution failed and left the message empty)
+        msgs.retain(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()));
+
+        msgs
     }
 
     async fn session_lock_for(&self, session_key: &str) -> Arc<Mutex<()>> {
