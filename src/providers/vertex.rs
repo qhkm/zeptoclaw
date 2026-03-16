@@ -86,7 +86,9 @@ impl VertexProvider {
             .unwrap_or_else(|| "us-central1".to_string());
 
         // Bearer token is required
-        let bearer_token = std::env::var("VERTEX_ACCESS_TOKEN").ok()?;
+        let bearer_token = std::env::var("VERTEX_ACCESS_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())?;
 
         let model = if model.is_empty() {
             DEFAULT_VERTEX_MODEL

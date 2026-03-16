@@ -584,6 +584,20 @@ impl Config {
                 .api_base = Some(val);
         }
 
+        // Vertex AI (project ID via api_key, location via api_base)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_API_KEY") {
+            self.providers
+                .vertex
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_API_BASE") {
+            self.providers
+                .vertex
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -660,6 +674,12 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_MODEL") {
             self.providers
                 .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_MODEL") {
+            self.providers
+                .vertex
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }
