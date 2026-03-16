@@ -2412,9 +2412,11 @@ impl AgentLoop {
         session: &crate::session::Session,
         memory_override: Option<&str>,
     ) -> Vec<Message> {
-        let mut msgs = self
-            .context_builder
-            .build_messages_with_memory_override(&session.messages, "", memory_override);
+        let mut msgs = self.context_builder.build_messages_with_memory_override(
+            &session.messages,
+            "",
+            memory_override,
+        );
 
         // Resolve image file paths to base64 before filtering
         if let Some(dir) = self.session_manager.sessions_dir() {
