@@ -984,17 +984,7 @@ impl AgentLoop {
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
         let memory_override = self.build_memory_override(&msg.content).await;
-        let mut messages = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override.as_deref(),
-        );
-
-        // Resolve any FilePath image sources to Base64 before handing the
-        // message list to the provider, which only accepts inline data.
-        if let Some(dir) = self.session_manager.sessions_dir() {
-            resolve_images_to_base64(&mut messages, dir);
-        }
+        let messages = self.build_resolved_messages(&session, memory_override.as_deref());
 
         // Get tool definitions (short-lived read lock)
         let tool_definitions = {
@@ -1704,16 +1694,7 @@ impl AgentLoop {
 
         // Pass an empty user_input: the current user message is already in session.
         let memory_override = self.build_memory_override(&msg.content).await;
-        let mut messages = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override.as_deref(),
-        );
-
-        // Resolve FilePath image sources to Base64 before sending to the provider.
-        if let Some(dir) = self.session_manager.sessions_dir() {
-            resolve_images_to_base64(&mut messages, dir);
-        }
+        let messages = self.build_resolved_messages(&session, memory_override.as_deref());
 
         let tool_definitions = {
             let tools = self.tools.read().await;
