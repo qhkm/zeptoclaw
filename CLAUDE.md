@@ -665,6 +665,11 @@ Environment variables override config:
 - `ZEPTOCLAW_TOOLS_CODING_TOOLS` — enable coding-specific tools: grep, find (default: false; auto-enabled by coder template)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` — enable WhatsApp Web channel (default: false)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` — session persistence directory (default: ~/.zeptoclaw/state/whatsapp_web)
+- `ZEPTOCLAW_CHANNELS_ACP_ENABLED` — enable ACP stdio channel (default: false)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_ENABLED` — enable ACP streamable HTTP channel (default: false)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_PORT` — ACP HTTP listen port (default: 8765)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_BIND` — ACP HTTP bind address (default: 127.0.0.1)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN` — ACP HTTP Bearer auth token (default: none)
 
 ### Keyless Providers
 

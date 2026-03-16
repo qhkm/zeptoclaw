@@ -246,6 +246,17 @@ Config lives under `channels.acp` (`AcpChannelConfig`):
 
 `channels.acp.enabled` is not required for HTTP. For `zeptoclaw acp` (stdio), no config flag is needed — just run the subcommand. `allow_from` and `deny_by_default` apply to both transports.
 
+### Environment variable overrides (`channels.acp.http`)
+
+All HTTP transport fields can be set via environment variables (override config file values):
+
+| Variable | Config field |
+|----------|-------------|
+| `ZEPTOCLAW_CHANNELS_ACP_HTTP_ENABLED` | `channels.acp.http.enabled` |
+| `ZEPTOCLAW_CHANNELS_ACP_HTTP_PORT` | `channels.acp.http.port` |
+| `ZEPTOCLAW_CHANNELS_ACP_HTTP_BIND` | `channels.acp.http.bind` |
+| `ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN` | `channels.acp.http.auth_token` |
+
 Allowlist/deny is applied via `BaseChannelConfig` built from `allow_from` and `deny_by_default`. Both the stdio and HTTP transports inherit the same allowlist. In the typical single-client setup, `allow_from` is empty and `deny_by_default` is false.
 
 ---
