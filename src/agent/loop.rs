@@ -306,7 +306,7 @@ async fn inbound_to_message(
 /// Relative paths are resolved against `sessions_dir`.  If a file cannot be
 /// read (e.g. it was deleted), the image part is silently dropped from the
 /// message's `content_parts`.
-fn resolve_images_to_base64(
+async fn resolve_images_to_base64(
     messages: &mut [crate::session::Message],
     sessions_dir: &std::path::Path,
 ) {
@@ -339,7 +339,7 @@ fn resolve_images_to_base64(
                     ref media_type,
                 } => {
                     let abs_path = sessions_dir.join(path);
-                    if let Ok(data) = std::fs::read(&abs_path) {
+                    if let Ok(data) = tokio::fs::read(&abs_path).await {
                         resolved_parts.push(ContentPart::Image {
                             source: ImageSource::Base64 {
                                 data: base64::engine::general_purpose::STANDARD.encode(&data),
@@ -984,17 +984,9 @@ impl AgentLoop {
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
         let memory_override = self.build_memory_override(&msg.content).await;
-        let mut messages = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override.as_deref(),
-        );
-
-        // Resolve any FilePath image sources to Base64 before handing the
-        // message list to the provider, which only accepts inline data.
-        if let Some(dir) = self.session_manager.sessions_dir() {
-            resolve_images_to_base64(&mut messages, dir);
-        }
+        let messages = self
+            .build_resolved_messages(&session, memory_override.as_deref())
+            .await;
 
         // Get tool definitions (short-lived read lock)
         let tool_definitions = {
@@ -1479,16 +1471,9 @@ impl AgentLoop {
                         "Tool call limit reached. Token budget exceeded.".to_string();
                     break;
                 }
-                let messages: Vec<_> = self
-                    .context_builder
-                    .build_messages_with_memory_override(
-                        &session.messages,
-                        "",
-                        memory_override.as_deref(),
-                    )
-                    .into_iter()
-                    .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                    .collect();
+                let messages = self
+                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .await;
                 response = provider
                     .chat(messages, vec![], model, options.clone())
                     .await?;
@@ -1544,16 +1529,9 @@ impl AgentLoop {
             }
 
             // Call LLM again with tool results -- provider lock NOT held
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self
+                .build_resolved_messages(&session, memory_override.as_deref())
+                .await;
 
             // Send thinking feedback for tool-loop LLM call
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -1722,16 +1700,9 @@ impl AgentLoop {
 
         // Pass an empty user_input: the current user message is already in session.
         let memory_override = self.build_memory_override(&msg.content).await;
-        let mut messages = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override.as_deref(),
-        );
-
-        // Resolve FilePath image sources to Base64 before sending to the provider.
-        if let Some(dir) = self.session_manager.sessions_dir() {
-            resolve_images_to_base64(&mut messages, dir);
-        }
+        let messages = self
+            .build_resolved_messages(&session, memory_override.as_deref())
+            .await;
 
         let tool_definitions = {
             let tools = self.tools.read().await;
@@ -2181,16 +2152,9 @@ impl AgentLoop {
                 break;
             }
 
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self
+                .build_resolved_messages(&session, memory_override.as_deref())
+                .await;
 
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
@@ -2235,16 +2199,9 @@ impl AgentLoop {
             // Re-issue the final call via chat_stream.
             // If the tool call limit was hit, pass empty tools so the model
             // cannot emit further tool calls after the cap was enforced.
-            let messages: Vec<_> = self
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "",
-                    memory_override.as_deref(),
-                )
-                .into_iter()
-                .filter(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()))
-                .collect();
+            let messages = self
+                .build_resolved_messages(&session, memory_override.as_deref())
+                .await;
 
             let tool_definitions = if tool_limit_hit {
                 vec![]
@@ -2435,6 +2392,35 @@ impl AgentLoop {
         }
 
         info!("memory_flush: completed");
+    }
+
+    /// Build messages with memory override, resolve image paths to base64,
+    /// and filter out empty user messages (after resolution).
+    ///
+    /// This centralizes the message preparation logic used in tool loops.
+    /// Images are resolved first so that if resolution fails and leaves a
+    /// message empty, it will be correctly filtered out.
+    async fn build_resolved_messages(
+        &self,
+        session: &crate::session::Session,
+        memory_override: Option<&str>,
+    ) -> Vec<Message> {
+        let mut msgs = self.context_builder.build_messages_with_memory_override(
+            &session.messages,
+            "",
+            memory_override,
+        );
+
+        // Resolve image file paths to base64 before filtering
+        if let Some(dir) = self.session_manager.sessions_dir() {
+            resolve_images_to_base64(&mut msgs, dir).await;
+        }
+
+        // Filter out empty user messages only after resolution
+        // (in case image resolution failed and left the message empty)
+        msgs.retain(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()));
+
+        msgs
     }
 
     async fn session_lock_for(&self, session_key: &str) -> Arc<Mutex<()>> {
@@ -4052,8 +4038,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_resolve_images_to_base64_resolves_file_path() {
+    #[tokio::test]
+    async fn test_resolve_images_to_base64_resolves_file_path() {
         use crate::session::{ContentPart, ImageSource, Message};
         use std::io::Write;
         use tempfile::TempDir;
@@ -4082,7 +4068,7 @@ mod tests {
         ];
 
         let mut messages = vec![msg];
-        resolve_images_to_base64(&mut messages, tmp.path());
+        resolve_images_to_base64(&mut messages, tmp.path()).await;
 
         let resolved = &messages[0].content_parts[1];
         match resolved {
@@ -4100,8 +4086,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_resolve_images_to_base64_skips_missing_file() {
+    #[tokio::test]
+    async fn test_resolve_images_to_base64_skips_missing_file() {
         use crate::session::{ContentPart, ImageSource, Message};
         use tempfile::TempDir;
 
@@ -4121,7 +4107,7 @@ mod tests {
         ];
 
         let mut messages = vec![msg];
-        resolve_images_to_base64(&mut messages, tmp.path());
+        resolve_images_to_base64(&mut messages, tmp.path()).await;
 
         // The unreadable image part should be silently dropped.
         assert_eq!(
