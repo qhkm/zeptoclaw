@@ -52,26 +52,23 @@ const MAX_REQUEST_BYTES: usize = 118_784; // 8 KB headers + ~110 KB body
 const MAX_PROMPT_BYTES: usize = 102_400;
 /// Maximum concurrent ACP sessions.
 const MAX_ACP_SESSIONS: usize = 1_000;
+/// Maximum number of in-flight TCP connections accepted before new ones are
+/// dropped.  Each accepted connection allocates a MAX_REQUEST_BYTES buffer
+/// before auth is checked, so an unlimited accept loop is a memory DoS vector.
+const MAX_CONCURRENT_CONNECTIONS: usize = 128;
 /// How long (seconds) to wait for the agent to reply to session/prompt.
 const PROMPT_TIMEOUT_SECS: u64 = 300;
 
 // --- Static HTTP response fragments ---
 
-const HTTP_204_CORS: &str = "HTTP/1.1 204 No Content\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-    Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-    Content-Length: 0\r\n\r\n";
+const HTTP_204_CORS: &str = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n";
 
-const HTTP_400_PREFIX: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
-     Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
+const HTTP_400_PREFIX: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n";
 
 /// Build a self-contained HTTP error response with a correct Content-Length.
 fn build_http_error(status_line: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\n\
-         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_line,
         body.len(),
         body
@@ -177,10 +174,8 @@ impl AcpHttpChannel {
 
     fn parse_request(raw: &[u8]) -> Option<ParsedRequest> {
         let s = std::str::from_utf8(raw).ok()?;
-        let (header_section, body) = match s.find("\r\n\r\n") {
-            Some(pos) => (&s[..pos], s[pos + 4..].to_string()),
-            None => (s, String::new()),
-        };
+        let pos = s.find("\r\n\r\n")?;
+        let header_section = &s[..pos];
         let mut lines = header_section.lines();
         let request_line = lines.next()?;
         let mut parts = request_line.split_whitespace();
@@ -195,6 +190,12 @@ impl AcpHttpChannel {
                 ));
             }
         }
+        // Bound the body by Content-Length to prevent pipelined/malformed
+        // trailing bytes from being folded into the JSON payload.
+        let content_len = Self::content_length(&headers);
+        let body_start = pos + 4;
+        let body_end = (body_start + content_len).min(s.len());
+        let body = s[body_start..body_end].to_string();
         Some(ParsedRequest {
             method,
             path,
@@ -251,9 +252,7 @@ impl AcpHttpChannel {
     /// Wrap a JSON-RPC body in an HTTP 200 response with CORS headers.
     fn http_200(body: &str) -> String {
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-             Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         )
@@ -566,12 +565,7 @@ impl AcpHttpChannel {
         pending_http: &PromptMap,
     ) {
         // Keep connection alive; client reads SSE events as they arrive.
-        let sse_headers = "HTTP/1.1 200 OK\r\n\
-            Content-Type: text/event-stream\r\n\
-            Cache-Control: no-cache\r\n\
-            Connection: keep-alive\r\n\
-            Access-Control-Allow-Origin: *\r\n\
-            X-Accel-Buffering: no\r\n\r\n";
+        let sse_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n";
         if stream.write_all(sse_headers.as_bytes()).await.is_err() {
             // Client disconnected before we could start.
             state.lock().await.pending.remove(session_id);
@@ -855,10 +849,21 @@ impl AcpHttpChannel {
             "ACP-HTTP: listening on {}:{}",
             http_config.bind, http_config.port
         );
+        let conn_sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
         while running.load(Ordering::SeqCst) {
             match tokio::time::timeout(Duration::from_secs(1), listener.accept()).await {
                 Ok(Ok((stream, addr))) => {
                     debug!("ACP-HTTP: accepted connection from {}", addr);
+                    let permit = match Arc::clone(&conn_sem).try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug!(
+                                "ACP-HTTP: connection limit ({}) reached, dropping {}",
+                                MAX_CONCURRENT_CONNECTIONS, addr
+                            );
+                            continue;
+                        }
+                    };
                     let config = config.clone();
                     let http_config = http_config.clone();
                     let base_config = base_config.clone();
@@ -871,6 +876,7 @@ impl AcpHttpChannel {
                         // the new one, preventing unbounded JoinSet growth.
                         while tasks.try_join_next().is_some() {}
                         tasks.spawn(async move {
+                            let _permit = permit; // released when handler completes
                             Self::handle_connection(
                                 stream,
                                 config,
