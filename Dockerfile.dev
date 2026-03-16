@@ -1,17 +1,40 @@
 FROM rust:1.93.0-slim
 
-# Project deps
-RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+# 1. Install system dependencies
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    pkg-config libssl-dev protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
 
-# Components
+# 2. Install global tools (these persist in the image layer)
+RUN cargo install cargo-nextest@0.9.130 --locked
 RUN rustup component add clippy rustfmt
 
-# nextest latest
-RUN cargo install cargo-nextest --locked
-
-# Baked configs
+# 3. Baked configs
 COPY scripts/artifacts/clippy.toml /clippy.toml
+# Podman rootless tutorial: no USER needed (--userns=keep-id maps host uid)
 
+# 4. Pre-compile dependencies (The "Warming" Step)
+ENV PATH="/usr/local/cargo/bin:${PATH}"
 WORKDIR /src
+
+# 5. Prepare dummy files to bake dependencies into the cache volumes
+RUN mkdir -p src benches && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > benches/message_bus.rs
+
+COPY Cargo.toml Cargo.lock ./
+
+# 3. Build dependencies (this uses the volumes mounted in the build command)
+RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
+    --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
+    ls -ld /src/target && cargo build && rm -rf src benches
+
+# 4. NOW copy the real source (this won't be clobbered because the dummy is gone)
+COPY . .
+
+# compile deps
+RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
+    --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
+    cargo build
 
 CMD ["/bin/bash"]

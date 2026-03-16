@@ -1,30 +1,28 @@
-# Containerized Devtools
+# Containerized Devtools (Podman Rootless)
 
 ## Quick Setup
 
-**docker/podman** installed.
+**Podman** rootless (docker dropped).
 
-**Build dev image** (one-time, pre-clippy/nextest ~2min):
-```
-**Docker:** `docker build -f Dockerfile.dev -t zeptodev .`
-**Podman:** `podman build -f Dockerfile.dev -t localhost/zeptodev .`  # localhost/ avoids short-name error
-```
-Fallback: rust:1.88-slim (rustup install each run ~20s).
+**Admin (one-time)**: `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER; podman system migrate`
 
-**Podman** (macOS/WSL):
+**Volumes** (pre-run):
 ```
-podman machine init
-podman machine start
+printf '%s\n' zeptoclaw-{target,registry,benches,sccache}_cache | xargs -I {} podman volume create {}
 ```
 
-**Volumes** (podman only, pre-run once):
-```
-podman volume create zeptoclaw-target_cache zeptoclaw-registry_cache zeptoclaw-benches_cache zeptoclaw-sccache
-```
-
-**sccache** opt (faster compiles):
+**sccache** opt:
 Host: `curl -sSf https://raw.githubusercontent.com/mozilla/sccache/master/install.sh | sh`
-Env: `export RUSTC_WRAPPER=sccache` (add to ~/.bashrc)
+Env: `export RUSTC_WRAPPER=sccache && source ~/.bashrc`
+
+**Build dev image** (~2min first):
+```
+podman build --userns=keep-id -f Dockerfile.dev -t localhost/zeptodev .
+# Rootless tutorial: keep-id maps host uid:gid 1:1 (no perms)
+```
+
+## Usage
+(all scripts auto --userns=keep-id)
 
 ## Usage
 
