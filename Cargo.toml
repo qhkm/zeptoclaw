@@ -150,7 +150,7 @@ teloxide = { version = "0.17", features = ["macros", "rustls"], default-features
 # Integration helpers
 base64 = "0.22"
 # Temp directory creation for container env files
-tempfile = "3.10"
+tempfile = "3.26"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
 # Zip archive extraction for ClawHub skill installs
