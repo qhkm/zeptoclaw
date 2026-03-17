@@ -22,8 +22,8 @@ if [[ "$RUNTIME" == "podman" ]]; then
 
       buildah bud \
       --userns=host \
-      -f "$SCRIPT_DIR/Dockerfile.dev" \
-      -t "${IMAGE_TAG}:custom" .
+      -f Dockerfile.dev \
+      -t "${IMAGE_TAG}" .
     fi
 fi
 
