@@ -34,4 +34,4 @@ ORIGINAL_IMAGE="$IMAGE"
 IMAGE="$IMAGE_TAG"
 trap 'IMAGE="$ORIGINAL_IMAGE"' EXIT
 
-container_run "cargo clippy --all-targets --config /clippy.toml -- -D warnings && cargo fmt --all -- --check && cargo test --doc"
+container_run "cargo clippy --all-targets --all-features --config /clippy.toml -- -D warnings && cargo fmt --all -- --check && cargo test --doc"
