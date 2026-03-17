@@ -6,27 +6,13 @@
 
 **Admin (one-time)**: `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER; podman system migrate`
 
-**Volumes** (pre-run):
-```
-printf '%s\n' zeptoclaw-{target,registry,benches,sccache}_cache | xargs -I {} podman volume create {}
-```
-
-**sccache** opt:
+**sccache (required)**:
 Host: `curl -sSf https://raw.githubusercontent.com/mozilla/sccache/master/install.sh | sh`
 Env: `export RUSTC_WRAPPER=sccache && source ~/.bashrc`
 
-**Build dev image** (~2min first):
-```
-podman build --userns=keep-id -f Dockerfile.dev -t localhost/zeptodev .
-# Rootless tutorial: keep-id maps host uid:gid 1:1 (no perms)
-```
-
-## Usage
-(all scripts auto --userns=keep-id)
-
 ## Usage
 
-```
+```bash
 # Tests
 ./scripts/test-container.sh lib                    # cargo nextest --lib
 ./scripts/test-container.sh integration            # cargo test
@@ -45,8 +31,6 @@ CONTAINER_RUNTIME=podman ./scripts/test-container.sh lib
 ./scripts/test-container.sh lib --sccache
 ```
 
-**Dry-run:** Scripts print docker/podman cmd if `echo DRY_RUN=1 ./scripts/...`
-
 ## Cache Prune
 
 **Docker:** `docker builder prune --filter type=cache`
@@ -55,9 +39,11 @@ CONTAINER_RUNTIME=podman ./scripts/test-container.sh lib
 
 ## Pre-Push Workflow (Recommended)
 
+```bash
 ./scripts/lint-container.sh
 ./scripts/test-container.sh lib
 ./scripts/bench-container.sh
+```
 
 Add to .git/hooks/pre-push for auto.
 

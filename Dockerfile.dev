@@ -24,15 +24,15 @@ RUN mkdir -p src benches && \
 
 COPY Cargo.toml Cargo.lock ./
 
-# 3. Build dependencies (this uses the volumes mounted in the build command)
+# 6. Build dependencies (this uses the volumes mounted in the build command)
 RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
     --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
     ls -ld /src/target && cargo build && rm -rf src benches
 
-# 4. NOW copy the real source (this won't be clobbered because the dummy is gone)
+# 7. NOW copy the real source (this won't be clobbered because the dummy is gone)
 COPY . .
 
-# compile deps
+# 8. Compile dependencies
 RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
     --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
     cargo build

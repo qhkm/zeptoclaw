@@ -1,9 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 source "$(dirname "$0")/container-base.sh"
 
-SCRIPT_DIR="$(dirname "$0")"
 # Check if stdin is a TTY and set flags accordingly
 TTY_FLAG=""
 if [ -t 0 ] && [ -t 1 ]; then
@@ -22,7 +24,7 @@ if [[ "$RUNTIME" == "podman" ]]; then
 
       buildah bud \
       --userns=host \
-      -f Dockerfile.dev \
+      -f "$REPO_ROOT/Dockerfile.dev" \
       -t "${IMAGE_TAG}" .
     fi
 fi
