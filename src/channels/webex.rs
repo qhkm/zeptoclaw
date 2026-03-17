@@ -379,7 +379,7 @@
 //! - Webex Messages API: <https://developer.webex.com/docs/api/v1/messages>
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
@@ -427,6 +427,7 @@ struct WebexRoom {
 #[derive(Debug)]
 struct ParsedHttpRequest {
     method: String,
+    #[allow(dead_code)]
     path: String,
     headers: Vec<(String, String)>,
     body: String,
@@ -435,8 +436,10 @@ struct ParsedHttpRequest {
 #[derive(Debug, Deserialize)]
 struct WebexWebhookPayload {
     #[serde(default)]
+    #[allow(dead_code)]
     id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     name: String,
     #[serde(default)]
     resource: String,
@@ -489,6 +492,7 @@ struct WebexOutboundMessage {
 struct WebexPerson {
     id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     emails: Vec<String>,
     #[serde(rename = "displayName")]
     #[serde(default)]
@@ -498,10 +502,14 @@ struct WebexPerson {
 #[derive(Debug, Deserialize)]
 struct WebexWebhook {
     id: String,
+    #[allow(dead_code)]
     name: String,
     #[serde(rename = "targetUrl")]
+    #[allow(dead_code)]
     target_url: String,
+    #[allow(dead_code)]
     resource: String,
+    #[allow(dead_code)]
     event: String,
 }
 
