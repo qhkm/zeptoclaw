@@ -2008,6 +2008,9 @@ pub struct SkillsConfig {
     /// Built-in or workspace skills to disable by name.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Optional GitHub token for skill search deep scanning.
+    #[serde(default)]
+    pub github_token: Option<String>,
 }
 
 impl Default for SkillsConfig {
@@ -2017,6 +2020,7 @@ impl Default for SkillsConfig {
             workspace_dir: None,
             always_load: Vec::new(),
             disabled: Vec::new(),
+            github_token: None,
         }
     }
 }

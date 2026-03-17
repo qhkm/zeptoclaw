@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use futures::future::join_all;
 
 use crate::error::Result;
 
@@ -75,6 +76,29 @@ pub fn build_search_url(query: &str, topics: &[&str]) -> String {
         encoded_query,
         topic_filters.join("")
     )
+}
+
+/// Check if SKILL.md exists in the root of a GitHub repository.
+async fn check_skill_md_exists(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<bool> {
+    let url = format!("https://api.github.com/repos/{}/{}/contents/SKILL.md", owner, repo);
+    let mut request = client.get(&url).header("User-Agent", "zeptoclaw");
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+    let response = request.send().await?;
+    match response.status() {
+        reqwest::StatusCode::OK => Ok(true),
+        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        _ => {
+            tracing::warn!("Unexpected response checking SKILL.md for {}/{}: {}", owner, repo, response.status());
+            Ok(false)
+        }
+    }
 }
 
 /// Compute a quality score [0.0, 1.0] for a GitHub repository as a skill source.
@@ -154,6 +178,7 @@ pub async fn search_github(
     client: &reqwest::Client,
     query: &str,
     topics: &[&str],
+    github_token: Option<&str>,
 ) -> Result<Vec<SkillSearchResult>> {
     let url = build_search_url(query, topics);
 
@@ -170,14 +195,26 @@ pub async fn search_github(
 
     let search_response: GitHubSearchResponse = response.json().await?;
 
-    let results: Vec<SkillSearchResult> = search_response
-        .items
-        .into_iter()
-        .map(|repo| {
-            let score = compute_quality_score(&repo, false); // TODO: check SKILL.md via API
+    let results = if github_token.is_some() {
+        // Deep mode
+        let checks = search_response.items.iter().map(|repo| {
+            let owner_repo: Vec<&str> = repo.full_name.split('/').collect();
+            // Assume GitHub repos have owner/repo format
+            check_skill_md_exists(client, owner_repo[0], owner_repo[1], github_token)
+        });
+        let has_skill_md_results = join_all(checks).await;
+        search_response.items.into_iter().zip(has_skill_md_results).map(|(repo, has_skill_md_res): (GitHubRepo, Result<bool>)| {
+            let has_skill_md = has_skill_md_res.unwrap_or(false);
+            let score = compute_quality_score(&repo, has_skill_md);
             SkillSearchResult::from_github(repo, score)
-        })
-        .collect();
+        }).collect()
+    } else {
+        // Fast mode
+        search_response.items.into_iter().map(|repo| {
+            let score = compute_quality_score(&repo, false);
+            SkillSearchResult::from_github(repo, score)
+        }).collect()
+    };
 
     Ok(results)
 }
