@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TERM_QUIET: "true" # F.I.R.S.T. principle (only print failures, not test names)
   RUSTFLAGS: -Dwarnings
-  BINARY_SIZE_LIMIT_MB: 10
+  BINARY_SIZE_LIMIT_MB: 11
 
 jobs:
   test:
@@ -83,7 +83,7 @@ jobs:
       - name: Generate code coverage
         run: cargo llvm-cov nextest --lib --features memory-bm25 --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@0561704f0f02c16a585d4c7555e57fa2e44cf909 # v5.5.2
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -121,10 +121,14 @@ jobs:
     name: Binary size
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          key: binary-size
       - run: cargo build --release
       - name: Check binary size
         run: |

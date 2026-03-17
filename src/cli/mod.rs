@@ -24,10 +24,13 @@ pub mod quota;
 pub mod secrets;
 #[cfg(feature = "panel")]
 pub mod serve;
+pub(crate) mod shimmer;
 pub mod skills;
+pub mod slash;
 pub mod status;
 pub mod template;
 pub mod tools;
+pub mod uninstall;
 pub mod update;
 pub mod watch;
 
@@ -62,9 +65,9 @@ enum Commands {
         /// Apply an agent template (built-in or ~/.zeptoclaw/templates/*.json)
         #[arg(long)]
         template: Option<String>,
-        /// Stream the response token-by-token
+        /// Disable streaming (streaming is on by default)
         #[arg(long)]
-        stream: bool,
+        no_stream: bool,
         /// Show what tools would be called without executing them
         #[arg(long)]
         dry_run: bool,
@@ -247,6 +250,15 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Remove ZeptoClaw state and optionally the current binary
+    Uninstall {
+        /// Also remove the current zeptoclaw binary for direct file installs
+        #[arg(long)]
+        remove_binary: bool,
+        /// Skip the confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Hardware device management (USB discovery, peripherals)
     Hardware {
         #[command(subcommand)]
@@ -414,6 +426,12 @@ pub enum AuthAction {
 pub enum ConfigAction {
     /// Check configuration for errors and warnings
     Check,
+    /// Reset configuration to defaults (backs up existing config first)
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -422,12 +440,12 @@ pub enum ChannelAction {
     List,
     /// Interactive setup for a channel
     Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
     /// Test channel connectivity
     Test {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
 }
@@ -526,12 +544,24 @@ pub async fn run() -> Result<()> {
     // Initialize logging from config (format, level, optional file output).
     // Load config early so we can respect the logging settings; fall back to
     // defaults if the config file is missing or unreadable.
-    let logging_cfg = zeptoclaw::config::Config::load()
+    let cli = Cli::parse();
+
+    let mut logging_cfg = zeptoclaw::config::Config::load()
         .map(|c| c.logging)
         .unwrap_or_default();
-    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
-    let cli = Cli::parse();
+    // CLI agent mode defaults to warn-level logging to keep output clean.
+    // Gateway and other long-running modes keep info-level for operational visibility.
+    // Users can still override with RUST_LOG=info.
+    if matches!(
+        cli.command,
+        Some(Commands::Agent { .. } | Commands::Batch { .. })
+    ) && std::env::var("RUST_LOG").is_err()
+    {
+        logging_cfg.level = "warn".to_string();
+    }
+
+    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
     match cli.command {
         None => {
@@ -548,11 +578,11 @@ pub async fn run() -> Result<()> {
         Some(Commands::Agent {
             message,
             template,
-            stream,
+            no_stream,
             dry_run,
             mode,
         }) => {
-            agent::cmd_agent(message, template, stream, dry_run, mode).await?;
+            agent::cmd_agent(message, template, no_stream, dry_run, mode).await?;
         }
         Some(Commands::Batch {
             input,
@@ -653,6 +683,9 @@ pub async fn run() -> Result<()> {
             force,
         }) => {
             update::cmd_update(check, version, force).await?;
+        }
+        Some(Commands::Uninstall { remove_binary, yes }) => {
+            uninstall::cmd_uninstall(remove_binary, yes).await?;
         }
         Some(Commands::Hardware { action }) => {
             cmd_hardware(action);

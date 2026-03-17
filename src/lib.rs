@@ -34,6 +34,7 @@ pub use agent::{CompactionStrategy, ContextMonitor};
 pub use config::CompactionConfig;
 pub use safety::taint::{TaintConfig, TaintEngine, TaintLabel, TaintViolation};
 pub use safety::{SafetyConfig, SafetyLayer, SafetyResult};
+pub mod r8r_bridge;
 pub mod security;
 pub mod session;
 pub mod skills;
@@ -44,9 +45,11 @@ pub mod utils;
 
 pub use agent::{AgentLoop, ContextBuilder, SwarmScratchpad, ZeptoAgent, ZeptoAgentBuilder};
 pub use bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
+#[cfg(feature = "whatsapp-web")]
+pub use channels::WhatsAppWebChannel;
 pub use channels::{
     BaseChannelConfig, Channel, ChannelManager, ChannelPluginAdapter, SlackChannel,
-    TelegramChannel, WhatsAppChannel, WhatsAppCloudChannel,
+    TelegramChannel, WhatsAppCloudChannel,
 };
 pub use config::Config;
 pub use cron::{CronJob, CronPayload, CronSchedule, CronService, OnMiss};

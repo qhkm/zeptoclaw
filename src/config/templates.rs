@@ -98,9 +98,19 @@ fn builtin_coder() -> AgentTemplate {
             "well-structured code following best practices for the language and ",
             "framework in use. You explain your reasoning, consider edge cases, ",
             "handle errors properly, and write tests when appropriate. You prefer ",
-            "simple, readable solutions over clever ones. ",
+            "simple, readable solutions over clever ones.\n\n",
             "You have access to grep (regex search across files) and find (glob file discovery) ",
-            "tools for navigating and understanding codebases."
+            "tools for navigating and understanding codebases.\n\n",
+            "When asked to fix bugs or modify code, follow this workflow:\n",
+            "1. Before writing any tests, check for existing test files (e.g., test_*.py, *_test.go, ",
+            "*Test.java). Use find or grep to discover them.\n",
+            "2. If existing tests exist, run them FIRST to see which tests fail and understand the ",
+            "current state of the code.\n",
+            "3. Fix bugs by editing the original source file in-place using edit_file. Do NOT create ",
+            "new copies of the file or rewrite it with write_file unless explicitly asked to.\n",
+            "4. After making changes, verify by re-running the EXISTING test suite — not by writing ",
+            "your own tests. Only write new tests if no relevant tests exist or the user asks for them.\n",
+            "5. Show a clear summary of what you changed and why."
         )
         .to_string(),
         model: None,
@@ -425,6 +435,33 @@ mod tests {
         assert!(coder.allowed_tools.is_none()); // all tools
         assert!(coder.tags.contains(&"development".to_string()));
         assert!(coder.tags.contains(&"coding".to_string()));
+    }
+
+    #[test]
+    fn test_coder_prompt_instructs_existing_test_workflow() {
+        let registry = TemplateRegistry::new();
+        let coder = registry.get("coder").unwrap();
+        let prompt = &coder.system_prompt;
+        // Must instruct to check for existing tests before writing new ones
+        assert!(
+            prompt.contains("existing test"),
+            "coder prompt must mention existing tests"
+        );
+        // Must instruct to use edit_file for in-place fixes
+        assert!(
+            prompt.contains("edit_file"),
+            "coder prompt must instruct using edit_file"
+        );
+        // Must instruct to run existing tests for verification
+        assert!(
+            prompt.contains("re-running the EXISTING test suite"),
+            "coder prompt must instruct re-running existing tests"
+        );
+        // Must NOT encourage writing own tests as default verification
+        assert!(
+            prompt.contains("Only write new tests if no relevant tests exist"),
+            "coder prompt must discourage writing new tests when existing ones are available"
+        );
     }
 
     #[test]

@@ -139,6 +139,9 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_ACTIVE_HAND") {
             self.agents.defaults.active_hand = if val.is_empty() { None } else { Some(val) };
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_SYSTEM_PROMPT") {
+            self.agents.defaults.system_prompt = if val.is_empty() { None } else { Some(val) };
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE") {
             self.agents.defaults.timezone = val;
         }
@@ -900,29 +903,38 @@ impl Config {
             }
         }
 
-        // WhatsApp
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL") {
+        // WhatsApp Web
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR") {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_url = val;
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.auth_dir = val;
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_TOKEN") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_AUTH_DIR") {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_token = Some(val);
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.auth_dir = val;
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED") {
-            if let Ok(enabled) = val.parse() {
-                let channel = self
-                    .channels
-                    .whatsapp
-                    .get_or_insert_with(WhatsAppConfig::default);
-                channel.enabled = enabled;
-            }
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.enabled = enabled;
+        }
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.enabled = enabled;
         }
 
         // Runtime: Apple Container
@@ -1657,10 +1669,28 @@ mod tests {
         assert!(telegram.enabled);
         assert_eq!(telegram.token, "bot123:ABC");
         assert_eq!(telegram.allow_from, vec!["user1", "user2"]);
+        assert!(telegram.allow_usernames);
 
         let discord = config.channels.discord.unwrap();
         assert!(!discord.enabled);
         assert_eq!(discord.token, "discord-token");
+    }
+
+    #[test]
+    fn test_telegram_channel_config_can_disable_username_matching() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "bot123:ABC",
+                    "allow_from": ["123456789"],
+                    "allow_usernames": false
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(!telegram.allow_usernames);
     }
 
     #[test]

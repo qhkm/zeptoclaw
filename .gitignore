@@ -58,3 +58,7 @@ docs/launch/
 # Panel frontend
 panel/node_modules/
 panel/dist/
+
+# Working docs (plans, specs, decisions)
+docs/decisions/
+docs/superpowers/

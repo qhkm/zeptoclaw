@@ -86,6 +86,9 @@ pub struct ToolOutput {
     /// Whether the tool is running asynchronously (result will arrive later).
     /// TODO: wire into agent loop to skip hooks and metrics for background tasks.
     pub is_async: bool,
+    /// When true, the agent loop should break after this tool result
+    /// and wait for the next user message before continuing.
+    pub pause_for_input: bool,
 }
 
 impl ToolOutput {
@@ -96,6 +99,7 @@ impl ToolOutput {
             for_user: None,
             is_error: false,
             is_async: false,
+            pause_for_input: false,
         }
     }
 
@@ -107,6 +111,7 @@ impl ToolOutput {
             for_user: Some(s),
             is_error: false,
             is_async: false,
+            pause_for_input: false,
         }
     }
 
@@ -117,6 +122,7 @@ impl ToolOutput {
             for_user: None,
             is_error: true,
             is_async: false,
+            pause_for_input: false,
         }
     }
 
@@ -127,6 +133,7 @@ impl ToolOutput {
             for_user: None,
             is_error: false,
             is_async: true,
+            pause_for_input: false,
         }
     }
 
@@ -141,7 +148,17 @@ impl ToolOutput {
             for_user: Some(for_user.into()),
             is_error: false,
             is_async: false,
+            pause_for_input: false,
         }
+    }
+
+    /// Mark this output as requiring a pause for user input.
+    ///
+    /// When set, the agent loop will stop the tool-calling cycle after
+    /// this result and wait for the next user message.
+    pub fn with_pause(mut self) -> Self {
+        self.pause_for_input = true;
+        self
     }
 }
 
@@ -240,6 +257,8 @@ pub struct ToolContext {
     pub chat_id: Option<String>,
     /// The workspace directory for file operations
     pub workspace: Option<String>,
+    /// Whether the tool is running in batch mode (no interactive user).
+    pub is_batch: bool,
 }
 
 impl ToolContext {
@@ -294,6 +313,15 @@ impl ToolContext {
         self.workspace = Some(workspace.to_string());
         self
     }
+
+    /// Set whether the tool is running in batch mode.
+    ///
+    /// In batch mode, there is no interactive user, so tools that need
+    /// user input should fall back to a sensible default.
+    pub fn with_batch(mut self, is_batch: bool) -> Self {
+        self.is_batch = is_batch;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +342,18 @@ mod tests {
         assert!(ctx.channel.is_none());
         assert!(ctx.chat_id.is_none());
         assert!(ctx.workspace.is_none());
+    }
+
+    #[test]
+    fn test_tool_context_is_batch_default() {
+        let ctx = ToolContext::new();
+        assert!(!ctx.is_batch);
+    }
+
+    #[test]
+    fn test_tool_context_with_batch() {
+        let ctx = ToolContext::new().with_batch(true);
+        assert!(ctx.is_batch);
     }
 
     #[test]
@@ -440,5 +480,37 @@ mod tests {
         let out = ToolOutput::split("llm sees this", "user sees that");
         assert_eq!(out.for_llm, "llm sees this");
         assert_eq!(out.for_user.as_deref(), Some("user sees that"));
+    }
+
+    #[test]
+    fn test_tool_output_default_pause_false() {
+        let out = ToolOutput::llm_only("test");
+        assert!(!out.pause_for_input);
+
+        let out2 = ToolOutput::user_visible("test");
+        assert!(!out2.pause_for_input);
+
+        let out3 = ToolOutput::error("test");
+        assert!(!out3.pause_for_input);
+
+        let out4 = ToolOutput::split("a", "b");
+        assert!(!out4.pause_for_input);
+
+        let out5 = ToolOutput::async_task("test");
+        assert!(!out5.pause_for_input);
+    }
+
+    #[test]
+    fn test_tool_output_with_pause() {
+        let out = ToolOutput::llm_only("test").with_pause();
+        assert!(out.pause_for_input);
+        assert_eq!(out.for_llm, "test");
+    }
+
+    #[test]
+    fn test_tool_output_split_with_pause() {
+        let out = ToolOutput::split("llm", "user").with_pause();
+        assert!(out.pause_for_input);
+        assert_eq!(out.for_user.as_deref(), Some("user"));
     }
 }

@@ -132,6 +132,9 @@ pub struct Config {
     /// Panel (control panel) configuration.
     #[serde(default)]
     pub panel: PanelConfig,
+    /// r8r workflow-engine bridge configuration.
+    #[serde(default)]
+    pub r8r_bridge: R8rBridgeConfig,
 }
 
 // ============================================================================
@@ -238,6 +241,75 @@ impl Default for PanelConfig {
             api_port: 9091,
             auth_mode: AuthMode::Token,
             bind: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// r8r Bridge Configuration
+// ============================================================================
+
+/// Channel target for routing r8r events to a specific messaging channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTarget {
+    /// Channel name (e.g. "telegram", "slack").
+    pub channel: String,
+    /// Chat/channel ID on that platform.
+    pub chat_id: String,
+}
+
+/// Configuration for the r8r workflow-engine bridge.
+///
+/// When enabled, ZeptoClaw connects to an r8r instance over WebSocket to
+/// receive workflow events (approvals, execution results, health) and send
+/// back decisions and workflow triggers.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct R8rBridgeConfig {
+    /// Whether the r8r bridge is enabled.
+    pub enabled: bool,
+    /// WebSocket endpoint for the r8r event stream.
+    pub endpoint: String,
+    /// Bearer token for authenticating with r8r.
+    pub token: Option<String>,
+    /// Default channel target for events that have no specific routing.
+    pub default_channel: Option<ChannelTarget>,
+    /// Per-workflow approval routing overrides (workflow name -> channel target).
+    #[serde(default)]
+    pub approval_routing: HashMap<String, ChannelTarget>,
+    /// Maximum reconnect backoff interval in seconds.
+    pub reconnect_max_interval_secs: u64,
+    /// Interval between health pings in seconds.
+    pub health_ping_interval_secs: u64,
+}
+
+impl std::fmt::Debug for R8rBridgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("R8rBridgeConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("default_channel", &self.default_channel)
+            .field("approval_routing", &self.approval_routing)
+            .field(
+                "reconnect_max_interval_secs",
+                &self.reconnect_max_interval_secs,
+            )
+            .field("health_ping_interval_secs", &self.health_ping_interval_secs)
+            .finish()
+    }
+}
+
+impl Default for R8rBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "ws://localhost:8080/api/ws/events".to_string(),
+            token: None,
+            default_channel: None,
+            approval_routing: HashMap::new(),
+            reconnect_max_interval_secs: 30,
+            health_ping_interval_secs: 60,
         }
     }
 }
@@ -662,6 +734,11 @@ pub struct AgentDefaults {
     /// Maximum total tool calls allowed per agent run. None = unlimited.
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
+    /// Custom system prompt injected into ContextBuilder. Takes priority over
+    /// template and hand system prompts when set. Useful for gateway/headless
+    /// mode where the system prompt must come from config, not CLI flags.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 /// Detect the system's IANA timezone.
@@ -707,7 +784,7 @@ impl Default for AgentDefaults {
             agent_timeout_secs: 300,
             tool_timeout_secs: 0,
             message_queue_mode: MessageQueueMode::default(),
-            streaming: false,
+            streaming: true,
             token_budget: 0,
             compact_tools: false,
             tool_profile: None,
@@ -716,6 +793,7 @@ impl Default for AgentDefaults {
             loop_guard: LoopGuardConfig::default(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             max_tool_calls: None,
+            system_prompt: None,
         }
     }
 }
@@ -745,8 +823,9 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot configuration
     pub slack: Option<SlackConfig>,
-    /// WhatsApp bridge configuration
-    pub whatsapp: Option<WhatsAppConfig>,
+    /// WhatsApp Web native channel configuration (requires `whatsapp-web` feature).
+    #[serde(alias = "whatsapp")]
+    pub whatsapp_web: Option<WhatsAppWebConfig>,
     /// WhatsApp Cloud API configuration (official API, no bridge)
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
@@ -884,6 +963,22 @@ pub struct WebhookConfig {
     /// Optional Bearer token for request authentication
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Optional HMAC secret for request signature verification.
+    #[serde(default)]
+    pub signature_secret: Option<String>,
+    /// Header carrying the request HMAC signature when `signature_secret` is set.
+    #[serde(default = "default_webhook_signature_header")]
+    pub signature_header: String,
+    /// Server-controlled sender ID used when `trust_payload_identity` is disabled.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Optional server-controlled chat ID used when `trust_payload_identity` is disabled.
+    /// Falls back to `sender_id` when omitted.
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// When true, accept caller-supplied `sender` and `chat_id` from webhook JSON.
+    #[serde(default)]
+    pub trust_payload_identity: bool,
     /// Allowlist of sender IDs (empty = allow all unless `deny_by_default` is set)
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -904,6 +999,10 @@ fn default_webhook_path() -> String {
     "/webhook".to_string()
 }
 
+fn default_webhook_signature_header() -> String {
+    "X-ZeptoClaw-Signature-256".to_string()
+}
+
 impl Default for WebhookConfig {
     fn default() -> Self {
         Self {
@@ -912,26 +1011,55 @@ impl Default for WebhookConfig {
             port: default_webhook_port(),
             path: default_webhook_path(),
             auth_token: None,
+            signature_secret: None,
+            signature_header: default_webhook_signature_header(),
+            sender_id: None,
+            chat_id: None,
+            trust_payload_identity: false,
             allow_from: Vec::new(),
             deny_by_default: false,
         }
     }
 }
 
+fn default_telegram_allow_usernames() -> bool {
+    true
+}
+
 /// Telegram channel configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelegramConfig {
     /// Whether the channel is enabled
     #[serde(default)]
     pub enabled: bool,
     /// Bot token from BotFather
     pub token: String,
-    /// Allowlist of user IDs/usernames (empty = allow all unless `deny_by_default` is set)
+    /// Allowlist of numeric user IDs (empty = allow all unless `deny_by_default` is set).
+    ///
+    /// Legacy username entries are only honored when `allow_usernames` is true.
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// When true, empty `allow_from` rejects all senders (strict mode).
     #[serde(default)]
     pub deny_by_default: bool,
+    /// Legacy compatibility toggle for username-based allowlist entries.
+    ///
+    /// New configs should keep this disabled and use numeric Telegram user IDs only.
+    #[serde(default = "default_telegram_allow_usernames")]
+    pub allow_usernames: bool,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: String::new(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+            allow_usernames: default_telegram_allow_usernames(),
+        }
+    }
 }
 
 /// Discord channel configuration
@@ -968,52 +1096,6 @@ pub struct SlackConfig {
     pub deny_by_default: bool,
 }
 
-/// WhatsApp channel configuration (via bridge)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhatsAppConfig {
-    /// Whether the channel is enabled
-    #[serde(default)]
-    pub enabled: bool,
-    /// WebSocket bridge URL
-    #[serde(default = "default_whatsapp_bridge_url")]
-    pub bridge_url: String,
-    /// Optional Bearer token for authenticating to the bridge WebSocket.
-    #[serde(default)]
-    pub bridge_token: Option<String>,
-    /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set)
-    #[serde(default)]
-    pub allow_from: Vec<String>,
-    /// When true, empty `allow_from` rejects all senders (strict mode).
-    #[serde(default)]
-    pub deny_by_default: bool,
-    /// Whether ZeptoClaw manages the bridge binary lifecycle.
-    /// When true, `channel setup` and `gateway` will auto-install and start the bridge.
-    /// When false, the user manages the bridge process externally.
-    #[serde(default = "default_bridge_managed")]
-    pub bridge_managed: bool,
-}
-
-fn default_whatsapp_bridge_url() -> String {
-    "ws://localhost:3001".to_string()
-}
-
-fn default_bridge_managed() -> bool {
-    true
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bridge_url: default_whatsapp_bridge_url(),
-            bridge_token: None,
-            allow_from: Vec::new(),
-            deny_by_default: false,
-            bridge_managed: default_bridge_managed(),
-        }
-    }
-}
-
 /// WhatsApp Cloud API channel configuration (official Meta API).
 ///
 /// Uses Meta's webhook system for inbound messages and the Cloud API
@@ -1032,6 +1114,9 @@ pub struct WhatsAppCloudConfig {
     /// Webhook verify token (you choose this secret, must match Meta dashboard).
     #[serde(default)]
     pub webhook_verify_token: String,
+    /// Optional Meta app secret used to verify `X-Hub-Signature-256` callback signatures.
+    #[serde(default)]
+    pub app_secret: Option<String>,
     /// Address to bind the webhook HTTP server to.
     #[serde(default = "default_whatsapp_cloud_bind")]
     pub bind_address: String,
@@ -1068,9 +1153,48 @@ impl Default for WhatsAppCloudConfig {
             phone_number_id: String::new(),
             access_token: String::new(),
             webhook_verify_token: String::new(),
+            app_secret: None,
             bind_address: default_whatsapp_cloud_bind(),
             port: default_whatsapp_cloud_port(),
             path: default_whatsapp_cloud_path(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+/// WhatsApp Web native channel configuration (personal WhatsApp via QR pairing).
+///
+/// Uses wa-rs for direct WhatsApp Web protocol support. No Meta Business
+/// account required — pairs via QR code like WhatsApp Desktop.
+/// Requires: `--features whatsapp-web`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppWebConfig {
+    /// Whether the channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for session persistence (SQLite database).
+    /// Default: ~/.zeptoclaw/state/whatsapp_web
+    #[serde(default = "default_whatsapp_web_auth_dir")]
+    pub auth_dir: String,
+    /// Allowlist of phone numbers in E.164 format (e.g., "+60123456789").
+    /// Empty = allow all unless `deny_by_default` is set.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_whatsapp_web_auth_dir() -> String {
+    "~/.zeptoclaw/state/whatsapp_web".to_string()
+}
+
+impl Default for WhatsAppWebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auth_dir: default_whatsapp_web_auth_dir(),
             allow_from: Vec::new(),
             deny_by_default: false,
         }
@@ -2294,9 +2418,9 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_defaults_to_false() {
+    fn test_streaming_defaults_to_true() {
         let defaults = AgentDefaults::default();
-        assert!(!defaults.streaming);
+        assert!(defaults.streaming);
     }
 
     #[test]
@@ -2484,12 +2608,37 @@ mod tests {
     }
 
     #[test]
+    fn test_r8r_bridge_config_debug_redacts_token() {
+        let config = R8rBridgeConfig {
+            token: Some("super-secret-token".to_string()),
+            ..Default::default()
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(
+            !debug_output.contains("super-secret-token"),
+            "token must not appear in Debug output"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "Debug output should show [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_r8r_bridge_config_debug_none_token() {
+        let config = R8rBridgeConfig::default();
+        let debug_output = format!("{:?}", config);
+        assert!(debug_output.contains("None"));
+    }
+
+    #[test]
     fn test_whatsapp_cloud_config_defaults() {
         let config = WhatsAppCloudConfig::default();
         assert!(!config.enabled);
         assert!(config.phone_number_id.is_empty());
         assert!(config.access_token.is_empty());
         assert!(config.webhook_verify_token.is_empty());
+        assert!(config.app_secret.is_none());
         assert_eq!(config.bind_address, "127.0.0.1");
         assert_eq!(config.port, 9877);
         assert_eq!(config.path, "/whatsapp");
@@ -2504,6 +2653,7 @@ mod tests {
             "phone_number_id": "123456",
             "access_token": "EAAx...",
             "webhook_verify_token": "my-verify-secret",
+            "app_secret": "meta-secret",
             "port": 8443,
             "allow_from": ["60123456789"]
         }"#;
@@ -2512,6 +2662,7 @@ mod tests {
         assert_eq!(config.phone_number_id, "123456");
         assert_eq!(config.access_token, "EAAx...");
         assert_eq!(config.webhook_verify_token, "my-verify-secret");
+        assert_eq!(config.app_secret.as_deref(), Some("meta-secret"));
         assert_eq!(config.port, 8443);
         assert_eq!(config.allow_from, vec!["60123456789"]);
     }
@@ -2532,6 +2683,22 @@ mod tests {
         let wac = config.channels.whatsapp_cloud.unwrap();
         assert!(wac.enabled);
         assert_eq!(wac.phone_number_id, "999");
+    }
+
+    #[test]
+    fn test_channels_config_whatsapp_legacy_alias_deserializes_to_whatsapp_web() {
+        let json = r#"{
+            "channels": {
+                "whatsapp": {
+                    "enabled": true,
+                    "auth_dir": "/tmp/wa-legacy"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let wa = config.channels.whatsapp_web.unwrap();
+        assert!(wa.enabled);
+        assert_eq!(wa.auth_dir, "/tmp/wa-legacy");
     }
 
     #[test]
@@ -2854,6 +3021,10 @@ pub struct EmailConfig {
     #[serde(default)]
     pub display_name: Option<String>,
     /// Allowlist of sender email addresses or domains.
+    ///
+    /// These entries are matched against the parsed inbound `From` header.
+    /// Use upstream authenticated-mail enforcement (SPF/DKIM/DMARC) if sender
+    /// authenticity matters.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     /// When `true` and `allowed_senders` is empty, all senders are denied.

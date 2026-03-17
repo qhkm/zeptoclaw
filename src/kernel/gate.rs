@@ -15,10 +15,81 @@ use std::time::Instant;
 
 use crate::error::Result;
 use crate::safety::taint::TaintEngine;
-use crate::safety::CheckDirection;
-use crate::safety::SafetyLayer;
+use crate::safety::{CheckDirection, SafetyLayer, SafetyResult, ScanOptions};
 use crate::tools::{ToolContext, ToolOutput, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
+
+const FILE_BODY_IGNORED_POLICY_RULES: &[&str] = &["shell_injection"];
+
+fn blocked_input_output(name: &str, result: SafetyResult) -> ToolOutput {
+    ToolOutput::error(format!(
+        "Tool '{}' input blocked by safety: {}",
+        name,
+        result.warnings.join("; ")
+    ))
+}
+
+fn scan_input_segment(
+    safety_layer: &SafetyLayer,
+    content: &str,
+    options: &ScanOptions<'_>,
+) -> SafetyResult {
+    safety_layer.scan_with_options(content, CheckDirection::Input, options)
+}
+
+fn scan_tool_input(safety_layer: &SafetyLayer, name: &str, input: &Value) -> Option<SafetyResult> {
+    let file_body_options = ScanOptions {
+        ignored_policy_rules: FILE_BODY_IGNORED_POLICY_RULES,
+    };
+
+    let check = |content: &str, options: &ScanOptions<'_>| {
+        let result = scan_input_segment(safety_layer, content, options);
+        result.blocked.then_some(result)
+    };
+
+    match name {
+        "write_file" => {
+            let path = input.get("path").and_then(|value| value.as_str());
+            if path.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "write_file input missing 'path' field; path pre-check skipped"
+                );
+            }
+
+            if let Some(result) = check(path.unwrap_or_default(), &ScanOptions::default()) {
+                return Some(result);
+            }
+
+            input
+                .get("content")
+                .and_then(|value| value.as_str())
+                .and_then(|content| check(content, &file_body_options))
+        }
+        "edit_file" => {
+            let path = input.get("path").and_then(|value| value.as_str());
+            if path.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "edit_file input missing 'path' field; path pre-check skipped"
+                );
+            }
+
+            if let Some(result) = check(path.unwrap_or_default(), &ScanOptions::default()) {
+                return Some(result);
+            }
+
+            ["old_text", "new_text", "diff"]
+                .iter()
+                .filter_map(|field| input.get(*field).and_then(|value| value.as_str()))
+                .find_map(|content| check(content, &file_body_options))
+        }
+        _ => {
+            let input_str = serde_json::to_string(input).unwrap_or_default();
+            check(&input_str, &ScanOptions::default())
+        }
+    }
+}
 
 /// Execute a tool with security gates applied.
 ///
@@ -44,16 +115,14 @@ pub async fn execute_tool(
     let start = Instant::now();
 
     // Step 1: Safety check on input
+    //
+    // Filesystem write tools use field-aware scanning so paths still get the
+    // full safety pipeline while file bodies only suppress the shell_injection
+    // rule that false-positives on legitimate code snippets.
     if let Some(safety_layer) = safety {
-        let input_str = serde_json::to_string(&input).unwrap_or_default();
-        let result = safety_layer.scan(&input_str, CheckDirection::Input);
-        if result.blocked {
+        if let Some(result) = scan_tool_input(safety_layer, name, &input) {
             metrics.record_tool_call(name, start.elapsed(), false);
-            return Ok(ToolOutput::error(format!(
-                "Tool '{}' input blocked by safety: {}",
-                name,
-                result.warnings.join("; ")
-            )));
+            return Ok(blocked_input_output(name, result));
         }
     }
 
@@ -110,13 +179,22 @@ mod tests {
     use super::*;
     use crate::safety::taint::TaintConfig;
     use crate::safety::{SafetyConfig, SafetyLayer};
+    use crate::tools::filesystem::{EditFileTool, WriteFileTool};
     use crate::tools::{EchoTool, ToolRegistry};
     use crate::utils::metrics::MetricsCollector;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn setup_registry() -> ToolRegistry {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(EchoTool));
+        registry
+    }
+
+    fn setup_filesystem_registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(WriteFileTool));
+        registry.register(Box::new(EditFileTool));
         registry
     }
 
@@ -205,6 +283,122 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().for_llm, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_allows_shell_like_code_in_content() {
+        let dir = tempdir().unwrap();
+        let workspace = std::fs::canonicalize(dir.path()).unwrap();
+        let registry = setup_filesystem_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::new().with_workspace(workspace.to_str().unwrap());
+        let safety = SafetyLayer::new(SafetyConfig::default());
+
+        let result = execute_tool(
+            &registry,
+            "write_file",
+            json!({"path": "script.sh", "content": "echo $(whoami)\necho `date`\n"}),
+            &ctx,
+            Some(&safety),
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !result.is_error,
+            "shell-like code content should no longer be blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_allows_shell_like_code_in_diff() {
+        let dir = tempdir().unwrap();
+        let workspace = std::fs::canonicalize(dir.path()).unwrap();
+        let file_path = dir.path().join("script.sh");
+        std::fs::write(&file_path, "echo hi\n").unwrap();
+
+        let registry = setup_filesystem_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::new().with_workspace(workspace.to_str().unwrap());
+        let safety = SafetyLayer::new(SafetyConfig::default());
+
+        let diff = "@@ -1 +1,2 @@\n-echo hi\n+echo $(whoami)\n+echo `date`\n";
+        let result = execute_tool(
+            &registry,
+            "edit_file",
+            json!({"path": "script.sh", "diff": diff}),
+            &ctx,
+            Some(&safety),
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !result.is_error,
+            "diff mode should allow shell-like code content"
+        );
+        let updated = std::fs::read_to_string(file_path).unwrap();
+        assert!(updated.contains("$(whoami)"));
+        assert!(updated.contains("`date`"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_still_blocks_private_key_content() {
+        let dir = tempdir().unwrap();
+        let workspace = std::fs::canonicalize(dir.path()).unwrap();
+        let registry = setup_filesystem_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::new().with_workspace(workspace.to_str().unwrap());
+        let safety = SafetyLayer::new(SafetyConfig::default());
+
+        let result = execute_tool(
+            &registry,
+            "write_file",
+            json!({"path": "secret.pem", "content": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"}),
+            &ctx,
+            Some(&safety),
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.is_error,
+            "non-shell safety checks should still block file bodies"
+        );
+        assert!(result.for_llm.contains("blocked by safety"));
+        assert!(!dir.path().join("secret.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_path_traversal_still_fails() {
+        let dir = tempdir().unwrap();
+        let workspace = std::fs::canonicalize(dir.path()).unwrap();
+        let registry = setup_filesystem_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::new().with_workspace(workspace.to_str().unwrap());
+        let safety = SafetyLayer::new(SafetyConfig::default());
+
+        let result = execute_tool(
+            &registry,
+            "write_file",
+            json!({"path": "../escape.sh", "content": "echo safe\n"}),
+            &ctx,
+            Some(&safety),
+            &metrics,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "path validation should still reject traversal"
+        );
     }
 
     #[tokio::test]

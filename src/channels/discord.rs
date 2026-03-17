@@ -572,7 +572,9 @@ impl DiscordChannel {
         }
 
         let content = msg.content.trim().to_string();
-        if content.is_empty() {
+
+        // Only reject if both content is empty AND there are no attachments
+        if content.is_empty() && msg.attachments.is_empty() {
             return None;
         }
 
@@ -1962,8 +1964,34 @@ mod tests {
         });
 
         let result = DiscordChannel::parse_message_create(&data, &[], false);
-        // Empty content should be filtered out.
+        // Empty content with no attachments should be filtered out.
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_message_create_with_image_only() {
+        // Message with an image attachment but no text content should be accepted.
+        // The actual attachment processing happens later in the gateway loop.
+        let data = json!({
+            "id": "msg-img-only",
+            "content": "",
+            "channel_id": "ch-300",
+            "author": { "id": "user-99", "bot": false },
+            "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/123/456/image.png",
+                "content_type": "image/png",
+                "filename": "image.png",
+                "size": 102400
+            }]
+        });
+
+        let result = DiscordChannel::parse_message_create(&data, &[], false);
+        assert!(result.is_some());
+
+        let inbound = result.unwrap();
+        assert_eq!(inbound.content, "");
+        // Attachments are processed later in the gateway loop, not in parse_message_create
+        assert_eq!(inbound.media.len(), 0);
     }
 
     #[test]

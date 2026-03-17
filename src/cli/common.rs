@@ -288,7 +288,9 @@ pub(crate) async fn create_agent_with_template(
         }
     }
 
-    if let Some(tpl) = &template {
+    if let Some(sp) = &config.agents.defaults.system_prompt {
+        context_builder = context_builder.with_system_prompt(sp);
+    } else if let Some(tpl) = &template {
         context_builder = context_builder.with_system_prompt(&tpl.system_prompt);
     } else if let Some(hand) = active_hand.as_ref() {
         context_builder = context_builder.with_system_prompt(&hand.manifest.system_prompt);
@@ -508,20 +510,11 @@ pub(crate) async fn validate_api_key(
         }
         "openai" => {
             let base = api_base.unwrap_or("https://api.openai.com/v1");
-            let resp = client
-                .get(format!("{}/models", base))
-                .header("Authorization", format!("Bearer {}", api_key))
-                .send()
-                .await?;
-            let status = resp.status().as_u16();
-            if resp.status().is_success() {
-                Ok(KeyValidation::Valid)
-            } else if status == 429 {
-                Ok(KeyValidation::RateLimited)
-            } else {
-                let body = resp.text().await.unwrap_or_default();
-                Err(anyhow::anyhow!(friendly_api_error("openai", status, &body)))
-            }
+            validate_bearer_models_key(&client, "openai", api_key, base).await
+        }
+        "zhipu" => {
+            let base = api_base.unwrap_or("https://open.bigmodel.cn/api/paas/v4");
+            validate_bearer_models_key(&client, "zhipu", api_key, base).await
         }
         "openrouter" => {
             // OpenRouter has a dedicated key info endpoint.
@@ -555,6 +548,28 @@ pub(crate) async fn validate_api_key(
     }
 }
 
+async fn validate_bearer_models_key(
+    client: &reqwest::Client,
+    provider: &str,
+    api_key: &str,
+    base: &str,
+) -> anyhow::Result<KeyValidation> {
+    let resp = client
+        .get(format!("{}/models", base))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    if resp.status().is_success() {
+        Ok(KeyValidation::Valid)
+    } else if status == 429 {
+        Ok(KeyValidation::RateLimited)
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(anyhow::anyhow!(friendly_api_error(provider, status, &body)))
+    }
+}
+
 /// Map HTTP status to user-friendly error message with actionable guidance.
 pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> String {
     // Try to extract a message from the provider's JSON error response.
@@ -573,6 +588,7 @@ pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> Str
             provider,
             match provider {
                 "anthropic" => "Get key: https://console.anthropic.com/",
+                "zhipu" => "Get key: https://open.bigmodel.cn/",
                 "openrouter" => "Get key: https://openrouter.ai/settings/keys",
                 _ => "Get key: https://platform.openai.com/api-keys",
             }
@@ -587,6 +603,7 @@ pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> Str
                 provider,
                 match provider {
                     "anthropic" => "Billing: https://console.anthropic.com/settings/billing",
+                    "zhipu" => "Billing: https://open.bigmodel.cn/",
                     _ => "Billing: https://platform.openai.com/settings/organization/billing",
                 }
             ),
@@ -742,6 +759,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_api_key_zhipu_429_returns_rate_limited() {
+        let base = spawn_validation_server(
+            "/models",
+            &[("authorization", "Bearer test-key")],
+            429,
+            "{}",
+        )
+        .await;
+
+        let result = validate_api_key("zhipu", "test-key", Some(&base))
+            .await
+            .expect("429 should be treated as a valid key");
+
+        assert_eq!(result, KeyValidation::RateLimited);
+    }
+
+    #[tokio::test]
     async fn test_validate_api_key_openrouter_429_returns_rate_limited() {
         let base =
             spawn_validation_server("/key", &[("authorization", "Bearer test-key")], 429, "{}")
@@ -792,6 +826,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_api_key_zhipu_401_returns_error() {
+        let base = spawn_validation_server(
+            "/models",
+            &[("authorization", "Bearer bad-key")],
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+        )
+        .await;
+
+        let err = validate_api_key("zhipu", "bad-key", Some(&base))
+            .await
+            .expect_err("401 should remain an error");
+
+        assert!(err.to_string().contains("Invalid API key"));
+        assert!(err.to_string().contains("open.bigmodel.cn"));
+    }
+
+    #[tokio::test]
     async fn test_validate_api_key_openrouter_401_returns_error() {
         let base = spawn_validation_server(
             "/key",
@@ -822,6 +874,14 @@ mod tests {
         assert!(msg.contains("Invalid API key"));
         assert!(msg.contains("openai"));
         assert!(msg.contains("platform.openai.com"));
+    }
+
+    #[test]
+    fn test_friendly_api_error_401_zhipu() {
+        let msg = friendly_api_error("zhipu", 401, "");
+        assert!(msg.contains("Invalid API key"));
+        assert!(msg.contains("zhipu"));
+        assert!(msg.contains("open.bigmodel.cn"));
     }
 
     #[test]

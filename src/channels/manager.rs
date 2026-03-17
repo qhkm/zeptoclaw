@@ -508,7 +508,14 @@ impl ChannelManager {
     pub async fn send(&self, channel_name: &str, msg: OutboundMessage) -> Result<()> {
         let channel = {
             let channels = self.channels.read().await;
-            channels.get(channel_name).cloned()
+            channels
+                .get(channel_name)
+                .cloned()
+                .or_else(|| match channel_name {
+                    "whatsapp" => channels.get("whatsapp_web").cloned(),
+                    "whatsapp_web" => channels.get("whatsapp").cloned(),
+                    _ => None,
+                })
         };
 
         if let Some(channel) = channel {

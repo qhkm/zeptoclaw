@@ -1,6 +1,6 @@
 [package]
 name = "zeptoclaw"
-version = "0.7.3"
+version = "0.7.6"
 edition = "2021"
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
@@ -52,6 +52,8 @@ scraper = "0.25"
 # =============================================================================
 # Command-line argument parsing with derive macros
 clap = { version = "4.5", features = ["derive"] }
+# Readline with tab-completion for interactive CLI
+rustyline = "15.0"
 
 # =============================================================================
 # LOGGING & DIAGNOSTICS
@@ -87,6 +89,8 @@ subtle = "2.5"
 hex = "0.4"
 # HMAC-SHA256 for CSRF token generation/validation
 ring = "0.17"
+# Platform-specific filesystem flags such as O_NOFOLLOW
+libc = "0.2"
 
 # =============================================================================
 # ASYNC UTILITIES
@@ -137,6 +141,8 @@ lopdf = { version = "0.39", optional = true }
 # =============================================================================
 # WebSocket support for future real-time channels
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+# URL parsing for WebSocket endpoint host extraction
+url = "2"
 # Protobuf decoding for Lark/Feishu pbbp2 WS frames
 prost = "0.14"
 # Telegram bot SDK (minimal features to reduce bloat)
@@ -171,6 +177,20 @@ webpki-roots = { version = "1.0", optional = true }
 # =============================================================================
 # Lightweight async MQTT client for IoT device communication
 rumqttc = { version = "0.25", optional = true }
+
+# =============================================================================
+# WHATSAPP WEB (optional — feature-gated behind "whatsapp-web")
+# =============================================================================
+# Pure Rust WhatsApp Web client (Signal Protocol, QR pairing, session persistence)
+wa-rs = { version = "0.2", optional = true }
+# SQLite storage backend for wa-rs session persistence
+wa-rs-sqlite-storage = { version = "0.2", optional = true }
+# Tokio WebSocket transport for wa-rs
+wa-rs-tokio-transport = { version = "0.2", optional = true }
+# HTTP client for wa-rs version/media requests
+wa-rs-ureq-http = { version = "0.2", optional = true }
+# QR code generation for WhatsApp Web terminal pairing
+qrcode = { version = "0.14", optional = true, default-features = false }
 
 # =============================================================================
 # HARDWARE (optional — feature-gated)
@@ -208,7 +228,7 @@ axum = { version = "0.8", features = ["ws"], optional = true }
 # Tower HTTP middleware (CORS, static file serving, tracing)
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = true }
 # JWT token generation/validation for panel auth
-jsonwebtoken = { version = "9", optional = true }
+jsonwebtoken = { version = "10", optional = true }
 # Password hashing for panel password auth mode
 bcrypt = { version = "0.18", optional = true }
 
@@ -246,6 +266,14 @@ peripheral-esp32 = ["hardware"]
 probe = ["probe-rs"]
 # MQTT channel for IoT device communication (rumqttc async client)
 mqtt = ["dep:rumqttc"]
+# WhatsApp Web native client (wa-rs + SQLite session storage)
+whatsapp-web = [
+    "dep:wa-rs",
+    "dep:wa-rs-sqlite-storage",
+    "dep:wa-rs-tokio-transport",
+    "dep:wa-rs-ureq-http",
+    "dep:qrcode",
+]
 # Android device control tool via ADB (adds quick-xml for UI hierarchy parsing)
 android = []
 # Linux sandbox runtimes (Linux-only, require respective binaries except landlock)

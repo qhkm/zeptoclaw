@@ -26,6 +26,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "compaction",
     "mcp",
     "routines",
+    "tunnel",
     "stripe",
     "custom_tools",
     "transcription",
@@ -39,6 +40,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "health",
     "devices",
     "logging",
+    "r8r_bridge",
 ];
 
 /// Known fields for each section. Nested as section.field.
@@ -49,15 +51,18 @@ const KNOWN_AGENTS_DEFAULTS: &[&str] = &[
     "temperature",
     "max_tool_iterations",
     "agent_timeout_secs",
+    "tool_timeout_secs",
     "message_queue_mode",
     "streaming",
     "token_budget",
     "compact_tools",
     "tool_profile",
     "active_hand",
+    "timezone",
     "loop_guard",
     "max_tool_result_bytes",
     "max_tool_calls",
+    "system_prompt",
 ];
 
 const KNOWN_LOOP_GUARD: &[&str] = &[
@@ -256,11 +261,198 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
                         message: "Empty \u{2014} anyone can message the bot".to_string(),
                     });
                 }
+
+                if name == "email"
+                    && enabled
+                    && channel_obj
+                        .get("allowed_senders")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|senders| !senders.is_empty())
+                {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Warn,
+                        path: "channels.email.allowed_senders".to_string(),
+                        message: "Email sender allowlists trust the parsed From header only; enforce SPF/DKIM/DMARC upstream if sender authenticity matters".to_string(),
+                    });
+                }
+
+                if name == "telegram" {
+                    let allow_usernames = channel_obj
+                        .get("allow_usernames")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let has_username_entries = channel_obj
+                        .get("allow_from")
+                        .and_then(|v| v.as_array())
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| entry.as_str())
+                                .any(|entry| {
+                                    let trimmed = entry.trim();
+                                    trimmed.is_empty()
+                                        || !trimmed.bytes().all(|b| b.is_ascii_digit())
+                                })
+                        })
+                        .unwrap_or(false);
+
+                    if has_username_entries {
+                        diagnostics.push(Diagnostic {
+                            level: DiagnosticLevel::Warn,
+                            path: "channels.telegram.allow_from".to_string(),
+                            message: if allow_usernames {
+                                "Telegram username allowlist entries are legacy and can be reassigned; prefer numeric user IDs and set allow_usernames=false after migration".to_string()
+                            } else {
+                                "Telegram allow_from contains non-numeric entries, but allow_usernames=false so they will never match".to_string()
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // r8r bridge warnings
+    if let Some(r8r) = obj.get("r8r_bridge").and_then(|v| v.as_object()) {
+        let enabled = r8r
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if enabled {
+            if let Some(endpoint) = r8r.get("endpoint").and_then(|v| v.as_str()) {
+                if endpoint.starts_with("ws://")
+                    && !endpoint.contains("localhost")
+                    && !endpoint.contains("127.0.0.1")
+                    && !endpoint.contains("[::1]")
+                {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Warn,
+                        path: "r8r_bridge.endpoint".to_string(),
+                        message: "Plaintext ws:// on non-loopback address \u{2014} bearer token will be sent in cleartext; use wss://".to_string(),
+                    });
+                }
             }
         }
     }
 
     diagnostics
+}
+
+/// Check if a model name looks compatible with a provider backend.
+///
+/// Returns `None` when the combination is fine, or `Some(message)` describing
+/// the mismatch.
+fn check_model_backend_compat(model: &str, provider_name: &str, backend: &str) -> Option<String> {
+    let m = model.to_lowercase();
+
+    match backend {
+        "anthropic" => {
+            // Claude models always start with "claude-"
+            if !m.starts_with("claude-") {
+                Some(format!(
+                    "model '{}' does not look like a Claude model (expected 'claude-*') \
+                     but provider '{}' uses the Anthropic API",
+                    model, provider_name,
+                ))
+            } else {
+                None
+            }
+        }
+        "openai" => {
+            // OpenAI-compatible providers accept many model formats, but a
+            // `claude-*` model is almost certainly wrong for the OpenAI backend.
+            if m.starts_with("claude-") && provider_name == "openai" {
+                Some(format!(
+                    "model '{}' looks like a Claude model but provider '{}' uses the OpenAI API",
+                    model, provider_name,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Validate that the configured default model is compatible with the
+/// resolved primary provider.
+///
+/// Also validates per-provider model overrides.
+pub fn validate_model_provider_compat(config: &crate::config::Config) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let default_model = &config.agents.defaults.model;
+
+    // Use the provider registry to figure out which providers are actually
+    // resolved at runtime (have credentials).
+    let selections = crate::providers::resolve_runtime_providers(config);
+
+    if selections.is_empty() {
+        diags.push(Diagnostic {
+            level: DiagnosticLevel::Warn,
+            path: "providers".to_string(),
+            message: "No AI provider resolved \u{2014} set an API key or run 'zeptoclaw onboard'"
+                .to_string(),
+        });
+        return diags;
+    }
+
+    // Check default model against primary (first resolved) provider.
+    let primary = &selections[0];
+    if let Some(msg) = check_model_backend_compat(default_model, primary.name, primary.backend) {
+        // If the provider has a per-provider model override, the default
+        // model mismatch is just a warning (per-provider model takes
+        // precedence at runtime).
+        let level = if primary.model.is_some() {
+            DiagnosticLevel::Warn
+        } else {
+            DiagnosticLevel::Error
+        };
+
+        let mut message = msg;
+        if let Some(ref per_model) = primary.model {
+            message.push_str(&format!(
+                " (per-provider model '{}' will be used instead)",
+                per_model
+            ));
+        } else {
+            message.push_str(
+                ". Fix: set 'agents.defaults.model' to a compatible model, \
+                 or add 'providers.<name>.model' override",
+            );
+        }
+
+        diags.push(Diagnostic {
+            level,
+            path: "agents.defaults.model".to_string(),
+            message,
+        });
+    }
+
+    // Check per-provider model overrides against their own backend.
+    for sel in &selections {
+        if let Some(ref per_model) = sel.model {
+            if let Some(msg) = check_model_backend_compat(per_model, sel.name, sel.backend) {
+                diags.push(Diagnostic {
+                    level: DiagnosticLevel::Error,
+                    path: format!("providers.{}.model", sel.name),
+                    message: msg,
+                });
+            }
+        }
+    }
+
+    if diags.is_empty() {
+        diags.push(Diagnostic {
+            level: DiagnosticLevel::Ok,
+            path: String::new(),
+            message: format!(
+                "Model '{}' compatible with primary provider '{}'",
+                default_model, primary.name
+            ),
+        });
+    }
+
+    diags
 }
 
 /// Validate custom tool definitions.
@@ -364,6 +556,29 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_accepts_tunnel_r8r_bridge_and_agent_default_fields() {
+        let raw = json!({
+            "agents": {
+                "defaults": {
+                    "model": "gpt-4",
+                    "timezone": "Asia/Kuala_Lumpur",
+                    "tool_timeout_secs": 30,
+                    "system_prompt": "You are a workflow assistant."
+                }
+            },
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://localhost:8080/api/ws/events"
+            },
+            "tunnel": {
+                "provider": "cloudflare"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().all(|d| d.level != DiagnosticLevel::Error));
+    }
+
+    #[test]
     fn test_validate_unknown_top_level() {
         let raw = json!({
             "agentsss": {}
@@ -386,6 +601,67 @@ mod tests {
         let diags = validate_config(&raw);
         assert!(diags.iter().any(|d| {
             d.level == DiagnosticLevel::Warn && d.message.contains("anyone can message")
+        }));
+    }
+
+    #[test]
+    fn test_validate_email_allowed_senders_warns_header_only_trust() {
+        let raw = json!({
+            "channels": {
+                "email": {
+                    "enabled": true,
+                    "imap_host": "imap.example.com",
+                    "smtp_host": "smtp.example.com",
+                    "username": "bot@example.com",
+                    "password": "secret",
+                    "allowed_senders": ["@example.com"]
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "channels.email.allowed_senders"
+                && d.message.contains("From header")
+        }));
+    }
+
+    #[test]
+    fn test_validate_telegram_username_allowlist_warns() {
+        let raw = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "abc",
+                    "allow_from": ["alice"]
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "channels.telegram.allow_from"
+                && d.message.contains("legacy")
+        }));
+    }
+
+    #[test]
+    fn test_validate_telegram_username_allowlist_disabled_warns_non_matching() {
+        let raw = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "abc",
+                    "allow_from": ["alice"],
+                    "allow_usernames": false
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "channels.telegram.allow_from"
+                && d.message.contains("never match")
         }));
     }
 
@@ -545,5 +821,115 @@ mod tests {
                 .any(|d| { d.path.contains("loop_guard.enbled") && d.message.contains("enabled") }),
             "Expected suggestion for typo 'enbled'"
         );
+    }
+
+    // --- Model-provider compatibility unit tests ---
+
+    #[test]
+    fn test_compat_claude_model_on_anthropic() {
+        let result =
+            check_model_backend_compat("claude-sonnet-4-5-20250929", "anthropic", "anthropic");
+        assert!(result.is_none(), "Claude model should be fine on anthropic");
+    }
+
+    #[test]
+    fn test_compat_gpt_model_on_anthropic() {
+        let result = check_model_backend_compat("gpt-5.1-2025-11-13", "anthropic", "anthropic");
+        assert!(
+            result.is_some(),
+            "GPT model should NOT be compatible with anthropic"
+        );
+        assert!(result
+            .unwrap()
+            .contains("does not look like a Claude model"));
+    }
+
+    #[test]
+    fn test_compat_gpt_model_on_openai() {
+        let result = check_model_backend_compat("gpt-5.1", "openai", "openai");
+        assert!(result.is_none(), "GPT model should be fine on openai");
+    }
+
+    #[test]
+    fn test_compat_claude_model_on_openai() {
+        let result = check_model_backend_compat("claude-sonnet-4-5-20250929", "openai", "openai");
+        assert!(
+            result.is_some(),
+            "Claude model should NOT be compatible with openai"
+        );
+    }
+
+    #[test]
+    fn test_compat_custom_model_on_groq() {
+        // Groq uses openai backend but has custom model names
+        let result = check_model_backend_compat("llama-3.3-70b", "groq", "openai");
+        assert!(
+            result.is_none(),
+            "Custom model should be fine on OpenAI-compat provider"
+        );
+    }
+
+    #[test]
+    fn test_compat_case_insensitive() {
+        let result = check_model_backend_compat("Claude-Sonnet-4-5", "anthropic", "anthropic");
+        assert!(result.is_none(), "Case-insensitive match should work");
+    }
+
+    #[test]
+    fn test_compat_openrouter_auto_on_openai() {
+        let result = check_model_backend_compat("openrouter/auto", "openrouter", "openai");
+        assert!(result.is_none(), "openrouter/auto should be fine");
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_ws_plaintext_non_loopback_warns() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Warn
+                && d.path == "r8r_bridge.endpoint"
+                && d.message.contains("cleartext")
+        }));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_ws_localhost_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "ws://localhost:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_wss_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": true,
+                "endpoint": "wss://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
+    }
+
+    #[test]
+    fn test_validate_r8r_bridge_disabled_no_warn() {
+        let raw = json!({
+            "r8r_bridge": {
+                "enabled": false,
+                "endpoint": "ws://remote-server:8080/api/ws/events"
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
     }
 }

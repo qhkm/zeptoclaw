@@ -79,6 +79,13 @@ pub enum CheckDirection {
     Output,
 }
 
+/// Optional scan behavior overrides for special-case inputs.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions<'a> {
+    /// Policy rule names to suppress for this scan only.
+    pub ignored_policy_rules: &'a [&'a str],
+}
+
 /// Orchestrator that chains validator → leak detector → policy → injection
 /// scanner into a single safety pipeline.
 ///
@@ -116,7 +123,26 @@ impl SafetyLayer {
     /// differentiation.
     ///
     /// Returns a [`SafetyResult`] describing what happened.
-    pub fn scan(&self, text: &str, _direction: CheckDirection) -> SafetyResult {
+    pub fn scan(&self, text: &str, direction: CheckDirection) -> SafetyResult {
+        self.scan_with_options(text, direction, &ScanOptions::default())
+    }
+
+    /// Run the safety pipeline with per-call scan options.
+    pub fn scan_with_options(
+        &self,
+        text: &str,
+        direction: CheckDirection,
+        options: &ScanOptions<'_>,
+    ) -> SafetyResult {
+        self.scan_impl(text, direction, options)
+    }
+
+    fn scan_impl(
+        &self,
+        text: &str,
+        _direction: CheckDirection,
+        options: &ScanOptions<'_>,
+    ) -> SafetyResult {
         let mut warnings: Vec<String> = Vec::new();
         let mut was_modified = false;
 
@@ -208,7 +234,9 @@ impl SafetyLayer {
         };
 
         // 4. Policy checks
-        let violations = self.policy_engine.check(&content);
+        let violations = self
+            .policy_engine
+            .check_with_ignored_rules(&content, options.ignored_policy_rules);
         for v in &violations {
             match v.action {
                 PolicyAction::Block => {
@@ -370,6 +398,36 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("system_file_access"));
+    }
+
+    #[test]
+    fn test_scan_with_options_ignores_shell_injection_only() {
+        let layer = default_layer();
+        let shellish_code = "echo $(whoami)\n`date`\n";
+        let result = layer.scan_with_options(
+            shellish_code,
+            CheckDirection::Input,
+            &ScanOptions {
+                ignored_policy_rules: &["shell_injection"],
+            },
+        );
+        assert!(
+            !result.blocked,
+            "ignoring shell_injection should allow code-like content through"
+        );
+
+        let private_key = "echo $(whoami)\n-----BEGIN PRIVATE KEY-----\nabc\n";
+        let result = layer.scan_with_options(
+            private_key,
+            CheckDirection::Input,
+            &ScanOptions {
+                ignored_policy_rules: &["shell_injection"],
+            },
+        );
+        assert!(
+            result.blocked,
+            "other blocking checks must still apply when shell_injection is ignored"
+        );
     }
 
     #[test]
