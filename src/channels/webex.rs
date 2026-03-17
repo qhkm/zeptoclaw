@@ -78,9 +78,9 @@
 //! # Configuration
 //!
 //! ## Webhook Mode Configuration
-//! 
+//!
 //! Add this to your `~/.zeptoclaw/config.json`:
-//! 
+//!
 //! ```json
 //! {
 //!   "channels": {
@@ -123,7 +123,7 @@
 //! - `mentioned_messages_only`: Only process messages that mention the bot (default: true)
 //!
 //! # Creating a Webex Bot
-//! 
+//!
 //! 1. Go to <https://developer.webex.com/>
 //! 2. Sign in with your Webex account
 //! 3. Navigate to "My Webex Apps" → "Create a New App"
@@ -135,26 +135,26 @@
 //!    - Description
 //! 6. Click "Add Bot"
 //! 7. Copy the **Bot Access Token** (this is your `access_token`)
-//! 
+//!
 //! # Webhook Mode Setup
-//! 
+//!
 //! ## Option 1: Public Webhook (Recommended for Production)
-//! 
+//!
 //! 1. You need a publicly accessible URL (e.g., `https://yourdomain.com/webhook`)
 //! 2. Set `webhook_url` to your public URL
 //! 3. Set a `webhook_secret` for signature verification
 //! 4. Configure `bind_address` and `port` for the local server
-//! 
+//!
 //! ## Option 2: Development with ngrok
-//! 
+//!
 //! ```bash
 //! # Terminal 1: Start zeptoclaw gateway
 //! zeptoclaw gateway --config ~/.zeptoclaw/config.json
-//! 
+//!
 //! # Terminal 2: Expose with ngrok
 //! ngrok http 8084
 //! ```
-//! 
+//!
 //! Then update your config:
 //! ```json
 //! {
@@ -224,11 +224,11 @@
 //! - You need instant responses (use webhook mode)
 //! - You have many active rooms (high API usage)
 //! - You have a public endpoint available
-//! 
+//!
 //! # Security Settings
-//! 
+//!
 //! ## Allow Specific Users Only
-//! 
+//!
 //! ```json
 //! {
 //!   "channels": {
@@ -242,15 +242,15 @@
 //!   }
 //! }
 //! ```
-//! 
+//!
 //! To find a person ID:
 //! - Go to <https://developer.webex.com/docs/api/v1/people/list-people>
 //! - Use the API to search by email
-//! 
+//!
 //! ## Webhook Signature Verification
-//! 
+//!
 //! Always set a `webhook_secret` in production:
-//! 
+//!
 //! ```json
 //! {
 //!   "channels": {
@@ -260,32 +260,32 @@
 //!   }
 //! }
 //! ```
-//! 
+//!
 //! # Testing Your Bot
-//! 
+//!
 //! 1. Add your bot to a Webex space
 //! 2. Send a message: `@YourBot hello`
 //! 3. Check zeptoclaw logs for incoming webhooks
 //! 4. The bot should respond according to your agent configuration
-//! 
+//!
 //! # Troubleshooting
-//! 
+//!
 //! ## Bot doesn't receive messages
 //! - Check that `webhook_url` is publicly accessible
 //! - Verify the URL in Webex Developer portal (Webhooks section)
 //! - Check zeptoclaw logs for webhook errors
 //! - Ensure port is not blocked by firewall
-//! 
+//!
 //! ## Invalid signature errors
 //! - Verify `webhook_secret` matches what you configured in Webex
 //! - Check if the secret has special characters (URL-encode if needed)
-//! 
+//!
 //! ## Bot responds to its own messages
 //! - This is prevented automatically by checking bot ID
 //! - If you see loops, check the logs
-//! 
+//!
 //! # Features Supported
-//! 
+//!
 //! **Both Modes (Webhook & Polling):**
 //! - ✅ Sending Messages - Text responses via REST API
 //! - ✅ Receiving Messages - Via webhooks or polling  
@@ -301,9 +301,9 @@
 //! **Polling Mode Only:**
 //! - ✅ Message deduplication - Prevents processing same message multiple times
 //! - ✅ Firewall friendly - Works behind NAT/firewalls
-//! 
+//!
 //! # Example Full Configuration
-//! 
+//!
 //! ## Webhook Mode (Production)
 //!
 //! ```json
@@ -362,17 +362,17 @@
 //!   }
 //! }
 //! ```
-//! 
+//!
 //! # Next Steps
-//! 
+//!
 //! 1. Create your bot at <https://developer.webex.com/>
 //! 2. Get the access token
 //! 3. Update your config.json (choose webhook or polling mode)
 //! 4. Start zeptoclaw: `zeptoclaw gateway --config ~/.zeptoclaw/config.json`
 //! 5. Add bot to a Webex space and test by mentioning it: `@YourBot hello`
-//! 
+//!
 //! # Additional Resources
-//! 
+//!
 //! For more information, see:
 //! - Webex Bot Documentation: <https://developer.webex.com/docs/bots>
 //! - Webex Webhooks Guide: <https://developer.webex.com/docs/api/guides/webhooks>
@@ -420,7 +420,7 @@ struct WebexRoom {
     title: String,
     #[serde(rename = "type")]
     #[serde(default)]
-    room_type: String,  // "direct" or "group"
+    room_type: String, // "direct" or "group"
 }
 
 /// Parsed HTTP request structure
@@ -623,8 +623,9 @@ impl WebexChannel {
     /// Get bot's own user ID
     async fn get_bot_id(&self) -> Result<String> {
         let url = format!("{}{}", WEBEX_API_BASE, WEBEX_PEOPLE_ENDPOINT);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .get(&url)
             .bearer_auth(&self.config.access_token)
             .send()
@@ -652,7 +653,7 @@ impl WebexChannel {
     /// Register webhook with Webex
     async fn register_webhook(&self, webhook_url: &str) -> Result<String> {
         let url = format!("{}{}", WEBEX_API_BASE, WEBEX_WEBHOOKS_ENDPOINT);
-        
+
         let mut webhook = serde_json::json!({
             "name": format!("Zeptoclaw-{}", uuid::Uuid::new_v4()),
             "targetUrl": webhook_url,
@@ -664,7 +665,8 @@ impl WebexChannel {
             webhook["secret"] = serde_json::json!(secret);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .bearer_auth(&self.config.access_token)
             .json(&webhook)
@@ -686,15 +688,22 @@ impl WebexChannel {
             .await
             .map_err(|e| ZeptoError::Channel(format!("Failed to parse webhook response: {}", e)))?;
 
-        info!("Registered Webex webhook: {} -> {}", created.id, webhook_url);
+        info!(
+            "Registered Webex webhook: {} -> {}",
+            created.id, webhook_url
+        );
         Ok(created.id)
     }
 
     /// Delete webhook
     async fn delete_webhook(&self, webhook_id: &str) -> Result<()> {
-        let url = format!("{}{}/{}", WEBEX_API_BASE, WEBEX_WEBHOOKS_ENDPOINT, webhook_id);
-        
-        let response = self.client
+        let url = format!(
+            "{}{}/{}",
+            WEBEX_API_BASE, WEBEX_WEBHOOKS_ENDPOINT, webhook_id
+        );
+
+        let response = self
+            .client
             .delete(&url)
             .bearer_auth(&self.config.access_token)
             .send()
@@ -702,7 +711,11 @@ impl WebexChannel {
             .map_err(|e| ZeptoError::Channel(format!("Failed to delete webhook: {}", e)))?;
 
         if !response.status().is_success() {
-            warn!("Failed to delete Webex webhook {}: HTTP {}", webhook_id, response.status());
+            warn!(
+                "Failed to delete Webex webhook {}: HTTP {}",
+                webhook_id,
+                response.status()
+            );
         } else {
             info!("Deleted Webex webhook: {}", webhook_id);
         }
@@ -724,7 +737,10 @@ impl WebexChannel {
     async fn process_webhook(&self, payload: WebexWebhookPayload) -> Result<()> {
         // Only handle message creation events
         if payload.resource != "messages" || payload.event != "created" {
-            debug!("Ignoring non-message webhook: {} {}", payload.resource, payload.event);
+            debug!(
+                "Ignoring non-message webhook: {} {}",
+                payload.resource, payload.event
+            );
             return Ok(());
         }
 
@@ -748,7 +764,9 @@ impl WebexChannel {
         }
 
         // Extract message text (prefer text over markdown)
-        let content = data.text.clone()
+        let content = data
+            .text
+            .clone()
             .or_else(|| data.markdown.clone())
             .unwrap_or_default();
 
@@ -766,26 +784,29 @@ impl WebexChannel {
             }
         }
 
-        let mut inbound_msg = InboundMessage::new(
-            "webex",
-            &data.person_id,
-            &data.room_id,
-            &content,
-        );
+        let mut inbound_msg =
+            InboundMessage::new("webex", &data.person_id, &data.room_id, &content);
         inbound_msg.media = attachments;
-        inbound_msg.metadata.insert("person_email".to_string(), data.person_email.clone());
-        inbound_msg.metadata.insert("room_type".to_string(), data.room_type.clone());
+        inbound_msg
+            .metadata
+            .insert("person_email".to_string(), data.person_email.clone());
+        inbound_msg
+            .metadata
+            .insert("room_type".to_string(), data.room_type.clone());
         if let Ok(raw) = serde_json::to_string(&data) {
-            inbound_msg.metadata.insert("raw_webhook_data".to_string(), raw);
+            inbound_msg
+                .metadata
+                .insert("raw_webhook_data".to_string(), raw);
         }
 
-        self.bus.publish_inbound(inbound_msg).await;
+        let _ = self.bus.publish_inbound(inbound_msg).await;
         Ok(())
     }
 
     /// Download file from Webex
     async fn download_file(&self, file_url: &str) -> Result<MediaAttachment> {
-        let response = self.client
+        let response = self
+            .client
             .get(file_url)
             .bearer_auth(&self.config.access_token)
             .send()
@@ -839,8 +860,9 @@ impl WebexChannel {
     /// Fetch all rooms the bot is in
     async fn get_rooms(&self) -> Result<Vec<WebexRoom>> {
         let url = format!("{}/rooms", WEBEX_API_BASE);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .get(&url)
             .bearer_auth(&self.config.access_token)
             .query(&[("max", "100")])
@@ -866,23 +888,30 @@ impl WebexChannel {
     }
 
     /// Poll for new messages in a specific room
-    async fn poll_room_messages(&self, room_id: &str, is_direct: bool) -> Result<Vec<WebexMessageData>> {
+    async fn poll_room_messages(
+        &self,
+        room_id: &str,
+        is_direct: bool,
+    ) -> Result<Vec<WebexMessageData>> {
         let url = format!("{}{}", WEBEX_API_BASE, WEBEX_MESSAGES_ENDPOINT);
-        
-        let bot_id = self.bot_id.as_ref()
+
+        let bot_id = self
+            .bot_id
+            .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Bot ID not set".to_string()))?;
-        
-        let mut request = self.client
+
+        let mut request = self
+            .client
             .get(&url)
             .bearer_auth(&self.config.access_token)
             .query(&[("roomId", room_id)]);
-        
+
         // For group spaces, only get messages that mention the bot
         // For direct messages, get all messages
         if !is_direct {
             request = request.query(&[("mentionedPeople", bot_id.as_str())]);
         }
-        
+
         let response = request
             .query(&[("max", "50")])
             .send()
@@ -891,17 +920,18 @@ impl WebexChannel {
 
         if !response.status().is_success() {
             let status = response.status();
-            
+
             // Handle rate limiting
             if status.as_u16() == 429 {
-                let retry_after = response.headers()
+                let retry_after = response
+                    .headers()
                     .get("Retry-After")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(60);
                 warn!("Rate limited, should retry after {} seconds", retry_after);
             }
-            
+
             let error_text = response.text().await.unwrap_or_default();
             return Err(ZeptoError::Channel(format!(
                 "Webex API error ({}): {}",
@@ -921,9 +951,9 @@ impl WebexChannel {
     async fn poll_messages(&self) -> Result<Vec<WebexMessageData>> {
         // Get all rooms the bot is in
         let rooms = self.get_rooms().await?;
-        
+
         let mut all_messages = Vec::new();
-        
+
         // Poll each room for messages
         for room in rooms {
             let is_direct = room.room_type == "direct";
@@ -938,7 +968,7 @@ impl WebexChannel {
                 }
             }
         }
-        
+
         Ok(all_messages)
     }
 
@@ -956,8 +986,10 @@ impl WebexChannel {
         if let Some(startup_time) = *self.startup_time.lock().await {
             if let Ok(msg_time) = chrono::DateTime::parse_from_rfc3339(&data.created) {
                 if msg_time.with_timezone(&Utc) < startup_time {
-                    debug!("Skipping historical message: {} from {} (created before startup)", 
-                           data.id, data.person_email);
+                    debug!(
+                        "Skipping historical message: {} from {} (created before startup)",
+                        data.id, data.person_email
+                    );
                     return Ok(());
                 }
             }
@@ -966,14 +998,20 @@ impl WebexChannel {
         // Check if we've already processed this message
         let mut processed_ids = self.processed_message_ids.lock().await;
         if processed_ids.contains(&data.id) {
-            debug!("Skipping already-processed message: {} from {}", data.id, data.person_email);
+            debug!(
+                "Skipping already-processed message: {} from {}",
+                data.id, data.person_email
+            );
             return Ok(());
         }
 
         // Mark message as processed
-        info!("Processing NEW message: {} from {}", data.id, data.person_email);
+        info!(
+            "Processing NEW message: {} from {}",
+            data.id, data.person_email
+        );
         processed_ids.insert(data.id.clone());
-        
+
         // Keep the set from growing indefinitely - keep last 1000 message IDs
         if processed_ids.len() > 1000 {
             // Remove oldest half (crude but effective)
@@ -991,7 +1029,9 @@ impl WebexChannel {
         }
 
         // Extract message text (prefer text over markdown)
-        let content = data.text.clone()
+        let content = data
+            .text
+            .clone()
             .or_else(|| data.markdown.clone())
             .unwrap_or_default();
 
@@ -999,7 +1039,10 @@ impl WebexChannel {
             return Ok(());
         }
 
-        info!("Webex message from {} (room_type={}): {}", data.person_email, data.room_type, content);
+        info!(
+            "Webex message from {} (room_type={}): {}",
+            data.person_email, data.room_type, content
+        );
 
         // Process file attachments
         let mut attachments = Vec::new();
@@ -1010,31 +1053,39 @@ impl WebexChannel {
             }
         }
 
-        let mut inbound_msg = InboundMessage::new(
-            "webex",
-            &data.person_id,
-            &data.room_id,
-            &content,
-        );
+        let mut inbound_msg =
+            InboundMessage::new("webex", &data.person_id, &data.room_id, &content);
         inbound_msg.media = attachments;
-        inbound_msg.metadata.insert("person_email".to_string(), data.person_email.clone());
-        inbound_msg.metadata.insert("room_type".to_string(), data.room_type.clone());
+        inbound_msg
+            .metadata
+            .insert("person_email".to_string(), data.person_email.clone());
+        inbound_msg
+            .metadata
+            .insert("room_type".to_string(), data.room_type.clone());
         if let Ok(raw) = serde_json::to_string(&data) {
-            inbound_msg.metadata.insert("raw_message_data".to_string(), raw);
+            inbound_msg
+                .metadata
+                .insert("raw_message_data".to_string(), raw);
         }
 
-        self.bus.publish_inbound(inbound_msg).await;
+        let _ = self.bus.publish_inbound(inbound_msg).await;
         Ok(())
     }
 
     /// Start message polling loop
     async fn start_polling(&mut self) -> Result<mpsc::Sender<()>> {
-        info!("Webex channel using polling mode (interval: {}s)", self.config.poll_interval_secs);
+        info!(
+            "Webex channel using polling mode (interval: {}s)",
+            self.config.poll_interval_secs
+        );
 
         // Record startup time - only process messages created after this
         let startup_time = Utc::now();
         *self.startup_time.lock().await = Some(startup_time);
-        info!("Webex polling will ignore messages before {}", startup_time.to_rfc3339());
+        info!(
+            "Webex polling will ignore messages before {}",
+            startup_time.to_rfc3339()
+        );
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -1096,7 +1147,10 @@ impl WebexChannel {
 
     /// Start webhook HTTP server
     async fn start_webhook_server(&mut self) -> Result<mpsc::Sender<()>> {
-        let webhook_url = self.config.webhook_url.as_ref()
+        let webhook_url = self
+            .config
+            .webhook_url
+            .as_ref()
             .ok_or_else(|| ZeptoError::Channel("webhook_url is required".to_string()))?
             .clone();
 
@@ -1181,7 +1235,9 @@ impl WebexChannel {
 
     async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<()> {
         let mut buffer = vec![0u8; 8192];
-        let n = socket.read(&mut buffer).await
+        let n = socket
+            .read(&mut buffer)
+            .await
             .map_err(|e| ZeptoError::Channel(format!("Failed to read request: {}", e)))?;
 
         if n == 0 {
@@ -1255,7 +1311,7 @@ impl Channel for WebexChannel {
             // Polling mode
             self.start_polling().await?
         };
-        
+
         self.shutdown_tx = Some(shutdown_tx);
         self.running.store(true, Ordering::SeqCst);
         info!("Webex channel started");
@@ -1294,12 +1350,15 @@ impl Channel for WebexChannel {
         let room_type = msg.metadata.get("room_type");
         let sender_id = msg.metadata.get("sender_id");
         let sender_email = msg.metadata.get("sender_email");
-        
-        debug!("Sending to room_type={:?}, sender_id={:?}", room_type, sender_id);
-        
+
+        debug!(
+            "Sending to room_type={:?}, sender_id={:?}",
+            room_type, sender_id
+        );
+
         let (text, html) = if room_type.map(|s| s.as_str()) == Some("group") {
             // For group spaces, mention the user in the response
-            if let (Some(person_id), Some(email)) = (sender_id, sender_email)  {
+            if let (Some(person_id), Some(email)) = (sender_id, sender_email) {
                 let display_name = email.split('@').next().unwrap_or(email);
                 let html_content = format!(
                     "<spark-mention data-object-type=\"person\" data-object-id=\"{}\">{}</spark-mention> {}",
@@ -1324,7 +1383,8 @@ impl Channel for WebexChannel {
             parent_id: msg.reply_to.clone(),
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .bearer_auth(&self.config.access_token)
             .json(&outbound)

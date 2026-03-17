@@ -1138,7 +1138,7 @@ fn default_webex_port() -> u16 {
 }
 
 fn default_webex_poll_interval() -> u64 {
-    15  // Poll every 15 seconds to avoid rate limiting
+    15 // Poll every 15 seconds to avoid rate limiting
 }
 
 /// WhatsApp Cloud API channel configuration (official Meta API).

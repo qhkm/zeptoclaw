@@ -14,7 +14,9 @@ use super::lark::LarkChannel;
 use super::plugin::{default_channel_plugins_dir, discover_channel_plugins, ChannelPluginAdapter};
 use super::webhook::{WebhookChannel, WebhookChannelConfig};
 use super::WhatsAppCloudChannel;
-use super::{BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel, WebexChannel};
+use super::{
+    BaseChannelConfig, ChannelManager, DiscordChannel, SlackChannel, TelegramChannel, WebexChannel,
+};
 
 /// Register all configured channels that currently have implementations.
 ///

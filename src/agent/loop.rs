@@ -233,16 +233,22 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
             .metadata
             .insert("telegram_thread_id".to_string(), tid.clone());
     }
-    
+
     // Webex metadata for mentions and routing
     if let Some(room_type) = inbound.metadata.get("room_type") {
-        outbound.metadata.insert("room_type".to_string(), room_type.clone());
+        outbound
+            .metadata
+            .insert("room_type".to_string(), room_type.clone());
     }
     if let Some(person_email) = inbound.metadata.get("person_email") {
-        outbound.metadata.insert("sender_email".to_string(), person_email.clone());
+        outbound
+            .metadata
+            .insert("sender_email".to_string(), person_email.clone());
     }
     // Copy sender_id from inbound message
-    outbound.metadata.insert("sender_id".to_string(), inbound.sender_id.clone());
+    outbound
+        .metadata
+        .insert("sender_id".to_string(), inbound.sender_id.clone());
 }
 
 /// Convert an inbound message with optional media attachments into a session Message.
