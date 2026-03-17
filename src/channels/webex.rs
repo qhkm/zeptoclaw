@@ -1,12 +1,382 @@
 //! Webex channel implementation.
 //!
-//! Supports:
-//! - Outbound messaging via Webex REST API (`POST /messages`)
-//! - Inbound messaging via Webex Webhooks (requires public HTTPS endpoint)
-//! - Inbound messaging via Message Polling (no webhook needed, works behind firewall)
+//! # About Webex
+//!
+//! Webex (formerly Cisco Webex Teams) is an enterprise collaboration platform that provides
+//! messaging, video conferencing, and file sharing. The Webex Messaging API allows bots to
+//! send and receive messages in Webex spaces (rooms), enabling automated interactions and
+//! integrations with external services.
+//!
+//! This implementation uses the official Webex REST API to enable zeptoclaw agents to
+//! interact with users through Webex.
+//!
+//! # Implementation Modes
+//!
+//! This module implements both webhook and polling modes for receiving messages from Webex.
+//!
+//! Zeptoclaw supports **two different modes** for receiving messages from Webex:
+//!
+//! ## 1. Webhook Mode (Recommended for Production)
+//!
+//! Webex pushes messages to your server via HTTP webhooks.
+//!
+//! **How it works:**
+//! - Starts an HTTP server listening for Webex webhook events
+//! - Real-time message delivery when webhook fires
+//! - Requires public HTTPS endpoint and webhook registration
+//!
+//! **Pros:**
+//! - Real-time message delivery (immediate responses)
+//! - Lower resource usage (event-driven)
+//! - Official Webex recommendation
+//!
+//! **Cons:**
+//! - Requires publicly accessible HTTPS endpoint
+//! - Needs webhook registration
+//! - More complex firewall configuration
+//!
+//! **Use when:** You have a public server or reverse proxy (e.g., nginx, ngrok)
+//!
+//! ## 2. Polling Mode
+//!
+//! Zeptoclaw periodically polls the Webex API for new messages.
+//!
+//! **TODO:** Implement real WebSocket mode using Webex Mercury protocol for true persistent connections
+//! instead of polling. Mercury provides bidirectional real-time communication without requiring a public
+//! endpoint, combining the benefits of both webhook and polling modes.
+//!
+//! **How it works:**
+//! - Runs a background task that periodically fetches new messages
+//! - Polls all rooms the bot is a member of
+//! - Automatically filters mentioned messages in group spaces
+//!
+//! **Pros:**
+//! - Works behind firewalls/NAT
+//! - No public endpoint needed
+//! - Easier for development/testing
+//! - Automatic message deduplication
+//!
+//! **Cons:**
+//! - Slight delay in responses (polling interval)
+//! - Higher API usage
+//! - More resource intensive
+//!
+//! **Use when:** You're behind a firewall or don't have a public IP
+//!
+//! ## Common Features (Both Modes)
+//!
+//! Both modes support:
+//! - Message deduplication (prevents processing the same message twice)
+//! - User allowlisting (restrict bot access to specific users)
+//! - File attachments (downloads and processes files from messages)
+//! - Markdown formatting in responses
+//! - Room type detection (1:1 vs group spaces)
+//!
+//! Based on Cisco Webex Teams/Messaging API  
+//! Reference: <https://developer.webex.com/docs/api/basics>
+//!
+//! # Configuration
+//!
+//! ## Webhook Mode Configuration
 //! 
-//! Based on Cisco Webex Teams/Messaging API
-//! Reference: https://developer.webex.com/docs/api/basics
+//! Add this to your `~/.zeptoclaw/config.json`:
+//! 
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "enabled": true,
+//!       "access_token": "YOUR_WEBEX_BOT_ACCESS_TOKEN",
+//!       "webhook_url": "https://yourdomain.com/webhook",
+//!       "webhook_secret": "optional-but-recommended-secret",
+//!       "bind_address": "0.0.0.0",
+//!       "port": 8084,
+//!       "allow_from": [],
+//!       "deny_by_default": false
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! ## Polling Mode Configuration
+//!
+//! For polling mode, omit `webhook_url` or set `polling_enabled` to true:
+//!
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "enabled": true,
+//!       "access_token": "YOUR_WEBEX_BOT_ACCESS_TOKEN",
+//!       "polling_enabled": true,
+//!       "polling_interval_secs": 15,
+//!       "allow_from": [],
+//!       "deny_by_default": false
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! **Configuration Options:**
+//! - `polling_enabled`: Set to `true` to enable polling mode (default: auto-enabled if no webhook_url)
+//! - `polling_interval_secs`: How often to check for new messages in seconds (default: 15)
+//! - `mentioned_messages_only`: Only process messages that mention the bot (default: true)
+//!
+//! # Creating a Webex Bot
+//! 
+//! 1. Go to <https://developer.webex.com/>
+//! 2. Sign in with your Webex account
+//! 3. Navigate to "My Webex Apps" → "Create a New App"
+//! 4. Select "Create a Bot"
+//! 5. Fill in:
+//!    - Bot name
+//!    - Bot username
+//!    - Icon (optional)
+//!    - Description
+//! 6. Click "Add Bot"
+//! 7. Copy the **Bot Access Token** (this is your `access_token`)
+//! 
+//! # Webhook Mode Setup
+//! 
+//! ## Option 1: Public Webhook (Recommended for Production)
+//! 
+//! 1. You need a publicly accessible URL (e.g., `https://yourdomain.com/webhook`)
+//! 2. Set `webhook_url` to your public URL
+//! 3. Set a `webhook_secret` for signature verification
+//! 4. Configure `bind_address` and `port` for the local server
+//! 
+//! ## Option 2: Development with ngrok
+//! 
+//! ```bash
+//! # Terminal 1: Start zeptoclaw gateway
+//! zeptoclaw gateway --config ~/.zeptoclaw/config.json
+//! 
+//! # Terminal 2: Expose with ngrok
+//! ngrok http 8084
+//! ```
+//! 
+//! Then update your config:
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "webhook_url": "https://YOUR-NGROK-ID.ngrok.io/webhook",
+//!       "port": 8084
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! # Polling Mode Setup
+//!
+//! Polling mode is ideal when you cannot expose a public endpoint or are behind a firewall.
+//!
+//! ## Step-by-Step Setup
+//!
+//! 1. **Create your bot** (see "Creating a Webex Bot" section above)
+//! 2. **Configure polling mode** in your `~/.zeptoclaw/config.json`:
+//!
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "enabled": true,
+//!       "access_token": "YOUR_WEBEX_BOT_ACCESS_TOKEN",
+//!       "polling_enabled": true,
+//!       "polling_interval_secs": 15,
+//!       "mentioned_messages_only": true
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! 3. **Start zeptoclaw**:
+//!
+//! ```bash
+//! zeptoclaw gateway --config ~/.zeptoclaw/config.json
+//! ```
+//!
+//! 4. **Add bot to a Webex space** and start chatting!
+//!
+//! ## How It Works
+//!
+//! - Zeptoclaw polls the Webex API every `polling_interval_secs` seconds
+//! - In group spaces, only messages that @mention the bot are processed (configurable)
+//! - In direct messages, all messages are processed
+//! - Message deduplication prevents processing the same message twice
+//! - Historical messages (sent before bot startup) are automatically ignored
+//!
+//! ## Tuning Performance
+//!
+//! - **Lower interval (5-10s)**: Faster responses, higher API usage
+//! - **Higher interval (15-30s)**: Slower responses, lower API usage
+//! - **mentioned_messages_only**: Set to `false` to process all messages in group spaces
+//!
+//! ## When to Use Polling Mode
+//!
+//! ✅ **Use polling when:**
+//! - You're behind a corporate firewall
+//! - You don't have a public IP address
+//! - You're testing/developing locally
+//! - You can't configure webhooks
+//!
+//! ❌ **Avoid polling when:**
+//! - You need instant responses (use webhook mode)
+//! - You have many active rooms (high API usage)
+//! - You have a public endpoint available
+//! 
+//! # Security Settings
+//! 
+//! ## Allow Specific Users Only
+//! 
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "allow_from": [
+//!         "user1@company.com-person-id",
+//!         "user2@company.com-person-id"
+//!       ],
+//!       "deny_by_default": true
+//!     }
+//!   }
+//! }
+//! ```
+//! 
+//! To find a person ID:
+//! - Go to <https://developer.webex.com/docs/api/v1/people/list-people>
+//! - Use the API to search by email
+//! 
+//! ## Webhook Signature Verification
+//! 
+//! Always set a `webhook_secret` in production:
+//! 
+//! ```json
+//! {
+//!   "channels": {
+//!     "webex": {
+//!       "webhook_secret": "your-random-secret-string-here"
+//!     }
+//!   }
+//! }
+//! ```
+//! 
+//! # Testing Your Bot
+//! 
+//! 1. Add your bot to a Webex space
+//! 2. Send a message: `@YourBot hello`
+//! 3. Check zeptoclaw logs for incoming webhooks
+//! 4. The bot should respond according to your agent configuration
+//! 
+//! # Troubleshooting
+//! 
+//! ## Bot doesn't receive messages
+//! - Check that `webhook_url` is publicly accessible
+//! - Verify the URL in Webex Developer portal (Webhooks section)
+//! - Check zeptoclaw logs for webhook errors
+//! - Ensure port is not blocked by firewall
+//! 
+//! ## Invalid signature errors
+//! - Verify `webhook_secret` matches what you configured in Webex
+//! - Check if the secret has special characters (URL-encode if needed)
+//! 
+//! ## Bot responds to its own messages
+//! - This is prevented automatically by checking bot ID
+//! - If you see loops, check the logs
+//! 
+//! # Features Supported
+//! 
+//! **Both Modes (Webhook & Polling):**
+//! - ✅ Sending Messages - Text responses via REST API
+//! - ✅ Receiving Messages - Via webhooks or polling  
+//! - ✅ File Attachments - Download and process files
+//! - ✅ Room Detection - Works in 1:1 and group spaces
+//! - ✅ User Mentions - Detect when bot is mentioned
+//! - ✅ Allowlist - Restrict access by person ID
+//!
+//! **Webhook Mode Only:**
+//! - ✅ Signature Verification - HMAC-SHA1 webhook security
+//! - ✅ Real-time delivery - Instant message processing
+//!
+//! **Polling Mode Only:**
+//! - ✅ Message deduplication - Prevents processing same message multiple times
+//! - ✅ Firewall friendly - Works behind NAT/firewalls
+//! 
+//! # Example Full Configuration
+//! 
+//! ## Webhook Mode (Production)
+//!
+//! ```json
+//! {
+//!   "agents": {
+//!     "defaults": {
+//!       "model": "gpt-4",
+//!       "max_tokens": 16384
+//!     }
+//!   },
+//!   "channels": {
+//!     "webex": {
+//!       "enabled": true,
+//!       "access_token": "YzJh...your-long-token...M2Y",
+//!       "webhook_url": "https://mybot.example.com/webhook",
+//!       "webhook_secret": "super-secret-signature-key",
+//!       "bind_address": "0.0.0.0",
+//!       "port": 8084,
+//!       "allow_from": [],
+//!       "deny_by_default": false
+//!     }
+//!   },
+//!   "providers": {
+//!     "openai": {
+//!       "api_key": "sk-..."
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! ## Polling Mode (Development/Behind Firewall)
+//!
+//! ```json
+//! {
+//!   "agents": {
+//!     "defaults": {
+//!       "model": "gpt-4",
+//!       "max_tokens": 16384
+//!     }
+//!   },
+//!   "channels": {
+//!     "webex": {
+//!       "enabled": true,
+//!       "access_token": "YzJh...your-long-token...M2Y",
+//!       "polling_enabled": true,
+//!       "polling_interval_secs": 15,
+//!       "mentioned_messages_only": true,
+//!       "allow_from": [],
+//!       "deny_by_default": false
+//!     }
+//!   },
+//!   "providers": {
+//!     "openai": {
+//!       "api_key": "sk-..."
+//!     }
+//!   }
+//! }
+//! ```
+//! 
+//! # Next Steps
+//! 
+//! 1. Create your bot at <https://developer.webex.com/>
+//! 2. Get the access token
+//! 3. Update your config.json (choose webhook or polling mode)
+//! 4. Start zeptoclaw: `zeptoclaw gateway --config ~/.zeptoclaw/config.json`
+//! 5. Add bot to a Webex space and test by mentioning it: `@YourBot hello`
+//! 
+//! # Additional Resources
+//! 
+//! For more information, see:
+//! - Webex Bot Documentation: <https://developer.webex.com/docs/bots>
+//! - Webex Webhooks Guide: <https://developer.webex.com/docs/api/guides/webhooks>
+//! - Webex Messages API: <https://developer.webex.com/docs/api/v1/messages>
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
