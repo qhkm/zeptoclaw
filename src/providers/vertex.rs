@@ -1,11 +1,13 @@
 //! Google Vertex AI provider.
 //!
 //! Uses the same `generateContent` request/response format as the Gemini
-//! provider, but routes through the Vertex AI regional endpoint with bearer
-//! token authentication instead of API-key auth.
+//! provider, but routes through the Vertex AI regional endpoint with
+//! Application Default Credentials (ADC) for automatic token lifecycle.
 //!
-//! Auth: Bearer token from `VERTEX_ACCESS_TOKEN` env var (typically obtained
-//! via `gcloud auth print-access-token`).
+//! Auth priority:
+//! 1. `VERTEX_ACCESS_TOKEN` env var (manual bearer token, no refresh)
+//! 2. `GOOGLE_APPLICATION_CREDENTIALS` service account JSON (auto-refresh)
+//! 3. `gcloud auth application-default login` ADC (auto-refresh)
 //!
 //! Endpoint:
 //! `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`
@@ -13,6 +15,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
@@ -25,17 +28,38 @@ use super::{parse_provider_error, ChatOptions, LLMProvider, LLMResponse, ToolDef
 /// Default model when none is configured or passed at call time.
 const DEFAULT_VERTEX_MODEL: &str = "gemini-2.5-flash";
 
+/// OAuth scope required for Vertex AI API access.
+const VERTEX_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+/// Authentication method for Vertex AI.
+enum VertexAuth {
+    /// Static bearer token (from `VERTEX_ACCESS_TOKEN`). No auto-refresh.
+    Static(String),
+    /// ADC credential with automatic token refresh via `google-cloud-auth`.
+    Adc(Arc<google_cloud_auth::token::Token>),
+}
+
+impl std::fmt::Debug for VertexAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(_) => f.write_str("VertexAuth::Static([REDACTED])"),
+            Self::Adc(_) => f.write_str("VertexAuth::Adc"),
+        }
+    }
+}
+
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 /// Google Vertex AI provider that speaks the Gemini `generateContent` API
 /// through the Vertex AI regional endpoint.
 ///
-/// Use [`VertexProvider::new`] for explicit construction, or
-/// [`VertexProvider::from_config`] for config/env-var driven resolution.
+/// Supports both static bearer tokens and ADC with automatic refresh.
 pub struct VertexProvider {
     project_id: String,
     location: String,
-    bearer_token: String,
+    auth: VertexAuth,
     model: String,
     client: Client,
 }
@@ -45,31 +69,56 @@ impl std::fmt::Debug for VertexProvider {
         f.debug_struct("VertexProvider")
             .field("project_id", &self.project_id)
             .field("location", &self.location)
+            .field("auth", &self.auth)
             .field("model", &self.model)
             .finish()
     }
 }
 
 impl VertexProvider {
-    /// Build a provider with explicit parameters.
+    /// Build a provider with a static bearer token.
     pub fn new(project_id: &str, location: &str, bearer_token: &str, model: &str) -> Self {
         Self {
             project_id: project_id.to_string(),
             location: location.to_string(),
-            bearer_token: bearer_token.to_string(),
+            auth: VertexAuth::Static(bearer_token.to_string()),
             model: model.to_string(),
             client: Self::build_client(),
         }
     }
 
+    /// Build a provider with ADC (Application Default Credentials).
+    ///
+    /// The token is automatically refreshed before expiry by `google-cloud-auth`.
+    pub async fn with_adc(project_id: &str, location: &str, model: &str) -> Result<Self> {
+        let cred = google_cloud_auth::token::DefaultTokenProvider::new(
+            google_cloud_auth::token::DefaultTokenProviderConfig::default()
+                .with_scopes(vec![VERTEX_SCOPE]),
+        )
+        .await
+        .map_err(|e| ZeptoError::Provider(format!("Vertex AI ADC init failed: {e}")))?;
+
+        Ok(Self {
+            project_id: project_id.to_string(),
+            location: location.to_string(),
+            auth: VertexAuth::Adc(Arc::new(cred)),
+            model: model.to_string(),
+            client: Self::build_client(),
+        })
+    }
+
     /// Build from config and environment variables.
     ///
     /// Resolution priority:
-    /// - **Project ID**: `api_key` config field -> `GOOGLE_CLOUD_PROJECT` -> `VERTEX_PROJECT_ID`
-    /// - **Location**: `api_base` config field -> `GOOGLE_CLOUD_LOCATION` -> `VERTEX_LOCATION` -> `us-central1`
-    /// - **Bearer token**: `VERTEX_ACCESS_TOKEN` env var
-    /// - **Model**: config model field -> `gemini-2.5-flash`
-    pub fn from_config(api_key: Option<&str>, api_base: Option<&str>, model: &str) -> Option<Self> {
+    /// - **Project ID**: `api_key` config → `GOOGLE_CLOUD_PROJECT` → `VERTEX_PROJECT_ID`
+    /// - **Location**: `api_base` config → `GOOGLE_CLOUD_LOCATION` → `VERTEX_LOCATION` → `us-central1`
+    /// - **Auth**: `VERTEX_ACCESS_TOKEN` (static) → ADC (auto-refresh)
+    /// - **Model**: config model → `gemini-2.5-flash`
+    pub async fn from_config(
+        api_key: Option<&str>,
+        api_base: Option<&str>,
+        model: &str,
+    ) -> Option<Self> {
         // Resolve project ID
         let project_id = api_key
             .filter(|k| !k.is_empty())
@@ -85,24 +134,28 @@ impl VertexProvider {
             .or_else(|| std::env::var("VERTEX_LOCATION").ok())
             .unwrap_or_else(|| "us-central1".to_string());
 
-        // Bearer token is required
-        let bearer_token = std::env::var("VERTEX_ACCESS_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty())?;
-
         let model = if model.is_empty() {
             DEFAULT_VERTEX_MODEL
         } else {
             model
         };
 
-        Some(Self {
-            project_id,
-            location,
-            bearer_token,
-            model: model.to_string(),
-            client: Self::build_client(),
-        })
+        // Try static token first (backward compat), then ADC
+        if let Some(token) = std::env::var("VERTEX_ACCESS_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+        {
+            return Some(Self::new(&project_id, &location, &token, model));
+        }
+
+        // Fall back to ADC (service account JSON or gcloud default credentials)
+        match Self::with_adc(&project_id, &location, model).await {
+            Ok(provider) => Some(provider),
+            Err(e) => {
+                tracing::warn!("Vertex AI ADC not available: {e}");
+                None
+            }
+        }
     }
 
     fn build_client() -> Client {
@@ -110,6 +163,20 @@ impl VertexProvider {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("failed to build HTTP client")
+    }
+
+    /// Get a valid bearer token, refreshing if needed for ADC.
+    async fn get_token(&self) -> Result<String> {
+        match &self.auth {
+            VertexAuth::Static(token) => Ok(token.clone()),
+            VertexAuth::Adc(cred) => {
+                let token = cred
+                    .token()
+                    .await
+                    .map_err(|e| ZeptoError::Provider(format!("Vertex AI token refresh: {e}")))?;
+                Ok(token.access_token)
+            }
+        }
     }
 
     /// Build the full Vertex AI `generateContent` URL.
@@ -205,6 +272,7 @@ impl LLMProvider for VertexProvider {
     ) -> Result<LLMResponse> {
         let model = model.unwrap_or(&self.model);
         let body = self.build_messages_body(&messages, &options);
+        let token = self.get_token().await?;
 
         debug!("Vertex AI request to model {} in {}", model, self.location);
 
@@ -212,7 +280,7 @@ impl LLMProvider for VertexProvider {
             .client
             .post(self.api_url(model))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", format!("Bearer {}", token))
             .json(&body)
             .send()
             .await
@@ -272,7 +340,7 @@ mod tests {
             VertexProvider::new("my-project", "europe-west1", "token123", "gemini-2.5-pro");
         assert_eq!(provider.project_id, "my-project");
         assert_eq!(provider.location, "europe-west1");
-        assert_eq!(provider.bearer_token, "token123");
+        assert!(matches!(provider.auth, VertexAuth::Static(ref t) if t == "token123"));
         assert_eq!(provider.model, "gemini-2.5-pro");
     }
 
@@ -364,7 +432,6 @@ mod tests {
 
     #[test]
     fn test_extract_text_reuses_gemini_parser() {
-        // Verify we're correctly delegating to GeminiProvider::extract_text.
         let response = serde_json::json!({
             "candidates": [{
                 "content": {
@@ -381,7 +448,6 @@ mod tests {
 
     #[test]
     fn test_extract_usage_reuses_gemini_parser() {
-        // Verify we're correctly delegating to GeminiProvider::extract_usage.
         let response = serde_json::json!({
             "candidates": [{ "content": { "parts": [{ "text": "hi" }] } }],
             "usageMetadata": {
@@ -404,5 +470,20 @@ mod tests {
         let messages = vec![Message::user("Hello")];
         let body = provider.build_messages_body(&messages, &ChatOptions::default());
         assert!(body.get("systemInstruction").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_static() {
+        let provider = VertexProvider::new("p", "us-central1", "my-token", "m");
+        let token = provider.get_token().await.unwrap();
+        assert_eq!(token, "my-token");
+    }
+
+    #[test]
+    fn test_static_auth_debug_redacted() {
+        let auth = VertexAuth::Static("secret".to_string());
+        let debug = format!("{:?}", auth);
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("REDACTED"));
     }
 }

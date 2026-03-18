@@ -24,7 +24,7 @@ pub async fn build_provider_chain(
     config: &Config,
 ) -> Option<(Arc<dyn LLMProvider>, Vec<&'static str>)> {
     refresh_oauth_credentials_if_needed(config).await;
-    let (chain, names) = build_runtime_provider_chain(config)?;
+    let (chain, names) = build_runtime_provider_chain(config).await?;
     let chain = apply_retry_wrapper(chain, config);
     Some((Arc::from(chain), names))
 }
@@ -36,7 +36,7 @@ pub async fn build_provider_chain(
 /// presets.
 ///
 /// Moved from `cli/common.rs:139–199`.
-pub fn provider_from_runtime_selection(
+pub async fn provider_from_runtime_selection(
     selection: &RuntimeProviderSelection,
     configured_model: &str,
 ) -> Option<Box<dyn LLMProvider>> {
@@ -96,30 +96,23 @@ pub fn provider_from_runtime_selection(
         }
         "vertex" => {
             // For Vertex: api_key holds the GCP project ID, api_base holds the location.
-            let project_id = if selection.api_key.is_empty() {
-                std::env::var("GOOGLE_CLOUD_PROJECT")
-                    .or_else(|_| std::env::var("VERTEX_PROJECT_ID"))
-                    .ok()?
+            // Auth: VERTEX_ACCESS_TOKEN (static) → ADC (auto-refresh via google-cloud-auth).
+            let api_key = if selection.api_key.is_empty() {
+                None
             } else {
-                selection.api_key.clone()
+                Some(selection.api_key.as_str())
             };
-            let location = selection
+            let api_base = selection
                 .api_base
                 .as_deref()
-                .filter(|b| !b.is_empty())
-                .unwrap_or("us-central1");
-            let bearer_token = std::env::var("VERTEX_ACCESS_TOKEN").ok()?;
-            let model = if configured_model.is_empty() {
-                "gemini-2.5-flash"
-            } else {
-                configured_model
-            };
-            Some(Box::new(crate::providers::vertex::VertexProvider::new(
-                &project_id,
-                location,
-                &bearer_token,
-                model,
-            )))
+                .filter(|b| !b.is_empty());
+            crate::providers::vertex::VertexProvider::from_config(
+                api_key,
+                api_base,
+                configured_model,
+            )
+            .await
+            .map(|p| Box::new(p) as Box<dyn LLMProvider>)
         }
         _ => None,
     }
@@ -138,7 +131,7 @@ struct RuntimeProviderCandidate {
 /// chains them with `FallbackProvider` when `providers.fallback.enabled`.
 ///
 /// Moved from `cli/common.rs:251–315`.
-pub fn build_runtime_provider_chain(
+pub async fn build_runtime_provider_chain(
     config: &Config,
 ) -> Option<(Box<dyn LLMProvider>, Vec<&'static str>)> {
     let mut candidates: Vec<RuntimeProviderCandidate> = Vec::new();
@@ -148,7 +141,9 @@ pub fn build_runtime_provider_chain(
     let quota_store = Arc::new(crate::providers::QuotaStore::load_or_default());
 
     for selection in resolve_runtime_providers(config) {
-        if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
+        if let Some(provider) =
+            provider_from_runtime_selection(&selection, configured_model).await
+        {
             let quota =
                 provider_config_by_name(config, selection.name).and_then(|pc| pc.quota.clone());
             let provider =
