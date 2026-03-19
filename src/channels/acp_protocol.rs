@@ -61,6 +61,14 @@ pub struct ClientInfo {
     pub version: Option<String>,
 }
 
+/// Generate a new unique identifier for ACP sessions and client tokens.
+///
+/// All ACP ID generation goes through this function so the scheme can be
+/// swapped project-wide (e.g. to ULID) by changing only this one place.
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 /// initialize result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
@@ -72,6 +80,12 @@ pub struct InitializeResult {
     pub agent_info: Option<AgentInfo>,
     #[serde(rename = "authMethods", default)]
     pub auth_methods: Vec<serde_json::Value>,
+    /// Opaque client identifier assigned by the server during `initialize`.
+    /// HTTP clients must echo this back as the `X-Acp-Client-Id` request
+    /// header on every subsequent call so per-client initialization state
+    /// is correctly isolated across concurrent connections.
+    #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

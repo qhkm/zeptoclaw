@@ -162,7 +162,7 @@ impl AcpChannel {
         let cwd = params
             .and_then(|p| serde_json::from_value::<super::acp_protocol::SessionNewParams>(p).ok())
             .and_then(|p| p.cwd);
-        let session_id = format!("acp_{}", uuid::Uuid::new_v4().simple());
+        let session_id = format!("acp_{}", super::acp_protocol::new_id());
         {
             let mut state = self.state.lock().await;
             if !state.initialized {
@@ -724,6 +724,8 @@ impl AcpChannel {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             auth_methods: vec![],
+            // stdio is single-client; no per-connection token needed.
+            client_id: None,
         };
         let response =
             JsonRpcResponse {

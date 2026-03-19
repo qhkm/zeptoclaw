@@ -19,7 +19,7 @@
 //! independent from the stdio `"acp"` channel and the bus routes outbound
 //! messages to the correct transport.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,7 +92,14 @@ type PromptMap = Arc<Mutex<HashMap<String, oneshot::Sender<(String, bool)>>>>;
 
 /// Mutable per-channel ACP state shared between the accept loop and `send()`.
 struct AcpHttpState {
-    initialized: bool,
+    /// Client IDs that have completed the `initialize` handshake.
+    ///
+    /// Each HTTP client receives a unique ID from `initialize` (via the
+    /// `clientId` response field) and must echo it back as the
+    /// `X-Acp-Client-Id` request header on subsequent calls.  Using a set
+    /// here rather than a single bool isolates concurrent clients so that
+    /// one client's initialization does not satisfy another's guard check.
+    initialized_clients: HashSet<String>,
     /// Session IDs → working directory (from session/new params, None if not provided).
     sessions: HashMap<String, Option<String>>,
     /// Tracks in-flight session/prompt requests so `send()` can retrieve the
@@ -103,7 +110,7 @@ struct AcpHttpState {
 impl AcpHttpState {
     fn new() -> Self {
         Self {
-            initialized: false,
+            initialized_clients: HashSet::new(),
             sessions: HashMap::new(),
             pending: HashMap::new(),
         }
@@ -294,9 +301,10 @@ impl AcpHttpChannel {
                 );
             }
         }
+        let client_id = super::acp_protocol::new_id();
         {
             let mut st = state.lock().await;
-            st.initialized = true;
+            st.initialized_clients.insert(client_id.clone());
         }
         let result = InitializeResult {
             protocol_version: serde_json::json!(1),
@@ -318,6 +326,7 @@ impl AcpHttpChannel {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             auth_methods: vec![],
+            client_id: Some(client_id),
         };
         match serde_json::to_value(result) {
             Ok(v) => Self::json_rpc_result(id, v),
@@ -330,6 +339,7 @@ impl AcpHttpChannel {
         base_config: &BaseChannelConfig,
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
+        client_id: Option<&str>,
     ) -> String {
         if !base_config.is_allowed(ACP_HTTP_SENDER_ID) {
             return Self::json_rpc_error(id, -32000, "Unauthorized");
@@ -337,10 +347,10 @@ impl AcpHttpChannel {
         let cwd = params
             .and_then(|p| serde_json::from_value::<super::acp_protocol::SessionNewParams>(p).ok())
             .and_then(|p| p.cwd);
-        let session_id = format!("acph_{}", uuid::Uuid::new_v4().simple());
+        let session_id = format!("acph_{}", super::acp_protocol::new_id());
         {
             let mut st = state.lock().await;
-            if !st.initialized {
+            if !st.initialized_clients.contains(client_id.unwrap_or("")) {
                 return Self::json_rpc_error(
                     id,
                     -32600,
@@ -398,12 +408,13 @@ impl AcpHttpChannel {
         base_config: &BaseChannelConfig,
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
+        client_id: Option<&str>,
     ) -> String {
         if !base_config.is_allowed(ACP_HTTP_SENDER_ID) {
             return Self::json_rpc_error(id, -32000, "Unauthorized");
         }
         let st = state.lock().await;
-        if !st.initialized {
+        if !st.initialized_clients.contains(client_id.unwrap_or("")) {
             return Self::json_rpc_error(
                 id,
                 -32600,
@@ -465,13 +476,14 @@ impl AcpHttpChannel {
         bus: &Arc<MessageBus>,
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
+        client_id: Option<&str>,
     ) -> Result<std::result::Result<(String, oneshot::Receiver<(String, bool)>), String>> {
         if !base_config.is_allowed(ACP_HTTP_SENDER_ID) {
             return Ok(Err(Self::json_rpc_error(id, -32000, "Unauthorized")));
         }
         {
             let st = state.lock().await;
-            if !st.initialized {
+            if !st.initialized_clients.contains(client_id.unwrap_or("")) {
                 return Ok(Err(Self::json_rpc_error(
                     id,
                     -32600,
@@ -728,6 +740,14 @@ impl AcpHttpChannel {
             return;
         }
 
+        // Per-client initialization token echoed back from the initialize response.
+        let client_id: Option<String> = req
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("x-acp-client-id"))
+            .map(|(_, v)| v.trim().to_string());
+        let client_id_ref = client_id.as_deref();
+
         // Parse JSON-RPC envelope.
         let rpc: JsonRpcRequest = match serde_json::from_str(&req.body) {
             Ok(r) => r,
@@ -769,7 +789,8 @@ impl AcpHttpChannel {
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/new" => {
-                let body = Self::do_session_new(&state, &base_config, id, params).await;
+                let body =
+                    Self::do_session_new(&state, &base_config, id, params, client_id_ref).await;
                 let resp = Self::http_200(&body);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
@@ -779,7 +800,8 @@ impl AcpHttpChannel {
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/list" => {
-                let body = Self::do_session_list(&state, &base_config, id, params).await;
+                let body =
+                    Self::do_session_list(&state, &base_config, id, params, client_id_ref).await;
                 let resp = Self::http_200(&body);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
@@ -791,6 +813,7 @@ impl AcpHttpChannel {
                     &bus,
                     id.clone(),
                     params,
+                    client_id_ref,
                 )
                 .await
                 {
@@ -1241,12 +1264,17 @@ mod tests {
             base,
             bus,
         );
-        ch.state.lock().await.initialized = true;
+        ch.state
+            .lock()
+            .await
+            .initialized_clients
+            .insert("test_client".to_string());
         let result = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
             Some(serde_json::json!(1)),
             None,
+            Some("test_client"),
         )
         .await;
         assert!(
@@ -1284,10 +1312,12 @@ mod tests {
     #[tokio::test]
     async fn test_session_list_requires_initialize() {
         let ch = make_channel();
+        // No client_id supplied → not in initialized_clients → must be rejected.
         let body = AcpHttpChannel::do_session_list(
             &ch.state,
             &ch.base_config,
             Some(serde_json::json!(1)),
+            None,
             None,
         )
         .await;
@@ -1300,12 +1330,17 @@ mod tests {
     #[tokio::test]
     async fn test_session_list_empty() {
         let ch = make_channel();
-        ch.state.lock().await.initialized = true;
+        ch.state
+            .lock()
+            .await
+            .initialized_clients
+            .insert("test_client".to_string());
         let body = AcpHttpChannel::do_session_list(
             &ch.state,
             &ch.base_config,
             Some(serde_json::json!(1)),
             None,
+            Some("test_client"),
         )
         .await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1319,7 +1354,7 @@ mod tests {
         let sid_b = "acph_list_b".to_string();
         {
             let mut st = ch.state.lock().await;
-            st.initialized = true;
+            st.initialized_clients.insert("test_client".to_string());
             st.sessions.insert(sid_a.clone(), None);
             st.sessions.insert(sid_b.clone(), None);
             st.pending
@@ -1330,6 +1365,7 @@ mod tests {
             &ch.base_config,
             Some(serde_json::json!(1)),
             None,
+            Some("test_client"),
         )
         .await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
