@@ -34,4 +34,4 @@ ORIGINAL_IMAGE="$IMAGE"
 IMAGE="$IMAGE_TAG"
 trap 'IMAGE="$ORIGINAL_IMAGE"' EXIT
 
-container_run "cargo clippy --fix --allow-dirty --all-targets --all-features --config /clippy.toml"
+container_run "cargo clippy --fix --allow-dirty --all-targets --config /clippy.toml"
