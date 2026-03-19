@@ -584,6 +584,22 @@ impl Config {
                 .api_base = Some(val);
         }
 
+        // Novita AI
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NOVITA_API_KEY")
+            .or_else(|_| std::env::var("NOVITA_API_KEY"))
+        {
+            self.providers
+                .novita
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NOVITA_API_BASE") {
+            self.providers
+                .novita
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -660,6 +676,12 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_MODEL") {
             self.providers
                 .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_NOVITA_MODEL") {
+            self.providers
+                .novita
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }

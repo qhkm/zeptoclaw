@@ -203,6 +203,16 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_api_version: None,
         api_key_required: true,
     },
+    ProviderSpec {
+        name: "novita",
+        model_keywords: &["novita"],
+        runtime_supported: true,
+        default_base_url: Some("https://api.novita.ai/openai"),
+        backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+        api_key_required: true,
+    },
 ];
 
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -222,6 +232,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "bedrock" => config.providers.bedrock.as_ref(),
         "xai" => config.providers.xai.as_ref(),
         "qianfan" => config.providers.qianfan.as_ref(),
+        "novita" => config.providers.novita.as_ref(),
         _ => None,
     }
 }
@@ -937,6 +948,23 @@ mod tests {
         assert_eq!(
             selected.api_base.as_deref(),
             Some("https://qianfan.baidubce.com/v2")
+        );
+    }
+
+    #[test]
+    fn test_novita_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.novita = Some(ProviderConfig {
+            api_key: Some("novita-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "novita");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://api.novita.ai/openai")
         );
     }
 
