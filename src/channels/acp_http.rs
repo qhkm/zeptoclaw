@@ -1594,6 +1594,99 @@ mod tests {
         assert!(ch.state.lock().await.sessions.is_empty());
     }
 
+    /// Happy-path round-trip: the `clientId` returned by `initialize` must be
+    /// accepted by `session/new` and produce a valid `sessionId`.
+    ///
+    /// This is the critical positive test that the guard-only tests cannot
+    /// cover: a bug in the JSON key name, value encoding, or HashSet insertion
+    /// would make every real client fail even though the negative tests pass.
+    #[tokio::test]
+    async fn test_initialize_to_session_new_round_trip() {
+        let ch = make_channel();
+
+        let init_body =
+            AcpHttpChannel::do_initialize(&ch.state, &ch.config, Some(serde_json::json!(1)), None)
+                .await;
+        let init_v: serde_json::Value = serde_json::from_str(&init_body).unwrap();
+        let client_id = init_v["result"]["clientId"]
+            .as_str()
+            .expect("clientId must be present in initialize response");
+
+        let new_body = AcpHttpChannel::do_session_new(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(2)),
+            None,
+            Some(client_id),
+        )
+        .await;
+        let new_v: serde_json::Value = serde_json::from_str(&new_body).unwrap();
+
+        assert!(
+            new_v.get("error").is_none(),
+            "session/new must succeed with the issued clientId: {new_body}"
+        );
+        assert!(
+            new_v["result"]["sessionId"].as_str().is_some(),
+            "session/new must return a sessionId: {new_body}"
+        );
+    }
+
+    /// Multi-round positive path: `initialize` → `session/new` → `session/list`,
+    /// all using the same issued `clientId` from the initialize response.
+    #[tokio::test]
+    async fn test_initialize_to_session_new_to_session_list_round_trip() {
+        let ch = make_channel();
+
+        // Round 1: initialize.
+        let init_body =
+            AcpHttpChannel::do_initialize(&ch.state, &ch.config, Some(serde_json::json!(1)), None)
+                .await;
+        let client_id = serde_json::from_str::<serde_json::Value>(&init_body).unwrap()["result"]
+            ["clientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Round 2: session/new.
+        let new_body = AcpHttpChannel::do_session_new(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(2)),
+            None,
+            Some(&client_id),
+        )
+        .await;
+        let session_id = serde_json::from_str::<serde_json::Value>(&new_body).unwrap()["result"]
+            ["sessionId"]
+            .as_str()
+            .expect("session/new must succeed")
+            .to_string();
+
+        // Round 3: session/list.
+        let list_body = AcpHttpChannel::do_session_list(
+            &ch.state,
+            &ch.base_config,
+            Some(serde_json::json!(3)),
+            None,
+            Some(&client_id),
+        )
+        .await;
+        let list_v: serde_json::Value = serde_json::from_str(&list_body).unwrap();
+
+        assert!(
+            list_v.get("error").is_none(),
+            "session/list must succeed with the issued clientId: {list_body}"
+        );
+        let sessions = list_v["result"]["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "exactly one session must be listed");
+        assert_eq!(
+            sessions[0]["sessionId"].as_str().unwrap(),
+            session_id,
+            "listed sessionId must match the one returned by session/new"
+        );
+    }
+
     /// session/list must be gated by client_id in the same way.
     #[tokio::test]
     async fn test_session_list_blocked_without_client_id_even_after_another_client_initialized() {
@@ -1614,6 +1707,44 @@ mod tests {
         assert!(
             body.contains("-32600"),
             "session/list with no client_id must fail even after another client initialized: {body}"
+        );
+    }
+
+    /// `register_prompt` has its own `initialized_clients` guard that is
+    /// exercised independently of `do_session_new` / `do_session_list`.
+    /// Verify it rejects calls with no `clientId` even after another client
+    /// has initialized.
+    #[tokio::test]
+    async fn test_register_prompt_blocked_without_client_id() {
+        let ch = make_channel();
+
+        // Another client initializes — must not unlock register_prompt for others.
+        AcpHttpChannel::do_initialize(&ch.state, &ch.config, Some(serde_json::json!(1)), None)
+            .await;
+
+        let result = AcpHttpChannel::register_prompt(
+            &ch.state,
+            &ch.pending_http,
+            &ch.base_config,
+            &ch.bus,
+            Some(serde_json::json!(2)),
+            Some(serde_json::json!({
+                "sessionId": "acph_any",
+                "prompt": [{ "type": "text", "text": "hello" }]
+            })),
+            None, // no X-Acp-Client-Id header
+        )
+        .await
+        .expect("register_prompt must not return an Err variant here");
+
+        assert!(
+            result.is_err(),
+            "register_prompt must reject calls with no clientId"
+        );
+        let err_body = result.unwrap_err();
+        assert!(
+            err_body.contains("-32600"),
+            "rejection must use -32600 (not initialized): {err_body}"
         );
     }
 }
