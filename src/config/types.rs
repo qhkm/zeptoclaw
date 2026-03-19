@@ -846,6 +846,8 @@ pub struct ChannelsConfig {
     pub serial: Option<SerialChannelConfig>,
     /// MQTT channel configuration. Requires `mqtt` feature.
     pub mqtt: Option<MqttChannelConfig>,
+    /// ACP (Agent Client Protocol) stdio channel configuration.
+    pub acp: Option<AcpChannelConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -877,6 +879,80 @@ impl Default for SerialChannelConfig {
             baud_rate: 115_200,
             allow_from: Vec::new(),
             deny_by_default: false,
+        }
+    }
+}
+
+/// ACP (Agent Client Protocol) channel configuration.
+///
+/// **Gateway mode (`zeptoclaw gateway`):** `enabled` has no effect here.
+/// The ACP stdio transport is exclusively for `zeptoclaw acp`, where the process
+/// is spawned as a subprocess by an ACP client (e.g. `acpx`). To expose ACP in
+/// gateway mode, set `channels.acp.http.enabled = true` instead.
+///
+/// **`zeptoclaw acp`:** reads `allow_from`, `deny_by_default`, and `http` from
+/// this config. The `enabled` field is accepted but ignored (the subcommand always
+/// runs ACP stdio regardless).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpChannelConfig {
+    /// Accepted for backward compatibility but has no effect in gateway mode.
+    /// `zeptoclaw acp` always starts ACP stdio regardless of this flag.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allow only specific sender/client IDs (empty = allow all unless deny_by_default).
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty allow_from rejects all senders.
+    #[serde(default)]
+    pub deny_by_default: bool,
+    /// Optional HTTP transport configuration. When present and enabled, the ACP
+    /// HTTP channel is registered alongside (or instead of) the stdio channel.
+    #[serde(default)]
+    pub http: Option<AcpHttpConfig>,
+}
+
+/// ACP streamable HTTP transport configuration.
+///
+/// When `channels.acp.http.enabled` is true, the gateway registers an HTTP
+/// listener that accepts JSON-RPC 2.0 messages via `POST /acp`. `session/prompt`
+/// responses are streamed back as Server-Sent Events; all other methods return
+/// synchronous JSON responses. `channels.acp.enabled` is not required.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpHttpConfig {
+    /// Whether the HTTP transport is active.
+    pub enabled: bool,
+    /// TCP port to listen on. Default: 8765.
+    pub port: u16,
+    /// Bind address. Default: "127.0.0.1".
+    pub bind: String,
+    /// Optional Bearer token. When set, all requests must supply
+    /// `Authorization: Bearer <token>`.
+    pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for AcpHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpHttpConfig")
+            .field("enabled", &self.enabled)
+            .field("port", &self.port)
+            .field("bind", &self.bind)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl Default for AcpHttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8765,
+            bind: "127.0.0.1".to_string(),
+            auth_token: None,
         }
     }
 }

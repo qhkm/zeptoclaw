@@ -25,6 +25,11 @@ Environment variables override config with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 - `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` (default: false)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` (default: ~/.zeptoclaw/state/whatsapp_web)
+- `ZEPTOCLAW_CHANNELS_ACP_ENABLED` (default: false)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_ENABLED` (default: false)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_PORT` (default: 8765)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_BIND` (default: 127.0.0.1)
+- `ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN` — Bearer auth token (default: none)
 
 ### Retry & Fallback
 - `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` (default: false)
