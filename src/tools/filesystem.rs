@@ -12,6 +12,8 @@ use std::path::Path;
 #[cfg(unix)]
 use std::{fs::OpenOptions, io::Write as _, os::unix::fs::MetadataExt};
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::error::{Result, ZeptoError};
 #[cfg(not(unix))]
 use crate::security::check_hardlink_write;
@@ -517,6 +519,260 @@ impl Tool for EditFileTool {
                 "Provide either 'diff' or 'old_text'/'new_text'".into(),
             ))
         }
+    }
+}
+
+// --- Fuzzy matching for edit_file ---
+// TODO: remove allow(dead_code) in Task 5 when wired into EditFileTool
+#[allow(dead_code)]
+#[derive(Debug)]
+enum MatchTier {
+    Exact,
+    UnicodeNormalized,
+    WhitespaceNormalized,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct UniqueMatch {
+    start: usize,
+    end: usize,
+    tier: MatchTier,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum EditMatchError {
+    NotFound,
+    MultipleMatches(usize),
+}
+
+impl std::fmt::Display for EditMatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditMatchError::NotFound => write!(f, "not found"),
+            EditMatchError::MultipleMatches(n) => write!(f, "Found {} occurrences", n),
+        }
+    }
+}
+
+/// Normalize whitespace: collapse runs of spaces/tabs to single space,
+/// trim trailing whitespace per line, normalize \r\n to \n.
+#[allow(dead_code)]
+fn normalize_whitespace(s: &str) -> String {
+    s.replace("\r\n", "\n")
+        .lines()
+        .map(|line| {
+            let mut result = String::new();
+            let mut prev_ws = false;
+            for ch in line.chars() {
+                if ch == ' ' || ch == '\t' {
+                    if !prev_ws {
+                        result.push(' ');
+                    }
+                    prev_ws = true;
+                } else {
+                    result.push(ch);
+                    prev_ws = false;
+                }
+            }
+            result.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Count non-overlapping occurrences and collect their byte offsets.
+#[allow(dead_code)]
+fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        positions.push(start + pos);
+        start += pos + needle.len();
+    }
+    positions
+}
+
+/// Map a byte range in an NFC-normalized string back to the original string.
+///
+/// NFC normalization can merge multiple original chars into one (e.g. `e` +
+/// combining accent -> precomposed `é`). This walks original chars one at a
+/// time, tracking cumulative NFC byte position to map back.
+#[allow(dead_code)]
+fn map_nfc_range_to_original(
+    original: &str,
+    _nfc: &str,
+    nfc_start: usize,
+    nfc_end: usize,
+) -> (usize, usize) {
+    let mut orig_start = 0;
+    let mut orig_end = original.len();
+    let mut nfc_byte_pos = 0;
+    let mut found_start = false;
+
+    for (orig_byte, ch) in original.char_indices() {
+        let orig_next = orig_byte + ch.len_utf8();
+        let nfc_len: usize = ch.nfc().map(|c| c.len_utf8()).sum();
+
+        if !found_start && nfc_byte_pos + nfc_len > nfc_start {
+            orig_start = orig_byte;
+            found_start = true;
+        }
+        nfc_byte_pos += nfc_len;
+        if found_start && nfc_byte_pos >= nfc_end {
+            orig_end = orig_next;
+            break;
+        }
+    }
+
+    (orig_start, orig_end)
+}
+
+/// Map a byte range in a whitespace-normalized string back to the original.
+///
+/// Handles `\r\n` -> `\n` mapping, whitespace collapse (runs of spaces/tabs
+/// become a single space), and trailing whitespace trimming.
+#[allow(dead_code)]
+fn map_ws_range_to_original(
+    original: &str,
+    normalized: &str,
+    norm_start: usize,
+    norm_end: usize,
+) -> (usize, usize) {
+    let orig_bytes = original.as_bytes();
+    let norm_bytes = normalized.as_bytes();
+
+    let mut orig_i = 0;
+    let mut norm_i = 0;
+    let mut result_start = 0;
+    let mut result_end = original.len();
+
+    while norm_i < norm_bytes.len() && orig_i < orig_bytes.len() {
+        if norm_i == norm_start {
+            result_start = orig_i;
+        }
+        if norm_i == norm_end {
+            result_end = orig_i;
+            break;
+        }
+
+        // Handle \r\n -> \n mapping
+        if orig_bytes[orig_i] == b'\r'
+            && orig_i + 1 < orig_bytes.len()
+            && orig_bytes[orig_i + 1] == b'\n'
+            && norm_bytes[norm_i] == b'\n'
+        {
+            orig_i += 2;
+            norm_i += 1;
+            continue;
+        }
+
+        // Handle whitespace collapse
+        if (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t') && norm_bytes[norm_i] == b' '
+        {
+            orig_i += 1;
+            norm_i += 1;
+            while orig_i < orig_bytes.len()
+                && (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t')
+            {
+                orig_i += 1;
+            }
+            continue;
+        }
+
+        // Handle trailing whitespace in original (trimmed in normalized)
+        if (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t')
+            && (norm_i >= norm_bytes.len() || norm_bytes[norm_i] == b'\n')
+        {
+            orig_i += 1;
+            continue;
+        }
+
+        orig_i += 1;
+        norm_i += 1;
+    }
+
+    if norm_end >= norm_bytes.len() && result_end == original.len() {
+        result_end = original.len();
+    }
+
+    (result_start, result_end)
+}
+
+/// Find a unique match for `old_text` in `content` using 3-tier fuzzy matching.
+///
+/// Tries in order:
+/// 1. **Exact** byte-for-byte match
+/// 2. **Unicode NFC** normalized match (only if normalization changes either string)
+/// 3. **Whitespace normalized** match (collapse runs, trim trailing, CRLF -> LF)
+///
+/// Returns `EditMatchError::MultipleMatches` if any tier finds 2+ matches.
+/// Returns `EditMatchError::NotFound` if no tier finds a match.
+#[allow(dead_code)]
+fn find_unique_match(
+    content: &str,
+    old_text: &str,
+) -> std::result::Result<UniqueMatch, EditMatchError> {
+    // Tier 1: Exact match
+    let positions = find_all_occurrences(content, old_text);
+    match positions.len() {
+        1 => {
+            return Ok(UniqueMatch {
+                start: positions[0],
+                end: positions[0] + old_text.len(),
+                tier: MatchTier::Exact,
+            });
+        }
+        n if n > 1 => return Err(EditMatchError::MultipleMatches(n)),
+        _ => {}
+    }
+
+    // Tier 2: Unicode NFC normalized
+    let content_nfc: String = content.nfc().collect();
+    let search_nfc: String = old_text.nfc().collect();
+    // Only try NFC tier if normalization actually changed something
+    if content_nfc != content || search_nfc != old_text {
+        let positions = find_all_occurrences(&content_nfc, &search_nfc);
+        match positions.len() {
+            1 => {
+                let (orig_start, orig_end) = map_nfc_range_to_original(
+                    content,
+                    &content_nfc,
+                    positions[0],
+                    positions[0] + search_nfc.len(),
+                );
+                return Ok(UniqueMatch {
+                    start: orig_start,
+                    end: orig_end,
+                    tier: MatchTier::UnicodeNormalized,
+                });
+            }
+            n if n > 1 => return Err(EditMatchError::MultipleMatches(n)),
+            _ => {}
+        }
+    }
+
+    // Tier 3: Whitespace normalized
+    let content_ws = normalize_whitespace(content);
+    let search_ws = normalize_whitespace(old_text);
+    let positions = find_all_occurrences(&content_ws, &search_ws);
+    match positions.len() {
+        1 => {
+            let (orig_start, orig_end) = map_ws_range_to_original(
+                content,
+                &content_ws,
+                positions[0],
+                positions[0] + search_ws.len(),
+            );
+            Ok(UniqueMatch {
+                start: orig_start,
+                end: orig_end,
+                tier: MatchTier::WhitespaceNormalized,
+            })
+        }
+        n if n > 1 => Err(EditMatchError::MultipleMatches(n)),
+        _ => Err(EditMatchError::NotFound),
     }
 }
 
@@ -1171,5 +1427,98 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not both"));
+    }
+
+    // --- find_unique_match tests ---
+    use super::{find_unique_match, MatchTier};
+
+    #[test]
+    fn test_exact_single_match() {
+        let content = "fn main() {}";
+        let result = find_unique_match(content, "main").unwrap();
+        assert_eq!(&content[result.start..result.end], "main");
+        assert!(matches!(result.tier, MatchTier::Exact));
+    }
+
+    #[test]
+    fn test_exact_multi_match_errors() {
+        let content = "foo bar foo baz foo";
+        let result = find_unique_match(content, "foo");
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("3"));
+    }
+
+    #[test]
+    fn test_not_found_errors() {
+        let content = "fn main() {}";
+        let result = find_unique_match(content, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unicode_nfc_fallback() {
+        let content = "caf\u{0065}\u{0301}"; // NFD: e + combining acute = 6 bytes
+        let search = "caf\u{00E9}"; // NFC: precomposed e-acute
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::UnicodeNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_unicode_nfc_mid_string() {
+        let content = "hello caf\u{0065}\u{0301} world";
+        let search = "caf\u{00E9}";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::UnicodeNormalized));
+        assert_eq!(result.start, 6);
+        assert_eq!(&content[result.start..result.end], "caf\u{0065}\u{0301}");
+    }
+
+    #[test]
+    fn test_whitespace_tabs_vs_spaces() {
+        let content = "fn\tmain()\t{}";
+        let search = "fn main() {}";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_whitespace_trailing() {
+        // Trailing spaces on a line prevent exact match but whitespace
+        // normalization trims them, producing a match.
+        let content = "hello   \nworld";
+        let search = "hello\nworld";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_whitespace_crlf_normalization() {
+        let content = "line1\r\nline2";
+        let search = "line1\nline2";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_fuzzy_multi_match_errors() {
+        let content = "fn\tmain() {}\nfn\t\tmain() {}";
+        let search = "fn main() {}";
+        let result = find_unique_match(content, search);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_content() {
+        let result = find_unique_match("", "search");
+        assert!(result.is_err());
     }
 }
