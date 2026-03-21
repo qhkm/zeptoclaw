@@ -1,0 +1,35 @@
+{
+  "tool": "shell",
+  "cases": [
+    {
+      "name": "simple_echo",
+      "setup": [],
+      "input": {"command": "echo hello"},
+      "expected": {"is_error": false, "output_contains": "hello"}
+    },
+    {
+      "name": "command_failure",
+      "setup": [],
+      "input": {"command": "false"},
+      "expected": {"is_error": false, "output_contains": "Exit code"}
+    },
+    {
+      "name": "empty_output",
+      "setup": [],
+      "input": {"command": "true"},
+      "expected": {"is_error": false}
+    },
+    {
+      "name": "multiline_output",
+      "setup": [],
+      "input": {"command": "printf 'line1\nline2\nline3'"},
+      "expected": {"is_error": false, "output_contains": "line1"}
+    },
+    {
+      "name": "stderr_output",
+      "setup": [],
+      "input": {"command": "echo error >&2"},
+      "expected": {"is_error": false}
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "tool": "find",
+  "cases": [
+    {
+      "name": "basic_glob",
+      "setup": [
+        {"type": "create_file", "path": "test.rs", "content": ""},
+        {"type": "create_file", "path": "test.txt", "content": ""}
+      ],
+      "input": {"pattern": "*.rs"},
+      "expected": {"is_error": false, "output_contains": "test.rs"}
+    },
+    {
+      "name": "no_match",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": ""}],
+      "input": {"pattern": "*.xyz"},
+      "expected": {"is_error": false, "output_contains": "No files found"}
+    },
+    {
+      "name": "nested_directory",
+      "setup": [
+        {"type": "create_dir", "path": "sub"},
+        {"type": "create_file", "path": "sub/deep.rs", "content": ""}
+      ],
+      "input": {"pattern": "**/*.rs"},
+      "expected": {"is_error": false, "output_contains": "deep.rs"}
+    },
+    {
+      "name": "multiple_matches",
+      "setup": [
+        {"type": "create_file", "path": "a.rs", "content": ""},
+        {"type": "create_file", "path": "b.rs", "content": ""}
+      ],
+      "input": {"pattern": "*.rs"},
+      "expected": {"is_error": false, "output_contains": "2 files"}
+    },
+    {
+      "name": "with_limit",
+      "setup": [
+        {"type": "create_file", "path": "a.rs", "content": ""},
+        {"type": "create_file", "path": "b.rs", "content": ""},
+        {"type": "create_file", "path": "c.rs", "content": ""}
+      ],
+      "input": {"pattern": "*.rs", "limit": 2},
+      "expected": {"is_error": false, "output_contains": "2 files"}
+    }
+  ]
+}
