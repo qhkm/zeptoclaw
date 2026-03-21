@@ -18,6 +18,7 @@ use crate::security::check_hardlink_write;
 use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
 use crate::tools::diff::apply_unified_diff;
 
+use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Resolve and validate a path relative to the workspace.
@@ -186,7 +187,11 @@ impl Tool for ReadFileTool {
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
-        Ok(ToolOutput::llm_only(content))
+        Ok(ToolOutput::llm_only(truncate_tool_output(
+            &content,
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
+        )))
     }
 }
 
@@ -359,7 +364,12 @@ impl Tool for ListDirTool {
         }
 
         items.sort();
-        Ok(ToolOutput::llm_only(items.join("\n")))
+        let joined = items.join("\n");
+        Ok(ToolOutput::llm_only(truncate_tool_output(
+            &joined,
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
+        )))
     }
 }
 
