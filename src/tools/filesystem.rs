@@ -440,6 +440,10 @@ impl Tool for EditFileTool {
                 "diff": {
                     "type": "string",
                     "description": "A unified diff patch to apply. Use standard @@ hunk headers with +/- lines. Mutually exclusive with old_text/new_text."
+                },
+                "expected_replacements": {
+                    "type": "integer",
+                    "description": "Exact number of occurrences to replace. When provided, all exact matches are replaced with count validation. When omitted, the match must be unique (fuzzy matching is used as fallback)."
                 }
             },
             "required": ["path"]
@@ -455,6 +459,10 @@ impl Tool for EditFileTool {
         let diff_param = args.get("diff").and_then(|v| v.as_str());
         let old_text = args.get("old_text").and_then(|v| v.as_str());
         let new_text = args.get("new_text").and_then(|v| v.as_str());
+        let expected_replacements = args
+            .get("expected_replacements")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
 
         if diff_param.is_some() && (old_text.is_some() || new_text.is_some()) {
             return Err(ZeptoError::Tool(
@@ -489,30 +497,72 @@ impl Tool for EditFileTool {
                 summary.hunks_applied, summary.lines_added, summary.lines_removed, full_path
             )))
         } else if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
-            // --- String replacement mode (existing logic) ---
+            // --- String replacement mode ---
             revalidate_path(full_path_ref, &workspace)?;
 
             let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
                 ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
             })?;
 
-            if !content.contains(old_text) {
-                return Err(ZeptoError::Tool(format!(
-                    "Text '{}' not found in file '{}'",
-                    crate::utils::string::preview(old_text, 50),
-                    full_path
-                )));
+            if old_text.is_empty() {
+                return Err(ZeptoError::Tool("old_text must not be empty".into()));
             }
 
-            let new_content = content.replace(old_text, new_text);
-
-            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
-
-            let replacements = content.matches(old_text).count();
-            Ok(ToolOutput::llm_only(format!(
-                "Successfully replaced {} occurrence(s) in {}",
-                replacements, full_path
-            )))
+            if let Some(expected) = expected_replacements {
+                // Guarded multi-match: exact matching with count check
+                let replacements = content.matches(old_text).count();
+                if replacements == 0 {
+                    return Err(ZeptoError::Tool(format!(
+                        "Text '{}' not found in file '{}'",
+                        crate::utils::string::preview(old_text, 50),
+                        full_path
+                    )));
+                }
+                if replacements != expected {
+                    return Err(ZeptoError::Tool(format!(
+                        "Expected {} replacement(s) for '{}' in '{}', found {}",
+                        expected,
+                        crate::utils::string::preview(old_text, 50),
+                        full_path,
+                        replacements
+                    )));
+                }
+                let new_content = content.replace(old_text, new_text);
+                write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
+                Ok(ToolOutput::llm_only(format!(
+                    "Successfully replaced {} occurrence(s) in {}",
+                    replacements, full_path
+                )))
+            } else {
+                // Unique match with tiered fuzzy matching
+                match find_unique_match(&content, old_text) {
+                    Ok(m) => {
+                        let mut new_content = String::with_capacity(content.len());
+                        new_content.push_str(&content[..m.start]);
+                        new_content.push_str(new_text);
+                        new_content.push_str(&content[m.end..]);
+                        write_file_secure(full_path_ref, &workspace, new_content.as_bytes())
+                            .await?;
+                        Ok(ToolOutput::llm_only(format!(
+                            "Successfully replaced 1 occurrence ({} match) in {}",
+                            m.tier, full_path
+                        )))
+                    }
+                    Err(EditMatchError::MultipleMatches(n)) => {
+                        Err(ZeptoError::Tool(format!(
+                            "Found {} occurrences of text in '{}'. Provide more surrounding context to uniquely identify the location.",
+                            n, full_path
+                        )))
+                    }
+                    Err(EditMatchError::NotFound) => {
+                        Err(ZeptoError::Tool(format!(
+                            "Text '{}' not found in file '{}'",
+                            crate::utils::string::preview(old_text, 50),
+                            full_path
+                        )))
+                    }
+                }
+            }
         } else {
             // unreachable due to early validation, but kept for safety
             Err(ZeptoError::Tool(
@@ -523,8 +573,6 @@ impl Tool for EditFileTool {
 }
 
 // --- Fuzzy matching for edit_file ---
-// TODO: remove allow(dead_code) in Task 5 when wired into EditFileTool
-#[allow(dead_code)]
 #[derive(Debug)]
 enum MatchTier {
     Exact,
@@ -532,7 +580,16 @@ enum MatchTier {
     WhitespaceNormalized,
 }
 
-#[allow(dead_code)]
+impl std::fmt::Display for MatchTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchTier::Exact => write!(f, "exact"),
+            MatchTier::UnicodeNormalized => write!(f, "unicode-normalized"),
+            MatchTier::WhitespaceNormalized => write!(f, "whitespace-normalized"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct UniqueMatch {
     start: usize,
@@ -540,7 +597,6 @@ struct UniqueMatch {
     tier: MatchTier,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 enum EditMatchError {
     NotFound,
@@ -558,7 +614,6 @@ impl std::fmt::Display for EditMatchError {
 
 /// Normalize whitespace: collapse runs of spaces/tabs to single space,
 /// trim trailing whitespace per line, normalize \r\n to \n.
-#[allow(dead_code)]
 fn normalize_whitespace(s: &str) -> String {
     s.replace("\r\n", "\n")
         .lines()
@@ -583,7 +638,6 @@ fn normalize_whitespace(s: &str) -> String {
 }
 
 /// Count non-overlapping occurrences and collect their byte offsets.
-#[allow(dead_code)]
 fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut start = 0;
@@ -599,7 +653,6 @@ fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
 /// NFC normalization can merge multiple original chars into one (e.g. `e` +
 /// combining accent -> precomposed `é`). This walks original chars one at a
 /// time, tracking cumulative NFC byte position to map back.
-#[allow(dead_code)]
 fn map_nfc_range_to_original(
     original: &str,
     _nfc: &str,
@@ -633,7 +686,6 @@ fn map_nfc_range_to_original(
 ///
 /// Handles `\r\n` -> `\n` mapping, whitespace collapse (runs of spaces/tabs
 /// become a single space), and trailing whitespace trimming.
-#[allow(dead_code)]
 fn map_ws_range_to_original(
     original: &str,
     normalized: &str,
@@ -709,7 +761,6 @@ fn map_ws_range_to_original(
 ///
 /// Returns `EditMatchError::MultipleMatches` if any tier finds 2+ matches.
 /// Returns `EditMatchError::NotFound` if no tier finds a match.
-#[allow(dead_code)]
 fn find_unique_match(
     content: &str,
     old_text: &str,
@@ -1003,7 +1054,8 @@ mod tests {
                 json!({
                     "path": "edit_multi.txt",
                     "old_text": "foo",
-                    "new_text": "qux"
+                    "new_text": "qux",
+                    "expected_replacements": 3
                 }),
                 &ctx,
             )
@@ -1427,6 +1479,55 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not both"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_multi_match_without_expected_errors() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "foo bar foo baz foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "old_text": "foo",
+                    "new_text": "qux"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("3 occurrences"));
+        assert!(err.contains("more surrounding context"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_fuzzy_whitespace_match() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "fn\tmain()\t{}").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "old_text": "fn main() {}",
+                    "new_text": "fn run() {}"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "fn run() {}");
     }
 
     // --- find_unique_match tests ---
