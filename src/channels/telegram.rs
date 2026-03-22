@@ -45,6 +45,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
 use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::Config;
 use crate::config::TelegramConfig;
@@ -94,37 +97,91 @@ struct OverridesDep {
     typing: TypingMap,
 }
 
+// ---------------------------------------------------------------------------
+// Markdown → Telegram HTML conversion
+// ---------------------------------------------------------------------------
+//
+// Telegram's HTML mode supports a small subset of tags: <b>, <i>, <code>,
+// <pre>, <a href="">, <tg-spoiler>.  Claude emits standard Markdown, so we
+// convert the most common constructs before sending.
+//
+// Strategy: extract code regions into NUL-byte placeholders first (so their
+// content is never touched by Markdown regex), process everything else, then
+// reinsert code with its own HTML escaping.
+
+static RE_FENCED_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```[^\n]*\n(.*?)```").unwrap());
+static RE_INLINE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
+static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+// Italic is applied after bold conversion has consumed all ** pairs, so
+// remaining single * delimiters are safe to match without lookbehind.
+static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^\*\n]+?)\*").unwrap());
+static RE_LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
+static RE_SPOILER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\|\|(.+?)\|\|").unwrap());
+static RE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
+static RE_BULLET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*[-*]\s+").unwrap());
+static RE_HR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^-{3,}\s*$").unwrap());
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn render_telegram_html(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 16);
-    let mut chars = content.chars().peekable();
-    let mut spoiler_open = false;
+    // Phase 1: Extract fenced code blocks into placeholders.
+    let mut code_blocks: Vec<String> = Vec::new();
+    let mut text = RE_FENCED_CODE
+        .replace_all(content, |caps: &regex::Captures| {
+            let idx = code_blocks.len();
+            let body = caps.get(1).map_or("", |m| m.as_str());
+            code_blocks.push(body.to_string());
+            format!("\x00CODEBLOCK{idx}\x00")
+        })
+        .into_owned();
 
-    while let Some(ch) = chars.next() {
-        if ch == '|' && chars.peek() == Some(&'|') {
-            let _ = chars.next();
-            if spoiler_open {
-                out.push_str("</tg-spoiler>");
-            } else {
-                out.push_str("<tg-spoiler>");
-            }
-            spoiler_open = !spoiler_open;
-            continue;
-        }
+    // Phase 2: Extract inline code into placeholders.
+    let mut inline_codes: Vec<String> = Vec::new();
+    text = RE_INLINE_CODE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let idx = inline_codes.len();
+            inline_codes.push(caps[1].to_string());
+            format!("\x00INLINE{idx}\x00")
+        })
+        .into_owned();
 
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
+    // Phase 3: Escape HTML entities in the remaining text.
+    text = escape_html(&text);
+
+    // Phase 4: Block-level conversions.
+    text = RE_HR.replace_all(&text, "").into_owned();
+    text = RE_HEADER.replace_all(&text, "<b>$1</b>").into_owned();
+    text = RE_BULLET.replace_all(&text, "• ").into_owned();
+
+    // Phase 5: Inline conversions (bold before italic to avoid conflict).
+    text = RE_BOLD.replace_all(&text, "<b>$1</b>").into_owned();
+    text = RE_ITALIC.replace_all(&text, "<i>$1</i>").into_owned();
+    text = RE_LINK
+        .replace_all(&text, |caps: &regex::Captures| {
+            format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
+        })
+        .into_owned();
+
+    // Phase 6: Spoilers.
+    text = RE_SPOILER
+        .replace_all(&text, "<tg-spoiler>$1</tg-spoiler>")
+        .into_owned();
+
+    // Phase 7: Reinsert code blocks with their own HTML escaping.
+    for (idx, block) in code_blocks.iter().enumerate() {
+        let tag = format!("<pre>{}</pre>", escape_html(block.trim_end()));
+        text = text.replace(&format!("\x00CODEBLOCK{idx}\x00"), &tag);
+    }
+    for (idx, code) in inline_codes.iter().enumerate() {
+        let tag = format!("<code>{}</code>", escape_html(code));
+        text = text.replace(&format!("\x00INLINE{idx}\x00"), &tag);
     }
 
-    // Graceful fallback for unmatched spoiler marker.
-    if spoiler_open {
-        out.push_str("</tg-spoiler>");
-    }
-
-    out
+    text
 }
 
 fn is_numeric_allowlist_entry(entry: &str) -> bool {
@@ -1183,8 +1240,126 @@ mod tests {
 
     #[test]
     fn test_render_telegram_html_unmatched_spoiler() {
+        // Unmatched || passes through as literal text (safer than auto-closing,
+        // which can swallow large chunks of content).
         let rendered = render_telegram_html("Dangling ||spoiler");
-        assert_eq!(rendered, "Dangling <tg-spoiler>spoiler</tg-spoiler>");
+        assert_eq!(rendered, "Dangling ||spoiler");
+    }
+
+    #[test]
+    fn test_render_bold() {
+        assert_eq!(
+            render_telegram_html("Hello **world**"),
+            "Hello <b>world</b>"
+        );
+    }
+
+    #[test]
+    fn test_render_italic() {
+        assert_eq!(render_telegram_html("Hello *world*"), "Hello <i>world</i>");
+    }
+
+    #[test]
+    fn test_render_bold_and_italic() {
+        assert_eq!(
+            render_telegram_html("**bold** and *italic*"),
+            "<b>bold</b> and <i>italic</i>"
+        );
+    }
+
+    #[test]
+    fn test_render_inline_code() {
+        assert_eq!(
+            render_telegram_html("Use `foo()` here"),
+            "Use <code>foo()</code> here"
+        );
+    }
+
+    #[test]
+    fn test_render_inline_code_preserves_html() {
+        assert_eq!(
+            render_telegram_html("Try `x < 5 && y > 2`"),
+            "Try <code>x &lt; 5 &amp;&amp; y &gt; 2</code>"
+        );
+    }
+
+    #[test]
+    fn test_render_fenced_code_block() {
+        let input = "Before\n```rust\nfn main() {\n    println!(\"<hello>\");\n}\n```\nAfter";
+        let rendered = render_telegram_html(input);
+        assert!(rendered.contains("<pre>"));
+        assert!(rendered.contains("&lt;hello&gt;"));
+        assert!(rendered.contains("</pre>"));
+        assert!(rendered.starts_with("Before\n"));
+        assert!(rendered.ends_with("\nAfter"));
+    }
+
+    #[test]
+    fn test_code_block_no_markdown_conversion() {
+        let input = "```\n**not bold** *not italic*\n```";
+        let rendered = render_telegram_html(input);
+        assert!(rendered.contains("**not bold** *not italic*"));
+        assert!(!rendered.contains("<b>"));
+        assert!(!rendered.contains("<i>"));
+    }
+
+    #[test]
+    fn test_render_link() {
+        assert_eq!(
+            render_telegram_html("See [docs](https://example.com)"),
+            "See <a href=\"https://example.com\">docs</a>"
+        );
+    }
+
+    #[test]
+    fn test_render_header() {
+        assert_eq!(render_telegram_html("## Summary"), "<b>Summary</b>");
+        assert_eq!(render_telegram_html("### Details"), "<b>Details</b>");
+    }
+
+    #[test]
+    fn test_render_bullets() {
+        assert_eq!(
+            render_telegram_html("- item one\n- item two"),
+            "• item one\n• item two"
+        );
+    }
+
+    #[test]
+    fn test_render_star_bullets() {
+        assert_eq!(
+            render_telegram_html("* item one\n* item two"),
+            "• item one\n• item two"
+        );
+    }
+
+    #[test]
+    fn test_render_horizontal_rule() {
+        assert_eq!(render_telegram_html("above\n---\nbelow"), "above\n\nbelow");
+    }
+
+    #[test]
+    fn test_render_spoiler_with_formatting() {
+        assert_eq!(
+            render_telegram_html("||**secret**||"),
+            "<tg-spoiler><b>secret</b></tg-spoiler>"
+        );
+    }
+
+    #[test]
+    fn test_render_empty_input() {
+        assert_eq!(render_telegram_html(""), "");
+    }
+
+    #[test]
+    fn test_render_plain_text_unchanged() {
+        assert_eq!(render_telegram_html("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn test_render_unclosed_bold() {
+        let rendered = render_telegram_html("Hello **world");
+        assert_eq!(rendered, "Hello **world");
     }
 
     #[tokio::test]
