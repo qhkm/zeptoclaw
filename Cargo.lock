@@ -5582,6 +5582,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -7115,6 +7116,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "dashmap",
  "dirs",
  "dotenvy",
  "futures",
@@ -7161,6 +7163,7 @@ dependencies = [
  "tokio-serial",
  "tokio-test",
  "tokio-tungstenite",
+ "tokio-util",
  "toml 1.0.3+spec-1.1.0",
  "tower",
  "tower-http",
