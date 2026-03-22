@@ -36,12 +36,14 @@
 //! ```
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
 use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::Config;
@@ -78,12 +80,18 @@ struct ConfiguredProviders {
     names: Vec<String>,
     models: Vec<(String, String)>,
 }
-/// Bundles both override stores into one DI dependency so that dptree's
-/// 9-parameter arity limit is not exceeded.
+/// Shared map of active typing indicator tasks, keyed by chat_id (or
+/// "chat_id:thread_id" for forum topics). The CancellationToken lets
+/// `send()` stop the typing loop when the response is ready.
+type TypingMap = Arc<DashMap<String, CancellationToken>>;
+
+/// Bundles override stores and shared state into one DI dependency so that
+/// dptree's 9-parameter arity limit is not exceeded.
 #[derive(Clone)]
 struct OverridesDep {
     model: ModelOverrideStore,
     persona: PersonaOverrideStore,
+    typing: TypingMap,
 }
 
 fn render_telegram_html(content: &str) -> String {
@@ -187,6 +195,8 @@ pub struct TelegramChannel {
     configured_models: Vec<(String, String)>,
     /// Long-term memory backing store for model overrides (optional)
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
+    /// Active typing indicator tasks per chat (or chat:thread for forums).
+    typing_indicators: TypingMap,
 }
 
 impl TelegramChannel {
@@ -271,6 +281,7 @@ impl TelegramChannel {
             configured_providers,
             configured_models,
             longterm_memory,
+            typing_indicators: Arc::new(DashMap::new()),
         }
     }
 
@@ -360,6 +371,7 @@ impl Channel for TelegramChannel {
         let overrides_dep = OverridesDep {
             model: self.model_overrides.clone(),
             persona: self.persona_overrides.clone(),
+            typing: self.typing_indicators.clone(),
         };
         let default_model = DefaultModel(self.default_model.clone());
         let configured_providers = ConfiguredProviders {
@@ -460,6 +472,7 @@ impl Channel for TelegramChannel {
                          longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
+                            let typing_indicators = overrides_dep.typing;
                             let configured_providers = configured_providers_dep.names;
                             let configured_models = configured_providers_dep.models;
                             // Extract user ID and optional username
@@ -498,6 +511,58 @@ impl Channel for TelegramChannel {
                                     );
                                 }
                                 return Ok(());
+                            }
+
+                            // Start typing indicator immediately so the user
+                            // sees feedback while the agent processes.
+                            {
+                                use teloxide::types::ChatAction;
+
+                                let typing_key = match msg.thread_id {
+                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
+                                    None => msg.chat.id.0.to_string(),
+                                };
+
+                                // Cancel any stale typing task for this chat
+                                // (e.g. rapid successive messages).
+                                if let Some((_, old_token)) = typing_indicators.remove(&typing_key)
+                                {
+                                    old_token.cancel();
+                                }
+
+                                let cancel_token = CancellationToken::new();
+                                typing_indicators
+                                    .insert(typing_key.clone(), cancel_token.clone());
+
+                                let typing_bot = bot.clone();
+                                let typing_chat_id = msg.chat.id;
+                                let typing_thread_id = msg.thread_id;
+                                let typing_map = typing_indicators.clone();
+                                let typing_map_key = typing_key;
+
+                                tokio::spawn(async move {
+                                    loop {
+                                        let mut action = typing_bot.send_chat_action(
+                                            typing_chat_id,
+                                            ChatAction::Typing,
+                                        );
+                                        if let Some(tid) = typing_thread_id {
+                                            action = action.message_thread_id(tid);
+                                        }
+                                        if let Err(e) = action.await {
+                                            debug!(
+                                                "Typing indicator send failed for {}: {}",
+                                                typing_map_key, e
+                                            );
+                                        }
+
+                                        tokio::select! {
+                                            _ = cancel_token.cancelled() => break,
+                                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                        }
+                                    }
+                                    typing_map.remove(&typing_map_key);
+                                });
                             }
 
                             // Only process text messages
@@ -861,6 +926,12 @@ impl Channel for TelegramChannel {
         // Clear cached bot
         self.bot = None;
 
+        // Cancel all active typing indicators
+        for entry in self.typing_indicators.iter() {
+            entry.value().cancel();
+        }
+        self.typing_indicators.clear();
+
         info!("Telegram channel stopped");
         Ok(())
     }
@@ -891,6 +962,15 @@ impl Channel for TelegramChannel {
         let chat_id: i64 = msg.chat_id.parse().map_err(|_| {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
+
+        // Cancel the typing indicator for this chat before sending.
+        let typing_key = match msg.metadata.get("telegram_thread_id") {
+            Some(tid) => format!("{}:{}", chat_id, tid),
+            None => chat_id.to_string(),
+        };
+        if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+            token.cancel();
+        }
 
         info!("Telegram: Sending message to chat {}", chat_id);
 
