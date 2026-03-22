@@ -111,20 +111,60 @@ struct OverridesDep {
 
 static RE_FENCED_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```[^\n]*\n(.*?)```").unwrap());
 static RE_INLINE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
+// Bold+italic combined (***text***) must be matched before bold and italic.
+static RE_BOLD_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*\*(.+?)\*\*\*").unwrap());
 static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
 // Italic is applied after bold conversion has consumed all ** pairs, so
 // remaining single * delimiters are safe to match without lookbehind.
 static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^\*\n]+?)\*").unwrap());
+// Underscore-style italic: _text_ — matched at word boundaries.
+// Uses `(?:^|[\s])` as a pseudo-lookbehind to avoid snake_case.
+static RE_ITALIC_UNDERSCORE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?:^|(?P<pre>\s))_(?P<body>[^_\n]+?)_(?P<suf>[\s.,;:!?]|$)"#).unwrap()
+});
+static RE_STRIKETHROUGH: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~(.+?)~~").unwrap());
 static RE_LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
 static RE_SPOILER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\|\|(.+?)\|\|").unwrap());
 static RE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
 static RE_BULLET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*[-*]\s+").unwrap());
+static RE_NUMBERED_LIST: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*\d+\.\s+").unwrap());
+static RE_BLOCKQUOTE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^&gt;\s?(.*)$").unwrap());
 static RE_HR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^-{3,}\s*$").unwrap());
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Validate that HTML tags are properly nested (no crossing tags).
+/// Returns `true` when the tag structure is well-formed.
+fn html_tags_valid(html: &str) -> bool {
+    static RE_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"<(/?)(\w[\w-]*)(?:\s[^>]*)?>").unwrap());
+    let mut stack: Vec<String> = Vec::new();
+    for caps in RE_TAG.captures_iter(html) {
+        let closing = &caps[1] == "/";
+        let tag = caps[2].to_lowercase();
+        if closing {
+            if stack.last().map(|s| s.as_str()) != Some(tag.as_str()) {
+                return false;
+            }
+            stack.pop();
+        } else {
+            stack.push(tag);
+        }
+    }
+    stack.is_empty()
+}
+
+/// Strip all HTML tags, restoring a plain-text representation.
+fn strip_html_tags(html: &str) -> String {
+    static RE_STRIP: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
+    let text = RE_STRIP.replace_all(html, "");
+    // Unescape entities we added so the user sees normal characters.
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 
 fn render_telegram_html(content: &str) -> String {
@@ -152,14 +192,46 @@ fn render_telegram_html(content: &str) -> String {
     // Phase 3: Escape HTML entities in the remaining text.
     text = escape_html(&text);
 
+    // Phase 3b: Restore Telegram-native HTML tags that Claude may emit
+    // directly (there is no markdown equivalent for these).
+    text = text
+        .replace("&lt;u&gt;", "<u>")
+        .replace("&lt;/u&gt;", "</u>")
+        .replace("&lt;ins&gt;", "<u>")
+        .replace("&lt;/ins&gt;", "</u>");
+
     // Phase 4: Block-level conversions.
     text = RE_HR.replace_all(&text, "").into_owned();
-    text = RE_HEADER.replace_all(&text, "<b>$1</b>").into_owned();
+    text = RE_HEADER.replace_all(&text, "<b>$1</b>\n").into_owned();
+    text = RE_BLOCKQUOTE
+        .replace_all(&text, "<blockquote>$1</blockquote>")
+        .into_owned();
     text = RE_BULLET.replace_all(&text, "• ").into_owned();
+    text = RE_NUMBERED_LIST
+        .replace_all(&text, |caps: &regex::Captures| {
+            // Preserve the original number prefix but strip the markdown indent.
+            let m = caps.get(0).unwrap().as_str().trim_start();
+            m.to_string()
+        })
+        .into_owned();
 
-    // Phase 5: Inline conversions (bold before italic to avoid conflict).
+    // Phase 5: Inline conversions (bold+italic before bold before italic).
+    text = RE_BOLD_ITALIC
+        .replace_all(&text, "<b><i>$1</i></b>")
+        .into_owned();
     text = RE_BOLD.replace_all(&text, "<b>$1</b>").into_owned();
     text = RE_ITALIC.replace_all(&text, "<i>$1</i>").into_owned();
+    text = RE_ITALIC_UNDERSCORE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let pre = caps.name("pre").map_or("", |m| m.as_str());
+            let body = &caps["body"];
+            let suf = caps.name("suf").map_or("", |m| m.as_str());
+            format!("{pre}<i>{body}</i>{suf}")
+        })
+        .into_owned();
+    text = RE_STRIKETHROUGH
+        .replace_all(&text, "<s>$1</s>")
+        .into_owned();
     text = RE_LINK
         .replace_all(&text, |caps: &regex::Captures| {
             format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
@@ -179,6 +251,13 @@ fn render_telegram_html(content: &str) -> String {
     for (idx, code) in inline_codes.iter().enumerate() {
         let tag = format!("<code>{}</code>", escape_html(code));
         text = text.replace(&format!("\x00INLINE{idx}\x00"), &tag);
+    }
+
+    // Safety net: if regex substitutions produced crossing tags (e.g. bold
+    // wrapping an italic that extends beyond it), fall back to plain text so
+    // Telegram doesn't reject the message outright.
+    if !html_tags_valid(&text) {
+        return strip_html_tags(&text);
     }
 
     text
@@ -1260,6 +1339,32 @@ mod tests {
     }
 
     #[test]
+    fn test_render_italic_underscore() {
+        assert_eq!(
+            render_telegram_html("something _impossible_."),
+            "something <i>impossible</i>."
+        );
+    }
+
+    #[test]
+    fn test_render_italic_underscore_ignores_snake_case() {
+        // Should NOT italicize parts of snake_case identifiers.
+        assert_eq!(
+            render_telegram_html("use my_var_name here"),
+            "use my_var_name here"
+        );
+    }
+
+    #[test]
+    fn test_render_underline_passthrough() {
+        // Claude emits raw <u> tags since there's no markdown for underline.
+        assert_eq!(
+            render_telegram_html("this is <u>underlined</u> text"),
+            "this is <u>underlined</u> text"
+        );
+    }
+
+    #[test]
     fn test_render_bold_and_italic() {
         assert_eq!(
             render_telegram_html("**bold** and *italic*"),
@@ -1313,8 +1418,8 @@ mod tests {
 
     #[test]
     fn test_render_header() {
-        assert_eq!(render_telegram_html("## Summary"), "<b>Summary</b>");
-        assert_eq!(render_telegram_html("### Details"), "<b>Details</b>");
+        assert_eq!(render_telegram_html("## Summary"), "<b>Summary</b>\n");
+        assert_eq!(render_telegram_html("### Details"), "<b>Details</b>\n");
     }
 
     #[test]
@@ -1562,6 +1667,88 @@ mod tests {
         assert_eq!(
             msg.metadata.get("telegram_thread_id"),
             Some(&"42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_html_tags_valid_well_formed() {
+        assert!(html_tags_valid("<b>bold</b>"));
+        assert!(html_tags_valid("<b>bold <i>italic</i></b>"));
+        assert!(html_tags_valid("plain text"));
+    }
+
+    #[test]
+    fn test_html_tags_valid_crossing() {
+        assert!(!html_tags_valid("<b>bold <i>cross</b> bad</i>"));
+    }
+
+    #[test]
+    fn test_html_tags_valid_unclosed() {
+        assert!(!html_tags_valid("<b>unclosed"));
+    }
+
+    #[test]
+    fn test_strip_html_tags() {
+        assert_eq!(strip_html_tags("<b>bold</b>"), "bold");
+        assert_eq!(strip_html_tags("a &amp; b &lt; c"), "a & b < c");
+    }
+
+    #[test]
+    fn test_render_crossing_bold_italic_falls_back() {
+        // Simulate what Claude might output: bold wrapping an italic that
+        // extends past the bold boundary.  The regex approach cannot produce
+        // valid HTML for this, so we should get plain text back.
+        let input = "**bold *cross** end*";
+        let output = render_telegram_html(input);
+        // Should NOT contain unmatched HTML tags — plain-text fallback.
+        assert!(!output.contains("</b>") || html_tags_valid(&output));
+    }
+
+    #[test]
+    fn test_render_strikethrough() {
+        assert_eq!(render_telegram_html("~~removed~~"), "<s>removed</s>");
+    }
+
+    #[test]
+    fn test_render_bold_italic_combined() {
+        assert_eq!(
+            render_telegram_html("***bold and italic***"),
+            "<b><i>bold and italic</i></b>"
+        );
+    }
+
+    #[test]
+    fn test_render_blockquote() {
+        assert_eq!(
+            render_telegram_html("> quoted text"),
+            "<blockquote>quoted text</blockquote>"
+        );
+    }
+
+    #[test]
+    fn test_render_numbered_list() {
+        let input = "1. First\n2. Second";
+        let output = render_telegram_html(input);
+        assert!(output.contains("1. First"));
+        assert!(output.contains("2. Second"));
+        // Should not have leading whitespace from markdown indent
+        assert!(!output.starts_with(' '));
+    }
+
+    #[test]
+    fn test_render_header_with_newline() {
+        let output = render_telegram_html("# Title\nBody");
+        assert!(output.contains("<b>Title</b>"));
+        assert!(output.contains("Body"));
+    }
+
+    #[test]
+    fn test_render_mixed_formatting() {
+        let input = "**bold** and *italic* and ~~struck~~ and `code`";
+        let output = render_telegram_html(input);
+        assert_eq!(
+            output,
+            "<b>bold</b> and <i>italic</i> and <s>struck</s> and <code>code</code>"
         );
     }
 }
