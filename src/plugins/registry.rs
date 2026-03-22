@@ -44,6 +44,7 @@ use super::types::{Plugin, PluginToolDef};
 ///         working_dir: None,
 ///         timeout_secs: None,
 ///         env: None,
+///         category: None,
 ///     }],
 ///     execution: "command".to_string(),
 ///     binary: None,
@@ -232,6 +233,7 @@ mod tests {
                 working_dir: None,
                 timeout_secs: None,
                 env: None,
+                category: None,
             })
             .collect();
 

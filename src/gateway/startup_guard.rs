@@ -128,15 +128,19 @@ impl StartupGuard {
         Ok(serde_json::from_str(&content).unwrap_or_default())
     }
 
-    /// Save state to disk atomically (write temp file + rename).
+    /// Save state to disk.
+    ///
+    /// Writes directly rather than using temp-file + rename so that
+    /// systemd `ReadWritePaths` only needs to list the target file
+    /// (the parent directory may be read-only under `ProtectHome`).
+    /// This is safe: the file is small and `load_state()` falls back
+    /// to defaults on malformed JSON.
     pub fn save_state(&self, state: &CrashState) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(ZeptoError::Io)?;
         }
-        let tmp = self.path.with_extension("tmp");
         let json = serde_json::to_string_pretty(state)?;
-        std::fs::write(&tmp, json).map_err(ZeptoError::Io)?;
-        std::fs::rename(&tmp, &self.path).map_err(ZeptoError::Io)?;
+        std::fs::write(&self.path, json).map_err(ZeptoError::Io)?;
         Ok(())
     }
 }

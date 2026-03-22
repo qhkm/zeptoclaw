@@ -417,6 +417,7 @@ mod tests {
                 working_dir: None,
                 timeout_secs: None,
                 env: None,
+                category: None,
             }],
             execution: "command".to_string(),
             binary: None,
@@ -811,6 +812,7 @@ mod tests {
             working_dir: None,
             timeout_secs: None,
             env: None,
+            category: None,
         });
         assert!(validate_manifest(&manifest).is_ok());
     }
@@ -826,6 +828,7 @@ mod tests {
             working_dir: None,
             timeout_secs: None,
             env: None,
+            category: None,
         });
         let result = validate_manifest(&manifest);
         assert!(result.is_err());
@@ -847,6 +850,7 @@ mod tests {
                 working_dir: None,
                 timeout_secs: None,
                 env: None,
+                category: None,
             }],
             execution: "binary".to_string(),
             binary: Some(BinaryPluginConfig {

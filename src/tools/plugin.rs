@@ -29,6 +29,7 @@
 //!     working_dir: None,
 //!     timeout_secs: Some(10),
 //!     env: None,
+//!     category: None,
 //! };
 //!
 //! let tool = PluginTool::new(def, "git-tools");
@@ -133,7 +134,7 @@ impl Tool for PluginTool {
     }
 
     fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
+        self.def.effective_category()
     }
 
     fn parameters(&self) -> Value {
@@ -232,6 +233,7 @@ mod tests {
             working_dir: None,
             timeout_secs: Some(5),
             env: None,
+            category: None,
         }
     }
 
@@ -392,11 +394,26 @@ mod tests {
             working_dir: None,
             timeout_secs: Some(5),
             env: Some(env),
+            category: None,
         };
         let tool = PluginTool::new(def, "test-plugin");
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().for_llm.trim(), "test_value");
+    }
+
+    #[test]
+    fn test_tool_category_from_def() {
+        let mut def = test_def("echo");
+        def.category = Some(ToolCategory::NetworkWrite);
+        let tool = PluginTool::new(def, "test-plugin");
+        assert_eq!(tool.category(), ToolCategory::NetworkWrite);
+    }
+
+    #[test]
+    fn test_tool_category_defaults_to_shell() {
+        let tool = PluginTool::new(test_def("echo"), "test-plugin");
+        assert_eq!(tool.category(), ToolCategory::Shell);
     }
 }
