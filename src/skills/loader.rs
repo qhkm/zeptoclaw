@@ -503,7 +503,7 @@ Use wttr.in.
         // Skill restricted to current platform — should pass
         std::fs::write(
             ws.join("platform/SKILL.md"),
-            &format!(
+            format!(
                 "---\nname: platform\ndescription: Platform-specific\nmetadata: {{\"openclaw\":{{\"os\":[\"{}\"]}}}}\n---\nBody.",
                 current_os()
             ),
@@ -528,7 +528,7 @@ Use wttr.in.
         };
         std::fs::write(
             ws.join("wrong_os/SKILL.md"),
-            &format!(
+            format!(
                 "---\nname: wrong_os\ndescription: Wrong platform\nmetadata: {{\"openclaw\":{{\"os\":[\"{}\"]}}}}\n---\nBody.",
                 wrong_os
             ),

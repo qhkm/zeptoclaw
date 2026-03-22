@@ -17,8 +17,8 @@ pub struct InboundMessage {
     pub chat_id: String,
     /// The text content of the message
     pub content: String,
-    /// Optional media attachment
-    pub media: Option<MediaAttachment>,
+    /// Media attachments (zero or more)
+    pub media: Vec<MediaAttachment>,
     /// Session key for routing (format: "channel:chat_id")
     pub session_key: String,
     /// Additional metadata key-value pairs
@@ -52,6 +52,8 @@ pub struct MediaAttachment {
     pub data: Option<Vec<u8>>,
     /// Original filename
     pub filename: Option<String>,
+    /// Explicit MIME type (e.g., "image/jpeg", "image/png")
+    pub mime_type: Option<String>,
 }
 
 /// Types of media that can be attached to messages
@@ -91,13 +93,16 @@ impl InboundMessage {
             sender_id: sender_id.to_string(),
             chat_id: chat_id.to_string(),
             content: content.to_string(),
-            media: None,
+            media: Vec::new(),
             session_key: format!("{}:{}", channel, chat_id),
             metadata: HashMap::new(),
         }
     }
 
     /// Attaches media to the message (builder pattern).
+    ///
+    /// Multiple calls push additional attachments; calling `.with_media()` twice
+    /// results in a message with two attachments.
     ///
     /// # Example
     /// ```
@@ -106,10 +111,10 @@ impl InboundMessage {
     /// let media = MediaAttachment::new(MediaType::Image).with_url("https://example.com/image.png");
     /// let msg = InboundMessage::new("telegram", "user123", "chat456", "Check this out!")
     ///     .with_media(media);
-    /// assert!(msg.media.is_some());
+    /// assert!(!msg.media.is_empty());
     /// ```
     pub fn with_media(mut self, media: MediaAttachment) -> Self {
-        self.media = Some(media);
+        self.media.push(media);
         self
     }
 
@@ -131,7 +136,7 @@ impl InboundMessage {
 
     /// Checks if this message has any media attached.
     pub fn has_media(&self) -> bool {
-        self.media.is_some()
+        !self.media.is_empty()
     }
 }
 
@@ -205,6 +210,7 @@ impl MediaAttachment {
             url: None,
             data: None,
             filename: None,
+            mime_type: None,
         }
     }
 
@@ -223,6 +229,21 @@ impl MediaAttachment {
     /// Sets the filename (builder pattern).
     pub fn with_filename(mut self, filename: &str) -> Self {
         self.filename = Some(filename.to_string());
+        self
+    }
+
+    /// Sets the MIME type for the media (builder pattern).
+    ///
+    /// # Example
+    /// ```
+    /// use zeptoclaw::bus::message::{MediaAttachment, MediaType};
+    ///
+    /// let media = MediaAttachment::new(MediaType::Image)
+    ///     .with_mime_type("image/webp");
+    /// assert_eq!(media.mime_type, Some("image/webp".to_string()));
+    /// ```
+    pub fn with_mime_type(mut self, mime_type: &str) -> Self {
+        self.mime_type = Some(mime_type.to_string());
         self
     }
 
@@ -249,7 +270,7 @@ mod tests {
         assert_eq!(msg.chat_id, "chat456");
         assert_eq!(msg.content, "Hello");
         assert_eq!(msg.session_key, "telegram:chat456");
-        assert!(msg.media.is_none());
+        assert!(msg.media.is_empty());
         assert!(msg.metadata.is_empty());
     }
 
@@ -263,7 +284,7 @@ mod tests {
             InboundMessage::new("discord", "user1", "channel1", "Check this").with_media(media);
 
         assert!(msg.has_media());
-        let attachment = msg.media.unwrap();
+        let attachment = msg.media.first().unwrap();
         assert_eq!(attachment.media_type, MediaType::Image);
         assert_eq!(
             attachment.url,
@@ -348,6 +369,29 @@ mod tests {
         assert_eq!(MediaType::Image, MediaType::Image);
         assert_ne!(MediaType::Image, MediaType::Audio);
         assert_ne!(MediaType::Video, MediaType::Document);
+    }
+
+    #[test]
+    fn test_inbound_message_with_multiple_media() {
+        let media1 = MediaAttachment::new(MediaType::Image)
+            .with_data(vec![0xFF, 0xD8])
+            .with_mime_type("image/jpeg");
+        let media2 = MediaAttachment::new(MediaType::Image)
+            .with_data(vec![0x89, 0x50])
+            .with_mime_type("image/png");
+
+        let msg = InboundMessage::new("telegram", "user1", "chat1", "Two images")
+            .with_media(media1)
+            .with_media(media2);
+
+        assert_eq!(msg.media.len(), 2);
+        assert!(msg.has_media());
+    }
+
+    #[test]
+    fn test_media_attachment_mime_type() {
+        let media = MediaAttachment::new(MediaType::Image).with_mime_type("image/webp");
+        assert_eq!(media.mime_type, Some("image/webp".to_string()));
     }
 
     #[test]

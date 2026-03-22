@@ -51,6 +51,11 @@ impl CustomTool {
             security: ShellSecurityConfig::default(),
         }
     }
+
+    /// Create a custom tool with a specific security configuration.
+    pub fn with_security(def: CustomToolDef, security: ShellSecurityConfig) -> Self {
+        Self { def, security }
+    }
 }
 
 #[async_trait]
@@ -202,6 +207,7 @@ mod tests {
             workspace: Some(std::env::temp_dir().to_string_lossy().to_string()),
             channel: None,
             chat_id: None,
+            is_batch: false,
         }
     }
 
@@ -281,6 +287,29 @@ mod tests {
         assert_eq!(props.len(), 2);
         assert_eq!(props["pattern"]["type"], "string");
         assert_eq!(props["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_custom_tool_with_security_config() {
+        use crate::security::{ShellAllowlistMode, ShellSecurityConfig};
+
+        let def = CustomToolDef {
+            name: "my_tool".to_string(),
+            description: "test tool".to_string(),
+            command: "echo hello".to_string(),
+            parameters: None,
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+        };
+
+        let security =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        let tool = CustomTool::with_security(def, security);
+        assert_eq!(tool.name(), "my_tool");
+        // Verify the injected security config actually restricts commands
+        assert!(tool.security.validate_command("git status").is_ok());
+        assert!(tool.security.validate_command("echo hello").is_err());
     }
 
     #[test]

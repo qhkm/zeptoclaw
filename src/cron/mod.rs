@@ -51,6 +51,9 @@ pub struct CronJob {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub delete_after_run: bool,
+    /// Optional per-job dispatch timeout in seconds (overrides default 5s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +80,10 @@ const DEFAULT_DISPATCH_TIMEOUT_MS: u64 = 50;
 #[cfg(not(test))]
 const DEFAULT_DISPATCH_TIMEOUT_MS: u64 = 5_000;
 
+/// Deduplication window: if a job's `last_run_at_ms` is within this window of
+/// `next_run_at_ms`, we consider it already dispatched (crash recovery guard).
+const DEDUP_WINDOW_MS: i64 = 60_000;
+
 const ERROR_BACKOFF_SCHEDULE_MS: [i64; 5] = [
     30_000,      // 1st error  -> 30s
     60_000,      // 2nd error  -> 1m
@@ -84,6 +91,23 @@ const ERROR_BACKOFF_SCHEDULE_MS: [i64; 5] = [
     15 * 60_000, // 4th error  -> 15m
     60 * 60_000, // 5th+ error -> 60m
 ];
+
+fn dispatch_timeout_ms(timeout_secs: Option<u64>) -> u64 {
+    timeout_secs
+        .map(|secs| secs.saturating_mul(1000))
+        .unwrap_or(DEFAULT_DISPATCH_TIMEOUT_MS)
+}
+
+fn should_skip_missed_dispatch(job: &CronJob, next_run_at_ms: i64) -> bool {
+    let Some(last_run_at_ms) = job.state.last_run_at_ms else {
+        return false;
+    };
+    if job.state.last_status.as_deref() != Some("ok") {
+        return false;
+    }
+    let delta_ms = i128::from(last_run_at_ms) - i128::from(next_run_at_ms);
+    delta_ms >= 0 && delta_ms < i128::from(DEDUP_WINDOW_MS)
+}
 
 fn error_backoff_ms(consecutive_errors: u32) -> i64 {
     if consecutive_errors == 0 {
@@ -258,8 +282,20 @@ impl CronService {
                                     info!(job_id = %job.id, job_name = %job.name, "Skipping missed schedule");
                                 }
                                 OnMiss::RunOnce => {
-                                    info!(job_id = %job.id, job_name = %job.name, "Queueing missed schedule for immediate run");
-                                    missed.push(job.payload.clone());
+                                    // Dedup guard: if job was already dispatched
+                                    // recently (crash between dispatch and save),
+                                    // skip to avoid duplicate delivery.
+                                    let already_ran = should_skip_missed_dispatch(job, next);
+                                    if already_ran {
+                                        info!(
+                                            job_id = %job.id,
+                                            job_name = %job.name,
+                                            "Skipping missed schedule (dedup: last_run near next_run)"
+                                        );
+                                    } else {
+                                        info!(job_id = %job.id, job_name = %job.name, "Queueing missed schedule for immediate run");
+                                        missed.push(job.payload.clone());
+                                    }
                                 }
                             }
                             // Either way, reschedule to next future time
@@ -294,11 +330,16 @@ impl CronService {
         let running_clone = Arc::clone(&running);
         let handle = tokio::spawn(async move {
             info!("Cron service started");
+            // Use interval instead of sleep to prevent timer drift under load.
+            // MissedTickBehavior::Delay ensures ticks don't pile up if a tick
+            // takes longer than 1s — the next tick fires 1s after the slow one.
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             while running.load(Ordering::SeqCst) {
+                interval.tick().await;
                 if let Err(err) = tick(&store, &store_path, &bus, jitter_ms).await {
                     error!("Cron tick failed: {}", err);
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             running_clone.store(false, Ordering::SeqCst);
         });
@@ -326,6 +367,19 @@ impl CronService {
         payload: CronPayload,
         delete_after_run: bool,
     ) -> Result<CronJob> {
+        self.add_job_with_timeout(name, schedule, payload, delete_after_run, None)
+            .await
+    }
+
+    /// Add a new job with an optional per-job dispatch timeout.
+    pub async fn add_job_with_timeout(
+        &self,
+        name: String,
+        schedule: CronSchedule,
+        payload: CronPayload,
+        delete_after_run: bool,
+        timeout_secs: Option<u64>,
+    ) -> Result<CronJob> {
         let now = now_ms();
         let job = CronJob {
             id: Uuid::new_v4().to_string().chars().take(8).collect(),
@@ -340,6 +394,7 @@ impl CronService {
             created_at_ms: now,
             updated_at_ms: now,
             delete_after_run,
+            timeout_secs,
         };
 
         {
@@ -440,8 +495,9 @@ async fn tick(
         if jitter_ms > 0 {
             tokio::time::sleep(jitter_delay(jitter_ms)).await;
         }
+        let timeout_ms = dispatch_timeout_ms(job.timeout_secs);
         let send_result = tokio::time::timeout(
-            std::time::Duration::from_millis(DEFAULT_DISPATCH_TIMEOUT_MS),
+            std::time::Duration::from_millis(timeout_ms),
             bus.publish_inbound(inbound),
         )
         .await;
@@ -743,6 +799,7 @@ mod tests {
                     created_at_ms: now_ms(),
                     updated_at_ms: now_ms(),
                     delete_after_run: false,
+                    timeout_secs: None,
                 },
                 CronJob {
                     id: "timeout".to_string(),
@@ -761,6 +818,7 @@ mod tests {
                     created_at_ms: now_ms(),
                     updated_at_ms: now_ms(),
                     delete_after_run: false,
+                    timeout_secs: None,
                 },
             ],
         }));
@@ -815,6 +873,7 @@ mod tests {
                     created_at_ms: now_ms(),
                     updated_at_ms: now_ms(),
                     delete_after_run: false,
+                    timeout_secs: None,
                 },
                 CronJob {
                     id: "atdel".to_string(),
@@ -835,6 +894,7 @@ mod tests {
                     created_at_ms: now_ms(),
                     updated_at_ms: now_ms(),
                     delete_after_run: true,
+                    timeout_secs: None,
                 },
             ],
         }));
@@ -876,6 +936,7 @@ mod tests {
                 created_at_ms: now_ms(),
                 updated_at_ms: now_ms(),
                 delete_after_run: true,
+                timeout_secs: None,
             }],
         }));
         let store_path = temp.path().join("jobs.json");
@@ -889,6 +950,504 @@ mod tests {
         assert!(
             store_guard.jobs.is_empty(),
             "one-shot job with delete_after_run=true should be removed after successful dispatch"
+        );
+    }
+
+    // --- Duplicate delivery guard (#252) ---
+
+    #[tokio::test]
+    async fn test_dedup_guard_skips_recently_dispatched_job() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store_path = temp.path().join("jobs.json");
+
+        let next_run = 100_000;
+        // Simulate crash: last_run_at is close to next_run (within DEDUP_WINDOW_MS)
+        let json = serde_json::json!({
+            "version": 1,
+            "jobs": [{
+                "id": "dedup1",
+                "name": "dedup job",
+                "enabled": true,
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "message": "dedup_check", "channel": "cli", "chat_id": "cli" },
+                "state": {
+                    "next_run_at_ms": next_run,
+                    "last_run_at_ms": next_run + 50,
+                    "last_status": "ok"
+                },
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "delete_after_run": false
+            }]
+        });
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&json).unwrap())
+            .await
+            .unwrap();
+
+        let service = CronService::new(store_path, bus.clone());
+        service.start(&OnMiss::RunOnce).await.unwrap();
+        service.stop().await;
+
+        // Should NOT have dispatched (dedup guard)
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), bus.consume_inbound())
+                .await;
+        assert!(
+            result.is_err(),
+            "dedup guard should prevent dispatch when last_run is near next_run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dedup_guard_allows_genuinely_missed_job() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store_path = temp.path().join("jobs.json");
+
+        // last_run is far from next_run (genuinely missed)
+        let json = serde_json::json!({
+            "version": 1,
+            "jobs": [{
+                "id": "dedup2",
+                "name": "genuine miss",
+                "enabled": true,
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "message": "genuine_check", "channel": "cli", "chat_id": "cli" },
+                "state": {
+                    "next_run_at_ms": 1,
+                    "last_run_at_ms": null,
+                    "last_status": null
+                },
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "delete_after_run": false
+            }]
+        });
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&json).unwrap())
+            .await
+            .unwrap();
+
+        let service = CronService::new(store_path, bus.clone());
+        service.start(&OnMiss::RunOnce).await.unwrap();
+        service.stop().await;
+
+        // Should dispatch — no dedup match
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), bus.consume_inbound())
+            .await
+            .expect("genuinely missed job should be dispatched")
+            .expect("bus should have a message");
+        assert_eq!(msg.content, "genuine_check");
+    }
+
+    // --- Per-job timeout (#254) ---
+
+    #[tokio::test]
+    async fn test_per_job_timeout_overrides_default() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store = Arc::new(RwLock::new(CronStore {
+            version: 1,
+            jobs: vec![CronJob {
+                id: "timed".to_string(),
+                name: "timed job".to_string(),
+                enabled: true,
+                schedule: CronSchedule::Every { every_ms: 60_000 },
+                payload: CronPayload {
+                    message: "timed_check".to_string(),
+                    channel: "cli".to_string(),
+                    chat_id: "cli".to_string(),
+                },
+                state: CronJobState {
+                    next_run_at_ms: Some(now_ms() - 1),
+                    ..Default::default()
+                },
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                delete_after_run: false,
+                timeout_secs: Some(10),
+            }],
+        }));
+        let store_path = temp.path().join("jobs.json");
+
+        tick(&store, &store_path, &bus, 0).await.unwrap();
+
+        let store_guard = store.read().await;
+        let job = store_guard.jobs.first().expect("job should exist");
+        assert_eq!(job.state.last_status.as_deref(), Some("ok"));
+        assert_eq!(job.timeout_secs, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_add_job_with_timeout() {
+        let temp = tempdir().unwrap();
+        let service = CronService::new(temp.path().join("jobs.json"), Arc::new(MessageBus::new()));
+
+        let job = service
+            .add_job_with_timeout(
+                "timeout test".to_string(),
+                CronSchedule::Every { every_ms: 1_000 },
+                CronPayload {
+                    message: "hello".to_string(),
+                    channel: "cli".to_string(),
+                    chat_id: "cli".to_string(),
+                },
+                false,
+                Some(30),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(job.timeout_secs, Some(30));
+
+        // Verify it persists through serde
+        let jobs = service.list_jobs(true).await;
+        assert_eq!(jobs[0].timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn test_timeout_secs_serde_roundtrip() {
+        let job = CronJob {
+            id: "t1".to_string(),
+            name: "test".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 1000 },
+            payload: CronPayload {
+                message: "hi".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: Some(60),
+        };
+
+        let json = serde_json::to_string(&job).unwrap();
+        assert!(json.contains("\"timeout_secs\":60"));
+
+        let parsed: CronJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.timeout_secs, Some(60));
+
+        // None should be omitted
+        let job_no_timeout = CronJob {
+            timeout_secs: None,
+            ..job.clone()
+        };
+        let json2 = serde_json::to_string(&job_no_timeout).unwrap();
+        assert!(!json2.contains("timeout_secs"));
+
+        // Missing field deserializes as None
+        let json3 = json2.clone();
+        let parsed2: CronJob = serde_json::from_str(&json3).unwrap();
+        assert_eq!(parsed2.timeout_secs, None);
+    }
+
+    #[test]
+    fn test_dedup_window_constant() {
+        assert_eq!(DEDUP_WINDOW_MS, 60_000, "dedup window should be 60 seconds");
+    }
+
+    #[test]
+    fn test_dispatch_timeout_ms_default() {
+        assert_eq!(dispatch_timeout_ms(None), DEFAULT_DISPATCH_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_dispatch_timeout_ms_saturates_on_large_value() {
+        assert_eq!(dispatch_timeout_ms(Some(u64::MAX)), u64::MAX);
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_requires_last_run_after_next() {
+        let job = CronJob {
+            id: "dedup3".to_string(),
+            name: "fast schedule".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 30_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: Some(70_000),
+                last_status: Some("ok".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(
+            !should_skip_missed_dispatch(&job, 100_000),
+            "dedup guard should not skip when last_run is before next_run"
+        );
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_near_next_with_success() {
+        let job = CronJob {
+            id: "dedup4".to_string(),
+            name: "near next".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 60_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: Some(100_010),
+                last_status: Some("ok".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(should_skip_missed_dispatch(&job, 100_000));
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_no_last_run() {
+        let job = CronJob {
+            id: "d5".to_string(),
+            name: "never ran".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 60_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: None,
+                last_status: None,
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(
+            !should_skip_missed_dispatch(&job, 100_000),
+            "should not skip when job has never run"
+        );
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_last_run_errored() {
+        let job = CronJob {
+            id: "d6".to_string(),
+            name: "errored run".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 60_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                last_run_at_ms: Some(100_010),
+                last_status: Some("error".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(
+            !should_skip_missed_dispatch(&job, 100_000),
+            "should not skip when last run was an error — must re-dispatch"
+        );
+    }
+
+    #[test]
+    fn test_should_skip_missed_dispatch_outside_window() {
+        let job = CronJob {
+            id: "d7".to_string(),
+            name: "old run".to_string(),
+            enabled: true,
+            schedule: CronSchedule::Every { every_ms: 60_000 },
+            payload: CronPayload {
+                message: "x".to_string(),
+                channel: "cli".to_string(),
+                chat_id: "cli".to_string(),
+            },
+            state: CronJobState {
+                // last_run is 120s after next_run — outside 60s window
+                last_run_at_ms: Some(100_000 + 120_000),
+                last_status: Some("ok".to_string()),
+                ..Default::default()
+            },
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            delete_after_run: false,
+            timeout_secs: None,
+        };
+        assert!(
+            !should_skip_missed_dispatch(&job, 100_000),
+            "should not skip when last_run is outside the dedup window"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_timeout_ms_normal_value() {
+        assert_eq!(dispatch_timeout_ms(Some(10)), 10_000);
+        assert_eq!(dispatch_timeout_ms(Some(1)), 1_000);
+        assert_eq!(dispatch_timeout_ms(Some(0)), 0);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_guard_dispatches_when_last_run_errored() {
+        let temp = tempdir().unwrap();
+        let bus = Arc::new(MessageBus::new());
+        let store_path = temp.path().join("jobs.json");
+
+        // Simulate crash after a failed dispatch — should re-dispatch
+        let json = serde_json::json!({
+            "version": 1,
+            "jobs": [{
+                "id": "dedup-err",
+                "name": "errored dedup",
+                "enabled": true,
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "message": "retry_me", "channel": "cli", "chat_id": "cli" },
+                "state": {
+                    "next_run_at_ms": 1,
+                    "last_run_at_ms": 50,
+                    "last_status": "error",
+                    "last_error": "cron dispatch timed out"
+                },
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "delete_after_run": false
+            }]
+        });
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&json).unwrap())
+            .await
+            .unwrap();
+
+        let service = CronService::new(store_path, bus.clone());
+        service.start(&OnMiss::RunOnce).await.unwrap();
+        service.stop().await;
+
+        // Should dispatch — last run was an error, dedup guard must not block
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), bus.consume_inbound())
+            .await
+            .expect("errored job should be re-dispatched")
+            .expect("bus should have a message");
+        assert_eq!(msg.content, "retry_me");
+    }
+
+    #[tokio::test]
+    async fn test_per_job_timeout_causes_timeout_on_full_bus() {
+        let temp = tempdir().unwrap();
+        // Buffer size 1: first job fills the bus, second job should timeout
+        let bus = Arc::new(MessageBus::with_buffer_size(1));
+        let store = Arc::new(RwLock::new(CronStore {
+            version: 1,
+            jobs: vec![
+                CronJob {
+                    id: "fill2".to_string(),
+                    name: "fill queue".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::Every { every_ms: 60_000 },
+                    payload: CronPayload {
+                        message: "fill".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: false,
+                    timeout_secs: None,
+                },
+                CronJob {
+                    id: "short-timeout".to_string(),
+                    name: "short timeout job".to_string(),
+                    enabled: true,
+                    schedule: CronSchedule::Every { every_ms: 60_000 },
+                    payload: CronPayload {
+                        message: "should_timeout".to_string(),
+                        channel: "cli".to_string(),
+                        chat_id: "cli".to_string(),
+                    },
+                    state: CronJobState {
+                        next_run_at_ms: Some(now_ms() - 1),
+                        ..Default::default()
+                    },
+                    created_at_ms: now_ms(),
+                    updated_at_ms: now_ms(),
+                    delete_after_run: false,
+                    // Very short timeout — in tests DEFAULT_DISPATCH_TIMEOUT_MS is
+                    // already 50ms, but this proves the field is actually read.
+                    timeout_secs: Some(0),
+                },
+            ],
+        }));
+        let store_path = temp.path().join("jobs.json");
+
+        tick(&store, &store_path, &bus, 0).await.unwrap();
+
+        let store_guard = store.read().await;
+        let timed = store_guard
+            .jobs
+            .iter()
+            .find(|j| j.id == "short-timeout")
+            .expect("short-timeout job");
+        assert_eq!(
+            timed.state.last_status.as_deref(),
+            Some("error"),
+            "job with timeout_secs=0 on full bus should timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_secs_persists_through_store_reload() {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("jobs.json");
+        let bus = Arc::new(MessageBus::new());
+
+        // Create a job with timeout_secs via the service
+        let service = CronService::new(store_path.clone(), bus.clone());
+        service
+            .add_job_with_timeout(
+                "persist test".to_string(),
+                CronSchedule::Every { every_ms: 60_000 },
+                CronPayload {
+                    message: "hi".to_string(),
+                    channel: "cli".to_string(),
+                    chat_id: "cli".to_string(),
+                },
+                false,
+                Some(45),
+            )
+            .await
+            .unwrap();
+        drop(service);
+
+        // Create a new service from the same file — simulates restart
+        let service2 = CronService::new(store_path, bus);
+        service2.start(&OnMiss::Skip).await.unwrap();
+        service2.stop().await;
+
+        let jobs = service2.list_jobs(true).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].timeout_secs,
+            Some(45),
+            "timeout_secs should survive store reload"
         );
     }
 }

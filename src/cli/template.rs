@@ -34,7 +34,15 @@ pub(crate) async fn cmd_template(action: TemplateAction) -> Result<()> {
                 } else {
                     "user"
                 };
-                println!("  - {} ({}) — {}", tpl.name, origin, tpl.description);
+                let coding_marker = if tpl.tags.iter().any(|t| t == "coding") {
+                    " [+grep,find]"
+                } else {
+                    ""
+                };
+                println!(
+                    "  - {} ({}) — {}{}",
+                    tpl.name, origin, tpl.description, coding_marker
+                );
             }
         }
         TemplateAction::Show { name } => {
@@ -64,6 +72,11 @@ pub(crate) async fn cmd_template(action: TemplateAction) -> Result<()> {
             }
             if !tpl.tags.is_empty() {
                 println!("Tags: {}", tpl.tags.join(", "));
+            }
+            // Show opt-in tools that this template activates via its tags
+            if tpl.tags.iter().any(|t| t == "coding") {
+                println!("Activates coding tools: grep, find");
+                println!("  (disabled by default — automatically enabled by this template)");
             }
             println!();
             println!("System prompt:");

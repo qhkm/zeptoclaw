@@ -164,6 +164,26 @@ impl Default for TokenBudget {
     }
 }
 
+/// Resolve effective token budget from global config and optional template override.
+///
+/// - `global` = 0 means unlimited; `template` = None means inherit global.
+/// - `template` = Some(0) means "no override" (treated same as None, since 0 = unlimited
+///   in TokenBudget, and a template must not expand beyond global).
+/// - When both are set (non-zero), the lower value wins.
+/// - When global is unlimited (0) and template sets a non-zero value, template wins.
+pub fn resolve_token_budget(global: u64, template: Option<u64>) -> u64 {
+    match template {
+        None | Some(0) => global,
+        Some(tpl) => {
+            if global == 0 {
+                tpl
+            } else {
+                global.min(tpl)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +334,34 @@ mod tests {
         assert_eq!(budget.input_used(), 6_000);
         assert_eq!(budget.output_used(), 2_500);
         assert_eq!(budget.total_used(), 8_500);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_template_only() {
+        assert_eq!(resolve_token_budget(0, Some(50000)), 50000);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_global_only() {
+        assert_eq!(resolve_token_budget(100000, None), 100000);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_both_takes_min() {
+        assert_eq!(resolve_token_budget(100000, Some(50000)), 50000);
+        assert_eq!(resolve_token_budget(30000, Some(50000)), 30000);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_both_unlimited() {
+        assert_eq!(resolve_token_budget(0, None), 0);
+    }
+
+    #[test]
+    fn test_resolve_token_budget_template_zero_cannot_expand() {
+        // Template setting 0 must NOT disable a finite global budget
+        assert_eq!(resolve_token_budget(50000, Some(0)), 50000);
+        // When global is also unlimited, stays unlimited
+        assert_eq!(resolve_token_budget(0, Some(0)), 0);
     }
 }

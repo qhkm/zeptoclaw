@@ -132,6 +132,9 @@ pub struct Config {
     /// Panel (control panel) configuration.
     #[serde(default)]
     pub panel: PanelConfig,
+    /// r8r workflow-engine bridge configuration.
+    #[serde(default)]
+    pub r8r_bridge: R8rBridgeConfig,
 }
 
 // ============================================================================
@@ -238,6 +241,75 @@ impl Default for PanelConfig {
             api_port: 9091,
             auth_mode: AuthMode::Token,
             bind: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// r8r Bridge Configuration
+// ============================================================================
+
+/// Channel target for routing r8r events to a specific messaging channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTarget {
+    /// Channel name (e.g. "telegram", "slack").
+    pub channel: String,
+    /// Chat/channel ID on that platform.
+    pub chat_id: String,
+}
+
+/// Configuration for the r8r workflow-engine bridge.
+///
+/// When enabled, ZeptoClaw connects to an r8r instance over WebSocket to
+/// receive workflow events (approvals, execution results, health) and send
+/// back decisions and workflow triggers.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct R8rBridgeConfig {
+    /// Whether the r8r bridge is enabled.
+    pub enabled: bool,
+    /// WebSocket endpoint for the r8r event stream.
+    pub endpoint: String,
+    /// Bearer token for authenticating with r8r.
+    pub token: Option<String>,
+    /// Default channel target for events that have no specific routing.
+    pub default_channel: Option<ChannelTarget>,
+    /// Per-workflow approval routing overrides (workflow name -> channel target).
+    #[serde(default)]
+    pub approval_routing: HashMap<String, ChannelTarget>,
+    /// Maximum reconnect backoff interval in seconds.
+    pub reconnect_max_interval_secs: u64,
+    /// Interval between health pings in seconds.
+    pub health_ping_interval_secs: u64,
+}
+
+impl std::fmt::Debug for R8rBridgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("R8rBridgeConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("default_channel", &self.default_channel)
+            .field("approval_routing", &self.approval_routing)
+            .field(
+                "reconnect_max_interval_secs",
+                &self.reconnect_max_interval_secs,
+            )
+            .field("health_ping_interval_secs", &self.health_ping_interval_secs)
+            .finish()
+    }
+}
+
+impl Default for R8rBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "ws://localhost:8080/api/ws/events".to_string(),
+            token: None,
+            default_channel: None,
+            approval_routing: HashMap::new(),
+            reconnect_max_interval_secs: 30,
+            health_ping_interval_secs: 60,
         }
     }
 }
@@ -401,8 +473,14 @@ pub struct McpConfig {
 pub struct McpServerConfig {
     /// Human-readable server name (used as tool name prefix).
     pub name: String,
-    /// Server URL endpoint.
-    pub url: String,
+    /// Server URL endpoint (for HTTP transport).
+    pub url: Option<String>,
+    /// Server command (for stdio transport).
+    pub command: Option<String>,
+    /// Server command arguments (for stdio transport).
+    pub args: Option<Vec<String>>,
+    /// Environment variables for stdio server process.
+    pub env: Option<std::collections::HashMap<String, String>>,
     /// Request timeout in seconds (default: 30).
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
@@ -559,6 +637,56 @@ pub struct AgentConfig {
     pub defaults: AgentDefaults,
 }
 
+/// Configuration for the multi-layered tool loop guard.
+///
+/// Controls ping-pong detection, outcome-aware blocking, poll relaxation,
+/// graduated responses, and backoff scheduling for repeated tool calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopGuardConfig {
+    /// Master switch to enable/disable the loop guard.
+    pub enabled: bool,
+    /// Number of identical call hashes before emitting a warning.
+    pub warn_threshold: u32,
+    /// Number of identical call hashes before blocking the call.
+    pub block_threshold: u32,
+    /// Total repetitions across all hashes before tripping the circuit breaker.
+    pub global_circuit_breaker: u32,
+    /// Minimum repeated cycles required to detect ping-pong oscillation (period 2 or 3).
+    pub ping_pong_min_repeats: u32,
+    /// Threshold multiplier for commands matching poll/status patterns.
+    pub poll_multiplier: u32,
+    /// Number of identical outcome hashes before emitting a warning.
+    pub outcome_warn_threshold: u32,
+    /// Number of identical outcome hashes before blocking the call.
+    pub outcome_block_threshold: u32,
+    /// Sliding window size for recent call tracking. When the call sequence
+    /// exceeds this limit, older entries are pruned and counters rebuilt to
+    /// prevent unbounded memory growth and false-positive warnings.
+    #[serde(default = "default_window_size")]
+    pub window_size: u32,
+}
+
+fn default_window_size() -> u32 {
+    200
+}
+
+impl Default for LoopGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            warn_threshold: 3,
+            block_threshold: 5,
+            global_circuit_breaker: 30,
+            ping_pong_min_repeats: 3,
+            poll_multiplier: 3,
+            outcome_warn_threshold: 2,
+            outcome_block_threshold: 3,
+            window_size: default_window_size(),
+        }
+    }
+}
+
 /// Default agent settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -575,6 +703,8 @@ pub struct AgentDefaults {
     pub max_tool_iterations: u32,
     /// Maximum wall-clock time (seconds) for a single agent run.
     pub agent_timeout_secs: u64,
+    /// Maximum wall-clock time (seconds) for a single tool call. 0 = use agent_timeout_secs.
+    pub tool_timeout_secs: u64,
     /// How to handle messages arriving during an active run.
     pub message_queue_mode: MessageQueueMode,
     /// Whether to stream the final LLM response token-by-token in CLI mode.
@@ -595,21 +725,20 @@ pub struct AgentDefaults {
     /// Defaults to system local timezone, falls back to "UTC".
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    /// Enable SHA256-based repeated tool-call loop detection.
-    #[serde(default = "default_true")]
-    pub loop_guard_enabled: bool,
-    /// Sliding window size for loop guard hash history.
-    #[serde(default = "default_loop_guard_window")]
-    pub loop_guard_window: usize,
-    /// Number of repeated hashes required before warning.
-    #[serde(default = "default_loop_guard_repetition_threshold")]
-    pub loop_guard_repetition_threshold: usize,
-    /// Number of detected loops before forcing turn stop.
-    #[serde(default = "default_loop_guard_max_hits")]
-    pub loop_guard_max_hits: usize,
+    /// Loop guard configuration for repeated tool-call detection.
+    #[serde(default)]
+    pub loop_guard: LoopGuardConfig,
     /// Maximum bytes allowed per tool result before truncation.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
+    /// Maximum total tool calls allowed per agent run. None = unlimited.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Custom system prompt injected into ContextBuilder. Takes priority over
+    /// template and hand system prompts when set. Useful for gateway/headless
+    /// mode where the system prompt must come from config, not CLI flags.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 /// Detect the system's IANA timezone.
@@ -633,18 +762,6 @@ fn default_timezone() -> String {
     "UTC".to_string()
 }
 
-fn default_loop_guard_window() -> usize {
-    10
-}
-
-fn default_loop_guard_repetition_threshold() -> usize {
-    3
-}
-
-fn default_loop_guard_max_hits() -> usize {
-    2
-}
-
 fn default_max_tool_result_bytes() -> usize {
     crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES
 }
@@ -665,18 +782,18 @@ impl Default for AgentDefaults {
             temperature: 0.7,
             max_tool_iterations: 20,
             agent_timeout_secs: 300,
+            tool_timeout_secs: 0,
             message_queue_mode: MessageQueueMode::default(),
-            streaming: false,
+            streaming: true,
             token_budget: 0,
             compact_tools: false,
             tool_profile: None,
             active_hand: None,
             timezone: default_timezone(),
-            loop_guard_enabled: true,
-            loop_guard_window: default_loop_guard_window(),
-            loop_guard_repetition_threshold: default_loop_guard_repetition_threshold(),
-            loop_guard_max_hits: default_loop_guard_max_hits(),
+            loop_guard: LoopGuardConfig::default(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
+            max_tool_calls: None,
+            system_prompt: None,
         }
     }
 }
@@ -706,8 +823,9 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     /// Slack bot configuration
     pub slack: Option<SlackConfig>,
-    /// WhatsApp bridge configuration
-    pub whatsapp: Option<WhatsAppConfig>,
+    /// WhatsApp Web native channel configuration (requires `whatsapp-web` feature).
+    #[serde(alias = "whatsapp")]
+    pub whatsapp_web: Option<WhatsAppWebConfig>,
     /// WhatsApp Cloud API configuration (official API, no bridge)
     pub whatsapp_cloud: Option<WhatsAppCloudConfig>,
     /// Feishu (Lark) configuration
@@ -726,6 +844,8 @@ pub struct ChannelsConfig {
     pub email: Option<EmailConfig>,
     /// Serial (UART) channel configuration. Requires `hardware` feature.
     pub serial: Option<SerialChannelConfig>,
+    /// MQTT channel configuration. Requires `mqtt` feature.
+    pub mqtt: Option<MqttChannelConfig>,
     /// Directory for channel plugins (default: ~/.zeptoclaw/channels/)
     #[serde(default)]
     pub channel_plugins_dir: Option<String>,
@@ -761,6 +881,70 @@ impl Default for SerialChannelConfig {
     }
 }
 
+/// MQTT channel configuration for IoT device communication.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MqttChannelConfig {
+    /// Whether the channel is enabled.
+    pub enabled: bool,
+    /// MQTT broker URL (e.g., "mqtt://localhost:1883").
+    pub broker_url: String,
+    /// Client ID for the MQTT connection.
+    pub client_id: String,
+    /// Topics to subscribe to for inbound messages (e.g., ["zeptoclaw/inbox/#"]).
+    pub subscribe_topics: Vec<String>,
+    /// Topic prefix for publishing responses (e.g., "zeptoclaw/outbox").
+    pub publish_prefix: String,
+    /// QoS level (0 = at most once, 1 = at least once, 2 = exactly once).
+    pub qos: u8,
+    /// MQTT broker username (optional).
+    #[serde(default)]
+    pub username: String,
+    /// MQTT broker password (optional).
+    #[serde(default)]
+    pub password: String,
+    /// Allow only specific device/sender IDs.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// Deny all senders unless in allowlist.
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+impl Default for MqttChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            broker_url: "mqtt://localhost:1883".to_string(),
+            client_id: "zeptoclaw-agent".to_string(),
+            subscribe_topics: vec!["zeptoclaw/inbox/#".to_string()],
+            publish_prefix: "zeptoclaw/outbox".to_string(),
+            qos: 1,
+            username: String::new(),
+            password: String::new(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+impl std::fmt::Debug for MqttChannelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttChannelConfig")
+            .field("enabled", &self.enabled)
+            .field("broker_url", &self.broker_url)
+            .field("client_id", &self.client_id)
+            .field("subscribe_topics", &self.subscribe_topics)
+            .field("publish_prefix", &self.publish_prefix)
+            .field("qos", &self.qos)
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("allow_from", &self.allow_from)
+            .field("deny_by_default", &self.deny_by_default)
+            .finish()
+    }
+}
+
 /// Webhook inbound channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
@@ -779,6 +963,22 @@ pub struct WebhookConfig {
     /// Optional Bearer token for request authentication
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Optional HMAC secret for request signature verification.
+    #[serde(default)]
+    pub signature_secret: Option<String>,
+    /// Header carrying the request HMAC signature when `signature_secret` is set.
+    #[serde(default = "default_webhook_signature_header")]
+    pub signature_header: String,
+    /// Server-controlled sender ID used when `trust_payload_identity` is disabled.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Optional server-controlled chat ID used when `trust_payload_identity` is disabled.
+    /// Falls back to `sender_id` when omitted.
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// When true, accept caller-supplied `sender` and `chat_id` from webhook JSON.
+    #[serde(default)]
+    pub trust_payload_identity: bool,
     /// Allowlist of sender IDs (empty = allow all unless `deny_by_default` is set)
     #[serde(default)]
     pub allow_from: Vec<String>,
@@ -799,6 +999,10 @@ fn default_webhook_path() -> String {
     "/webhook".to_string()
 }
 
+fn default_webhook_signature_header() -> String {
+    "X-ZeptoClaw-Signature-256".to_string()
+}
+
 impl Default for WebhookConfig {
     fn default() -> Self {
         Self {
@@ -807,6 +1011,11 @@ impl Default for WebhookConfig {
             port: default_webhook_port(),
             path: default_webhook_path(),
             auth_token: None,
+            signature_secret: None,
+            signature_header: default_webhook_signature_header(),
+            sender_id: None,
+            chat_id: None,
+            trust_payload_identity: false,
             allow_from: Vec::new(),
             deny_by_default: false,
         }
@@ -817,8 +1026,13 @@ fn default_telegram_chunk_size() -> usize {
     4000
 }
 
+fn default_telegram_allow_usernames() -> bool {
+    true
+}
+
 /// Telegram channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelegramConfig {
     /// Whether the channel is enabled
     #[serde(default)]
@@ -829,12 +1043,19 @@ pub struct TelegramConfig {
     /// Default is 4000 to leave room for some buffer.
     #[serde(default = "default_telegram_chunk_size")]
     pub chunk_size: usize,
-    /// Allowlist of user IDs/usernames (empty = allow all unless `deny_by_default` is set)
+    /// Allowlist of numeric user IDs (empty = allow all unless `deny_by_default` is set).
+    ///
+    /// Legacy username entries are only honored when `allow_usernames` is true.
     #[serde(default)]
     pub allow_from: Vec<String>,
     /// When true, empty `allow_from` rejects all senders (strict mode).
     #[serde(default)]
     pub deny_by_default: bool,
+    /// Legacy compatibility toggle for username-based allowlist entries.
+    ///
+    /// New configs should keep this disabled and use numeric Telegram user IDs only.
+    #[serde(default = "default_telegram_allow_usernames")]
+    pub allow_usernames: bool,
 }
 
 impl Default for TelegramConfig {
@@ -845,6 +1066,7 @@ impl Default for TelegramConfig {
             chunk_size: default_telegram_chunk_size(),
             allow_from: Vec::new(),
             deny_by_default: false,
+            allow_usernames: default_telegram_allow_usernames(),
         }
     }
 }
@@ -883,52 +1105,6 @@ pub struct SlackConfig {
     pub deny_by_default: bool,
 }
 
-/// WhatsApp channel configuration (via bridge)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhatsAppConfig {
-    /// Whether the channel is enabled
-    #[serde(default)]
-    pub enabled: bool,
-    /// WebSocket bridge URL
-    #[serde(default = "default_whatsapp_bridge_url")]
-    pub bridge_url: String,
-    /// Optional Bearer token for authenticating to the bridge WebSocket.
-    #[serde(default)]
-    pub bridge_token: Option<String>,
-    /// Allowlist of phone numbers (empty = allow all unless `deny_by_default` is set)
-    #[serde(default)]
-    pub allow_from: Vec<String>,
-    /// When true, empty `allow_from` rejects all senders (strict mode).
-    #[serde(default)]
-    pub deny_by_default: bool,
-    /// Whether ZeptoClaw manages the bridge binary lifecycle.
-    /// When true, `channel setup` and `gateway` will auto-install and start the bridge.
-    /// When false, the user manages the bridge process externally.
-    #[serde(default = "default_bridge_managed")]
-    pub bridge_managed: bool,
-}
-
-fn default_whatsapp_bridge_url() -> String {
-    "ws://localhost:3001".to_string()
-}
-
-fn default_bridge_managed() -> bool {
-    true
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bridge_url: default_whatsapp_bridge_url(),
-            bridge_token: None,
-            allow_from: Vec::new(),
-            deny_by_default: false,
-            bridge_managed: default_bridge_managed(),
-        }
-    }
-}
-
 /// WhatsApp Cloud API channel configuration (official Meta API).
 ///
 /// Uses Meta's webhook system for inbound messages and the Cloud API
@@ -947,6 +1123,9 @@ pub struct WhatsAppCloudConfig {
     /// Webhook verify token (you choose this secret, must match Meta dashboard).
     #[serde(default)]
     pub webhook_verify_token: String,
+    /// Optional Meta app secret used to verify `X-Hub-Signature-256` callback signatures.
+    #[serde(default)]
+    pub app_secret: Option<String>,
     /// Address to bind the webhook HTTP server to.
     #[serde(default = "default_whatsapp_cloud_bind")]
     pub bind_address: String,
@@ -983,9 +1162,48 @@ impl Default for WhatsAppCloudConfig {
             phone_number_id: String::new(),
             access_token: String::new(),
             webhook_verify_token: String::new(),
+            app_secret: None,
             bind_address: default_whatsapp_cloud_bind(),
             port: default_whatsapp_cloud_port(),
             path: default_whatsapp_cloud_path(),
+            allow_from: Vec::new(),
+            deny_by_default: false,
+        }
+    }
+}
+
+/// WhatsApp Web native channel configuration (personal WhatsApp via QR pairing).
+///
+/// Uses wa-rs for direct WhatsApp Web protocol support. No Meta Business
+/// account required — pairs via QR code like WhatsApp Desktop.
+/// Requires: `--features whatsapp-web`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppWebConfig {
+    /// Whether the channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for session persistence (SQLite database).
+    /// Default: ~/.zeptoclaw/state/whatsapp_web
+    #[serde(default = "default_whatsapp_web_auth_dir")]
+    pub auth_dir: String,
+    /// Allowlist of phone numbers in E.164 format (e.g., "+60123456789").
+    /// Empty = allow all unless `deny_by_default` is set.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// When true, empty `allow_from` rejects all senders (strict mode).
+    #[serde(default)]
+    pub deny_by_default: bool,
+}
+
+fn default_whatsapp_web_auth_dir() -> String {
+    "~/.zeptoclaw/state/whatsapp_web".to_string()
+}
+
+impl Default for WhatsAppWebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auth_dir: default_whatsapp_web_auth_dir(),
             allow_from: Vec::new(),
             deny_by_default: false,
         }
@@ -1145,6 +1363,22 @@ pub struct ProvidersConfig {
     pub ollama: Option<ProviderConfig>,
     /// Nvidia NIM configuration
     pub nvidia: Option<ProviderConfig>,
+    /// DeepSeek configuration
+    pub deepseek: Option<ProviderConfig>,
+    /// Kimi (Moonshot AI) configuration
+    pub kimi: Option<ProviderConfig>,
+    /// Azure OpenAI configuration (OpenAI-compatible with api-key header).
+    #[serde(default)]
+    pub azure: Option<ProviderConfig>,
+    /// Amazon Bedrock configuration (OpenAI-compatible endpoint; SigV4 required externally).
+    #[serde(default)]
+    pub bedrock: Option<ProviderConfig>,
+    /// xAI (Grok) configuration (OpenAI-compatible).
+    #[serde(default)]
+    pub xai: Option<ProviderConfig>,
+    /// Baidu Qianfan configuration (OpenAI-compatible v2 endpoint).
+    #[serde(default)]
+    pub qianfan: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
@@ -1172,6 +1406,16 @@ pub struct ProviderConfig {
     /// `agents.defaults.model` when this provider is selected (e.g. in fallback chains).
     #[serde(default)]
     pub model: Option<String>,
+    /// Per-provider usage quota configuration. When set, the provider will be
+    /// wrapped in a `QuotaProvider` that enforces the configured limits.
+    #[serde(default)]
+    pub quota: Option<crate::providers::quota::QuotaConfig>,
+    /// Custom auth header name, e.g. "api-key" for Azure. Overrides spec default.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// API version query param, e.g. "2024-08-01-preview" for Azure.
+    #[serde(default)]
+    pub api_version: Option<String>,
 }
 
 impl ProviderConfig {
@@ -1392,6 +1636,16 @@ pub struct ToolsConfig {
     /// Skills marketplace (ClawHub) configuration
     #[serde(default)]
     pub skills: SkillsMarketplaceConfig,
+    /// Enable coding-specific tools (grep, find). Default: false.
+    ///
+    /// These tools assume a laptop/server environment with bash available.
+    /// Enable when using ZeptoClaw as a coding agent. The built-in "coder"
+    /// template enables them automatically; this flag lets you enable them
+    /// without switching templates.
+    ///
+    /// Example: `"tools": { "coding_tools": true }`
+    #[serde(default)]
+    pub coding_tools: bool,
     /// Tools to deny (disable). Set by startup guard in degraded mode.
     #[serde(default)]
     pub deny: Vec<String>,
@@ -1431,9 +1685,15 @@ pub struct WebToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSearchConfig {
-    /// API key for search service
+    /// Search provider: "brave", "searxng", "ddg" (default: auto-detect)
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// API key for Brave Search
     #[serde(default)]
     pub api_key: Option<String>,
+    /// SearXNG instance URL (e.g. "https://search.example.com")
+    #[serde(default)]
+    pub api_url: Option<String>,
     /// Maximum search results to return
     pub max_results: u32,
 }
@@ -1441,7 +1701,9 @@ pub struct WebSearchConfig {
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             api_key: None,
+            api_url: None,
             max_results: 5,
         }
     }
@@ -1684,6 +1946,13 @@ pub struct ClawHubConfig {
     /// Optional Bearer token for authenticated registry access.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Hostnames explicitly allowed to bypass SSRF checks.
+    ///
+    /// Use this for self-hosted skill registries on private networks
+    /// (e.g., `["registry.internal.corp"]`). Public registries like
+    /// `clawhub.ai` do not need to be listed here.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 fn default_clawhub_url() -> String {
@@ -1696,6 +1965,7 @@ impl Default for ClawHubConfig {
             enabled: true,
             base_url: default_clawhub_url(),
             auth_token: None,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -2157,9 +2427,9 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_defaults_to_false() {
+    fn test_streaming_defaults_to_true() {
         let defaults = AgentDefaults::default();
-        assert!(!defaults.streaming);
+        assert!(defaults.streaming);
     }
 
     #[test]
@@ -2347,12 +2617,37 @@ mod tests {
     }
 
     #[test]
+    fn test_r8r_bridge_config_debug_redacts_token() {
+        let config = R8rBridgeConfig {
+            token: Some("super-secret-token".to_string()),
+            ..Default::default()
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(
+            !debug_output.contains("super-secret-token"),
+            "token must not appear in Debug output"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "Debug output should show [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_r8r_bridge_config_debug_none_token() {
+        let config = R8rBridgeConfig::default();
+        let debug_output = format!("{:?}", config);
+        assert!(debug_output.contains("None"));
+    }
+
+    #[test]
     fn test_whatsapp_cloud_config_defaults() {
         let config = WhatsAppCloudConfig::default();
         assert!(!config.enabled);
         assert!(config.phone_number_id.is_empty());
         assert!(config.access_token.is_empty());
         assert!(config.webhook_verify_token.is_empty());
+        assert!(config.app_secret.is_none());
         assert_eq!(config.bind_address, "127.0.0.1");
         assert_eq!(config.port, 9877);
         assert_eq!(config.path, "/whatsapp");
@@ -2367,6 +2662,7 @@ mod tests {
             "phone_number_id": "123456",
             "access_token": "EAAx...",
             "webhook_verify_token": "my-verify-secret",
+            "app_secret": "meta-secret",
             "port": 8443,
             "allow_from": ["60123456789"]
         }"#;
@@ -2375,6 +2671,7 @@ mod tests {
         assert_eq!(config.phone_number_id, "123456");
         assert_eq!(config.access_token, "EAAx...");
         assert_eq!(config.webhook_verify_token, "my-verify-secret");
+        assert_eq!(config.app_secret.as_deref(), Some("meta-secret"));
         assert_eq!(config.port, 8443);
         assert_eq!(config.allow_from, vec!["60123456789"]);
     }
@@ -2395,6 +2692,22 @@ mod tests {
         let wac = config.channels.whatsapp_cloud.unwrap();
         assert!(wac.enabled);
         assert_eq!(wac.phone_number_id, "999");
+    }
+
+    #[test]
+    fn test_channels_config_whatsapp_legacy_alias_deserializes_to_whatsapp_web() {
+        let json = r#"{
+            "channels": {
+                "whatsapp": {
+                    "enabled": true,
+                    "auth_dir": "/tmp/wa-legacy"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let wa = config.channels.whatsapp_web.unwrap();
+        assert!(wa.enabled);
+        assert_eq!(wa.auth_dir, "/tmp/wa-legacy");
     }
 
     #[test]
@@ -2554,6 +2867,123 @@ mod tests {
         assert_eq!(config.api_key.as_deref(), Some("sk-test"));
         assert!(config.model.is_none());
     }
+
+    #[test]
+    fn test_provider_config_quota_default_is_none() {
+        let config = ProviderConfig::default();
+        assert!(config.quota.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_quota_serde() {
+        use crate::providers::quota::{QuotaAction, QuotaConfig, QuotaPeriod};
+
+        // Serialize a ProviderConfig with a quota set and round-trip it.
+        let original = ProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            quota: Some(QuotaConfig {
+                max_cost_usd: Some(10.0),
+                max_tokens: None,
+                period: QuotaPeriod::Monthly,
+                action: QuotaAction::Reject,
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: ProviderConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.api_key.as_deref(), Some("sk-test"));
+        let quota = decoded
+            .quota
+            .expect("quota should be present after round-trip");
+        assert_eq!(quota.max_cost_usd, Some(10.0));
+        assert!(quota.max_tokens.is_none());
+        assert_eq!(quota.period, QuotaPeriod::Monthly);
+        assert_eq!(quota.action, QuotaAction::Reject);
+
+        // A JSON object with no "quota" key should deserialize with quota: None.
+        let no_quota_json = r#"{"api_key": "sk-test"}"#;
+        let no_quota: ProviderConfig = serde_json::from_str(no_quota_json).unwrap();
+        assert!(
+            no_quota.quota.is_none(),
+            "missing quota key should deserialize as None"
+        );
+    }
+
+    #[test]
+    fn test_mcp_server_config_stdio_fields() {
+        let json = r#"{
+            "name": "test",
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"KEY": "val"},
+            "timeout_secs": 30
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.command, Some("node".to_string()));
+        assert_eq!(config.args, Some(vec!["server.js".to_string()]));
+        assert_eq!(
+            config
+                .env
+                .as_ref()
+                .and_then(|e| e.get("KEY"))
+                .map(|s| s.as_str()),
+            Some("val")
+        );
+        assert!(config.url.is_none());
+    }
+
+    #[test]
+    fn test_provider_config_auth_header_and_api_version_default_none() {
+        let c = ProviderConfig::default();
+        assert!(c.auth_header.is_none());
+        assert!(c.api_version.is_none());
+    }
+
+    #[test]
+    fn test_providers_config_has_azure_and_bedrock_fields() {
+        let c = ProvidersConfig::default();
+        assert!(c.azure.is_none());
+        assert!(c.bedrock.is_none());
+    }
+
+    #[test]
+    fn test_azure_provider_config_round_trips() {
+        let json = r#"{
+            "providers": {
+                "azure": {
+                    "api_key": "my-azure-key",
+                    "api_base": "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+                    "auth_header": "api-key",
+                    "api_version": "2024-08-01-preview"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let azure = config.providers.azure.as_ref().unwrap();
+        assert_eq!(azure.api_key.as_deref(), Some("my-azure-key"));
+        assert_eq!(azure.auth_header.as_deref(), Some("api-key"));
+        assert_eq!(azure.api_version.as_deref(), Some("2024-08-01-preview"));
+    }
+
+    #[test]
+    fn test_web_search_config_defaults() {
+        let cfg = WebSearchConfig::default();
+        assert_eq!(cfg.provider, None);
+        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.api_url, None);
+        assert_eq!(cfg.max_results, 5);
+    }
+
+    #[test]
+    fn test_web_search_config_deserialize_provider() {
+        let json = r#"{"provider": "searxng", "api_url": "https://search.example.com"}"#;
+        let cfg: WebSearchConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("searxng"));
+        assert_eq!(cfg.api_url.as_deref(), Some("https://search.example.com"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2600,6 +3030,10 @@ pub struct EmailConfig {
     #[serde(default)]
     pub display_name: Option<String>,
     /// Allowlist of sender email addresses or domains.
+    ///
+    /// These entries are matched against the parsed inbound `From` header.
+    /// Use upstream authenticated-mail enforcement (SPF/DKIM/DMARC) if sender
+    /// authenticity matters.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     /// When `true` and `allowed_senders` is empty, all senders are denied.

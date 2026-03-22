@@ -19,11 +19,18 @@ pub mod onboard;
 pub mod pair;
 #[cfg(feature = "panel")]
 pub mod panel;
+pub mod provider;
+pub mod quota;
 pub mod secrets;
+#[cfg(feature = "panel")]
+pub mod serve;
+pub(crate) mod shimmer;
 pub mod skills;
+pub mod slash;
 pub mod status;
 pub mod template;
 pub mod tools;
+pub mod uninstall;
 pub mod update;
 pub mod watch;
 
@@ -48,6 +55,9 @@ enum Commands {
         full: bool,
     },
     /// Start interactive agent mode
+    #[command(
+        after_help = "Coding tools (grep, find) are disabled by default to keep the core\nruntime portable. Enable them with `--template coder` or by setting\n`tools.coding_tools: true` in your config file."
+    )]
     Agent {
         /// Direct message to process (non-interactive mode)
         #[arg(short, long)]
@@ -55,9 +65,9 @@ enum Commands {
         /// Apply an agent template (built-in or ~/.zeptoclaw/templates/*.json)
         #[arg(long)]
         template: Option<String>,
-        /// Stream the response token-by-token
+        /// Disable streaming (streaming is on by default)
         #[arg(long)]
-        stream: bool,
+        no_stream: bool,
         /// Show what tools would be called without executing them
         #[arg(long)]
         dry_run: bool,
@@ -176,6 +186,16 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
+    /// Show or reset per-provider quota usage
+    Quota {
+        #[command(subcommand)]
+        action: QuotaSubcommand,
+    },
+    /// Inspect provider chain configuration
+    Provider {
+        #[command(subcommand)]
+        action: ProviderSubcommand,
+    },
     #[cfg(feature = "panel")]
     /// Start the control panel (API server + dashboard)
     Panel {
@@ -230,10 +250,35 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Remove ZeptoClaw state and optionally the current binary
+    Uninstall {
+        /// Also remove the current zeptoclaw binary for direct file installs
+        #[arg(long)]
+        remove_binary: bool,
+        /// Skip the confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Hardware device management (USB discovery, peripherals)
     Hardware {
         #[command(subcommand)]
         action: HardwareAction,
+    },
+    #[cfg(feature = "panel")]
+    /// Start an OpenAI-compatible API server (no panel UI)
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
+    /// Start MCP server (expose tools to Claude Desktop, VS Code, Cursor)
+    McpServer {
+        /// Listen on HTTP address instead of stdio (e.g., ":3000", "127.0.0.1:3000")
+        #[arg(long)]
+        http: Option<String>,
     },
 }
 
@@ -381,6 +426,12 @@ pub enum AuthAction {
 pub enum ConfigAction {
     /// Check configuration for errors and warnings
     Check,
+    /// Reset configuration to defaults (backs up existing config first)
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,12 +440,12 @@ pub enum ChannelAction {
     List,
     /// Interactive setup for a channel
     Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
     /// Test channel connectivity
     Test {
-        /// Channel name (telegram, discord, slack, whatsapp, webhook)
+        /// Channel name (telegram, discord, slack, whatsapp_web, webhook)
         channel_name: String,
     },
 }
@@ -454,6 +505,23 @@ pub enum PairAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum QuotaSubcommand {
+    /// Show current quota usage for all providers
+    Status,
+    /// Reset quota usage for a specific provider, or all providers if omitted
+    Reset {
+        /// Provider name to reset (e.g., "anthropic"). Omit to reset all.
+        provider: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProviderSubcommand {
+    /// Show resolved provider chain, wrappers, and configuration
+    Status,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum HardwareAction {
     /// List discovered USB devices
@@ -476,12 +544,24 @@ pub async fn run() -> Result<()> {
     // Initialize logging from config (format, level, optional file output).
     // Load config early so we can respect the logging settings; fall back to
     // defaults if the config file is missing or unreadable.
-    let logging_cfg = zeptoclaw::config::Config::load()
+    let cli = Cli::parse();
+
+    let mut logging_cfg = zeptoclaw::config::Config::load()
         .map(|c| c.logging)
         .unwrap_or_default();
-    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
-    let cli = Cli::parse();
+    // CLI agent mode defaults to warn-level logging to keep output clean.
+    // Gateway and other long-running modes keep info-level for operational visibility.
+    // Users can still override with RUST_LOG=info.
+    if matches!(
+        cli.command,
+        Some(Commands::Agent { .. } | Commands::Batch { .. })
+    ) && std::env::var("RUST_LOG").is_err()
+    {
+        logging_cfg.level = "warn".to_string();
+    }
+
+    zeptoclaw::utils::logging::init_logging(&logging_cfg);
 
     match cli.command {
         None => {
@@ -498,11 +578,11 @@ pub async fn run() -> Result<()> {
         Some(Commands::Agent {
             message,
             template,
-            stream,
+            no_stream,
             dry_run,
             mode,
         }) => {
-            agent::cmd_agent(message, template, stream, dry_run, mode).await?;
+            agent::cmd_agent(message, template, no_stream, dry_run, mode).await?;
         }
         Some(Commands::Batch {
             input,
@@ -569,6 +649,12 @@ pub async fn run() -> Result<()> {
         Some(Commands::Pair { action }) => {
             pair::cmd_pair(action).await?;
         }
+        Some(Commands::Quota { action }) => {
+            quota::cmd_quota(action)?;
+        }
+        Some(Commands::Provider { action }) => {
+            provider::cmd_provider(action)?;
+        }
         #[cfg(feature = "panel")]
         Some(Commands::Panel {
             action,
@@ -598,8 +684,18 @@ pub async fn run() -> Result<()> {
         }) => {
             update::cmd_update(check, version, force).await?;
         }
+        Some(Commands::Uninstall { remove_binary, yes }) => {
+            uninstall::cmd_uninstall(remove_binary, yes).await?;
+        }
         Some(Commands::Hardware { action }) => {
             cmd_hardware(action);
+        }
+        #[cfg(feature = "panel")]
+        Some(Commands::Serve { port, bind }) => {
+            serve::cmd_serve(port, bind).await?;
+        }
+        Some(Commands::McpServer { http }) => {
+            cmd_mcp_server(http).await?;
         }
     }
 
@@ -674,4 +770,48 @@ fn cmd_hardware(action: HardwareAction) {
             }
         },
     }
+}
+
+/// Start MCP server, exposing registered tools via JSON-RPC 2.0.
+async fn cmd_mcp_server(http: Option<String>) -> Result<()> {
+    use std::sync::Arc;
+
+    use zeptoclaw::bus::MessageBus;
+    use zeptoclaw::config::Config;
+    use zeptoclaw::mcp_server::McpServer;
+
+    // Config::load() performs blocking filesystem I/O; move it off the
+    // async runtime thread to avoid starving other tasks.
+    let config = tokio::task::spawn_blocking(Config::load)
+        .await
+        .map_err(|e| anyhow::anyhow!("Config loader task panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+    let bus = Arc::new(MessageBus::new());
+
+    let kernel = zeptoclaw::kernel::ZeptoKernel::boot(config, bus, None, None).await?;
+    let kernel = Arc::new(kernel);
+    let server = McpServer::new(kernel);
+
+    match http {
+        Some(addr) => {
+            #[cfg(feature = "panel")]
+            {
+                server.start_http(&addr).await?;
+            }
+            #[cfg(not(feature = "panel"))]
+            {
+                let _ = addr;
+                anyhow::bail!(
+                    "HTTP transport requires the 'panel' feature. \
+                     Build with: cargo build --features panel\n\
+                     Or use stdio transport (default): zeptoclaw mcp-server"
+                );
+            }
+        }
+        None => {
+            server.start_stdio().await?;
+        }
+    }
+
+    Ok(())
 }

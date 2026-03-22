@@ -21,12 +21,20 @@ struct ChannelStatus {
 /// Known channel component name prefixes registered in `HealthRegistry`.
 ///
 /// Channel components are registered under their channel type name (e.g.
-/// "telegram", "discord", "whatsapp").  We surface all health checks whose
+/// "telegram", "discord", "whatsapp_web").  We surface all health checks whose
 /// name matches one of these known prefixes so the panel can display live
 /// channel status without hard-coding assumptions about which channels are
 /// enabled.
 const CHANNEL_NAMES: &[&str] = &[
-    "telegram", "discord", "slack", "whatsapp", "webhook", "email", "serial", "lark",
+    "telegram",
+    "discord",
+    "slack",
+    "whatsapp",
+    "whatsapp_web",
+    "webhook",
+    "email",
+    "serial",
+    "lark",
 ];
 
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> Json<Value> {

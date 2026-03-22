@@ -5,10 +5,34 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::sync::atomic::Ordering;
+
 use crate::bus::InboundMessage;
 use crate::config::AgentDefaults;
 use crate::error::ZeptoError;
+use crate::health::UsageMetrics;
 use crate::session::Session;
+
+/// Snapshot of usage counters returned from a containerized agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageSnapshot {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub tool_calls: u64,
+    pub errors: u64,
+}
+
+impl UsageSnapshot {
+    /// Capture a snapshot from live `UsageMetrics`.
+    pub fn from_metrics(metrics: &UsageMetrics) -> Self {
+        Self {
+            input_tokens: metrics.input_tokens.load(Ordering::Relaxed),
+            output_tokens: metrics.output_tokens.load(Ordering::Relaxed),
+            tool_calls: metrics.tool_calls.load(Ordering::Relaxed),
+            errors: metrics.errors.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Marker for start of response in stdout
 pub const RESPONSE_START_MARKER: &str = "<<<AGENT_RESPONSE_START>>>";
@@ -55,6 +79,9 @@ pub struct AgentResponse {
     pub request_id: String,
     /// The result of processing
     pub result: AgentResult,
+    /// Optional usage metrics snapshot from the agent process
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageSnapshot>,
 }
 
 /// Result of agent processing
@@ -85,6 +112,7 @@ impl AgentResponse {
                 content: content.to_string(),
                 session,
             },
+            usage: None,
         }
     }
 
@@ -96,7 +124,14 @@ impl AgentResponse {
                 message: message.to_string(),
                 code: code.to_string(),
             },
+            usage: None,
         }
+    }
+
+    /// Attach a usage snapshot to this response.
+    pub fn with_usage(mut self, usage: UsageSnapshot) -> Self {
+        self.usage = Some(usage);
+        self
     }
 
     /// Format response with markers for reliable parsing from stdout
@@ -225,5 +260,32 @@ mod tests {
 
         let error = request.validate().expect_err("request should be invalid");
         assert!(matches!(error, ZeptoError::Session(_)));
+    }
+
+    #[test]
+    fn test_response_with_usage() {
+        let usage = UsageSnapshot {
+            input_tokens: 100,
+            output_tokens: 50,
+            tool_calls: 3,
+            errors: 0,
+        };
+        let response = AgentResponse::success("req-u", "OK", None).with_usage(usage);
+        let marked = response.to_marked_json();
+        let parsed = parse_marked_response(&marked).unwrap();
+
+        let u = parsed.usage.expect("usage should be present");
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.tool_calls, 3);
+        assert_eq!(u.errors, 0);
+    }
+
+    #[test]
+    fn test_response_without_usage_backward_compat() {
+        // Responses without "usage" field should still parse (backward compat)
+        let json = r#"{"request_id":"old","result":{"Success":{"content":"hi","session":null}}}"#;
+        let parsed: AgentResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.usage.is_none());
     }
 }

@@ -12,12 +12,12 @@ Five open-source projects solving the same problem — a self-hosted AI assistan
 | **Binary / Install** | ~100MB+ (Node + 53 deps) | Single binary (<10MB) | Node.js + 10 deps | Single binary (~3.4MB) | Single binary (~4MB) |
 | **Memory (RSS)** | ~200MB+ | <10MB | ~50MB+ (Node + containers) | Low (Rust native) | ~6MB |
 | **Startup** | Seconds | <1s (on 0.6GHz SBC) | Seconds | <10ms | ~50ms |
-| **Built-in tools** | 52 skills | 12 tools | 0 (Claude Agent SDK) | 9 tools | 29 tools + MCP client |
+| **Built-in tools** | 52 skills | 12 tools | 0 (Claude Agent SDK) | 9 tools | 32 tools + MCP client |
 | **Channels** | 14 + 32 extensions | 10 | 1 (WhatsApp) | 7 | 9 |
 | **LLM providers** | Anthropic, OpenAI | 5-7 | Claude only | 22+ (OpenAI-compatible) | Claude, OpenAI + retry/fallback stack |
 | **Container isolation** | Docker (deployment only) | None | Yes (per-agent, Apple/Docker) | None (planned) | Yes (per-command, Apple/Docker) |
 | **Codebase** | ~465K lines | ~20.6K lines | ~3.4K lines | ~27.4K lines | ~106K lines |
-| **Tests** | 949 test files | 222 tests | ~413 assertions | ~700+ tests | 2,581+ tests |
+| **Tests** | 949 test files | 222 tests | ~413 assertions | ~700+ tests | 3,100+ tests |
 | **License** | MIT | MIT | MIT | MIT | Apache 2.0 |
 
 ## Tools & Capabilities

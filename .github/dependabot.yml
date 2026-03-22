@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown: # applies only to version-updates (not security-updates)
+      default-days: 10
+      semver-minor-days: 14 # wait 14 days before applying minor updates
+      semver-major-days: 28
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
+  - package-ecosystem: docker-compose
+    directories:
+      - /
+      - deploy
+      - tests/e2e
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
+  - package-ecosystem: npm
+    directories:
+      - landing/*/docs
+      - panel
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
+      semver-minor-days: 14
+      semver-major-days: 28

@@ -6,10 +6,17 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+#[cfg(unix)]
+use std::{fs::OpenOptions, io::Write as _, os::unix::fs::MetadataExt};
 
 use crate::error::{Result, ZeptoError};
-use crate::security::validate_path_in_workspace;
+#[cfg(not(unix))]
+use crate::security::check_hardlink_write;
+use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
+use crate::tools::diff::apply_unified_diff;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
@@ -18,14 +25,98 @@ use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 /// Requires a workspace to be configured. All paths are validated to stay
 /// within workspace boundaries. This is the correct security posture --
 /// filesystem tools must not operate outside a defined workspace.
-fn resolve_path(path: &str, ctx: &ToolContext) -> Result<String> {
+///
+/// Returns `(resolved_path, workspace)` so callers can re-validate before I/O.
+fn resolve_path(path: &str, ctx: &ToolContext) -> Result<(String, String)> {
     let workspace = ctx.workspace.as_ref().ok_or_else(|| {
         ZeptoError::SecurityViolation(
             "Workspace not configured; filesystem tools require a workspace for safety".to_string(),
         )
     })?;
     let safe_path = validate_path_in_workspace(path, workspace)?;
-    Ok(safe_path.as_path().to_string_lossy().to_string())
+    Ok((
+        safe_path.as_path().to_string_lossy().to_string(),
+        workspace.clone(),
+    ))
+}
+
+#[cfg(unix)]
+fn write_file_secure_blocking(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_directory_chain_secure(parent, workspace)?;
+            revalidate_path(parent, workspace)?;
+        }
+    }
+
+    revalidate_path(path, workspace)?;
+
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(path).map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to securely open file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    let metadata = file.metadata().map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to inspect opened file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    if metadata.is_file() && metadata.nlink() > 1 {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Write blocked: '{}' has {} hard links and may alias content outside workspace",
+            path.display(),
+            metadata.nlink()
+        )));
+    }
+
+    file.set_len(0).map_err(|e| {
+        ZeptoError::Tool(format!(
+            "Failed to truncate file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    file.write_all(content).map_err(|e| {
+        ZeptoError::Tool(format!("Failed to write file '{}': {}", path.display(), e))
+    })?;
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_file_secure_blocking(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_directory_chain_secure(parent, workspace)?;
+            revalidate_path(parent, workspace)?;
+        }
+    }
+
+    revalidate_path(path, workspace)?;
+    check_hardlink_write(path)?;
+    std::fs::write(path, content).map_err(|e| {
+        ZeptoError::Tool(format!("Failed to write file '{}': {}", path.display(), e))
+    })?;
+    Ok(())
+}
+
+async fn write_file_secure(path: &Path, workspace: &str, content: &[u8]) -> Result<()> {
+    let path = path.to_path_buf();
+    let workspace = workspace.to_string();
+    let content = content.to_vec();
+    tokio::task::spawn_blocking(move || write_file_secure_blocking(&path, &workspace, &content))
+        .await
+        .map_err(|e| ZeptoError::Tool(format!("Secure write task failed: {}", e)))?
 }
 
 /// Tool for reading file contents.
@@ -87,7 +178,10 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(Path::new(&full_path), &workspace)?;
 
         let content = tokio::fs::read_to_string(&full_path)
             .await
@@ -165,20 +259,10 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'content' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+        let full_path_ref = Path::new(&full_path);
 
-        // Create parent directories if they don't exist
-        if let Some(parent) = Path::new(&full_path).parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ZeptoError::Tool(format!("Failed to create parent directories: {}", e))
-                })?;
-            }
-        }
-
-        tokio::fs::write(&full_path, content).await.map_err(|e| {
-            ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
-        })?;
+        write_file_secure(full_path_ref, &workspace, content.as_bytes()).await?;
 
         Ok(ToolOutput::llm_only(format!(
             "Successfully wrote {} bytes to {}",
@@ -246,7 +330,10 @@ impl Tool for ListDirTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let full_path = resolve_path(path, ctx)?;
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+
+        // TOCTOU: re-validate immediately before I/O
+        revalidate_path(Path::new(&full_path), &workspace)?;
 
         let mut entries = tokio::fs::read_dir(&full_path).await.map_err(|e| {
             ZeptoError::Tool(format!("Failed to read directory '{}': {}", full_path, e))
@@ -311,7 +398,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing specified text with new content"
+        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff)."
     }
 
     fn compact_description(&self) -> &str {
@@ -337,9 +424,13 @@ impl Tool for EditFileTool {
                 "new_text": {
                     "type": "string",
                     "description": "The text to replace it with"
+                },
+                "diff": {
+                    "type": "string",
+                    "description": "A unified diff patch to apply. Use standard @@ hunk headers with +/- lines. Mutually exclusive with old_text/new_text."
                 }
             },
-            "required": ["path", "old_text", "new_text"]
+            "required": ["path"]
         })
     }
 
@@ -349,47 +440,73 @@ impl Tool for EditFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let old_text = args
-            .get("old_text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ZeptoError::Tool("Missing 'old_text' argument".into()))?;
+        let diff_param = args.get("diff").and_then(|v| v.as_str());
+        let old_text = args.get("old_text").and_then(|v| v.as_str());
+        let new_text = args.get("new_text").and_then(|v| v.as_str());
 
-        let new_text = args
-            .get("new_text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ZeptoError::Tool("Missing 'new_text' argument".into()))?;
-
-        let full_path = resolve_path(path, ctx)?;
-
-        // Read the current content
-        let content = tokio::fs::read_to_string(&full_path)
-            .await
-            .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
-
-        // Check if old_text exists in the file
-        if !content.contains(old_text) {
-            return Err(ZeptoError::Tool(format!(
-                "Text '{}' not found in file '{}'",
-                crate::utils::string::preview(old_text, 50),
-                full_path
-            )));
+        if diff_param.is_some() && (old_text.is_some() || new_text.is_some()) {
+            return Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text', not both.".into(),
+            ));
         }
 
-        // Replace the text
-        let new_content = content.replace(old_text, new_text);
+        if diff_param.is_none() && (old_text.is_none() || new_text.is_none()) {
+            return Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text'".into(),
+            ));
+        }
 
-        // Write back
-        tokio::fs::write(&full_path, &new_content)
-            .await
-            .map_err(|e| {
-                ZeptoError::Tool(format!("Failed to write file '{}': {}", full_path, e))
+        let (full_path, workspace) = resolve_path(path, ctx)?;
+        let full_path_ref = Path::new(&full_path);
+
+        if let Some(diff_str) = diff_param {
+            // --- Unified diff mode ---
+            revalidate_path(full_path_ref, &workspace)?;
+
+            let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
+                ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
             })?;
 
-        let replacements = content.matches(old_text).count();
-        Ok(ToolOutput::llm_only(format!(
-            "Successfully replaced {} occurrence(s) in {}",
-            replacements, full_path
-        )))
+            let (new_content, summary) = apply_unified_diff(&content, diff_str)
+                .map_err(|e| ZeptoError::Tool(format!("Diff apply failed: {}", e)))?;
+
+            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
+
+            Ok(ToolOutput::llm_only(format!(
+                "Applied {} hunk(s): +{} -{} in {}",
+                summary.hunks_applied, summary.lines_added, summary.lines_removed, full_path
+            )))
+        } else if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
+            // --- String replacement mode (existing logic) ---
+            revalidate_path(full_path_ref, &workspace)?;
+
+            let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
+                ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
+            })?;
+
+            if !content.contains(old_text) {
+                return Err(ZeptoError::Tool(format!(
+                    "Text '{}' not found in file '{}'",
+                    crate::utils::string::preview(old_text, 50),
+                    full_path
+                )));
+            }
+
+            let new_content = content.replace(old_text, new_text);
+
+            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
+
+            let replacements = content.matches(old_text).count();
+            Ok(ToolOutput::llm_only(format!(
+                "Successfully replaced {} occurrence(s) in {}",
+                replacements, full_path
+            )))
+        } else {
+            // unreachable due to early validation, but kept for safety
+            Err(ZeptoError::Tool(
+                "Provide either 'diff' or 'old_text'/'new_text'".into(),
+            ))
+        }
     }
 }
 
@@ -666,7 +783,7 @@ mod tests {
         let tool = EditFileTool;
         let ctx = ToolContext::new().with_workspace("/tmp");
 
-        // Missing old_text
+        // Missing old_text (only new_text provided)
         let result = tool
             .execute(json!({"path": "test.txt", "new_text": "new"}), &ctx)
             .await;
@@ -674,9 +791,9 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Missing 'old_text'"));
+            .contains("Provide either 'diff' or 'old_text'/'new_text'"));
 
-        // Missing new_text
+        // Missing new_text (only old_text provided)
         let result = tool
             .execute(json!({"path": "test.txt", "old_text": "old"}), &ctx)
             .await;
@@ -684,7 +801,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Missing 'new_text'"));
+            .contains("Provide either 'diff' or 'old_text'/'new_text'"));
     }
 
     #[test]
@@ -707,7 +824,7 @@ mod tests {
         let ctx = ToolContext::new().with_workspace(workspace);
         let result = resolve_path("relative/path", &ctx);
         assert!(result.is_ok());
-        let resolved = result.unwrap();
+        let (resolved, _ws) = result.unwrap();
         // The path should contain "relative/path" and be within workspace
         assert!(resolved.contains("relative/path") || resolved.ends_with("relative/path"));
     }
@@ -876,5 +993,173 @@ mod tests {
             "Expected security error for double-encoded traversal, got: {}",
             err
         );
+    }
+
+    // ==================== TOCTOU + HARDLINK SECURITY TESTS ====================
+
+    #[tokio::test]
+    async fn test_write_blocks_hardlinked_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file
+        let original = canonical.join("original.txt");
+        fs::write(&original, "original content").unwrap();
+
+        // Create a hard link to it
+        let hardlink = canonical.join("hardlink.txt");
+        fs::hard_link(&original, &hardlink).unwrap();
+
+        let tool = WriteFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        // Writing to the hardlinked file should be blocked
+        let result = tool
+            .execute(
+                json!({"path": "hardlink.txt", "content": "malicious"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_blocks_hardlinked_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file
+        let original = canonical.join("editable.txt");
+        fs::write(&original, "Hello World").unwrap();
+
+        // Create a hard link
+        let hardlink = canonical.join("edit_link.txt");
+        fs::hard_link(&original, &hardlink).unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_link.txt",
+                    "old_text": "Hello",
+                    "new_text": "Goodbye"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_allows_single_link_file() {
+        let dir = tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a regular file (nlink = 1)
+        fs::write(canonical.join("normal.txt"), "original").unwrap();
+
+        let tool = WriteFileTool;
+        let ctx = ToolContext::new().with_workspace(workspace);
+
+        let result = tool
+            .execute(json!({"path": "normal.txt", "content": "updated"}), &ctx)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read_to_string(canonical.join("normal.txt")).unwrap(),
+            "updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_mode_simple() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("diff_test.txt");
+        fs::write(&file_path, "line one\nline two\nline three\n").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "diff_test.txt",
+                    "diff": "@@ -1,3 +1,3 @@\n line one\n-line two\n+LINE TWO\n line three"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap().for_llm;
+        assert!(output.contains("Applied 1 hunk"));
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "line one\nLINE TWO\nline three\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_mode_context_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("diff_mismatch.txt");
+        fs::write(&file_path, "foo\nbar\nbaz\n").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "diff_mismatch.txt",
+                    "diff": "@@ -1,3 +1,3 @@\n foo\n WRONG\n baz"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("context mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_diff_and_old_text_mutually_exclusive() {
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace("/tmp");
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "diff": "@@ -1,1 +1,1 @@\n-a\n+b",
+                    "old_text": "a",
+                    "new_text": "b"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not both"));
     }
 }

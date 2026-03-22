@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::path::Path;
 
 use crate::error::{Result, ZeptoError};
-use crate::security::validate_path_in_workspace;
+use crate::security::{revalidate_path, validate_path_in_workspace};
 use crate::tools::{Tool, ToolContext, ToolOutput};
 
 /// Maximum file size accepted for transcription (25 MiB).
@@ -198,6 +198,16 @@ impl Tool for TranscribeTool {
                 file_path.to_string()
             }
         };
+
+        // TOCTOU: re-validate immediately before I/O
+        if let Some(ws) = &ctx.workspace {
+            if let Err(e) = revalidate_path(Path::new(&resolved), ws) {
+                return Ok(ToolOutput::error(format!(
+                    "Path re-validation failed: {}",
+                    e
+                )));
+            }
+        }
 
         match self.transcribe_file(&resolved).await {
             Ok(text) if text.is_empty() => Ok(ToolOutput::llm_only(

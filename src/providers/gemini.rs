@@ -12,7 +12,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::error::{Result, ZeptoError};
-use crate::session::{Message, Role};
+use crate::session::{ContentPart, ImageSource, Message, Role};
 
 use super::{parse_provider_error, ChatOptions, LLMProvider, LLMResponse, ToolDefinition, Usage};
 
@@ -253,9 +253,31 @@ impl GeminiProvider {
                     Role::Assistant => "model",
                     _ => "user",
                 };
+                let parts: Vec<Value> = if m.has_images() {
+                    m.content_parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => Some(json!({ "text": text })),
+                            ContentPart::Image { source, media_type } => {
+                                if let ImageSource::Base64 { data } = source {
+                                    Some(json!({
+                                        "inlineData": {
+                                            "mimeType": media_type,
+                                            "data": data
+                                        }
+                                    }))
+                                } else {
+                                    None
+                                }
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![json!({ "text": &m.content })]
+                };
                 json!({
                     "role": gemini_role,
-                    "parts": [{ "text": &m.content }]
+                    "parts": parts
                 })
             })
             .collect();
@@ -679,5 +701,74 @@ mod tests {
         });
         let result = GeminiAuth::token_from_json_if_valid(&json);
         assert_eq!(result.as_deref(), Some("fallback-oauth"));
+    }
+
+    // ── Task 6: inlineData image support ─────────────────────────────────────
+
+    #[test]
+    fn test_build_messages_body_with_image() {
+        use crate::session::{ContentPart, ImageSource, Message};
+
+        let provider = GeminiProvider::new_with_key("key", DEFAULT_GEMINI_MODEL);
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc123".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("What is this?", images);
+        let body = provider.build_messages_body(&[msg], &ChatOptions::default());
+
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0]["text"].is_string());
+        assert!(parts[1]["inlineData"].is_object());
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "abc123");
+    }
+
+    #[test]
+    fn test_build_messages_body_text_only_unchanged() {
+        use crate::session::Message;
+
+        let provider = GeminiProvider::new_with_key("key", DEFAULT_GEMINI_MODEL);
+        let msg = Message::user("Hello");
+        let body = provider.build_messages_body(&[msg], &ChatOptions::default());
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_gemini_image_json_matches_api_spec() {
+        // Verify the serialized JSON matches Gemini's exact API format:
+        // {"inlineData":{"mimeType":"image/png","data":"..."}}
+        use crate::session::{ContentPart, ImageSource, Message};
+
+        let provider = GeminiProvider::new_with_key("key", DEFAULT_GEMINI_MODEL);
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "iVBOR".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Describe this", images);
+        let body = provider.build_messages_body(&[msg], &ChatOptions::default());
+
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+
+        // Text part
+        assert_eq!(parts[0]["text"], "Describe this");
+
+        // Image part — must match Gemini API spec exactly
+        assert!(
+            parts[1].get("inlineData").is_some(),
+            "Must use inlineData key"
+        );
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBOR");
+
+        // Must NOT have "text" key on image part
+        assert!(parts[1].get("text").is_none());
     }
 }

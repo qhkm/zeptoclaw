@@ -7,10 +7,10 @@
 //!
 //! # Policies
 //!
-//! - `AlwaysAllow` - All tools execute without approval (default)
+//! - `AlwaysAllow` - All tools execute without approval
 //! - `AlwaysRequire` - Every tool invocation requires approval
 //! - `RequireForTools` - Only named tools require approval
-//! - `RequireForDangerous` - Tools tagged as "dangerous" require approval
+//! - `RequireForDangerous` - Tools tagged as "dangerous" require approval (default)
 //!
 //! # Configuration
 //!
@@ -21,7 +21,7 @@
 //!     "approval": {
 //!         "enabled": true,
 //!         "policy": "require_for_dangerous",
-//!         "dangerous_tools": ["shell", "write_file", "edit_file"]
+//!         "dangerous_tools": ["shell", "write_file", "edit_file", "google"]
 //!     }
 //! }
 //! ```
@@ -34,8 +34,8 @@
 //! let config = ApprovalConfig::default();
 //! let gate = ApprovalGate::new(config);
 //!
-//! // Default policy is AlwaysAllow with enabled=false
-//! assert!(!gate.requires_approval("shell"));
+//! // Default policy gates dangerous tools.
+//! assert!(gate.requires_approval("shell"));
 //! ```
 
 use chrono::{DateTime, Duration, Utc};
@@ -73,13 +73,13 @@ pub enum ApprovalPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicyConfig {
     /// All tools execute without approval.
-    #[default]
     AlwaysAllow,
     /// Every tool invocation requires approval.
     AlwaysRequire,
     /// Only tools listed in `require_for` need approval.
     RequireForTools,
     /// Tools in the `dangerous_tools` list need approval.
+    #[default]
     RequireForDangerous,
 }
 
@@ -94,16 +94,18 @@ pub enum ApprovalPolicyConfig {
 ///
 /// # Defaults
 ///
-/// - `enabled`: `false`
-/// - `policy`: `AlwaysAllow`
+/// - `enabled`: `true`
+/// - `policy`: `RequireForDangerous`
 /// - `require_for`: empty
-/// - `dangerous_tools`: `["shell", "write_file", "edit_file"]`
+/// - `dangerous_tools`: `["shell", "write_file", "edit_file", "google"]`
 /// - `auto_approve_timeout_secs`: `0` (disabled)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalConfig {
-    /// Master switch. When `false`, all tools execute without approval
-    /// regardless of the policy setting.
+    /// Master switch for interactive approval prompts.
+    ///
+    /// When `false`, the approval gate itself does not request approval,
+    /// though agent-mode enforcement may still block a tool before execution.
     pub enabled: bool,
 
     /// Which approval policy to apply.
@@ -124,8 +126,8 @@ pub struct ApprovalConfig {
 impl Default for ApprovalConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            policy: ApprovalPolicyConfig::AlwaysAllow,
+            enabled: true,
+            policy: ApprovalPolicyConfig::RequireForDangerous,
             require_for: Vec::new(),
             dangerous_tools: ApprovalGate::default_dangerous_tools(),
             auto_approve_timeout_secs: 0,
@@ -511,8 +513,8 @@ mod tests {
     fn test_default_config() {
         let config = ApprovalConfig::default();
 
-        assert!(!config.enabled);
-        assert_eq!(config.policy, ApprovalPolicyConfig::AlwaysAllow);
+        assert!(config.enabled);
+        assert_eq!(config.policy, ApprovalPolicyConfig::RequireForDangerous);
         assert!(config.require_for.is_empty());
         assert_eq!(
             config.dangerous_tools,
@@ -738,7 +740,10 @@ mod tests {
         });
         assert!(enabled_gate.is_enabled());
 
-        let disabled_gate = ApprovalGate::new(ApprovalConfig::default());
+        let disabled_gate = ApprovalGate::new(ApprovalConfig {
+            enabled: false,
+            ..Default::default()
+        });
         assert!(!disabled_gate.is_enabled());
     }
 

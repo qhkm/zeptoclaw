@@ -11,9 +11,9 @@ export default defineConfig({
         dark: './src/assets/logo.svg',
         replacesTitle: true,
       },
-      social: {
-        github: 'https://github.com/qhkm/zeptoclaw',
-      },
+      social: [
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/qhkm/zeptoclaw' },
+      ],
       sidebar: [
         {
           label: 'Getting Started',

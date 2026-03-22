@@ -27,12 +27,13 @@
 //! ```
 
 pub mod history;
+pub mod media;
 pub mod repair;
 pub mod types;
 
 pub use history::ConversationHistory;
 pub use repair::{repair_messages, RepairStats};
-pub use types::{Message, Role, Session, ToolCall};
+pub use types::{ContentPart, ImageSource, Message, Role, Session, ToolCall};
 
 use crate::config::Config;
 use crate::error::Result;
@@ -395,6 +396,15 @@ impl SessionManager {
     pub async fn cache_size(&self) -> usize {
         let sessions = self.sessions.read().await;
         sessions.len()
+    }
+
+    /// Return the on-disk sessions directory, if persistence is enabled.
+    ///
+    /// Returns `None` for in-memory-only managers created with `new_memory()`.
+    /// Used by the agent loop to resolve `ImageSource::FilePath` entries to
+    /// absolute paths before forwarding messages to LLM providers.
+    pub fn sessions_dir(&self) -> Option<&std::path::Path> {
+        self.storage_path.as_deref()
     }
 
     /// Sanitize a session key for use as a filename.

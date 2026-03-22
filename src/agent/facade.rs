@@ -239,11 +239,12 @@ impl ZeptoAgent {
 
 /// Builder for `ZeptoAgent`.
 pub struct ZeptoAgentBuilder {
-    provider: Option<Box<dyn LLMProvider>>,
+    provider: Option<Arc<dyn LLMProvider>>,
     tools: Vec<Box<dyn Tool>>,
     system_prompt: Option<String>,
     max_iterations: usize,
     model: Option<String>,
+    history: Vec<Message>,
 }
 
 impl ZeptoAgentBuilder {
@@ -255,12 +256,19 @@ impl ZeptoAgentBuilder {
             system_prompt: None,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             model: None,
+            history: Vec::new(),
         }
     }
 
     /// Set the LLM provider (required).
     pub fn provider(mut self, provider: impl LLMProvider + 'static) -> Self {
-        self.provider = Some(Box::new(provider));
+        self.provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set the LLM provider from a pre-existing `Arc` (for shared providers).
+    pub fn provider_arc(mut self, provider: Arc<dyn LLMProvider>) -> Self {
+        self.provider = Some(provider);
         self
     }
 
@@ -294,6 +302,14 @@ impl ZeptoAgentBuilder {
         self
     }
 
+    /// Pre-load conversation history (e.g. restored from a previous session).
+    ///
+    /// The agent will continue the conversation from where it left off.
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
     /// Build the `ZeptoAgent`.
     ///
     /// Returns `Err` if no provider was set.
@@ -309,11 +325,11 @@ impl ZeptoAgentBuilder {
             .unwrap_or_else(|| "You are a helpful AI assistant.".into());
 
         Ok(ZeptoAgent {
-            provider: Arc::from(provider),
+            provider,
             tools: self.tools,
             system_prompt,
             max_iterations: self.max_iterations,
-            history: Mutex::new(Vec::new()),
+            history: Mutex::new(self.history),
             model: self.model,
         })
     }

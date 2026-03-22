@@ -4,11 +4,17 @@
 //! via the Chrome DevTools Protocol. Includes full SSRF protection by
 //! reusing the validation from [`super::web`].
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::fetch::{
+    ContinueRequestParams, DisableParams as FetchDisableParams, EnableParams as FetchEnableParams,
+    EventRequestPaused, FailRequestParams, RequestPattern,
+};
+use chromiumoxide::cdp::browser_protocol::network::ErrorReason;
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
@@ -39,6 +45,9 @@ const MIN_DIMENSION: u32 = 100;
 /// Maximum viewport dimension.
 const MAX_DIMENSION: u32 = 3840;
 
+/// Maximum allowed redirect hops for the main document navigation.
+const MAX_SCREENSHOT_REDIRECT_HOPS: usize = 5;
+
 /// Web screenshot tool that captures full-page screenshots of URLs.
 ///
 /// Uses a headless Chromium browser via the Chrome DevTools Protocol.
@@ -54,30 +63,147 @@ impl WebScreenshotTool {
 }
 
 impl Default for WebScreenshotTool {
+    /// Create a default `WebScreenshotTool` instance.
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// Validate a browser-request URL target without performing DNS resolution.
+///
+/// Ensures the scheme is `http`/`https` and the host is not a blocked local
+/// or private address.
+fn validate_browser_request_target_basic(url: &Url) -> Result<()> {
+    match url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Redirect/browser request scheme is blocked: {}",
+                other
+            )));
+        }
+    }
+
+    if is_blocked_host(url) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Redirect/browser request destination is blocked (local or private network): {}",
+            url
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a browser-request URL including DNS safety checks.
+///
+/// DNS is re-checked for every intercepted request to narrow the DNS-rebinding
+/// window across redirect chains.
+async fn validate_browser_request_url(raw_url: &str) -> Result<()> {
+    let parsed = Url::parse(raw_url).map_err(|e| {
+        ZeptoError::SecurityViolation(format!(
+            "Blocked browser request with invalid URL '{}': {}",
+            raw_url, e
+        ))
+    })?;
+
+    validate_browser_request_target_basic(&parsed)?;
+
+    resolve_and_check_host(&parsed).await?;
+
+    Ok(())
+}
+
+/// Handle an intercepted browser request during screenshot navigation.
+///
+/// Safe requests are continued; unsafe requests are failed with
+/// `AccessDenied`, and the validation error is propagated.
+async fn handle_paused_browser_request(
+    page: &chromiumoxide::Page,
+    event: &EventRequestPaused,
+) -> Result<()> {
+    let request_id = event.request_id.clone();
+    let request_url = event.request.url.clone();
+
+    match validate_browser_request_url(&request_url).await {
+        Ok(()) => {
+            page.execute(ContinueRequestParams::new(request_id))
+                .await
+                .map_err(|e| {
+                    ZeptoError::Tool(format!(
+                        "Failed to continue intercepted browser request '{}': {}",
+                        request_url, e
+                    ))
+                })?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = page
+                .execute(FailRequestParams::new(
+                    request_id,
+                    ErrorReason::AccessDenied,
+                ))
+                .await;
+            Err(err)
+        }
+    }
+}
+
+/// Normalize a redirect URL string for stable loop tracking comparisons.
+fn normalize_redirect_tracking_url(raw_url: &str) -> String {
+    Url::parse(raw_url)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| raw_url.to_string())
+}
+
+/// Update redirect hop and loop-tracking state for a document redirect.
+fn track_document_redirect(
+    document_redirect_hops: &mut usize,
+    seen_document_redirect_urls: &mut HashSet<String>,
+    raw_redirect_url: &str,
+) -> Result<()> {
+    *document_redirect_hops += 1;
+    if *document_redirect_hops > MAX_SCREENSHOT_REDIRECT_HOPS {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Exceeded maximum redirect hops ({})",
+            MAX_SCREENSHOT_REDIRECT_HOPS
+        )));
+    }
+
+    let redirected_url = normalize_redirect_tracking_url(raw_redirect_url);
+    if !seen_document_redirect_urls.insert(redirected_url.clone()) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Detected redirect loop while capturing screenshot: {}",
+            redirected_url
+        )));
+    }
+
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for WebScreenshotTool {
+    /// Return the tool name.
     fn name(&self) -> &str {
         "web_screenshot"
     }
 
+    /// Describe what this tool does.
     fn description(&self) -> &str {
         "Take a screenshot of a web page. Returns base64-encoded PNG or saves to a file path."
     }
 
+    /// Provide a compact description for constrained UIs.
     fn compact_description(&self) -> &str {
         "Screenshot URL"
     }
 
+    /// Classify this tool for policy enforcement.
     fn category(&self) -> ToolCategory {
         // Fetches URL (NetworkRead) AND writes file to disk — use more restrictive category.
         ToolCategory::FilesystemWrite
     }
 
+    /// Define JSON schema for tool arguments.
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -113,6 +239,7 @@ impl Tool for WebScreenshotTool {
         })
     }
 
+    /// Execute screenshot capture with browser-native SSRF redirect checks.
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         // ---- Parse and validate URL ----
         let url_str = args
@@ -124,6 +251,12 @@ impl Tool for WebScreenshotTool {
 
         let parsed = Url::parse(url_str)
             .map_err(|e| ZeptoError::Tool(format!("Invalid URL '{}': {}", url_str, e)))?;
+
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, MAX_TIMEOUT_SECS);
 
         match parsed.scheme() {
             "http" | "https" => {}
@@ -141,7 +274,11 @@ impl Tool for WebScreenshotTool {
                 "Blocked URL host (local or private network)".to_string(),
             ));
         }
+
+        // Initial DNS SSRF check for the entry URL.
         resolve_and_check_host(&parsed).await?;
+
+        let normalized_entry_url = parsed.to_string();
 
         // ---- Parse optional parameters ----
         let output_path = args
@@ -150,12 +287,6 @@ impl Tool for WebScreenshotTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from);
-
-        let timeout_secs = args
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS);
 
         let width = args
             .get("width")
@@ -196,31 +327,127 @@ impl Tool for WebScreenshotTool {
             }
         });
 
-        // ---- Navigate and screenshot (with timeout) ----
-        let screenshot_result = timeout(Duration::from_secs(timeout_secs), async {
+        // ---- Navigate and screenshot (with timeout + browser-side SSRF redirect checks) ----
+        let screenshot_result = async {
+            // Create an empty page first so we can attach interception before navigation.
             let page = browser
-                .new_page(url_str)
+                .new_page("about:blank")
                 .await
                 .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?;
 
-            let screenshot_bytes = page
-                .screenshot(ScreenshotParams::builder().full_page(false).build())
+            let main_frame_id = page
+                .mainframe()
                 .await
-                .map_err(|e| ZeptoError::Tool(format!("Failed to capture screenshot: {}", e)))?;
+                .map_err(|e| ZeptoError::Tool(format!("Failed to resolve main frame: {}", e)))?;
 
-            Ok::<Vec<u8>, ZeptoError>(screenshot_bytes)
-        })
-        .await
-        .map_err(|_| {
-            ZeptoError::Tool(format!(
-                "Screenshot timed out after {}s for '{}'",
-                timeout_secs, url_str
-            ))
-        })??;
+            let mut paused_events = page
+                .event_listener::<EventRequestPaused>()
+                .await
+                .map_err(|e| {
+                    ZeptoError::Tool(format!(
+                        "Failed to subscribe to browser request interception events: {}",
+                        e
+                    ))
+                })?;
 
-        // Clean up browser resources.
+            // Intercept every request. Redirect hops are surfaced as additional
+            // paused requests and validated individually before being continued.
+            page.execute(
+                FetchEnableParams::builder()
+                    .pattern(RequestPattern::builder().url_pattern("*").build())
+                    .build(),
+            )
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to enable request interception: {}", e)))?;
+
+            let nav_page = page.clone();
+            let screenshot_future = async move {
+                nav_page
+                    .goto(url_str)
+                    .await
+                    .map_err(|e| ZeptoError::Tool(format!("Failed to open page: {}", e)))?;
+
+                let screenshot_bytes = nav_page
+                    .screenshot(ScreenshotParams::builder().full_page(false).build())
+                    .await
+                    .map_err(|e| ZeptoError::Tool(format!("Failed to capture screenshot: {}", e)))?;
+
+                Ok::<Vec<u8>, ZeptoError>(screenshot_bytes)
+            };
+            tokio::pin!(screenshot_future);
+
+            let mut document_redirect_hops: usize = 0;
+            let mut seen_document_redirect_urls: HashSet<String> = HashSet::new();
+            seen_document_redirect_urls.insert(normalized_entry_url.clone());
+
+            let timed_capture = timeout(Duration::from_secs(timeout_secs), async {
+                loop {
+                    tokio::select! {
+                        captured = &mut screenshot_future => {
+                            break captured;
+                        }
+                        maybe_event = paused_events.next() => {
+                            let Some(event) = maybe_event else {
+                                break Err(ZeptoError::Tool(
+                                    "Browser request interception stream ended unexpectedly".to_string()
+                                ));
+                            };
+
+                            let event_ref = event.as_ref();
+                            let is_main_frame = match &main_frame_id {
+                                Some(frame_id) => event_ref.frame_id == *frame_id,
+                                None => true,
+                            };
+
+                            if event_ref.redirected_request_id.is_some()
+                                && is_main_frame
+                                && matches!(
+                                    event_ref.resource_type,
+                                    chromiumoxide::cdp::browser_protocol::network::ResourceType::Document
+                                )
+                            {
+                                if let Err(err) = track_document_redirect(
+                                    &mut document_redirect_hops,
+                                    &mut seen_document_redirect_urls,
+                                    &event_ref.request.url,
+                                ) {
+                                    let _ = page
+                                        .execute(FailRequestParams::new(
+                                            event_ref.request_id.clone(),
+                                            ErrorReason::AccessDenied,
+                                        ))
+                                        .await;
+                                    break Err(err);
+                                }
+                            }
+
+                            if let Err(err) = handle_paused_browser_request(&page, event_ref).await {
+                                break Err(err);
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            // Best-effort cleanup of interception domain.
+            let _ = page.execute(FetchDisableParams::default()).await;
+
+            let capture_result = timed_capture.map_err(|_| {
+                ZeptoError::Tool(format!(
+                    "Screenshot timed out after {}s for '{}'",
+                    timeout_secs, url_str
+                ))
+            })?;
+
+            capture_result
+        }
+        .await;
+
         drop(browser);
         handler_handle.abort();
+
+        let screenshot_result = screenshot_result?;
 
         // ---- Output: save or encode ----
         let result = if let Some(path) = output_path {
@@ -310,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_default_constructor() {
-        let tool = WebScreenshotTool::default();
+        let tool = WebScreenshotTool;
         assert_eq!(tool.name(), "web_screenshot");
     }
 
@@ -485,6 +712,80 @@ mod tests {
             .execute(json!({"url": "http://internal.local/data"}), &ctx)
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_browser_request_target_basic_blocks_private_host() {
+        let private_target = Url::parse("http://127.0.0.1:8080/admin").unwrap();
+        let result = validate_browser_request_target_basic(&private_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("blocked (local or private network)"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_browser_request_target_basic_blocks_non_http_scheme() {
+        let ftp_target = Url::parse("ftp://example.com/file").unwrap();
+        let result = validate_browser_request_target_basic(&ftp_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("scheme is blocked"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_browser_request_url_blocks_private_host() {
+        let result = validate_browser_request_url("http://192.168.1.10/admin").await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_track_document_redirect_exceeds_hop_limit() {
+        let mut redirect_hops = MAX_SCREENSHOT_REDIRECT_HOPS;
+        let mut seen_urls = HashSet::new();
+        seen_urls.insert("https://example.com/".to_string());
+
+        let result = track_document_redirect(
+            &mut redirect_hops,
+            &mut seen_urls,
+            "https://example.com/next",
+        );
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("Exceeded maximum redirect hops"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_track_document_redirect_detects_normalized_loop() {
+        let mut redirect_hops = 0;
+        let mut seen_urls = HashSet::new();
+        seen_urls.insert("https://example.com/".to_string());
+
+        let result =
+            track_document_redirect(&mut redirect_hops, &mut seen_urls, "HTTPS://EXAMPLE.COM");
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("Detected redirect loop while capturing screenshot"));
+                assert!(msg.contains("https://example.com/"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
     }
 
     // ---- Parameter parsing / defaults tests ----

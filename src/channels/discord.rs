@@ -15,18 +15,24 @@
 //! 7. Reconnect with exponential backoff on disconnection.
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::watch;
+use tokio_tungstenite::client_async_tls;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::DiscordConfig;
 use crate::error::{Result, ZeptoError};
 
@@ -54,6 +60,7 @@ const GATEWAY_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
 const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
 const DISCORD_CHANNEL_TYPE_GUILD_FORUM: u8 = 15;
 const DISCORD_CHANNEL_TYPE_GUILD_MEDIA: u8 = 16;
+const MAX_PROXY_CONNECT_RESPONSE_BYTES: usize = 8 * 1024;
 
 // ---------------------------------------------------------------------------
 // Gateway payload types (deserialization)
@@ -81,6 +88,22 @@ struct HelloData {
     heartbeat_interval: u64,
 }
 
+/// A file attachment on a Discord message.
+#[derive(Debug, Deserialize)]
+struct DiscordAttachment {
+    /// The CDN URL of the attachment.
+    url: String,
+    /// MIME type (e.g. "image/png"), may be absent for older clients.
+    #[serde(default)]
+    content_type: Option<String>,
+    /// Original filename.
+    #[serde(default)]
+    filename: Option<String>,
+    /// File size in bytes.
+    #[serde(default)]
+    size: Option<u64>,
+}
+
 /// The `d` field of a MESSAGE_CREATE dispatch event.
 #[derive(Debug, Deserialize)]
 struct MessageCreateData {
@@ -93,6 +116,9 @@ struct MessageCreateData {
     author: MessageAuthor,
     /// The unique message ID.
     id: String,
+    /// File attachments on this message (images, etc.).
+    #[serde(default)]
+    attachments: Vec<DiscordAttachment>,
 }
 
 /// Author of a Discord message.
@@ -210,6 +236,289 @@ impl DiscordChannel {
         Ok(format!("{}/?v=10&encoding=json", url))
     }
 
+    /// Returns a copy of `proxy_url` with any userinfo (username + password) stripped,
+    /// so the result is safe to include in log messages and error strings.
+    fn sanitize_proxy_url(proxy_url: &str) -> String {
+        match reqwest::Url::parse(proxy_url) {
+            Ok(mut u) => {
+                let _ = u.set_password(None);
+                let _ = u.set_username("");
+                u.to_string()
+            }
+            // URL is not parseable at all; don't echo the raw string.
+            Err(_) => "<invalid proxy URL>".to_string(),
+        }
+    }
+
+    fn parse_proxy_url(proxy_url: &str) -> Result<(String, u16, Option<String>)> {
+        let parsed = reqwest::Url::parse(proxy_url).map_err(|e| {
+            ZeptoError::Config(format!(
+                "Invalid Discord gateway proxy URL '{}': {}",
+                Self::sanitize_proxy_url(proxy_url),
+                e
+            ))
+        })?;
+
+        if parsed.scheme() != "http" {
+            return Err(ZeptoError::Config(format!(
+                "Discord gateway proxy URL must use http:// scheme, got '{}'",
+                parsed.scheme()
+            )));
+        }
+
+        let host = parsed.host_str().ok_or_else(|| {
+            ZeptoError::Config("Discord gateway proxy URL missing host".to_string())
+        })?;
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            ZeptoError::Config("Discord gateway proxy URL missing port".to_string())
+        })?;
+
+        let auth_header = if parsed.username().is_empty() {
+            None
+        } else {
+            use base64::Engine as _;
+            // Decode percent-encoding so that special characters (e.g. %40 → @) are
+            // transmitted correctly in the Basic auth credential string.
+            let username = Self::percent_decode(parsed.username());
+            let password = Self::percent_decode(parsed.password().unwrap_or(""));
+            let creds = format!("{}:{}", username, password);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+            Some(format!("Proxy-Authorization: Basic {}\r\n", encoded))
+        };
+
+        Ok((host.to_string(), port, auth_header))
+    }
+
+    fn gateway_proxy_from_env(ws_url: &str) -> Option<String> {
+        let parsed = reqwest::Url::parse(ws_url).ok()?;
+        let scheme = parsed.scheme();
+        let prefer_https = matches!(scheme, "wss" | "https");
+        let candidates: &[&str] = if prefer_https {
+            &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        } else {
+            &["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"]
+        };
+
+        for key in candidates {
+            if let Ok(value) = std::env::var(key) {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Only return URLs whose scheme is "http": HTTP CONNECT
+                // tunnelling requires a plain TCP connection to the proxy, so
+                // https:// entries are skipped and the next candidate is tried.
+                // Malformed or unsupported-scheme values are also skipped.
+                match reqwest::Url::parse(trimmed) {
+                    Ok(u) if u.scheme() == "http" => {
+                        return Some(trimmed.to_string());
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        None
+    }
+
+    fn nono_proxy_auth_header() -> Option<String> {
+        if let Ok(token) = std::env::var("NONO_PROXY_TOKEN") {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            // Reject tokens containing CR or LF to prevent HTTP header injection.
+            if trimmed.contains('\r') || trimmed.contains('\n') {
+                warn!(
+                    "NONO_PROXY_TOKEN contains CR or LF characters; \
+                     ignoring to prevent HTTP header injection"
+                );
+                return None;
+            }
+            return Some(format!("Proxy-Authorization: Bearer {}\r\n", trimmed));
+        }
+        None
+    }
+
+    fn build_connect_request(
+        target_host: &str,
+        target_port: u16,
+        auth_header: Option<&str>,
+    ) -> String {
+        // RFC 7231 §4.3.6: IPv6 literals must be bracketed in the request-target and Host header.
+        let authority = if target_host.contains(':') {
+            format!("[{}]:{}", target_host, target_port)
+        } else {
+            format!("{}:{}", target_host, target_port)
+        };
+        let mut request = format!(
+            "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+        );
+        if let Some(auth) = auth_header {
+            request.push_str(auth);
+        }
+        request.push_str("\r\n");
+        request
+    }
+
+    /// Decodes percent-encoded bytes (e.g. `%40` → `@`) from a URL component.
+    fn percent_decode(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push(((hi << 4) | lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn parse_connect_response_ok(response: &[u8]) -> Result<bool> {
+        let text = std::str::from_utf8(response).map_err(|e| {
+            ZeptoError::Channel(format!(
+                "HTTP CONNECT proxy response is not valid UTF-8: {}",
+                e
+            ))
+        })?;
+        let status_line = text.lines().next().unwrap_or_default();
+        let mut parts = status_line.split_whitespace();
+        let version = parts.next().unwrap_or_default();
+        let code = parts.next().unwrap_or_default();
+        if (version == "HTTP/1.1" || version == "HTTP/1.0") && code == "200" {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn connect_via_http_proxy(
+        ws_url: &str,
+        proxy_url: &str,
+    ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        let ws_parsed = reqwest::Url::parse(ws_url).map_err(|e| {
+            ZeptoError::Channel(format!("Invalid Discord gateway URL '{}': {}", ws_url, e))
+        })?;
+        let target_host = ws_parsed
+            .host_str()
+            .ok_or_else(|| ZeptoError::Channel("Discord gateway URL missing host".to_string()))?;
+        let target_port = ws_parsed
+            .port_or_known_default()
+            .ok_or_else(|| ZeptoError::Channel("Discord gateway URL missing port".to_string()))?;
+
+        let (proxy_host, proxy_port, mut proxy_auth_header) = Self::parse_proxy_url(proxy_url)?;
+        if proxy_auth_header.is_none() {
+            proxy_auth_header = Self::nono_proxy_auth_header();
+        }
+        let io_timeout = Duration::from_secs(15);
+        let mut stream = tokio::time::timeout(
+            io_timeout,
+            TcpStream::connect((proxy_host.as_str(), proxy_port)),
+        )
+        .await
+        .map_err(|_| ZeptoError::Channel("Timed out connecting to HTTP CONNECT proxy".to_string()))?
+        .map_err(|e| {
+            ZeptoError::Channel(format!(
+                "Failed to connect to Discord HTTP CONNECT proxy '{}:{}': {}",
+                proxy_host, proxy_port, e
+            ))
+        })?;
+
+        let connect_request =
+            Self::build_connect_request(target_host, target_port, proxy_auth_header.as_deref());
+        tokio::time::timeout(io_timeout, stream.write_all(connect_request.as_bytes()))
+            .await
+            .map_err(|_| ZeptoError::Channel("Timed out writing HTTP CONNECT request".to_string()))?
+            .map_err(|e| {
+                ZeptoError::Channel(format!("Failed to write HTTP CONNECT request: {}", e))
+            })?;
+        tokio::time::timeout(io_timeout, stream.flush())
+            .await
+            .map_err(|_| {
+                ZeptoError::Channel("Timed out flushing HTTP CONNECT request".to_string())
+            })?
+            .map_err(|e| {
+                ZeptoError::Channel(format!("Failed to flush HTTP CONNECT request: {}", e))
+            })?;
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = tokio::time::timeout(io_timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| {
+                    ZeptoError::Channel("Timed out reading HTTP CONNECT proxy response".to_string())
+                })?
+                .map_err(|e| {
+                    ZeptoError::Channel(format!(
+                        "Failed reading HTTP CONNECT proxy response: {}",
+                        e
+                    ))
+                })?;
+            if n == 0 {
+                return Err(ZeptoError::Channel(
+                    "HTTP CONNECT proxy closed before sending response headers".to_string(),
+                ));
+            }
+            if buf.len() + n > MAX_PROXY_CONNECT_RESPONSE_BYTES {
+                return Err(ZeptoError::Channel(format!(
+                    "HTTP CONNECT proxy response too large (>{} bytes)",
+                    MAX_PROXY_CONNECT_RESPONSE_BYTES
+                )));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        if !Self::parse_connect_response_ok(&buf)? {
+            let preview = String::from_utf8_lossy(&buf);
+            let first_line = preview.lines().next().unwrap_or_default();
+            return Err(ZeptoError::Channel(format!(
+                "HTTP CONNECT proxy tunnel failed: {}",
+                first_line
+            )));
+        }
+
+        let request = ws_url.into_client_request().map_err(|e| {
+            ZeptoError::Channel(format!(
+                "Failed to create Discord WebSocket client request for '{}': {}",
+                ws_url, e
+            ))
+        })?;
+        let tls_timeout = Duration::from_secs(30);
+        let (ws_stream, _) = tokio::time::timeout(tls_timeout, client_async_tls(request, stream))
+            .await
+            .map_err(|_| {
+                ZeptoError::Channel(
+                    "Timed out during TLS/WebSocket handshake over proxy tunnel".to_string(),
+                )
+            })?
+            .map_err(|e| ZeptoError::Channel(format!("Discord WebSocket connect failed: {}", e)))?;
+        Ok(ws_stream)
+    }
+
+    async fn connect_gateway(ws_url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        // gateway_proxy_from_env only returns http:// proxy URLs, so we can use
+        // the result directly for HTTP CONNECT tunnelling.
+        if let Some(proxy_url) = Self::gateway_proxy_from_env(ws_url) {
+            info!("Discord gateway connecting via HTTP CONNECT proxy from env");
+            return Self::connect_via_http_proxy(ws_url, &proxy_url).await;
+        }
+
+        let (ws_stream, _) = connect_async(ws_url)
+            .await
+            .map_err(|e| ZeptoError::Channel(format!("Discord WebSocket connect failed: {}", e)))?;
+        Ok(ws_stream)
+    }
+
     // -----------------------------------------------------------------------
     // Gateway payload helpers
     // -----------------------------------------------------------------------
@@ -263,7 +572,9 @@ impl DiscordChannel {
         }
 
         let content = msg.content.trim().to_string();
-        if content.is_empty() {
+
+        // Only reject if both content is empty AND there are no attachments
+        if content.is_empty() && msg.attachments.is_empty() {
             return None;
         }
 
@@ -551,6 +862,7 @@ impl DiscordChannel {
                     }
                 }
             };
+            info!("Discord gateway URL discovered: {}", ws_url);
 
             // --- WebSocket connect ---
             let ws_stream = tokio::select! {
@@ -558,9 +870,9 @@ impl DiscordChannel {
                     info!("Discord gateway shutdown requested");
                     return;
                 }
-                result = connect_async(&ws_url) => {
+                result = Self::connect_gateway(&ws_url) => {
                     match result {
-                        Ok((stream, _)) => stream,
+                        Ok(stream) => stream,
                         Err(e) => {
                             warn!("Discord: WebSocket connect failed: {}", e);
                             let delay = Self::backoff_delay(reconnect_attempt);
@@ -667,26 +979,33 @@ impl DiscordChannel {
             tokio::spawn({
                 let mut shutdown = heartbeat_shutdown;
                 async move {
-                    let interval = Duration::from_millis(heartbeat_interval);
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.changed() => {
-                                debug!("Discord heartbeat task shutting down");
-                                return;
-                            }
-                            _ = tokio::time::sleep(interval) => {
-                                let s = if seq_valid_clone.load(Ordering::SeqCst) {
-                                    Some(seq_clone.load(Ordering::SeqCst))
-                                } else {
-                                    None
-                                };
-                                let payload = Self::build_heartbeat_payload(s);
-                                if heartbeat_tx.send(payload).await.is_err() {
-                                    debug!("Discord heartbeat channel closed");
+                    let task_result = std::panic::AssertUnwindSafe(async move {
+                        let interval = Duration::from_millis(heartbeat_interval);
+                        loop {
+                            tokio::select! {
+                                _ = shutdown.changed() => {
+                                    debug!("Discord heartbeat task shutting down");
                                     return;
+                                }
+                                _ = tokio::time::sleep(interval) => {
+                                    let s = if seq_valid_clone.load(Ordering::SeqCst) {
+                                        Some(seq_clone.load(Ordering::SeqCst))
+                                    } else {
+                                        None
+                                    };
+                                    let payload = Self::build_heartbeat_payload(s);
+                                    if heartbeat_tx.send(payload).await.is_err() {
+                                        debug!("Discord heartbeat channel closed");
+                                        return;
+                                    }
                                 }
                             }
                         }
+                    })
+                    .catch_unwind()
+                    .await;
+                    if task_result.is_err() {
+                        error!("Discord heartbeat task panicked");
                     }
                 }
             });
@@ -733,9 +1052,34 @@ impl DiscordChannel {
                                                 if let Some(event_name) = payload.t.as_deref() {
                                                     if event_name == "MESSAGE_CREATE" {
                                                         if let Some(ref data) = payload.d {
-                                                            if let Some(inbound) =
+                                                            if let Some(mut inbound) =
                                                                 Self::parse_message_create(data, &allowlist, deny_by_default)
                                                             {
+                                                                // Download image attachments
+                                                                if let Ok(msg_data) = serde_json::from_value::<MessageCreateData>(data.clone()) {
+                                                                    for att in &msg_data.attachments {
+                                                                        if let Some(ref ct) = att.content_type {
+                                                                            if ct.starts_with("image/")
+                                                                                && att.size.is_none_or(|s| s <= 20 * 1024 * 1024)
+                                                                            {
+                                                                                match client.get(&att.url).send().await {
+                                                                                    Ok(resp) => {
+                                                                                        if let Ok(bytes) = resp.bytes().await {
+                                                                                            let mut media = MediaAttachment::new(MediaType::Image)
+                                                                                                .with_data(bytes.to_vec())
+                                                                                                .with_mime_type(ct);
+                                                                                            if let Some(ref name) = att.filename {
+                                                                                                media = media.with_filename(name);
+                                                                                            }
+                                                                                            inbound = inbound.with_media(media);
+                                                                                        }
+                                                                                    }
+                                                                                    Err(e) => warn!("Failed to download Discord attachment: {}", e),
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                                 if let Err(e) =
                                                                     bus.publish_inbound(inbound).await
                                                                 {
@@ -864,15 +1208,22 @@ impl Channel for DiscordChannel {
         let allow_from = self.config.allow_from.clone();
         let deny_by_default = self.config.deny_by_default;
         tokio::spawn(async move {
-            Self::run_gateway_loop(
-                http_client,
-                token,
-                bus,
-                allow_from,
-                deny_by_default,
-                shutdown_rx,
-            )
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                Self::run_gateway_loop(
+                    http_client,
+                    token,
+                    bus,
+                    allow_from,
+                    deny_by_default,
+                    shutdown_rx,
+                )
+                .await;
+            })
+            .catch_unwind()
             .await;
+            if task_result.is_err() {
+                error!("Discord gateway task panicked");
+            }
             running_clone.store(false, Ordering::SeqCst);
         });
 
@@ -1325,6 +1676,131 @@ mod tests {
         assert_eq!(d, Duration::from_secs(MAX_RECONNECT_DELAY_SECS));
     }
 
+    #[test]
+    fn test_parse_proxy_url_http_with_auth() {
+        let (host, port, auth) =
+            DiscordChannel::parse_proxy_url("http://alice:secret@127.0.0.1:8080")
+                .expect("proxy should parse");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 8080);
+        assert!(auth.is_some());
+        let auth_line = auth.expect("auth header expected");
+        assert!(auth_line.starts_with("Proxy-Authorization: Basic "));
+    }
+
+    #[test]
+    fn test_parse_proxy_url_rejects_non_http_scheme() {
+        let err = DiscordChannel::parse_proxy_url("https://127.0.0.1:8080")
+            .expect_err("https proxy must be rejected for CONNECT transport");
+        assert!(err
+            .to_string()
+            .contains("Discord gateway proxy URL must use http:// scheme"));
+    }
+
+    #[test]
+    fn test_parse_connect_response_ok() {
+        let resp = b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: test\r\n\r\n";
+        let ok = DiscordChannel::parse_connect_response_ok(resp).expect("parse should succeed");
+        assert!(ok);
+    }
+
+    #[test]
+    fn test_parse_connect_response_not_ok() {
+        let resp = b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n";
+        let ok = DiscordChannel::parse_connect_response_ok(resp).expect("parse should succeed");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_parse_connect_response_rejects_2000() {
+        // "HTTP/1.1 200" prefix match would incorrectly accept "2000"; exact token check must not.
+        let resp = b"HTTP/1.1 2000 OK\r\n\r\n";
+        let ok = DiscordChannel::parse_connect_response_ok(resp).expect("parse should succeed");
+        assert!(!ok, "status code 2000 must not be accepted as a 200");
+    }
+
+    #[test]
+    fn test_build_connect_request_ipv6_brackets() {
+        let req = DiscordChannel::build_connect_request("::1", 443, None);
+        assert!(
+            req.starts_with("CONNECT [::1]:443 HTTP/1.1"),
+            "IPv6 literal must be bracketed in CONNECT request-target: {}",
+            req.lines().next().unwrap_or_default()
+        );
+        assert!(
+            req.contains("Host: [::1]:443"),
+            "Host header must also bracket IPv6"
+        );
+    }
+
+    #[test]
+    fn test_build_connect_request_ipv4_no_brackets() {
+        let req = DiscordChannel::build_connect_request("127.0.0.1", 80, None);
+        assert!(req.starts_with("CONNECT 127.0.0.1:80 HTTP/1.1"));
+    }
+
+    #[test]
+    fn test_parse_proxy_url_percent_encoded_credentials() {
+        // %40 = '@', %3A = ':'
+        let (_, _, auth) =
+            DiscordChannel::parse_proxy_url("http://user%40corp:p%40ss@127.0.0.1:3128")
+                .expect("should parse");
+        let auth_line = auth.expect("auth header expected");
+        // Decode the Base64 payload and verify the raw credentials are correct.
+        use base64::Engine as _;
+        let b64 = auth_line
+            .trim_start_matches("Proxy-Authorization: Basic ")
+            .trim_end_matches("\r\n");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("valid base64");
+        let creds = String::from_utf8(decoded).expect("valid utf8");
+        assert_eq!(creds, "user@corp:p@ss");
+    }
+
+    #[test]
+    fn test_gateway_proxy_env_candidate_fallback() {
+        // When HTTPS_PROXY holds an https:// URL (unusable for CONNECT) and
+        // HTTP_PROXY holds a valid http:// URL, gateway_proxy_from_env must
+        // skip the https entry and return the http one.
+        //
+        // Note: std::env::set_var is inherently not thread-safe; this test
+        // must not run concurrently with other tests that touch the same vars.
+        let https_key = "HTTPS_PROXY";
+        let http_key = "HTTP_PROXY";
+        // Save any pre-existing values so we can restore them afterwards.
+        let saved_https = std::env::var(https_key).ok();
+        let saved_http = std::env::var(http_key).ok();
+
+        unsafe {
+            std::env::set_var(https_key, "https://proxy.example.com:3128");
+            std::env::set_var(http_key, "http://proxy.example.com:3128");
+        }
+
+        // Discord gateway uses wss://, so HTTPS_PROXY is tried first.
+        let result =
+            DiscordChannel::gateway_proxy_from_env("wss://gateway.discord.gg/?v=10&encoding=json");
+
+        // Restore env before asserting (ensures cleanup even on panic via
+        // the assert macro, which unwinds through this scope).
+        unsafe {
+            match &saved_https {
+                Some(v) => std::env::set_var(https_key, v),
+                None => std::env::remove_var(https_key),
+            }
+            match &saved_http {
+                Some(v) => std::env::set_var(http_key, v),
+                None => std::env::remove_var(http_key),
+            }
+        }
+
+        assert_eq!(
+            result.as_deref(),
+            Some("http://proxy.example.com:3128"),
+            "https:// HTTPS_PROXY must be skipped; http:// HTTP_PROXY must be returned"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Extra: Identify and heartbeat payload construction
     // -----------------------------------------------------------------------
@@ -1488,8 +1964,34 @@ mod tests {
         });
 
         let result = DiscordChannel::parse_message_create(&data, &[], false);
-        // Empty content should be filtered out.
+        // Empty content with no attachments should be filtered out.
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_message_create_with_image_only() {
+        // Message with an image attachment but no text content should be accepted.
+        // The actual attachment processing happens later in the gateway loop.
+        let data = json!({
+            "id": "msg-img-only",
+            "content": "",
+            "channel_id": "ch-300",
+            "author": { "id": "user-99", "bot": false },
+            "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/123/456/image.png",
+                "content_type": "image/png",
+                "filename": "image.png",
+                "size": 102400
+            }]
+        });
+
+        let result = DiscordChannel::parse_message_create(&data, &[], false);
+        assert!(result.is_some());
+
+        let inbound = result.unwrap();
+        assert_eq!(inbound.content, "");
+        // Attachments are processed later in the gateway loop, not in parse_message_create
+        assert_eq!(inbound.media.len(), 0);
     }
 
     #[test]

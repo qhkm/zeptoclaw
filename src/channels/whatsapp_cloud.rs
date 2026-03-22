@@ -13,9 +13,11 @@
 //! Sends replies via `https://graph.facebook.com/v18.0/{phone_number_id}/messages`
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,6 +40,8 @@ const MAX_HEADER_SIZE: usize = 8_192;
 
 /// WhatsApp text message character limit.
 const MAX_MESSAGE_LENGTH: usize = 4096;
+const SHA256_BLOCK_SIZE: usize = 64;
+const SHA256_OUTPUT_SIZE: usize = 32;
 
 // --- HTTP response constants ---
 
@@ -157,6 +161,47 @@ struct ParsedHttpRequest {
 }
 
 // --- Helper functions ---
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    let mut k = [0u8; SHA256_BLOCK_SIZE];
+    if key.len() > SHA256_BLOCK_SIZE {
+        let hashed = sha2::Sha256::digest(key);
+        k[..SHA256_OUTPUT_SIZE].copy_from_slice(&hashed);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+
+    let mut k_ipad = [0u8; SHA256_BLOCK_SIZE];
+    let mut k_opad = [0u8; SHA256_BLOCK_SIZE];
+    for i in 0..SHA256_BLOCK_SIZE {
+        k_ipad[i] = k[i] ^ 0x36;
+        k_opad[i] = k[i] ^ 0x5c;
+    }
+
+    let mut inner = sha2::Sha256::new();
+    inner.update(k_ipad);
+    inner.update(message);
+    let inner_result = inner.finalize();
+
+    let mut outer = sha2::Sha256::new();
+    outer.update(k_opad);
+    outer.update(inner_result);
+    hex::encode(outer.finalize())
+}
 
 /// Parse a raw HTTP request into structured parts.
 fn parse_http_request(raw: &[u8]) -> Result<ParsedHttpRequest> {
@@ -492,6 +537,33 @@ impl WhatsAppCloudChannel {
         Some(challenge.to_string())
     }
 
+    fn validate_signature(
+        headers: &[(String, String)],
+        body: &str,
+        app_secret: &Option<String>,
+    ) -> bool {
+        let app_secret = match app_secret {
+            Some(secret) => secret,
+            None => return true,
+        };
+
+        let provided = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-hub-signature-256"))
+            .map(|(_, value)| value.trim());
+
+        let provided = match provided {
+            Some(value) => value,
+            None => return false,
+        };
+
+        let expected = format!(
+            "sha256={}",
+            hmac_sha256_hex(app_secret.as_bytes(), body.as_bytes())
+        );
+        constant_time_eq(provided, &expected)
+    }
+
     /// Handle a single TCP connection.
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
@@ -581,7 +653,13 @@ impl WhatsAppCloudChannel {
                 }
             }
             "POST" => {
-                // Always respond 200 immediately (Meta requirement)
+                if !Self::validate_signature(&request.headers, &request.body, &config.app_secret) {
+                    warn!("WhatsApp Cloud: invalid or missing X-Hub-Signature-256");
+                    let _ = stream.write_all(HTTP_403_FORBIDDEN.as_bytes()).await;
+                    return;
+                }
+
+                // Respond 200 only after the webhook authenticity check passes.
                 let _ = stream.write_all(HTTP_200_OK.as_bytes()).await;
 
                 // Parse notification
@@ -685,33 +763,47 @@ impl Channel for WhatsAppCloudChannel {
         let http_client = self.client.clone();
 
         tokio::spawn(async move {
-            let mut shutdown_rx = shutdown_rx;
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                let mut shutdown_rx = shutdown_rx;
 
-            loop {
-                tokio::select! {
-                    accept_result = listener.accept() => {
-                        match accept_result {
-                            Ok((stream, addr)) => {
-                                debug!("WhatsApp Cloud: accepted connection from {}", addr);
-                                let cfg = config.clone();
-                                let bc = base_config.clone();
-                                let bus_ref = Arc::clone(&bus);
-                                let tx = transcriber.clone();
-                                let cl = http_client.clone();
-                                tokio::spawn(async move {
-                                    Self::handle_connection(stream, &cfg, &bc, &bus_ref, tx.as_deref(), &cl).await;
-                                });
-                            }
-                            Err(e) => {
-                                warn!("WhatsApp Cloud: failed to accept connection: {}", e);
+                loop {
+                    tokio::select! {
+                        accept_result = listener.accept() => {
+                            match accept_result {
+                                Ok((stream, addr)) => {
+                                    debug!("WhatsApp Cloud: accepted connection from {}", addr);
+                                    let cfg = config.clone();
+                                    let bc = base_config.clone();
+                                    let bus_ref = Arc::clone(&bus);
+                                    let tx = transcriber.clone();
+                                    let cl = http_client.clone();
+                                    tokio::spawn(async move {
+                                        let conn_result = std::panic::AssertUnwindSafe(async move {
+                                            Self::handle_connection(stream, &cfg, &bc, &bus_ref, tx.as_deref(), &cl).await;
+                                        })
+                                        .catch_unwind()
+                                        .await;
+                                        if conn_result.is_err() {
+                                            error!("WhatsApp Cloud connection handler panicked");
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("WhatsApp Cloud: failed to accept connection: {}", e);
+                                }
                             }
                         }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("WhatsApp Cloud channel shutdown signal received");
-                        break;
+                        _ = &mut shutdown_rx => {
+                            info!("WhatsApp Cloud channel shutdown signal received");
+                            break;
+                        }
                     }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if task_result.is_err() {
+                error!("WhatsApp Cloud listener task panicked");
             }
 
             running.store(false, Ordering::SeqCst);
@@ -830,6 +922,7 @@ mod tests {
             phone_number_id: "123456".to_string(),
             access_token: "test-token".to_string(),
             webhook_verify_token: "verify-secret".to_string(),
+            app_secret: None,
             bind_address: "127.0.0.1".to_string(),
             port: 0,
             path: "/whatsapp".to_string(),
@@ -892,6 +985,41 @@ mod tests {
         let query = "hub.mode=subscribe&hub.verify_token=verify-secret";
         let result = WhatsAppCloudChannel::handle_verification(query, "verify-secret");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signature_validation_not_required_without_app_secret() {
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        assert!(WhatsAppCloudChannel::validate_signature(
+            &headers,
+            sample_webhook_json(),
+            &None,
+        ));
+    }
+
+    #[test]
+    fn test_signature_validation_valid_signature() {
+        let secret = Some("meta-app-secret".to_string());
+        let body = sample_webhook_json();
+        let signature = format!(
+            "sha256={}",
+            hmac_sha256_hex(b"meta-app-secret", body.as_bytes())
+        );
+        let headers = vec![("X-Hub-Signature-256".to_string(), signature)];
+        assert!(WhatsAppCloudChannel::validate_signature(
+            &headers, body, &secret
+        ));
+    }
+
+    #[test]
+    fn test_signature_validation_missing_header_when_required() {
+        let secret = Some("meta-app-secret".to_string());
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        assert!(!WhatsAppCloudChannel::validate_signature(
+            &headers,
+            sample_webhook_json(),
+            &secret,
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1219,6 +1347,100 @@ mod tests {
         assert_eq!(received.channel, "whatsapp_cloud");
         assert_eq!(received.sender_id, "60123456789");
         assert_eq!(received.content, "Hello there!");
+
+        channel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_end_to_end_inbound_message_with_valid_signature() {
+        let bus = test_bus();
+        let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = temp_listener.local_addr().unwrap().port();
+        drop(temp_listener);
+
+        let mut config = test_config();
+        config.port = port;
+        config.allow_from = vec![];
+        config.app_secret = Some("meta-app-secret".to_string());
+        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus), None);
+        channel.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let body = sample_webhook_json();
+        let signature = format!(
+            "sha256={}",
+            hmac_sha256_hex(b"meta-app-secret", body.as_bytes())
+        );
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let request = format!(
+            "POST /whatsapp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Hub-Signature-256: {}\r\nContent-Length: {}\r\n\r\n{}",
+            signature,
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let response = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(2), bus.consume_inbound())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(received.channel, "whatsapp_cloud");
+        assert_eq!(received.sender_id, "60123456789");
+
+        channel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_end_to_end_inbound_message_missing_required_signature() {
+        let bus = test_bus();
+        let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = temp_listener.local_addr().unwrap().port();
+        drop(temp_listener);
+
+        let mut config = test_config();
+        config.port = port;
+        config.allow_from = vec![];
+        config.app_secret = Some("meta-app-secret".to_string());
+        let mut channel = WhatsAppCloudChannel::new(config, Arc::clone(&bus), None);
+        channel.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let body = sample_webhook_json();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let request = format!(
+            "POST /whatsapp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let response = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), bus.consume_inbound())
+                .await
+                .is_err()
+        );
 
         channel.stop().await.unwrap();
     }

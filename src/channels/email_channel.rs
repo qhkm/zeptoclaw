@@ -21,7 +21,14 @@
 //!   }
 //! }
 //! ```
+//!
+//! `allowed_senders` is matched against the parsed inbound `From` header.
+//! This is a trust-model limitation of IMAP/header-based ingestion, not a
+//! cryptographic sender-authentication guarantee. If sender authenticity
+//! matters, enforce SPF/DKIM/DMARC upstream before messages reach this channel.
 
+#[cfg(feature = "channel-email")]
+use futures::FutureExt;
 #[cfg(feature = "channel-email")]
 use tracing::{error, info, warn};
 
@@ -34,7 +41,7 @@ use std::sync::{
 use tokio::sync::Mutex;
 
 #[cfg(feature = "channel-email")]
-use crate::bus::InboundMessage;
+use crate::bus::{InboundMessage, MediaAttachment, MediaType};
 use crate::bus::{MessageBus, OutboundMessage};
 use crate::config::EmailConfig;
 use crate::error::{Result, ZeptoError};
@@ -63,6 +70,14 @@ pub struct EmailChannel {
 impl EmailChannel {
     /// Create a new `EmailChannel` from configuration.
     pub fn new(config: EmailConfig, bus: Arc<MessageBus>) -> Self {
+        #[cfg(feature = "channel-email")]
+        if config.enabled && !config.allowed_senders.is_empty() {
+            warn!(
+                "Email allowed_senders relies on the parsed From header only. \
+                 Enforce SPF/DKIM/DMARC upstream if sender authenticity matters."
+            );
+        }
+
         let base_config = BaseChannelConfig {
             name: "email".to_string(),
             allowlist: config.allowed_senders.clone(),
@@ -332,9 +347,31 @@ impl EmailChannel {
             let body_text = Self::extract_plain_text(&parsed);
             let content = format!("Subject: {subject}\n\n{body_text}");
 
-            let inbound = InboundMessage::new("email", &from, &from, &content)
+            let mut inbound = InboundMessage::new("email", &from, &from, &content)
                 .with_metadata("message_id", &msg_id)
                 .with_metadata("subject", &subject);
+
+            // Extract image attachments
+            use mail_parser::MimeHeaders;
+            for part in parsed.attachments() {
+                if let Some(ct) = part.content_type() {
+                    let main_type = ct.c_type.as_ref();
+                    let sub_type = ct.c_subtype.as_deref().unwrap_or("octet-stream");
+                    let mime = format!("{}/{}", main_type, sub_type);
+                    if main_type.eq_ignore_ascii_case("image") {
+                        let bytes = part.contents().to_vec();
+                        if !bytes.is_empty() && bytes.len() <= 20 * 1024 * 1024 {
+                            let mut media = MediaAttachment::new(MediaType::Image)
+                                .with_data(bytes)
+                                .with_mime_type(&mime);
+                            if let Some(name) = part.attachment_name() {
+                                media = media.with_filename(name);
+                            }
+                            inbound = inbound.with_media(media);
+                        }
+                    }
+                }
+            }
 
             if inbound_tx.send(inbound).await.is_err() {
                 return Ok(());
@@ -384,26 +421,35 @@ impl Channel for EmailChannel {
             let this_running = Arc::clone(&self.running);
 
             tokio::spawn(async move {
-                let channel = EmailChannel {
-                    config,
-                    base_config: BaseChannelConfig::new("email"),
-                    bus,
-                    running: Arc::clone(&this_running),
-                    seen_ids,
-                };
+                let task_result = std::panic::AssertUnwindSafe(async move {
+                    let channel = EmailChannel {
+                        config,
+                        base_config: BaseChannelConfig::new("email"),
+                        bus,
+                        running: Arc::clone(&this_running),
+                        seen_ids,
+                    };
 
-                let mut backoff = std::time::Duration::from_secs(1);
-                let max_backoff = std::time::Duration::from_secs(60);
+                    let mut backoff = std::time::Duration::from_secs(1);
+                    let max_backoff = std::time::Duration::from_secs(60);
 
-                while this_running.load(Ordering::SeqCst) {
-                    match channel.run_idle_session().await {
-                        Ok(()) => break,
-                        Err(e) => {
-                            error!("Email IMAP session error: {e}. Reconnecting in {backoff:?}…");
-                            tokio::time::sleep(backoff).await;
-                            backoff = std::cmp::min(backoff * 2, max_backoff);
+                    while this_running.load(Ordering::SeqCst) {
+                        match channel.run_idle_session().await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                error!(
+                                    "Email IMAP session error: {e}. Reconnecting in {backoff:?}…"
+                                );
+                                tokio::time::sleep(backoff).await;
+                                backoff = std::cmp::min(backoff * 2, max_backoff);
+                            }
                         }
                     }
+                })
+                .catch_unwind()
+                .await;
+                if task_result.is_err() {
+                    error!("Email channel task panicked");
                 }
 
                 this_running.store(false, Ordering::SeqCst);
@@ -414,6 +460,12 @@ impl Channel for EmailChannel {
                 "Email channel starting (IMAP IDLE on {})",
                 self.config.imap_host
             );
+            if !self.config.allowed_senders.is_empty() {
+                warn!(
+                    "Email allowed_senders checks parsed From headers only; \
+                     configure authenticated-mail enforcement upstream if sender authenticity matters."
+                );
+            }
             Ok(())
         }
     }

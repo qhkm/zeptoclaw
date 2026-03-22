@@ -119,6 +119,110 @@ impl LLMProvider for MockToolCallingProvider {
     }
 }
 
+/// A provider that reports large token usage on each call.
+/// Used to test that token_budget resets between process_message() runs.
+#[derive(Debug)]
+struct MockBudgetExhaustingProvider {
+    tokens_per_call: u32,
+}
+
+impl MockBudgetExhaustingProvider {
+    fn new(tokens_per_call: u32) -> Self {
+        Self { tokens_per_call }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for MockBudgetExhaustingProvider {
+    fn name(&self) -> &str {
+        "mock-budget-exhaust"
+    }
+
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+
+    async fn chat(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+    ) -> zeptoclaw::error::Result<LLMResponse> {
+        Ok(LLMResponse {
+            content: "budget-test-response".to_string(),
+            tool_calls: vec![],
+            usage: Some(zeptoclaw::providers::Usage {
+                prompt_tokens: self.tokens_per_call,
+                completion_tokens: self.tokens_per_call,
+                total_tokens: self.tokens_per_call * 2,
+            }),
+        })
+    }
+}
+
+/// A provider that emits a configurable number of tool calls per batch.
+/// Used to test max_tool_calls enforcement at the agent loop level.
+///
+/// Behavior:
+/// - When tools are provided and call_count == 0: emit `batch_size` echo tool calls
+/// - When tools are empty (synthesis call) or after tool results: return text summary
+#[derive(Debug)]
+struct MockBatchToolProvider {
+    batch_size: usize,
+    call_count: AtomicUsize,
+}
+
+impl MockBatchToolProvider {
+    fn new(batch_size: usize) -> Self {
+        Self {
+            batch_size,
+            call_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for MockBatchToolProvider {
+    fn name(&self) -> &str {
+        "mock-batch-tool"
+    }
+
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+
+    async fn chat(
+        &self,
+        _messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        _model: Option<&str>,
+        _options: ChatOptions,
+    ) -> zeptoclaw::error::Result<LLMResponse> {
+        let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        // First call with tools available: emit batch_size tool calls
+        if count == 0 && !tools.is_empty() && self.batch_size > 0 {
+            let tool_calls: Vec<LLMToolCall> = (0..self.batch_size)
+                .map(|i| {
+                    LLMToolCall::new(
+                        &format!("call_{}", i),
+                        "echo",
+                        &format!(r#"{{"message": "batch-item-{}"}}"#, i),
+                    )
+                })
+                .collect();
+            Ok(LLMResponse {
+                content: String::new(),
+                tool_calls,
+                usage: None,
+            })
+        } else {
+            // Synthesis / no-tools call: return text
+            Ok(LLMResponse::text("synthesis-complete"))
+        }
+    }
+}
+
 /// A provider that always fails. Used to verify error propagation through the
 /// full agent pipeline.
 #[derive(Debug)]
@@ -571,4 +675,214 @@ async fn test_live_agent_run() {
         Ok(Err(e)) => panic!("Live agent run failed: {}", e),
         Err(_) => panic!("Live agent run timed out after 30 seconds"),
     }
+}
+
+// ============================================================================
+// Tool Call Limit E2E Tests
+// ============================================================================
+
+/// max_tool_calls=0 should block all tool execution.
+/// The provider offers 3 tool calls, but none should execute.
+/// The agent should still return a synthesis response.
+#[tokio::test]
+async fn test_max_tool_calls_zero_blocks_all() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = Some(0);
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    let msg = InboundMessage::new("test", "user1", "chat1", "Do something");
+    let result = agent.process_message(&msg).await;
+
+    assert!(result.is_ok(), "process_message failed: {:?}", result.err());
+    let response = result.unwrap();
+    // No tool should have executed — response should NOT contain batch-item markers
+    assert!(
+        !response.contains("batch-item"),
+        "Tools ran despite max_tool_calls=0, got: {}",
+        response
+    );
+}
+
+/// max_tool_calls=3 with a batch of 3 should allow all 3 to execute,
+/// then make a synthesis call. The synthesis response should be returned.
+#[tokio::test]
+async fn test_max_tool_calls_exact_budget() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = Some(3);
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    let msg = InboundMessage::new("test", "user1", "chat1", "Do something");
+    let result = agent.process_message(&msg).await;
+
+    assert!(result.is_ok(), "process_message failed: {:?}", result.err());
+    let response = result.unwrap();
+    // The synthesis call should have produced the final response
+    assert!(
+        response.contains("synthesis-complete"),
+        "Expected synthesis response after exact budget, got: {}",
+        response
+    );
+}
+
+/// max_tool_calls=2 with a batch of 5 should truncate to 2 tool calls,
+/// then synthesize.
+#[tokio::test]
+async fn test_max_tool_calls_truncates_batch() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = Some(2);
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(5)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    let msg = InboundMessage::new("test", "user1", "chat1", "Do something");
+    let result = agent.process_message(&msg).await;
+
+    assert!(result.is_ok(), "process_message failed: {:?}", result.err());
+    let response = result.unwrap();
+    // Should get synthesis (the LLM was called a second time with no tools)
+    assert!(
+        response.contains("synthesis-complete"),
+        "Expected synthesis response after truncation, got: {}",
+        response
+    );
+}
+
+/// Regression: tool call counter must reset between process_message() calls.
+/// Without reset, the second run would inherit the exhausted counter from the
+/// first run and fail to execute any tools.
+#[tokio::test]
+async fn test_max_tool_calls_resets_between_runs() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = Some(3);
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    // First run: exhausts the 3-call budget
+    let msg1 = InboundMessage::new("test", "user1", "chat1", "First run");
+    let result1 = agent.process_message(&msg1).await;
+    assert!(result1.is_ok(), "First run failed: {:?}", result1.err());
+    let response1 = result1.unwrap();
+    assert!(
+        response1.contains("synthesis-complete"),
+        "First run should synthesize, got: {}",
+        response1
+    );
+
+    // Second run on the SAME agent: counter must have reset, so tools work again.
+    // Replace provider to reset its internal call_count.
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    let msg2 = InboundMessage::new("test", "user2", "chat2", "Second run");
+    let result2 = agent.process_message(&msg2).await;
+    assert!(result2.is_ok(), "Second run failed: {:?}", result2.err());
+    let response2 = result2.unwrap();
+    assert!(
+        response2.contains("synthesis-complete"),
+        "Second run should also synthesize (counter reset), got: {}",
+        response2
+    );
+}
+
+/// max_tool_calls with no limit (None) should allow all tool calls.
+/// This is the default behavior — tools execute and the model synthesizes.
+#[tokio::test]
+async fn test_max_tool_calls_unlimited() {
+    let mut config = Config::default();
+    config.agents.defaults.max_tool_calls = None;
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBatchToolProvider::new(3)))
+        .await;
+    agent.register_tool(Box::new(EchoTool)).await;
+
+    let msg = InboundMessage::new("test", "user1", "chat1", "Do something");
+    let result = agent.process_message(&msg).await;
+
+    assert!(result.is_ok(), "process_message failed: {:?}", result.err());
+    let response = result.unwrap();
+    // With no limit, all tools run and the model synthesizes normally
+    assert!(
+        response.contains("synthesis-complete"),
+        "Expected synthesis response with unlimited budget, got: {}",
+        response
+    );
+}
+
+/// Regression: token budget must reset between process_message() calls.
+/// Without reset, the second run would fail with "Token budget exceeded"
+/// because the budget was consumed by the first run.
+#[tokio::test]
+async fn test_token_budget_resets_between_runs() {
+    let mut config = Config::default();
+    // Set a budget of 200 tokens. The provider reports 100+100=200 per call,
+    // which exactly exhausts the budget on the first run.
+    config.agents.defaults.token_budget = 200;
+
+    let session_manager = SessionManager::new_memory();
+    let bus = Arc::new(MessageBus::new());
+    let agent = zeptoclaw::agent::AgentLoop::new(config, session_manager, bus.clone());
+
+    agent
+        .set_provider(Box::new(MockBudgetExhaustingProvider::new(100)))
+        .await;
+
+    // First run: consumes 200 tokens (exactly the budget)
+    let msg1 = InboundMessage::new("test", "user1", "chat1", "First run");
+    let result1 = agent.process_message(&msg1).await;
+    assert!(result1.is_ok(), "First run failed: {:?}", result1.err());
+    let response1 = result1.unwrap();
+    assert!(
+        response1.contains("budget-test-response"),
+        "First run should succeed, got: {}",
+        response1
+    );
+
+    // Second run on the SAME agent: budget must have reset.
+    let msg2 = InboundMessage::new("test", "user2", "chat2", "Second run");
+    let result2 = agent.process_message(&msg2).await;
+    assert!(
+        result2.is_ok(),
+        "Second run should succeed (budget reset), but got error: {:?}",
+        result2.err()
+    );
+    let response2 = result2.unwrap();
+    assert!(
+        response2.contains("budget-test-response"),
+        "Second run should also return response (budget reset), got: {}",
+        response2
+    );
 }

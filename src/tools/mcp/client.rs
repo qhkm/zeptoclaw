@@ -1,17 +1,18 @@
-//! MCP client with HTTP transport.
+//! MCP client — transport-agnostic JSON-RPC 2.0 client.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
 use tokio::sync::RwLock;
 
 use super::protocol::*;
+use super::transport::{HttpTransport, McpTransport, StdioTransport};
 
-/// MCP client for communicating with MCP servers over HTTP.
+/// MCP client for communicating with MCP servers over any transport.
 pub struct McpClient {
-    /// Server URL (base endpoint).
-    url: String,
-    /// HTTP client with timeout.
-    http: reqwest::Client,
+    /// Transport layer (HTTP, stdio, etc.).
+    transport: Arc<dyn McpTransport>,
     /// Atomic request ID counter.
     next_id: AtomicU64,
     /// Cached tool definitions.
@@ -21,16 +22,33 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Create a new MCP client.
+    /// Create a new MCP client with HTTP transport (backward-compatible).
     pub fn new(name: &str, url: &str, timeout_secs: u64) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .build()
-            .unwrap_or_default();
+        Self::new_http(name, url, timeout_secs)
+    }
 
+    /// Create a new MCP client with HTTP transport.
+    pub fn new_http(name: &str, url: &str, timeout_secs: u64) -> Self {
+        let transport = Arc::new(HttpTransport::new(url, timeout_secs));
+        Self::with_transport(name, transport)
+    }
+
+    /// Create a new MCP client with stdio transport (spawns child process).
+    pub async fn new_stdio(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+        timeout_secs: u64,
+    ) -> Result<Self, String> {
+        let transport = Arc::new(StdioTransport::spawn(command, args, env, timeout_secs).await?);
+        Ok(Self::with_transport(name, transport))
+    }
+
+    /// Create a new MCP client with a custom transport.
+    pub fn with_transport(name: &str, transport: Arc<dyn McpTransport>) -> Self {
         Self {
-            url: url.to_string(),
-            http,
+            transport,
             next_id: AtomicU64::new(1),
             tools_cache: Arc::new(RwLock::new(None)),
             server_name: name.to_string(),
@@ -47,30 +65,14 @@ impl McpClient {
         &self.server_name
     }
 
-    /// Get the server URL.
-    pub fn url(&self) -> &str {
-        &self.url
+    /// Get the underlying transport type.
+    pub fn transport_type(&self) -> &str {
+        self.transport.transport_type()
     }
 
-    /// Send a JSON-RPC request and return the response.
+    /// Send a JSON-RPC request via transport and return the response.
     async fn send_request(&self, request: &McpRequest) -> Result<McpResponse, String> {
-        let resp = self
-            .http
-            .post(&self.url)
-            .json(request)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {} from MCP server: {}", status, body));
-        }
-
-        resp.json::<McpResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse MCP response: {}", e))
+        self.transport.send(request).await
     }
 
     /// Send the initialize handshake.
@@ -92,7 +94,6 @@ impl McpClient {
 
     /// List available tools (cached after first call).
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
-        // Check cache first
         {
             let cache = self.tools_cache.read().await;
             if let Some(ref tools) = *cache {
@@ -111,7 +112,6 @@ impl McpClient {
             serde_json::from_value(response.result.ok_or("No result in tools/list response")?)
                 .map_err(|e| format!("Failed to parse tools list: {}", e))?;
 
-        // Update cache
         let tools = result.tools;
         {
             let mut cache = self.tools_cache.write().await;
@@ -151,6 +151,11 @@ impl McpClient {
         let mut cache = self.tools_cache.write().await;
         *cache = None;
     }
+
+    /// Shut down the transport (kills stdio child process if applicable).
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.transport.shutdown().await
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +166,39 @@ mod tests {
     fn test_client_creation() {
         let client = McpClient::new("test-server", "http://localhost:8080", 30);
         assert_eq!(client.server_name(), "test-server");
-        assert_eq!(client.url(), "http://localhost:8080");
+        assert_eq!(client.transport_type(), "http");
+    }
+
+    #[test]
+    fn test_client_new_http() {
+        let client = McpClient::new_http("test-server", "http://localhost:8080", 30);
+        assert_eq!(client.server_name(), "test-server");
+        assert_eq!(client.transport_type(), "http");
+    }
+
+    #[test]
+    fn test_client_new_with_transport() {
+        let transport = Arc::new(HttpTransport::new("http://localhost:8080", 30));
+        let client = McpClient::with_transport("custom", transport);
+        assert_eq!(client.server_name(), "custom");
+        assert_eq!(client.transport_type(), "http");
+    }
+
+    #[tokio::test]
+    async fn test_client_new_stdio_with_cat() {
+        let client = McpClient::new_stdio("test-stdio", "cat", &[], &HashMap::new(), 10).await;
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.server_name(), "test-stdio");
+        assert_eq!(client.transport_type(), "stdio");
+        let _ = client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_client_new_stdio_bad_command() {
+        let result =
+            McpClient::new_stdio("bad", "/nonexistent/binary", &[], &HashMap::new(), 5).await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -179,7 +216,6 @@ mod tests {
     async fn test_invalidate_cache() {
         let client = McpClient::new("test", "http://localhost:8080", 30);
 
-        // Manually populate cache
         {
             let mut cache = client.tools_cache.write().await;
             *cache = Some(vec![McpTool {
@@ -189,16 +225,13 @@ mod tests {
             }]);
         }
 
-        // Verify cache is populated
         {
             let cache = client.tools_cache.read().await;
             assert!(cache.is_some());
         }
 
-        // Invalidate
         client.invalidate_cache().await;
 
-        // Verify cache is cleared
         {
             let cache = client.tools_cache.read().await;
             assert!(cache.is_none());
@@ -207,7 +240,6 @@ mod tests {
 
     #[test]
     fn test_client_default_timeout() {
-        // Verify client can be created with various timeouts without panic
         let _c1 = McpClient::new("fast", "http://localhost:8080", 5);
         let _c2 = McpClient::new("slow", "http://localhost:8080", 120);
         let _c3 = McpClient::new("very-slow", "http://localhost:8080", 600);
@@ -220,9 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn test_url_accessor() {
+    fn test_transport_type_accessor() {
         let client = McpClient::new("test", "https://mcp.example.com/rpc", 30);
-        assert_eq!(client.url(), "https://mcp.example.com/rpc");
+        assert_eq!(client.transport_type(), "http");
     }
 
     #[tokio::test]

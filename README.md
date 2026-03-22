@@ -31,7 +31,7 @@ $ zeptoclaw agent --stream -m "Analyze our API for security issues"
 ✓ Analysis complete in 4.2s
 ```
 
-We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 29 tools, 9 channels, 9 providers, and 6 sandbox runtimes.
+We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. PicoClaw's size without the bare-bones feature set. One Rust binary with 32 tools, 9 channels, 9 providers, and 6 sandbox runtimes.
 
 <p align="center">
   <img src="https://img.shields.io/badge/binary-~6MB-3b82f6" alt="~6MB binary">
@@ -83,6 +83,20 @@ docker pull ghcr.io/qhkm/zeptoclaw:latest
 
 # Build from source
 cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw
+```
+
+## Uninstall
+
+```bash
+# Remove ZeptoClaw state (~/.zeptoclaw)
+zeptoclaw uninstall --yes
+
+# Also remove a direct-install binary from ~/.local/bin or /usr/local/bin
+zeptoclaw uninstall --remove-binary --yes
+
+# Package-managed installs still use their package manager
+brew uninstall qhkm/tap/zeptoclaw
+cargo uninstall zeptoclaw
 ```
 
 ## Quick Start
@@ -195,7 +209,7 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 | Feature | What it does |
 |---------|-------------|
 | **Multi-Provider LLM** | 9 providers with SSE streaming, retry with backoff + budget cap, auto-failover |
-| **29 Tools + Plugins** | Shell, filesystem, web, git, stripe, PDF, transcription, Android ADB, and more |
+| **32 Tools + Plugins** | Shell, filesystem, grep, find, web, git, stripe, PDF, transcription, Android ADB, and more |
 | **Tool Composition** | Create new tools from natural language descriptions — composable `{{param}}` templates |
 | **Agent Swarms** | Delegate to sub-agents with parallel fan-out, aggregation, and cost-aware routing |
 | **Library Facade** | Embed as a crate — `ZeptoAgent::builder().provider(p).tool(t).build()` for Tauri/GUI apps |
@@ -206,7 +220,7 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 
 | Feature | What it does |
 |---------|-------------|
-| **9-Channel Gateway** | Telegram, Slack, Discord, WhatsApp (bridge + Cloud), Lark, Email, Webhook, Serial — unified message bus |
+| **9-Channel Gateway** | Telegram, Slack, Discord, WhatsApp Web (native, `--features whatsapp-web`) + Cloud API, Lark, Email, Webhook, Serial — unified message bus |
 | **Persona System** | Per-chat personality switching via `/persona` command with LTM persistence |
 | **Plugin System** | JSON manifest plugins auto-discovered from `~/.zeptoclaw/plugins/` |
 | **Hooks** | `before_tool`, `after_tool`, `on_error` with Log, Block, and Notify actions |
@@ -294,6 +308,31 @@ cargo fmt -- --check
 
 See [CLAUDE.md](CLAUDE.md) for full architecture reference, [AGENTS.md](AGENTS.md) for coding guidelines, and [docs/](docs/) for benchmarks, multi-tenant deployment, and performance guides.
 
+## Zepto Stack
+
+ZeptoClaw is part of the Zepto stack — a modular system for running AI agents in production.
+
+```
+ZeptoPM        — orchestration, supervision, retries, job lifecycle
+    │
+    │  create(spec) + spawn(worker, args, env)
+    ▼
+ZeptoCapsule   — capsule creation, process isolation, resource enforcement
+    │
+    │  fork/namespace/microVM + stdio transport
+    ▼
+ZeptoClaw      — LLM calls, tool use, artifact production
+    │
+    └── JSON-line IPC over stdin/stdout back to ZeptoPM
+```
+
+| Layer | Repo | Role |
+|:------|:-----|:-----|
+| **ZeptoPM** | [qhkm/zeptopm](https://github.com/qhkm/zeptopm) | Process manager — config-driven daemon, HTTP API, pipelines, orchestration |
+| **ZeptoCapsule** | [qhkm/zeptocapsule](https://github.com/qhkm/zeptocapsule) | Sandbox — process/namespace/Firecracker isolation, resource limits, fallback chains |
+| **ZeptoRT** | [qhkm/zeptort](https://github.com/qhkm/zeptort) | Durable runtime — journaled effects, snapshot recovery, OTP-style supervision |
+| **ZeptoClaw** | [qhkm/zeptoclaw](https://github.com/qhkm/zeptoclaw) | Agent framework — 32 tools, 9 providers, 9 channels, container isolation |
+
 ## Contributing
 
 We welcome contributions! Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for:
@@ -306,6 +345,10 @@ We welcome contributions! Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE)
+
+## Disclaimer
+
+ZeptoClaw is a pure open-source software project. It has no token, no cryptocurrency, no blockchain component, and no financial instrument of any kind. This project is not affiliated with any token or financial product.
 
 ---
 

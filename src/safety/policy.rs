@@ -184,6 +184,15 @@ impl PolicyEngine {
     /// Returns a (possibly empty) list of violations. Multiple rules can
     /// match the same input.
     pub fn check(&self, input: &str) -> Vec<PolicyViolation> {
+        self.check_with_ignored_rules(input, &[])
+    }
+
+    /// Check `input` against all policy rules except those explicitly ignored.
+    pub fn check_with_ignored_rules(
+        &self,
+        input: &str,
+        ignored_rules: &[&str],
+    ) -> Vec<PolicyViolation> {
         // Fast path: if no patterns match, return immediately.
         let matches: Vec<usize> = self.set.matches(input).into_iter().collect();
         if matches.is_empty() {
@@ -194,6 +203,9 @@ impl PolicyEngine {
 
         for idx in matches {
             let rule = &self.rules[idx];
+            if ignored_rules.contains(&rule.name) {
+                continue;
+            }
             let matched_text = rule.pattern.find(input).map(|m| m.as_str().to_string());
 
             violations.push(PolicyViolation {
@@ -255,6 +267,20 @@ mod tests {
     fn test_system_file_access_aws() {
         let v = engine().check("cat .aws/credentials");
         assert!(v.iter().any(|v| v.rule_name == "system_file_access"));
+    }
+
+    #[test]
+    fn test_check_with_ignored_rules_skips_named_rule_only() {
+        let v = engine()
+            .check_with_ignored_rules("echo $(whoami) > .aws/credentials", &["shell_injection"]);
+        assert!(
+            !v.iter().any(|v| v.rule_name == "shell_injection"),
+            "shell_injection should be ignored"
+        );
+        assert!(
+            v.iter().any(|v| v.rule_name == "system_file_access"),
+            "other matching rules should still be reported"
+        );
     }
 
     // -- Crypto key patterns -----------------------------------------------

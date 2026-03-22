@@ -44,7 +44,7 @@ impl ContainerRuntime for LandlockRuntime {
     /// Returns true only when the `sandbox-landlock` feature is compiled in.
     /// Actual kernel support is checked at exec time via ABI negotiation.
     async fn is_available(&self) -> bool {
-        cfg!(feature = "sandbox-landlock")
+        cfg!(all(target_os = "linux", feature = "sandbox-landlock"))
     }
 
     async fn execute(
@@ -69,7 +69,7 @@ impl ContainerRuntime for LandlockRuntime {
 /// When the `sandbox-landlock` feature is disabled, returns `NotAvailable`.
 /// When enabled, applies Landlock rules in the child via `pre_exec` so the
 /// parent process is never restricted.
-#[cfg(not(feature = "sandbox-landlock"))]
+#[cfg(not(all(target_os = "linux", feature = "sandbox-landlock")))]
 fn execute_with_landlock(
     _command: &str,
     _config: &ContainerConfig,
@@ -80,7 +80,7 @@ fn execute_with_landlock(
     ))
 }
 
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 fn execute_with_landlock(
     command: &str,
     config: &ContainerConfig,
@@ -90,7 +90,7 @@ fn execute_with_landlock(
 }
 
 /// Inner implementation, only compiled when the feature is enabled.
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 fn execute_with_landlock_inner(
     command: &str,
     config: &ContainerConfig,
@@ -134,7 +134,6 @@ fn execute_with_landlock_inner(
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut child = child;
         let _ = tx.send(child.wait_with_output());
     });
 
@@ -155,7 +154,7 @@ fn execute_with_landlock_inner(
 ///
 /// Called inside the child process via `pre_exec`. Restricts filesystem access
 /// based on the configured read/write directory allowlists.
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeError> {
     use landlock::{
         Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
@@ -209,7 +208,6 @@ fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeE
 mod tests {
     use super::*;
     use crate::config::LandlockConfig;
-    use crate::runtime::types::ContainerConfig;
 
     #[test]
     fn test_landlock_runtime_name() {
@@ -222,7 +220,7 @@ mod tests {
         let rt = LandlockRuntime::new(LandlockConfig::default());
         assert_eq!(
             rt.is_available().await,
-            cfg!(feature = "sandbox-landlock"),
+            cfg!(all(target_os = "linux", feature = "sandbox-landlock")),
             "is_available() should reflect whether sandbox-landlock feature is compiled in"
         );
     }
@@ -236,7 +234,7 @@ mod tests {
     }
 
     /// When compiled WITHOUT the sandbox-landlock feature, execute() returns a clear error.
-    #[cfg(not(feature = "sandbox-landlock"))]
+    #[cfg(not(all(target_os = "linux", feature = "sandbox-landlock")))]
     #[tokio::test]
     async fn test_landlock_execute_without_feature_returns_error() {
         let rt = LandlockRuntime::new(LandlockConfig::default());

@@ -439,8 +439,7 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(
@@ -476,14 +475,14 @@ mod tests {
             &c,
         )
         .await
-        .unwrap().for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "set", "key": "fact:db", "value": "PostgreSQL is reliable", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap().for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "search", "query": "Rust"}), &c)
@@ -517,8 +516,7 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "delete", "key": "k1"}), &c)
@@ -558,16 +556,14 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "b"}),
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "list"}), &c)
@@ -589,16 +585,14 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "list", "category": "user"}), &c)
@@ -646,24 +640,21 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "set", "key": "k2", "value": "v2", "category": "fact"}),
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         tool.execute(
             json!({"action": "set", "key": "k3", "value": "v3", "category": "user"}),
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "categories"}), &c)
@@ -805,8 +796,7 @@ mod tests {
             &c,
         )
         .await
-        .unwrap()
-        .for_llm;
+        .unwrap();
 
         let result = tool
             .execute(json!({"action": "search", "query": "visual"}), &c)

@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use crate::error::{Result, ZeptoError};
 use crate::plugins::PluginToolDef;
+use crate::security::ShellSecurityConfig;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
@@ -68,6 +69,8 @@ pub struct PluginTool {
     def: PluginToolDef,
     /// Name of the plugin that provides this tool (for logging).
     plugin_name: String,
+    /// Shell security configuration for command validation.
+    security: ShellSecurityConfig,
 }
 
 impl PluginTool {
@@ -76,6 +79,20 @@ impl PluginTool {
         Self {
             def,
             plugin_name: plugin_name.to_string(),
+            security: ShellSecurityConfig::default(),
+        }
+    }
+
+    /// Create a plugin tool with a specific security configuration.
+    pub fn with_security(
+        def: PluginToolDef,
+        plugin_name: &str,
+        security: ShellSecurityConfig,
+    ) -> Self {
+        Self {
+            def,
+            plugin_name: plugin_name.to_string(),
+            security,
         }
     }
 
@@ -125,6 +142,15 @@ impl Tool for PluginTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let command = Self::interpolate(&self.def.command, &args);
+
+        // Validate command against security policy
+        self.security.validate_command(&command).map_err(|e| {
+            ZeptoError::Tool(format!(
+                "Plugin tool '{}' command blocked by security policy: {}",
+                self.def.name, e
+            ))
+        })?;
+
         let timeout = Duration::from_secs(self.def.effective_timeout());
 
         tracing::debug!(
@@ -333,6 +359,25 @@ mod tests {
         let ctx = ToolContext::new();
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_plugin_tool_with_security_blocks_command() {
+        use crate::security::{ShellAllowlistMode, ShellSecurityConfig};
+
+        let def = test_def("curl https://evil.com");
+        let security =
+            ShellSecurityConfig::new().with_allowlist(vec!["git"], ShellAllowlistMode::Strict);
+        let tool = PluginTool::with_security(def, "test-plugin", security);
+        let ctx = ToolContext::new();
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("blocked") || err_msg.contains("security"),
+            "Expected blocked/security in error, got: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]

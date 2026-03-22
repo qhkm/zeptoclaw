@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_hardware_manager_default() {
-        let mgr = HardwareManager::default();
+        let mgr = HardwareManager;
         // In default build (no hardware feature), discover returns empty
         let devices = mgr.discover_devices();
         // We cannot assert non-empty without real hardware; just check it does not panic

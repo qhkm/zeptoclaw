@@ -9,30 +9,51 @@ Project-level guidance for coding agents working in this repository.
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
+- Agent coding benchmark fixture: `test-coding/` with intentionally buggy Python code and stdlib verification tests
+- Pristine agent comparison fixture: `test-coding-pristine/` preserves the original failing state for repeatable head-to-head runs
 - Codebase: ~106,000+ lines of Rust
-- Channels: 9 (Telegram, Slack, Discord, WhatsApp, WhatsApp Cloud, Lark, Email, Webhook, Serial)
+- Channels: 10 (Telegram, Slack, Discord, WhatsApp, WhatsApp Web, WhatsApp Cloud, Lark, Email, Webhook, Serial)
 - Runtimes: 6 (Native, Docker, Apple Container, Landlock, Firejail, Bubblewrap)
 - Peripherals: 4 boards (ESP32, RPi, Arduino, Nucleo) with GPIO, I2C, NVS, Serial
 - Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
 - Plugins: Command-mode (shell template) + Binary-mode (JSON-RPC 2.0 stdin/stdout)
 - Library facade: `ZeptoAgent::builder()` for embedding as a crate (Tauri, GUI apps)
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
+- Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
+- Provider onboarding validation: Anthropic uses `GET /v1/models`; OpenAI-compatible presets validate keys with read-only endpoint checks, including Zhipu/GLM via `GET /models`
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
+- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
+- Webhook auth hardening: generic webhook supports optional HMAC-SHA256 body signatures plus fixed server-side sender/chat identity by default (`trust_payload_identity` is an explicit legacy escape hatch); WhatsApp Cloud verifies `X-Hub-Signature-256` when `app_secret` is configured
+- Telegram allowlist hardening: numeric user IDs are the safe default for new setups; legacy username matching remains available only through `channels.telegram.allow_usernames` for compatibility and emits warnings when non-numeric allowlist entries are present
+- Telegram markdown/chunking: outbound Markdown is rendered to Telegram HTML with balanced chunk splitting via `channels.telegram.chunk_size` (default `4000`) while preserving `||spoiler||` support
+- Email allowlist limitation surfaced: `channels.email.allowed_senders` matches the parsed `From` header only and now emits config/runtime warnings so authenticated-mail enforcement is pushed upstream
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
+- CLI interactive mode: TTY-gated local slash commands with rustyline tab completion when available, persisted REPL history, inline tool approval prompts, session-scoped `/trust` override for local use, `/model` and `/persona` overrides, `/tools`, `/template`, and `/clear`
 - Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
+- Tool execution convergence: agent loop and MCP server both route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording)
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
+- Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows; safety pre-scan keeps full path scanning while scanning file bodies with a narrow `shell_injection` carve-out instead of skipping content wholesale
+- Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
+- Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
+- Streaming tool parity: `process_message_streaming()` now mirrors non-streaming hook callbacks, usage-metric accounting, success/failure logging, thinking/response feedback, and malformed tool-argument parse preservation
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
+- r8r bridge: optional WebSocket client for workflow approvals, health updates, and replay-safe duplicate-event acknowledgments
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
+- Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and `r8r_bridge`, plus agent defaults such as `timezone`, `tool_timeout_secs`, and `system_prompt`
+- MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
-- Tests: 2612 lib + 97 main + 23 cli_smoke + 13 e2e + 70 integration + 122 doc (33 ignored)
+- Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
+- Fork release workflow: keeps push-to-`main`/`master` + `workflow_dispatch` latest prereleases and adds an `x86_64-unknown-linux-musl` static release artifact
+- Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
+- Tests: current upgraded local build runs 3184 lib (0 failed, 6 ignored) + 146 main + 24 cli_smoke + 19 e2e + 70 integration + 127 doc (27 ignored); note that ad hoc untracked files under `tests/` are picked up by `cargo test`
 
 ## Task Tracking Protocol
 
@@ -74,7 +95,8 @@ Before finishing any non-trivial change, run:
 ```bash
 cargo fmt -- --check
 cargo clippy -- -D warnings
-cargo test
+cargo test --lib --bin zeptoclaw --test cli_smoke --test integration --test e2e
+cargo test --doc
 ```
 
 If benchmark-related code is changed, also run:
@@ -103,6 +125,13 @@ cargo bench --bench message_bus --no-run
 - Do not add performance numbers unless they are reproducible with repository commands.
 - If adding new commands or workflows, include a runnable example.
 
+## Release Versioning
+
+- Use `patch` for backward-compatible bug fixes, reliability hardening, docs corrections, and internal refactors that do not add user-visible capability.
+- Use `minor` for backward-compatible new functionality such as new commands, flags, config fields, tools, providers, runtimes, channels, or other opt-in capabilities.
+- If upgrading should only give existing users fixes, choose `patch`.
+- If upgrading gives existing users new capabilities without requiring migration, choose `minor`.
+
 ## Change Hygiene
 
 - Do not revert unrelated local changes.
@@ -121,7 +150,8 @@ cargo bench --bench message_bus --no-run
 1. Create `src/tools/<name>.rs`
 2. Implement `Tool` trait (`name()`, `description()`, `parameters()`, `execute()`)
 3. Add `pub mod <name>;` in `src/tools/mod.rs`
-4. Register in `create_agent()` in `src/cli/common.rs`
+4. Register in `src/kernel/registrar.rs` inside `register_all_tools()` behind `filter.is_enabled("<name>")`
+5. If the tool assumes laptop/server environment (bash, filesystem, shell): make it opt-in by gating on `coding_tools_on` (see the grep/find block in registrar.rs), add it to the `TOOLS` array in `src/cli/tools.rs` with `opt_in: true`, and add it to `opt_in_tool_hint()` in `src/tools/registry.rs`
 
 ### Adding a provider wrapper
 1. Create `src/providers/<name>.rs`

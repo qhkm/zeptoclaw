@@ -23,6 +23,7 @@ impl Severity {
     }
 }
 
+#[derive(Debug)]
 pub struct DiagItem {
     pub severity: Severity,
     pub category: &'static str,
@@ -38,6 +39,7 @@ pub fn run_diagnostics(config: &Config, online: bool) -> Vec<DiagItem> {
     check_providers(config, &mut diags);
     check_channels(config, &mut diags);
     check_memory(&mut diags);
+    check_coding_tools(config, &mut diags);
 
     if online {
         check_provider_connectivity(config, &mut diags);
@@ -247,6 +249,30 @@ pub fn check_memory(diags: &mut Vec<DiagItem>) {
     }
 }
 
+fn check_coding_tools(config: &Config, diags: &mut Vec<DiagItem>) {
+    // Only relevant if a workspace is configured — no workspace means IoT/portable mode
+    // where coding tools aren't expected anyway.
+    let workspace = config.workspace_path();
+    if !workspace.exists() {
+        return;
+    }
+    if !config.tools.coding_tools {
+        diags.push(DiagItem {
+            severity: Severity::Warn,
+            category: "tools",
+            message: "Workspace is set but coding tools (grep, find) are disabled. \
+                      Enable with `--template coder` or set `tools.coding_tools: true` in config."
+                .into(),
+        });
+    } else {
+        diags.push(DiagItem {
+            severity: Severity::Ok,
+            category: "tools",
+            message: "Coding tools enabled (grep, find)".into(),
+        });
+    }
+}
+
 fn check_provider_connectivity(_config: &Config, diags: &mut Vec<DiagItem>) {
     diags.push(DiagItem {
         severity: Severity::Warn,
@@ -350,9 +376,15 @@ mod tests {
 
     #[test]
     fn test_check_binary_missing() {
+        // Use a long random-looking name to avoid collisions with binaries
+        // that might exist in unusual Docker/CI environments.
         let mut diags = Vec::new();
-        check_binary("nonexistent_binary_xyz_12345", &mut diags);
-        assert!(diags.iter().any(|d| d.severity == Severity::Warn));
+        check_binary("zeptoclaw_nonexistent_a8f3e2d1b9c7", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warn),
+            "expected Warn for missing binary, got: {:?}",
+            diags
+        );
     }
 
     #[test]

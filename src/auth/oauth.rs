@@ -376,6 +376,29 @@ pub fn open_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
+fn generate_csrf_state() -> String {
+    use chacha20poly1305::aead::rand_core::RngCore;
+    use chacha20poly1305::aead::OsRng;
+    let mut buf = [0u8; 16];
+    OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+/// Returns `true` when running in a headless environment with no display server.
+///
+/// On Linux: headless if neither `$DISPLAY` (X11) nor `$WAYLAND_DISPLAY` (Wayland) is set.
+/// On macOS and Windows: always `false` (graphical session is always present for CLI tools).
+fn is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 fn validate_oauth_state(returned_state: Option<&str>, expected_state: &str) -> Result<()> {
     let returned_state = returned_state.ok_or_else(|| {
         ZeptoError::Config("OAuth callback missing state parameter — possible CSRF attack".into())
@@ -406,13 +429,7 @@ pub async fn run_oauth_flow(
     let pkce = PkceChallenge::generate();
 
     // Generate random state for CSRF protection
-    let state = {
-        use chacha20poly1305::aead::rand_core::RngCore;
-        use chacha20poly1305::aead::OsRng;
-        let mut buf = [0u8; 16];
-        OsRng.fill_bytes(&mut buf);
-        hex::encode(buf)
-    };
+    let state = generate_csrf_state();
 
     // Start callback server first so we know the port
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -438,6 +455,85 @@ pub async fn run_oauth_flow(
     println!("Waiting for authentication (timeout: 120s)...");
 
     open_browser(&auth_url)?;
+
+    // Wait for callback (120s timeout)
+    let callback = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        accept_callback(&listener),
+    )
+    .await
+    .map_err(|_| {
+        ZeptoError::Config(
+            "OAuth callback timed out after 120s. Did you complete the browser sign-in?".into(),
+        )
+    })??;
+
+    validate_oauth_state(callback.state.as_deref(), &state)?;
+
+    // Exchange code for tokens
+    println!("Exchanging authorization code for tokens...");
+    let tokens = exchange_code(
+        config,
+        &callback.code,
+        &pkce.code_verifier,
+        &redirect_uri,
+        client_id,
+    )
+    .await?;
+
+    Ok(tokens)
+}
+
+/// Run the OAuth flow with a fixed redirect URI port instead of ephemeral.
+///
+/// Unlike [`run_oauth_flow`], this binds the callback server to a specific port
+/// and constructs the redirect URI as `http://localhost:{port}/auth/callback`.
+/// This format is required for OpenAI's registered application configuration,
+/// which expects `http://localhost:1455/auth/callback` (port 1455, path
+/// `/auth/callback`, host `localhost` not `127.0.0.1`).
+pub async fn run_oauth_flow_with_port(
+    config: &ProviderOAuthConfig,
+    client_id: &str,
+    port: u16,
+) -> Result<OAuthTokenSet> {
+    let pkce = PkceChallenge::generate();
+
+    // Generate random state for CSRF protection
+    let state = generate_csrf_state();
+
+    // Bind callback server to the fixed port
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| {
+            ZeptoError::Config(format!(
+                "Failed to bind callback server on port {}: {} \
+                 (is another process using this port?)",
+                port, e
+            ))
+        })?;
+
+    let redirect_uri = format!("http://localhost:{}/auth/callback", port);
+
+    // Build authorization URL
+    let auth_url = build_authorize_url(config, client_id, &redirect_uri, &pkce, &state);
+
+    // Open browser or print headless/VPS instructions
+    if is_headless() {
+        println!("Headless/VPS environment detected (no display server).");
+        println!();
+        println!("To complete authentication, run this on your LOCAL machine:");
+        println!("  ssh -L {}:localhost:{} <user>@<your-host>", port, port);
+        println!("Then visit this URL in your local browser:");
+        println!("  {}", auth_url);
+    } else {
+        println!("Opening browser for {} authentication...", config.provider);
+        println!();
+        println!("If the browser doesn't open, visit this URL manually:");
+        println!("  {}", auth_url);
+        open_browser(&auth_url)?;
+    }
+    println!();
+    println!("Waiting for authentication (timeout: 120s)...");
 
     // Wait for callback (120s timeout)
     let callback = tokio::time::timeout(
@@ -628,10 +724,65 @@ mod tests {
         assert!(!url.contains("scope="));
     }
 
+    #[test]
+    fn test_build_authorize_url_openai_fixed_port() {
+        let config = super::super::ProviderOAuthConfig {
+            provider: "openai".to_string(),
+            token_url: "https://auth.openai.com/oauth/token".to_string(),
+            authorize_url: "https://auth.openai.com/oauth/authorize".to_string(),
+            client_name: "ZeptoClaw".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+        };
+        let pkce = PkceChallenge {
+            code_verifier: "v".to_string(),
+            code_challenge: "c".to_string(),
+        };
+        let redirect_uri = "http://localhost:1455/auth/callback";
+        let url = build_authorize_url(
+            &config,
+            "app_EMoamEEZ73f0CkXaXp7hrann",
+            redirect_uri,
+            &pkce,
+            "s",
+        );
+
+        assert!(
+            url.contains("https://auth.openai.com/oauth/authorize"),
+            "URL must start with authorize endpoint"
+        );
+        assert!(
+            url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"),
+            "URL must contain client_id"
+        );
+        assert!(url.contains("1455"), "URL must contain port 1455");
+        assert!(url.contains("openid"), "URL must contain openid scope");
+    }
+
     #[tokio::test]
     async fn test_callback_server_timeout() {
         let result = start_callback_server(1).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn test_is_headless_non_linux_always_false() {
+        // On macOS and Windows, is_headless() must always return false
+        // because those platforms always have a graphical session for CLI apps.
+        #[cfg(not(target_os = "linux"))]
+        assert!(!is_headless(), "is_headless() must be false on non-Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_is_headless_matches_display_env() {
+        // On Linux, is_headless() must mirror the absence of $DISPLAY and $WAYLAND_DISPLAY.
+        let expected =
+            std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err();
+        assert_eq!(
+            is_headless(),
+            expected,
+            "is_headless() must match env var state"
+        );
     }
 }

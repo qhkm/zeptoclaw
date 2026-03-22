@@ -34,7 +34,7 @@ use std::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{Result, ZeptoError};
-use crate::session::{Message, Role};
+use crate::session::{ContentPart, ImageSource, Message, Role};
 
 use super::{
     parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage,
@@ -87,14 +87,48 @@ struct OpenAIRequest {
     response_format: Option<serde_json::Value>,
 }
 
+/// OpenAI message content — either a plain string or an array of parts for vision.
+///
+/// The `#[serde(untagged)]` attribute means the JSON representation is either a
+/// bare string (for `Text`) or a JSON array (for `Parts`), matching the OpenAI
+/// Chat Completions API spec.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+enum OpenAIContent {
+    /// Plain text content (non-vision messages).
+    Text(String),
+    /// Multi-part content array (vision messages with text + image_url parts).
+    Parts(Vec<OpenAIContentPart>),
+}
+
+/// A single content part inside a vision message.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum OpenAIContentPart {
+    /// A text segment.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// An image URL (supports `data:` URIs for base64-encoded images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+/// The URL payload inside an `image_url` content part.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct OpenAIImageUrl {
+    /// Either an `https://` URL or a `data:<mime>;base64,<data>` URI.
+    url: String,
+}
+
 /// A message in OpenAI's format.
 #[derive(Debug, Clone, Serialize)]
 struct OpenAIMessage {
     /// Role: "system", "user", "assistant", or "tool"
     role: String,
-    /// Message content (can be null for assistant with tool_calls)
+    /// Message content — plain string for text-only, array of parts for vision.
+    /// Omitted when the assistant message contains only tool calls.
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAIContent>,
     /// Tool calls made by the assistant
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAIToolCallRequest>>,
@@ -313,6 +347,10 @@ pub struct OpenAIProvider {
     client: Client,
     /// Preferred token field by model to avoid repeated fallback retries
     model_token_fields: Mutex<HashMap<String, MaxTokenField>>,
+    /// Custom auth header name, e.g. "api-key" for Azure. None = "Authorization: Bearer"
+    auth_key_header: Option<String>,
+    /// Optional API version query param, e.g. "2024-08-01-preview" for Azure.
+    api_version: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -340,6 +378,8 @@ impl OpenAIProvider {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
         }
     }
 
@@ -366,6 +406,8 @@ impl OpenAIProvider {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
         }
     }
 
@@ -384,6 +426,49 @@ impl OpenAIProvider {
             api_base: api_base.trim_end_matches('/').to_string(),
             client,
             model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header: None,
+            api_version: None,
+        }
+    }
+
+    /// Create a new OpenAI provider with full configuration, including optional
+    /// Azure-style auth header and API version query parameter.
+    ///
+    /// # Arguments
+    /// * `api_key` - API key
+    /// * `api_base` - Base URL for the API (trailing slash will be removed)
+    /// * `auth_key_header` - Custom auth header name. Use `Some("api-key")` for Azure.
+    ///   `None` defaults to `Authorization: Bearer`.
+    /// * `api_version` - Optional `api-version` query parameter, e.g.
+    ///   `Some("2024-08-01-preview")` for Azure OpenAI.
+    ///
+    /// # Example
+    /// ```
+    /// use zeptoclaw::providers::openai::OpenAIProvider;
+    ///
+    /// let provider = OpenAIProvider::with_config(
+    ///     "my-azure-key",
+    ///     "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+    ///     Some("api-key".to_string()),
+    ///     Some("2024-08-01-preview".to_string()),
+    /// );
+    /// ```
+    pub fn with_config(
+        api_key: &str,
+        api_base: &str,
+        auth_key_header: Option<String>,
+        api_version: Option<String>,
+    ) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+            api_base: api_base.trim_end_matches('/').to_string(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            model_token_fields: Mutex::new(HashMap::new()),
+            auth_key_header,
+            api_version,
         }
     }
 
@@ -402,6 +487,34 @@ impl OpenAIProvider {
             fields.insert(model.to_string(), token_field);
         }
     }
+
+    /// Return the correct `(header_name, header_value)` pair for authentication.
+    ///
+    /// When `auth_key_header` is `Some(name)`, returns `(name, api_key)` for any
+    /// custom header name (e.g. `"api-key"`, `"x-api-key"`, etc.).
+    /// When `None`, returns `("Authorization", "Bearer <api_key>")`.
+    ///
+    /// When `api_key` is empty (keyless providers such as Ollama or vLLM),
+    /// returns `("", "")` so callers can skip adding the auth header entirely.
+    pub(crate) fn auth_header_pair(&self) -> (&'_ str, String) {
+        if self.api_key.is_empty() {
+            return ("", String::new());
+        }
+        match self.auth_key_header.as_deref() {
+            Some(name) => (name, self.api_key.clone()),
+            None => ("Authorization", format!("Bearer {}", self.api_key)),
+        }
+    }
+
+    /// Build the full request URL for `path`, appending `?api-version=<v>` when set.
+    ///
+    /// `path` should be provided **without** a leading slash (e.g. `"chat/completions"`).
+    pub(crate) fn versioned_url(&self, path: &str) -> String {
+        match &self.api_version {
+            Some(v) => format!("{}/{}?api-version={}", self.api_base, path, v),
+            None => format!("{}/{}", self.api_base, path),
+        }
+    }
 }
 
 // ============================================================================
@@ -412,7 +525,7 @@ impl OpenAIProvider {
 fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
     messages
         .into_iter()
-        .map(|msg| {
+        .map(|mut msg| {
             let role = match msg.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -421,7 +534,7 @@ fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
             }
             .to_string();
 
-            let tool_calls = msg.tool_calls.map(|tcs| {
+            let tool_calls = msg.tool_calls.take().map(|tcs| {
                 tcs.into_iter()
                     .map(|tc| OpenAIToolCallRequest {
                         id: tc.id,
@@ -434,13 +547,45 @@ fn convert_messages(messages: Vec<Message>) -> Vec<OpenAIMessage> {
                     .collect()
             });
 
+            let content = if msg.content.is_empty() && tool_calls.is_some() {
+                // Assistant messages that consist solely of tool calls must omit
+                // the content field entirely so OpenAI accepts the request.
+                None
+            } else if msg.has_images() {
+                // Vision message: build a parts array from content_parts.
+                // Only Base64 sources are forwarded; FilePath/Url variants are
+                // skipped because the API requires either an https:// URL or a
+                // data: URI.  FilePath images should have been resolved to
+                // Base64 by the time they reach the provider.
+                let parts: Vec<OpenAIContentPart> = msg
+                    .content_parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => {
+                            Some(OpenAIContentPart::Text { text: text.clone() })
+                        }
+                        ContentPart::Image { source, media_type } => {
+                            if let ImageSource::Base64 { data } = source {
+                                Some(OpenAIContentPart::ImageUrl {
+                                    image_url: OpenAIImageUrl {
+                                        url: format!("data:{};base64,{}", media_type, data),
+                                    },
+                                })
+                            } else {
+                                // Remote URLs and file paths are not forwarded.
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                Some(OpenAIContent::Parts(parts))
+            } else {
+                Some(OpenAIContent::Text(msg.content))
+            };
+
             OpenAIMessage {
                 role,
-                content: if msg.content.is_empty() && tool_calls.is_some() {
-                    None
-                } else {
-                    Some(msg.content)
-                },
+                content,
                 tool_calls,
                 tool_call_id: msg.tool_call_id,
             }
@@ -633,12 +778,16 @@ impl LLMProvider for OpenAIProvider {
             let request = build_request(model, &messages, &tools, &options, token_field);
             debug!("OpenAI request to model {} with {:?}", model, token_field);
 
-            let response = self
+            let (auth_header_name, auth_header_value) = self.auth_header_pair();
+            let mut req = self
                 .client
-                .post(format!("{}/chat/completions", self.api_base))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .post(self.versioned_url("chat/completions"))
                 .header("Content-Type", "application/json")
-                .json(&request)
+                .json(&request);
+            if !auth_header_name.is_empty() {
+                req = req.header(auth_header_name, auth_header_value);
+            }
+            let response = req
                 .send()
                 .await
                 .map_err(|e| ZeptoError::Provider(format!("OpenAI request failed: {}", e)))?;
@@ -716,12 +865,16 @@ impl LLMProvider for OpenAIProvider {
                 model, token_field
             );
 
-            let response = self
+            let (auth_header_name, auth_header_value) = self.auth_header_pair();
+            let mut req = self
                 .client
-                .post(format!("{}/chat/completions", self.api_base))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .post(self.versioned_url("chat/completions"))
                 .header("Content-Type", "application/json")
-                .json(&request)
+                .json(&request);
+            if !auth_header_name.is_empty() {
+                req = req.header(auth_header_name, auth_header_value);
+            }
+            let response = req
                 .send()
                 .await
                 .map_err(|e| ZeptoError::Provider(format!("OpenAI request failed: {}", e)))?;
@@ -856,18 +1009,22 @@ impl LLMProvider for OpenAIProvider {
     }
 
     async fn embed(&self, texts: &[String]) -> crate::error::Result<Vec<Vec<f32>>> {
-        let url = format!("{}/embeddings", self.api_base);
+        let url = self.versioned_url("embeddings");
         let body = serde_json::json!({
             "model": "text-embedding-3-small",
             "input": texts,
         });
 
-        let resp = self
+        let (auth_header_name, auth_header_value) = self.auth_header_pair();
+        let mut req = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
+            .json(&body);
+        if !auth_header_name.is_empty() {
+            req = req.header(auth_header_name, auth_header_value);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| ZeptoError::Provider(format!("Embedding request failed: {}", e)))?;
@@ -926,7 +1083,7 @@ impl LLMProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Message, ToolCall};
+    use crate::session::{ContentPart, ImageSource, Message, ToolCall};
 
     #[test]
     fn test_openai_provider_creation() {
@@ -1076,11 +1233,20 @@ mod tests {
 
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "system");
-        assert_eq!(converted[0].content, Some("You are helpful".to_string()));
+        assert_eq!(
+            converted[0].content,
+            Some(OpenAIContent::Text("You are helpful".to_string()))
+        );
         assert_eq!(converted[1].role, "user");
-        assert_eq!(converted[1].content, Some("Hello".to_string()));
+        assert_eq!(
+            converted[1].content,
+            Some(OpenAIContent::Text("Hello".to_string()))
+        );
         assert_eq!(converted[2].role, "assistant");
-        assert_eq!(converted[2].content, Some("Hi there!".to_string()));
+        assert_eq!(
+            converted[2].content,
+            Some(OpenAIContent::Text("Hi there!".to_string()))
+        );
     }
 
     #[test]
@@ -1106,7 +1272,10 @@ mod tests {
         // Second message: tool result
         assert_eq!(converted[1].role, "tool");
         assert_eq!(converted[1].tool_call_id, Some("call_1".to_string()));
-        assert_eq!(converted[1].content, Some("Found results".to_string()));
+        assert_eq!(
+            converted[1].content,
+            Some(OpenAIContent::Text("Found results".to_string()))
+        );
     }
 
     #[test]
@@ -1237,7 +1406,7 @@ mod tests {
             model: "gpt-5.1".to_string(),
             messages: vec![OpenAIMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(OpenAIContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             }],
@@ -1297,7 +1466,7 @@ mod tests {
     fn test_openai_message_with_tool_call_id() {
         let msg = OpenAIMessage {
             role: "tool".to_string(),
-            content: Some("Tool result".to_string()),
+            content: Some(OpenAIContent::Text("Tool result".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_123".to_string()),
         };
@@ -1679,5 +1848,185 @@ mod tests {
             .get("data")
             .and_then(serde_json::Value::as_array);
         assert!(data.is_none(), "missing 'data' should return None");
+    }
+
+    // ========================================================================
+    // Vision / image_url content tests
+    // ========================================================================
+
+    /// A user message with a base64 image should produce a Parts array where
+    /// the first element is a text part and the second is an image_url part
+    /// whose URL starts with the correct data-URI prefix.
+    #[test]
+    fn test_convert_user_message_with_image_openai() {
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "abc123".to_string(),
+            },
+            media_type: "image/jpeg".to_string(),
+        }];
+        let msg = Message::user_with_images("What is this?", images);
+        let openai_msgs = convert_messages(vec![msg]);
+
+        assert_eq!(openai_msgs.len(), 1);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        let content = &json["content"];
+        assert!(
+            content.is_array(),
+            "Expected array content for vision message, got: {content}"
+        );
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "Expected text part + image_url part");
+        assert_eq!(arr[0]["type"], "text", "First part must be type=text");
+        assert_eq!(
+            arr[1]["type"], "image_url",
+            "Second part must be type=image_url"
+        );
+        let url = arr[1]["image_url"]["url"]
+            .as_str()
+            .expect("image_url.url must be a string");
+        assert!(
+            url.starts_with("data:image/jpeg;base64,"),
+            "URL must start with data:image/jpeg;base64, — got: {url}"
+        );
+        assert!(
+            url.ends_with("abc123"),
+            "URL must end with the base64 payload — got: {url}"
+        );
+    }
+
+    /// A plain text-only user message should serialize `content` as a JSON
+    /// string, not an array, so text-only requests stay compact.
+    #[test]
+    fn test_convert_text_only_message_stays_string_openai() {
+        let msg = Message::user("Hello");
+        let openai_msgs = convert_messages(vec![msg]);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        assert!(
+            json["content"].is_string(),
+            "Text-only messages should serialize as a JSON string, not an array — got: {}",
+            json["content"]
+        );
+        assert_eq!(json["content"], "Hello");
+    }
+
+    #[test]
+    fn test_openai_image_json_matches_api_spec() {
+        // Verify the serialized JSON matches OpenAI's exact API format:
+        // [{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]
+        let images = vec![ContentPart::Image {
+            source: ImageSource::Base64 {
+                data: "iVBOR".to_string(),
+            },
+            media_type: "image/png".to_string(),
+        }];
+        let msg = Message::user_with_images("Describe this", images);
+        let openai_msgs = convert_messages(vec![msg]);
+
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+        let content = json["content"].as_array().unwrap();
+
+        // Text part
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this");
+
+        // Image part — must match OpenAI Vision API spec
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBOR"
+        );
+    }
+
+    #[test]
+    fn test_openai_text_only_stays_string_not_array() {
+        // Critical: text-only messages MUST serialize as a string, not array.
+        // Many OpenAI-compatible endpoints (Ollama, vLLM) reject array content for non-vision models.
+        let msg = Message::user("Hello world");
+        let openai_msgs = convert_messages(vec![msg]);
+        let json = serde_json::to_value(&openai_msgs[0]).unwrap();
+
+        // Must be a plain string, not an array
+        assert!(
+            json["content"].is_string(),
+            "Text-only content must be a string for compatibility"
+        );
+        assert_eq!(json["content"], "Hello world");
+    }
+
+    // ========================================================================
+    // Azure auth header + api_version tests
+    // ========================================================================
+
+    #[test]
+    fn test_with_config_custom_auth_header() {
+        let p = OpenAIProvider::with_config(
+            "mykey",
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+            Some("api-key".to_string()),
+            None,
+        );
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "api-key");
+        assert_eq!(val, "mykey");
+    }
+
+    #[test]
+    fn test_with_config_default_auth_header() {
+        let p = OpenAIProvider::with_config("sk-x", "https://api.openai.com/v1", None, None);
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "Authorization");
+        assert_eq!(val, "Bearer sk-x");
+    }
+
+    #[test]
+    fn test_with_config_arbitrary_custom_auth_header() {
+        let p = OpenAIProvider::with_config(
+            "mykey",
+            "https://api.example.com/v1",
+            Some("x-api-key".to_string()),
+            None,
+        );
+        let (name, val) = p.auth_header_pair();
+        assert_eq!(name, "x-api-key");
+        assert_eq!(val, "mykey");
+    }
+
+    #[test]
+    fn test_versioned_url_with_api_version() {
+        let p = OpenAIProvider::with_config(
+            "k",
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o",
+            None,
+            Some("2024-08-01-preview".to_string()),
+        );
+        let url = p.versioned_url("chat/completions");
+        assert_eq!(
+            url,
+            "https://myco.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+        );
+    }
+
+    #[test]
+    fn test_versioned_url_without_api_version() {
+        let p = OpenAIProvider::with_base_url("k", "https://api.openai.com/v1");
+        let url = p.versioned_url("chat/completions");
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_auth_header_pair_skips_auth_for_empty_key() {
+        let provider = OpenAIProvider::with_base_url("", "http://localhost:11434/v1");
+        let (name, value) = provider.auth_header_pair();
+        assert_eq!(name, "");
+        assert_eq!(value, "");
+    }
+
+    #[test]
+    fn test_auth_header_pair_sends_auth_for_nonempty_key() {
+        let provider = OpenAIProvider::with_base_url("sk-real-key", "http://localhost:11434/v1");
+        let (name, value) = provider.auth_header_pair();
+        assert_eq!(name, "Authorization");
+        assert_eq!(value, "Bearer sk-real-key");
     }
 }

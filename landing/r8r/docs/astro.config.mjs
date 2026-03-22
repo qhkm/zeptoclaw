@@ -11,9 +11,9 @@ export default defineConfig({
         dark: './src/assets/logo.svg',
         replacesTitle: true,
       },
-      social: {
-        github: 'https://github.com/r8r/r8r',
-      },
+      social: [
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/r8r/r8r' },
+      ],
       sidebar: [
         {
           label: 'Getting Started',

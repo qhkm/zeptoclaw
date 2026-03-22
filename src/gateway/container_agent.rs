@@ -320,23 +320,43 @@ impl ContainerAgentProxy {
         };
 
         match self.spawn_container(&request).await {
-            Ok(response) => match response.result {
-                AgentResult::Success { content, session } => {
-                    self.persist_session_snapshot(&message.session_key, session)
-                        .await;
-                    OutboundMessage::new(&message.channel, &message.chat_id, &content)
-                }
-                AgentResult::Error { message: err, .. } => {
-                    if let Some(metrics) = usage_metrics.as_ref() {
-                        metrics.record_error();
+            Ok(response) => {
+                // Record usage metrics reported by the containerized agent.
+                if let (Some(metrics), Some(usage)) =
+                    (usage_metrics.as_ref(), response.usage.as_ref())
+                {
+                    metrics.record_tokens(usage.input_tokens, usage.output_tokens);
+                    metrics.record_tool_calls(usage.tool_calls);
+                    if usage.errors > 0 {
+                        metrics
+                            .errors
+                            .fetch_add(usage.errors, std::sync::atomic::Ordering::Relaxed);
                     }
-                    OutboundMessage::new(
-                        &message.channel,
-                        &message.chat_id,
-                        &format!("Error: {}", err),
-                    )
                 }
-            },
+
+                match response.result {
+                    AgentResult::Success { content, session } => {
+                        self.persist_session_snapshot(&message.session_key, session)
+                            .await;
+                        OutboundMessage::new(&message.channel, &message.chat_id, &content)
+                    }
+                    AgentResult::Error { message: err, .. } => {
+                        // Only record a request-level error when the usage
+                        // snapshot is absent; when present, the error count
+                        // was already replayed above via usage.errors.
+                        if response.usage.is_none() {
+                            if let Some(metrics) = usage_metrics.as_ref() {
+                                metrics.record_error();
+                            }
+                        }
+                        OutboundMessage::new(
+                            &message.channel,
+                            &message.chat_id,
+                            &format!("Error: {}", err),
+                        )
+                    }
+                }
+            }
             Err(e) => {
                 error!("Container execution failed: {}", e);
                 if let Some(metrics) = usage_metrics.as_ref() {

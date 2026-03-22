@@ -2,12 +2,19 @@
 //! Requires `tools.http_request.allowed_domains` in config.
 
 use crate::error::{Result, ZeptoError};
-use crate::tools::web::{is_blocked_host, resolve_and_check_host};
+#[cfg(test)]
+use crate::tools::web::validate_redirect_target_basic;
+use crate::tools::web::{
+    is_blocked_host, resolve_and_check_host, validate_redirect_target,
+    validate_redirect_target_for_policy,
+};
 use crate::tools::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
 use serde_json::{json, Value};
 use std::time::Duration;
+
+const MAX_HTTP_REQUEST_REDIRECTS: usize = 5;
 
 /// Tool that allows the agent to make HTTP requests to external REST APIs.
 ///
@@ -84,6 +91,22 @@ fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+fn http_request_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_HTTP_REQUEST_REDIRECTS {
+            return attempt.error(format!(
+                "Too many redirects (max {})",
+                MAX_HTTP_REQUEST_REDIRECTS
+            ));
+        }
+
+        match validate_redirect_target_for_policy(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(err) => attempt.error(err),
+        }
+    })
+}
+
 #[async_trait]
 impl Tool for HttpRequestTool {
     fn name(&self) -> &str {
@@ -145,11 +168,10 @@ impl Tool for HttpRequestTool {
             .map_err(|_| ZeptoError::Tool(format!("Unknown HTTP method: {method_str}")))?;
 
         // Build a client that pins the DNS resolution to the IP we already
-        // validated and caps redirects so intermediate hops cannot escape to
-        // a private address undetected.
+        // validated and checks every redirect hop before following.
         let mut builder = Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
-            .redirect(reqwest::redirect::Policy::limited(5));
+            .redirect(http_request_redirect_policy());
         if let Some((host, addr)) = pinned {
             builder = builder.resolve(&host, addr);
         }
@@ -190,12 +212,8 @@ impl Tool for HttpRequestTool {
             .await
             .map_err(|e| ZeptoError::Tool(format!("Request failed: {e}")))?;
 
-        // Post-redirect SSRF check: block redirects to private hosts.
-        if is_blocked_host(response.url()) {
-            return Err(ZeptoError::Tool(
-                "Redirect to private/local host blocked".into(),
-            ));
-        }
+        // Defense in depth: validate final redirect destination too.
+        validate_redirect_target(response.url()).await?;
 
         let status = response.status().as_u16();
         let body_bytes = response
@@ -303,5 +321,46 @@ mod tests {
         let stripped = HttpRequestTool::strip_dangerous_headers(headers);
         assert_eq!(stripped.len(), 1);
         assert_eq!(stripped[0].0, "X-Custom");
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_private_host() {
+        let private_target = Url::parse("http://127.0.0.1:8080/admin").unwrap();
+        let result = validate_redirect_target_basic(&private_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("blocked (local or private network)"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_non_http_scheme() {
+        let ftp_target = Url::parse("ftp://api.example.com/resource").unwrap();
+        let result = validate_redirect_target_basic(&ftp_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("scheme is blocked"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_allows_public_https() {
+        let public_target = Url::parse("https://93.184.216.34/v1/redirect").unwrap();
+        assert!(validate_redirect_target_basic(&public_target).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_redirect_target_async_blocks_dns_private_resolution() {
+        let localhost_target = Url::parse("https://localhost:443/").unwrap();
+        let result = validate_redirect_target(&localhost_target).await;
+        assert!(result.is_err());
     }
 }

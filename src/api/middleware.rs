@@ -148,6 +148,12 @@ pub async fn auth_middleware(
                 *method,
                 axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::DELETE
             ) {
+                // OpenAI-compatible API endpoints are authenticated via Bearer token
+                // but exempt from CSRF (they are not browser-originated).
+                if path.starts_with("/v1/") {
+                    return Ok(next.run(request).await);
+                }
+
                 let csrf_token = request
                     .headers()
                     .get("x-csrf-token")
@@ -195,6 +201,8 @@ mod tests {
             .route("/api/protected", post(|| async { "mutate" }))
             .route("/api/auth/login", post(|| async { "login" }))
             .route("/ws/events", get(|| async { "ws" }))
+            .route("/v1/models", get(|| async { "models" }))
+            .route("/v1/chat/completions", post(|| async { "completions" }))
             .layer(axum_mw::from_fn_with_state(state, auth_middleware))
     }
 
@@ -245,6 +253,70 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_models_requires_auth() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_v1_models_with_valid_token() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .uri("/v1/models")
+            .header("authorization", "Bearer static-test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_chat_completions_requires_auth() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_v1_chat_completions_with_valid_token() {
+        // POST /v1/chat/completions requires Bearer auth but is exempt from CSRF.
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("authorization", "Bearer static-test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_v1_unexpected_route_requires_auth() {
+        // Regression: all `/v1/` routes require Bearer auth.
+        let state = make_state();
+        let app = Router::new()
+            .route("/v1/unexpected", get(|| async { "should not reach" }))
+            .layer(axum_mw::from_fn_with_state(state, auth_middleware));
+        let req = Request::builder()
+            .uri("/v1/unexpected")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // -----------------------------------------------------------------------

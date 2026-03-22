@@ -113,6 +113,11 @@ impl Config {
                 self.agents.defaults.agent_timeout_secs = v;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOOL_TIMEOUT_SECS") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.tool_timeout_secs = v;
+            }
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TOKEN_BUDGET") {
             if let Ok(v) = val.parse() {
                 self.agents.defaults.token_budget = v;
@@ -134,31 +139,70 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_ACTIVE_HAND") {
             self.agents.defaults.active_hand = if val.is_empty() { None } else { Some(val) };
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_SYSTEM_PROMPT") {
+            self.agents.defaults.system_prompt = if val.is_empty() { None } else { Some(val) };
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_TIMEZONE") {
             self.agents.defaults.timezone = val;
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED") {
-            self.agents.defaults.loop_guard_enabled = val == "true" || val == "1";
+            self.agents.defaults.loop_guard.enabled = val == "true" || val == "1";
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD") {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_window = v;
+                self.agents.defaults.loop_guard.warn_threshold = v;
             }
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_REPETITION_THRESHOLD")
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.block_threshold = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER")
         {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_repetition_threshold = v;
+                self.agents.defaults.loop_guard.global_circuit_breaker = v;
             }
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_MAX_HITS") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS")
+        {
             if let Ok(v) = val.parse() {
-                self.agents.defaults.loop_guard_max_hits = v;
+                self.agents.defaults.loop_guard.ping_pong_min_repeats = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.poll_multiplier = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD")
+        {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.outcome_warn_threshold = v;
+            }
+        }
+        if let Ok(val) =
+            std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD")
+        {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.outcome_block_threshold = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE") {
+            if let Ok(v) = val.parse() {
+                self.agents.defaults.loop_guard.window_size = v;
             }
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_BYTES") {
             if let Ok(v) = val.parse() {
                 self.agents.defaults.max_tool_result_bytes = v;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_AGENTS_DEFAULTS_MAX_TOOL_CALLS") {
+            if let Ok(v) = val.parse::<u32>() {
+                self.agents.defaults.max_tool_calls = Some(v);
             }
         }
 
@@ -424,6 +468,122 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // DeepSeek
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_API_KEY") {
+            let provider = self
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_API_BASE") {
+            let provider = self
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
+        // Kimi (Moonshot AI)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_API_KEY") {
+            let provider = self
+                .providers
+                .kimi
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_API_BASE") {
+            let provider = self
+                .providers
+                .kimi
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
+        // Azure OpenAI
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY")
+            .or_else(|_| std::env::var("AZURE_OPENAI_API_KEY"))
+        {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_BASE")
+            .or_else(|_| std::env::var("AZURE_OPENAI_ENDPOINT"))
+        {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(v);
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_AZURE_API_VERSION") {
+            self.providers
+                .azure
+                .get_or_insert_with(ProviderConfig::default)
+                .api_version = Some(v);
+        }
+
+        // Amazon Bedrock
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY") {
+            self.providers
+                .bedrock
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(v);
+        } else if self.providers.bedrock.is_some() {
+            if let Ok(v) = std::env::var("AWS_ACCESS_KEY_ID") {
+                // Only apply AWS_ACCESS_KEY_ID if Bedrock was already explicitly configured
+                self.providers
+                    .bedrock
+                    .get_or_insert_with(ProviderConfig::default)
+                    .api_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_BASE") {
+            self.providers
+                .bedrock
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(v);
+        }
+
+        // xAI (Grok)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        } else if let Ok(val) = std::env::var("XAI_API_KEY") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_API_BASE") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
+        // Baidu Qianfan
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        } else if let Ok(val) = std::env::var("QIANFAN_API_KEY") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_BASE") {
+            self.providers
+                .qianfan
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -476,6 +636,30 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL") {
             self.providers
                 .zhipu
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_DEEPSEEK_MODEL") {
+            self.providers
+                .deepseek
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_KIMI_MODEL") {
+            self.providers
+                .kimi
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_XAI_MODEL") {
+            self.providers
+                .xai
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_QIANFAN_MODEL") {
+            self.providers
+                .qianfan
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }
@@ -533,6 +717,132 @@ impl Config {
                         crate::providers::rotation::RotationStrategy::RoundRobin
                 }
                 _ => {}
+            }
+        }
+
+        // Per-provider quota overrides — Anthropic
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD") {
+            if let Ok(v) = val.parse::<f64>() {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_cost_usd = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_TOKENS") {
+            if let Ok(v) = val.parse::<u64>() {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_tokens = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_PERIOD") {
+            use crate::providers::quota::QuotaPeriod;
+            let maybe_period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => Some(QuotaPeriod::Daily),
+                "monthly" => Some(QuotaPeriod::Monthly),
+                _ => None, // unknown value — skip, don't override config file
+            };
+            if let Some(period) = maybe_period {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .period = period;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION") {
+            use crate::providers::quota::QuotaAction;
+            let maybe_action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => Some(QuotaAction::Fallback),
+                "warn" => Some(QuotaAction::Warn),
+                "reject" => Some(QuotaAction::Reject),
+                _ => None, // unknown value — skip
+            };
+            if let Some(action) = maybe_action {
+                let provider = self
+                    .providers
+                    .anthropic
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .action = action;
+            }
+        }
+
+        // Per-provider quota overrides — OpenAI
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_COST_USD") {
+            if let Ok(v) = val.parse::<f64>() {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_cost_usd = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_MAX_TOKENS") {
+            if let Ok(v) = val.parse::<u64>() {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .max_tokens = Some(v);
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_PERIOD") {
+            use crate::providers::quota::QuotaPeriod;
+            let maybe_period = match val.trim().to_ascii_lowercase().as_str() {
+                "daily" => Some(QuotaPeriod::Daily),
+                "monthly" => Some(QuotaPeriod::Monthly),
+                _ => None, // unknown value — skip, don't override config file
+            };
+            if let Some(period) = maybe_period {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .period = period;
+            }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_OPENAI_QUOTA_ACTION") {
+            use crate::providers::quota::QuotaAction;
+            let maybe_action = match val.trim().to_ascii_lowercase().as_str() {
+                "fallback" => Some(QuotaAction::Fallback),
+                "warn" => Some(QuotaAction::Warn),
+                "reject" => Some(QuotaAction::Reject),
+                _ => None, // unknown value — skip
+            };
+            if let Some(action) = maybe_action {
+                let provider = self
+                    .providers
+                    .openai
+                    .get_or_insert_with(ProviderConfig::default);
+                provider
+                    .quota
+                    .get_or_insert_with(crate::providers::quota::QuotaConfig::default)
+                    .action = action;
             }
         }
     }
@@ -593,29 +903,38 @@ impl Config {
             }
         }
 
-        // WhatsApp
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL") {
+        // WhatsApp Web
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR") {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_url = val;
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.auth_dir = val;
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_BRIDGE_TOKEN") {
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_AUTH_DIR") {
             let channel = self
                 .channels
-                .whatsapp
-                .get_or_insert_with(WhatsAppConfig::default);
-            channel.bridge_token = Some(val);
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.auth_dir = val;
         }
-        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED") {
-            if let Ok(enabled) = val.parse() {
-                let channel = self
-                    .channels
-                    .whatsapp
-                    .get_or_insert_with(WhatsAppConfig::default);
-                channel.enabled = enabled;
-            }
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.enabled = enabled;
+        }
+        if let Ok(Ok(enabled)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_WHATSAPP_ENABLED").map(|v| v.parse::<bool>())
+        {
+            let channel = self
+                .channels
+                .whatsapp_web
+                .get_or_insert_with(WhatsAppWebConfig::default);
+            channel.enabled = enabled;
         }
 
         // Runtime: Apple Container
@@ -653,6 +972,13 @@ impl Config {
             if let Ok(v) = val.parse::<u32>() {
                 self.tools.web.search.max_results = v.clamp(1, 10);
             }
+        }
+
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER") {
+            self.tools.web.search.provider = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL") {
+            self.tools.web.search.api_url = Some(val);
         }
 
         // WhatsApp tool configuration
@@ -705,6 +1031,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_TRANSCRIBE_ENABLED") {
             self.tools.transcribe.enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_TOOLS_CODING_TOOLS") {
+            self.tools.coding_tools = v == "true" || v == "1";
         }
     }
 
@@ -864,6 +1193,12 @@ impl Config {
             if let Ok(v) = val.parse::<usize>() {
                 self.safety.max_output_length = v.clamp(1_000, 10_000_000);
             }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_ENABLED") {
+            self.safety.taint.enabled = val.eq_ignore_ascii_case("true") || val == "1";
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_BLOCK_ON_VIOLATION") {
+            self.safety.taint.block_on_violation = val.eq_ignore_ascii_case("true") || val == "1";
         }
     }
 
@@ -1194,7 +1529,7 @@ fn decrypt_config_values(
 }
 
 /// Expand ~ to home directory in a path string
-fn expand_home(path: &str) -> PathBuf {
+pub fn expand_home(path: &str) -> PathBuf {
     if path.is_empty() {
         return PathBuf::from(path);
     }
@@ -1334,10 +1669,28 @@ mod tests {
         assert!(telegram.enabled);
         assert_eq!(telegram.token, "bot123:ABC");
         assert_eq!(telegram.allow_from, vec!["user1", "user2"]);
+        assert!(telegram.allow_usernames);
 
         let discord = config.channels.discord.unwrap();
         assert!(!discord.enabled);
         assert_eq!(discord.token, "discord-token");
+    }
+
+    #[test]
+    fn test_telegram_channel_config_can_disable_username_matching() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "bot123:ABC",
+                    "allow_from": ["123456789"],
+                    "allow_usernames": false
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(!telegram.allow_usernames);
     }
 
     #[test]
@@ -1656,6 +2009,8 @@ mod tests {
             ("ZEPTOCLAW_PROVIDERS_OLLAMA_MODEL", "mistral:latest"),
             ("ZEPTOCLAW_PROVIDERS_VLLM_MODEL", "meta-llama/Llama-3"),
             ("ZEPTOCLAW_PROVIDERS_ZHIPU_MODEL", "glm-4"),
+            ("ZEPTOCLAW_PROVIDERS_DEEPSEEK_MODEL", "deepseek-chat"),
+            ("ZEPTOCLAW_PROVIDERS_KIMI_MODEL", "moonshot-v1-128k"),
         ];
 
         for (key, val) in &vars {
@@ -1701,10 +2056,194 @@ mod tests {
             config.providers.zhipu.as_ref().unwrap().model,
             Some("glm-4".to_string())
         );
+        assert_eq!(
+            config.providers.deepseek.as_ref().unwrap().model,
+            Some("deepseek-chat".to_string())
+        );
+        assert_eq!(
+            config.providers.kimi.as_ref().unwrap().model,
+            Some("moonshot-v1-128k".to_string())
+        );
 
         // Clean up
         for (key, _) in &vars {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn test_env_override_anthropic_quota_max_cost() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD", "5.5");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        let quota = config
+            .providers
+            .anthropic
+            .as_ref()
+            .expect("anthropic provider should be initialized")
+            .quota
+            .as_ref()
+            .expect("quota should be set");
+        assert_eq!(quota.max_cost_usd, Some(5.5));
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_MAX_COST_USD");
+    }
+
+    #[test]
+    fn test_env_override_anthropic_quota_action_fallback() {
+        use crate::providers::quota::QuotaAction;
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION", "fallback");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        let quota = config
+            .providers
+            .anthropic
+            .as_ref()
+            .expect("anthropic provider should be initialized")
+            .quota
+            .as_ref()
+            .expect("quota should be set");
+        assert_eq!(quota.action, QuotaAction::Fallback);
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_QUOTA_ACTION");
+    }
+
+    #[test]
+    fn test_azure_env_override_api_key() {
+        // Uses a dedicated env var name to avoid collisions
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY", "test-azure-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .azure
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("test-azure-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_AZURE_API_KEY");
+    }
+
+    #[test]
+    fn test_bedrock_aws_key_not_auto_enabled_without_config() {
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_BEDROCK_API_KEY");
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
+        let mut config = Config::default();
+        // Ensure no explicit Bedrock config is present
+        config.providers.bedrock = None;
+        config.apply_env_overrides();
+        // Without explicit Bedrock config, AWS_ACCESS_KEY_ID should NOT activate Bedrock
+        assert!(
+            config.providers.bedrock.is_none()
+                || config.providers.bedrock.as_ref().unwrap().api_key.is_none()
+                || config
+                    .providers
+                    .bedrock
+                    .as_ref()
+                    .unwrap()
+                    .api_key
+                    .as_deref()
+                    != Some("AKIAIOSFODNN7EXAMPLE")
+        );
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+    }
+
+    #[test]
+    fn test_xai_env_override_api_key() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY", "xai-test-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .xai
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("xai-test-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_XAI_API_KEY");
+    }
+
+    #[test]
+    fn test_qianfan_env_override_api_key() {
+        std::env::set_var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY", "qf-test-env-key");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .qianfan
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("qf-test-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_QIANFAN_API_KEY");
+    }
+
+    #[test]
+    fn test_web_search_env_provider_override() {
+        // Use unique env var names to avoid parallel test interference
+        std::env::set_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER", "searxng");
+        std::env::set_var(
+            "ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL",
+            "https://s.example.com",
+        );
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.tools.web.search.provider.as_deref(), Some("searxng"));
+        assert_eq!(
+            cfg.tools.web.search.api_url.as_deref(),
+            Some("https://s.example.com")
+        );
+        std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_PROVIDER");
+        std::env::remove_var("ZEPTOCLAW_TOOLS_WEB_SEARCH_API_URL");
+    }
+
+    #[test]
+    fn test_env_override_loop_guard_all_fields() {
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED", "false");
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD", "10");
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD", "20");
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER",
+            "50",
+        );
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS",
+            "5",
+        );
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER", "4");
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD",
+            "7",
+        );
+        std::env::set_var(
+            "ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD",
+            "9",
+        );
+        std::env::set_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE", "300");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        let lg = &config.agents.defaults.loop_guard;
+        assert!(!lg.enabled);
+        assert_eq!(lg.warn_threshold, 10);
+        assert_eq!(lg.block_threshold, 20);
+        assert_eq!(lg.global_circuit_breaker, 50);
+        assert_eq!(lg.ping_pong_min_repeats, 5);
+        assert_eq!(lg.poll_multiplier, 4);
+        assert_eq!(lg.outcome_warn_threshold, 7);
+        assert_eq!(lg.outcome_block_threshold, 9);
+        assert_eq!(lg.window_size, 300);
+
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_ENABLED");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WARN_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_BLOCK_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_GLOBAL_CIRCUIT_BREAKER");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_PING_PONG_MIN_REPEATS");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_POLL_MULTIPLIER");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_WARN_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_OUTCOME_BLOCK_THRESHOLD");
+        std::env::remove_var("ZEPTOCLAW_AGENTS_DEFAULTS_LOOP_GUARD_WINDOW_SIZE");
     }
 }

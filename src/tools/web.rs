@@ -28,6 +28,7 @@ const MAX_WEB_SEARCH_COUNT: usize = 10;
 const DEFAULT_MAX_FETCH_CHARS: usize = 50_000;
 const MAX_FETCH_CHARS: usize = 200_000;
 const MIN_FETCH_CHARS: usize = 256;
+const MAX_WEB_FETCH_REDIRECTS: usize = 5;
 /// Maximum bytes to read from a response body before truncating.
 /// Uses a 4x multiplier over MAX_FETCH_CHARS to account for multi-byte UTF-8.
 const MAX_FETCH_BYTES: usize = MAX_FETCH_CHARS * 4;
@@ -396,6 +397,180 @@ impl Tool for DdgSearchTool {
     }
 }
 
+/// Validate that a SearXNG instance URL has a valid scheme.
+fn validate_searxng_url(url: &str) -> Result<Url> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(ZeptoError::Tool("SearXNG URL is empty".to_string()));
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|e| ZeptoError::Tool(format!("Invalid SearXNG URL: {}", e)))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => Err(ZeptoError::Tool(format!(
+            "SearXNG URL must use http or https, got: {}",
+            scheme
+        ))),
+    }
+}
+
+/// Parse SearXNG JSON search response into structured results.
+fn parse_searxng_json(body: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|e| ZeptoError::Tool(format!("Failed to parse SearXNG response: {}", e)))?;
+    let empty = Vec::new();
+    let results = parsed["results"].as_array().unwrap_or(&empty);
+    Ok(results
+        .iter()
+        .filter_map(|r| {
+            let title = r["title"].as_str()?.trim().to_string();
+            let url = r["url"].as_str()?.trim().to_string();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let description = r["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Some(SearchResult {
+                title,
+                url,
+                description,
+            })
+        })
+        .take(max_results)
+        .collect())
+}
+
+/// Web search tool backed by a self-hosted SearXNG instance.
+pub struct SearxngSearchTool {
+    api_url: Url,
+    client: Client,
+    max_results: usize,
+}
+
+impl SearxngSearchTool {
+    /// Create a new SearXNG search tool.
+    pub fn new(api_url: &str) -> Result<Self> {
+        Self::with_max_results(api_url, 5)
+    }
+
+    /// Create with custom max results.
+    pub fn with_max_results(api_url: &str, max_results: usize) -> Result<Self> {
+        let parsed = validate_searxng_url(api_url)?;
+        Ok(Self {
+            api_url: parsed,
+            client: Client::new(),
+            max_results: max_results.clamp(1, MAX_WEB_SEARCH_COUNT),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for SearxngSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web and return result titles, URLs, and snippets."
+    }
+
+    fn compact_description(&self) -> &str {
+        "Web search"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::NetworkRead
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of results (1-10)",
+                    "minimum": 1,
+                    "maximum": 10
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ZeptoError::Tool("Missing 'query' parameter".to_string()))?;
+
+        let count = args
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize)
+            .unwrap_or(self.max_results)
+            .clamp(1, MAX_WEB_SEARCH_COUNT);
+
+        let search_url = format!("{}/search", self.api_url.as_str().trim_end_matches('/'));
+
+        let response = self
+            .client
+            .get(&search_url)
+            .header("User-Agent", WEB_USER_AGENT)
+            .query(&[("q", query), ("format", "json"), ("categories", "general")])
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("SearXNG search failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            let detail = detail.trim();
+            return Err(ZeptoError::Tool(if detail.is_empty() {
+                format!("SearXNG API error: {}", status)
+            } else {
+                format!("SearXNG API error: {} ({})", status, detail)
+            }));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ZeptoError::Tool(format!("Failed to read SearXNG response: {}", e)))?;
+
+        let results = parse_searxng_json(&body, count)?;
+
+        if results.is_empty() {
+            return Ok(ToolOutput::user_visible(format!(
+                "No web search results found for '{}'.",
+                query
+            )));
+        }
+
+        let mut output = format!("Web search results for '{}':\n\n", query);
+        for (index, item) in results.iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", index + 1, item.title));
+            output.push_str(&format!("   {}\n", item.url));
+            if let Some(desc) = item.description.as_deref().map(str::trim) {
+                if !desc.is_empty() {
+                    output.push_str(&format!("   {}\n", desc));
+                }
+            }
+            output.push('\n');
+        }
+
+        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+    }
+}
+
 /// Web fetch tool for URL content retrieval.
 pub struct WebFetchTool {
     client: Client,
@@ -406,7 +581,7 @@ impl WebFetchTool {
     /// Create a new web fetch tool.
     pub fn new() -> Self {
         let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(web_fetch_redirect_policy())
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
@@ -554,7 +729,7 @@ impl Tool for WebFetchTool {
         // (potentially private) address.
         let client = if let Some((host, addr)) = pinned {
             Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(5))
+                .redirect(web_fetch_redirect_policy())
                 .timeout(Duration::from_secs(30))
                 .resolve(&host, addr)
                 .build()
@@ -570,14 +745,8 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ZeptoError::Tool(format!("Web fetch failed: {}", e)))?;
 
-        // SSRF redirect check: after reqwest follows redirects, validate
-        // that the final destination URL is not a blocked host.
-        if is_blocked_host(response.url()) {
-            return Err(ZeptoError::SecurityViolation(format!(
-                "Redirect destination is blocked (local or private network): {}",
-                response.url()
-            )));
-        }
+        // Defense in depth: validate the final destination URL as well.
+        validate_redirect_target(response.url()).await?;
 
         let status = response.status();
         let final_url = response.url().to_string();
@@ -931,6 +1100,78 @@ fn dom_walk(element: ElementRef<'_>, output: &mut String) {
     }
 }
 
+fn web_fetch_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_WEB_FETCH_REDIRECTS {
+            return attempt.error(format!(
+                "Too many redirects (max {})",
+                MAX_WEB_FETCH_REDIRECTS
+            ));
+        }
+
+        match validate_redirect_target_for_policy(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(err) => attempt.error(err),
+        }
+    })
+}
+
+pub fn validate_redirect_target_basic(url: &Url) -> Result<()> {
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Redirect destination scheme is blocked: {}",
+                url.scheme()
+            )));
+        }
+    }
+
+    if is_blocked_host(url) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Redirect destination is blocked (local or private network): {}",
+            url
+        )));
+    }
+
+    Ok(())
+}
+
+pub fn validate_redirect_target_for_policy(url: &Url) -> Result<()> {
+    validate_redirect_target_basic(url)?;
+
+    let url_for_check = url.clone();
+    let join = std::thread::spawn(move || -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                ZeptoError::Tool(format!(
+                    "Failed to create runtime for redirect DNS check: {}",
+                    e
+                ))
+            })?;
+
+        runtime
+            .block_on(async { resolve_and_check_host(&url_for_check).await })
+            .map(|_| ())
+    })
+    .join();
+
+    match join {
+        Ok(result) => result,
+        Err(_) => Err(ZeptoError::Tool(
+            "Redirect DNS validation thread panicked".to_string(),
+        )),
+    }
+}
+
+pub async fn validate_redirect_target(url: &Url) -> Result<()> {
+    validate_redirect_target_basic(url)?;
+    resolve_and_check_host(url).await?;
+    Ok(())
+}
+
 /// Collect all descendant text from an element, stripping inner tags.
 fn collect_inline_text(element: ElementRef<'_>) -> String {
     element
@@ -1267,8 +1508,7 @@ mod tests {
 
     #[test]
     fn test_blocked_redirect_destination() {
-        // Simulate a redirect landing on a private IP — `is_blocked_host`
-        // must catch these when called on the final response URL.
+        // Redirect targets to local/private addresses must be blocked.
         let cloud_metadata = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
         assert!(is_blocked_host(&cloud_metadata));
 
@@ -1287,6 +1527,54 @@ mod tests {
         // Public URLs should not be blocked after redirect.
         let public = Url::parse("https://cdn.example.com/page").unwrap();
         assert!(!is_blocked_host(&public));
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_private_host() {
+        let private_target = Url::parse("http://127.0.0.1:8080/admin").unwrap();
+        let result = validate_redirect_target_basic(&private_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("blocked (local or private network)"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_non_http_scheme() {
+        let ftp_target = Url::parse("ftp://example.com/resource").unwrap();
+        let result = validate_redirect_target_basic(&ftp_target);
+
+        assert!(matches!(result, Err(ZeptoError::SecurityViolation(_))));
+        match result {
+            Err(ZeptoError::SecurityViolation(msg)) => {
+                assert!(msg.contains("scheme is blocked"));
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_target_allows_public_https() {
+        let public_target = Url::parse("https://example.com/article").unwrap();
+        assert!(validate_redirect_target_basic(&public_target).is_ok());
+    }
+
+    #[test]
+    fn test_validate_redirect_target_for_policy_blocks_dns_private_resolution() {
+        let localhost_target = Url::parse("https://localhost:443/").unwrap();
+        let result = validate_redirect_target_for_policy(&localhost_target);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_redirect_target_async_blocks_dns_private_resolution() {
+        let localhost_target = Url::parse("https://localhost:443/").unwrap();
+        let result = validate_redirect_target(&localhost_target).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2017,5 +2305,99 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("query")));
+    }
+
+    // ==================== SEARXNG SEARCH TOOL TESTS ====================
+
+    #[test]
+    fn test_searxng_search_tool_name() {
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn test_searxng_search_tool_description() {
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_searxng_search_tool_parameters() {
+        let tool = SearxngSearchTool::new("https://search.example.com").unwrap();
+        let params = tool.parameters();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("query")));
+    }
+
+    #[test]
+    fn test_parse_searxng_results_basic() {
+        let json_str = r#"{"results": [
+            {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "A systems language"},
+            {"title": "Cargo", "url": "https://doc.rust-lang.org/cargo", "content": "Rust package manager"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 5).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Lang");
+        assert_eq!(results[0].url, "https://rust-lang.org");
+        assert_eq!(
+            results[0].description,
+            Some("A systems language".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_searxng_results_respects_max() {
+        let json_str = r#"{"results": [
+            {"title": "A", "url": "https://a.com", "content": "a"},
+            {"title": "B", "url": "https://b.com", "content": "b"},
+            {"title": "C", "url": "https://c.com", "content": "c"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 2).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_searxng_results_empty() {
+        let json_str = r#"{"results": []}"#;
+        let results = parse_searxng_json(json_str, 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_searxng_results_missing_content() {
+        let json_str = r#"{"results": [
+            {"title": "No Content", "url": "https://example.com"}
+        ]}"#;
+        let results = parse_searxng_json(json_str, 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_searxng_results_invalid_json() {
+        let result = parse_searxng_json("not json", 5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_valid() {
+        assert!(validate_searxng_url("https://search.example.com").is_ok());
+        assert!(validate_searxng_url("http://localhost:8888").is_ok());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_invalid_scheme() {
+        assert!(validate_searxng_url("ftp://search.example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_searxng_url_invalid_format() {
+        assert!(validate_searxng_url("not a url").is_err());
+        assert!(validate_searxng_url("").is_err());
+        assert!(validate_searxng_url("   ").is_err());
     }
 }

@@ -5,13 +5,9 @@
 //! 2. `{workspace}/.mcp.json` — project-level config (optional)
 //!
 //! Supported JSON formats:
-//! - **Claude Desktop** (`{"mcpServers": { "name": { "url": "..." } }}`)
-//! - **Flat servers** (`{"servers": { "name": { "url": "..." } }}`)
-//! - **Direct map** (`{ "name": { "url": "..." } }`)  (fall-through)
-//!
-//! Only servers with a `url` field (HTTP transport) are included. Stdio-only
-//! entries (`command` with no `url`) are skipped with a debug log so they do
-//! not cause errors for callers that only speak HTTP.
+//! - **Claude Desktop** (`{"mcpServers": { "name": { ... } }}`)
+//! - **Flat servers** (`{"servers": { "name": { ... } }}`)
+//! - **Direct map** (`{ "name": { ... } }`) (fall-through)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,19 +15,12 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// A single entry from a `servers.json` / `.mcp.json` file.
-///
-/// Only `url` is required for HTTP transport discovery. All other fields are
-/// preserved for callers that want to inspect them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerEntry {
     /// HTTP endpoint for the MCP server.
     pub url: Option<String>,
-    /// Stdio server command (not used by HTTP transport).
+    /// Stdio server command.
     pub command: Option<String>,
     /// Stdio server arguments.
     pub args: Option<Vec<String>>,
@@ -39,49 +28,34 @@ pub struct McpServerEntry {
     pub env: Option<HashMap<String, String>>,
 }
 
+/// Transport type for a discovered MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransportType {
+    /// HTTP transport — server has a URL endpoint.
+    Http { url: String },
+    /// Stdio transport — server is a child process.
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+}
+
 /// An MCP server successfully discovered from a config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredMcpServer {
     /// The key name given to this server in the config file.
     pub name: String,
-    /// HTTP URL for the MCP server endpoint.
-    pub url: String,
+    /// Transport configuration.
+    pub transport: McpTransportType,
     /// Origin of this entry: `"global"` or `"project"`.
     pub source: String,
 }
 
-// ---------------------------------------------------------------------------
-// Discovery entrypoint
-// ---------------------------------------------------------------------------
-
 /// Discover MCP servers from standard config file locations.
-///
-/// Checks (in order):
-/// 1. `~/.mcp/servers.json` — global config
-/// 2. `{workspace}/.mcp.json` — project config (only if `workspace` is `Some`)
-///
-/// Both files are optional. Missing files are silently skipped. Parse errors
-/// emit a `warn!` log and skip the file rather than returning an error so that
-/// discovery never blocks agent startup.
-///
-/// Only servers with a `url` field are returned. Stdio-only servers are logged
-/// at `debug` level and excluded.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use std::path::Path;
-/// use zeptoclaw::tools::mcp::discovery::discover_mcp_servers;
-///
-/// let servers = discover_mcp_servers(Some(Path::new("/my/project")));
-/// for s in &servers {
-///     println!("Found MCP server '{}' at {} ({})", s.name, s.url, s.source);
-/// }
-/// ```
 pub fn discover_mcp_servers(workspace: Option<&Path>) -> Vec<DiscoveredMcpServer> {
     let mut servers = Vec::new();
 
-    // 1. Global: ~/.mcp/servers.json
     let global_path: Option<PathBuf> =
         dirs::home_dir().map(|h| h.join(".mcp").join("servers.json"));
     if let Some(ref path) = global_path {
@@ -90,7 +64,6 @@ pub fn discover_mcp_servers(workspace: Option<&Path>) -> Vec<DiscoveredMcpServer
         }
     }
 
-    // 2. Project-level: {workspace}/.mcp.json
     if let Some(ws) = workspace {
         let project_path = ws.join(".mcp.json");
         if let Some(discovered) = load_mcp_config(&project_path, "project") {
@@ -105,71 +78,58 @@ pub fn discover_mcp_servers(workspace: Option<&Path>) -> Vec<DiscoveredMcpServer
     servers
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Load and parse one MCP config file, returning HTTP-capable servers only.
-///
-/// Returns `None` when the file does not exist or cannot be parsed, so callers
-/// can distinguish "missing" from "empty".
+/// Load and parse one MCP config file.
 pub(crate) fn load_mcp_config(path: &Path, source: &str) -> Option<Vec<DiscoveredMcpServer>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return None, // file absent — not an error
+        Err(_) => return None,
     };
 
     let entries = parse_mcp_config_json(&content, path)?;
 
     let mut result = Vec::new();
     for (name, entry) in entries {
-        match entry.url {
-            Some(url) => {
-                result.push(DiscoveredMcpServer {
-                    name,
-                    url,
-                    source: source.to_string(),
-                });
-            }
-            None => {
-                debug!(
-                    server = %name,
-                    path = %path.display(),
-                    "Skipping stdio-only MCP server (no url field)"
-                );
-            }
+        if let Some(url) = entry.url {
+            result.push(DiscoveredMcpServer {
+                name,
+                transport: McpTransportType::Http { url },
+                source: source.to_string(),
+            });
+        } else if let Some(command) = entry.command {
+            result.push(DiscoveredMcpServer {
+                name,
+                transport: McpTransportType::Stdio {
+                    command,
+                    args: entry.args.unwrap_or_default(),
+                    env: entry.env.unwrap_or_default(),
+                },
+                source: source.to_string(),
+            });
+        } else {
+            debug!(
+                server = %name,
+                path = %path.display(),
+                "Skipping MCP server entry (no url or command)"
+            );
         }
     }
 
     Some(result)
 }
 
-/// Parse the JSON content of an MCP config file into a name→entry map.
-///
-/// Attempts three formats in order:
-/// 1. `{"mcpServers": {...}}` — Claude Desktop format
-/// 2. `{"servers": {...}}` — flat servers alias
-/// 3. Direct `HashMap<String, McpServerEntry>` — bare map
-///
-/// Returns `None` on JSON parse failure (caller emits the warning).
 fn parse_mcp_config_json(content: &str, path: &Path) -> Option<HashMap<String, McpServerEntry>> {
-    // Wrapper that accepts both "mcpServers" and "servers" via #[serde(alias)].
     #[derive(Deserialize)]
     struct McpConfigWrapper {
         #[serde(alias = "mcpServers", alias = "servers")]
         servers: Option<HashMap<String, McpServerEntry>>,
     }
 
-    // Try the wrapper format first (most common).
     if let Ok(wrapper) = serde_json::from_str::<McpConfigWrapper>(content) {
         if let Some(servers) = wrapper.servers {
             return Some(servers);
         }
-        // Wrapper parsed but "servers"/"mcpServers" key absent — fall through
-        // to direct map attempt.
     }
 
-    // Fallback: the file is a bare HashMap at the top level.
     match serde_json::from_str::<HashMap<String, McpServerEntry>>(content) {
         Ok(map) => Some(map),
         Err(err) => {
@@ -183,24 +143,13 @@ fn parse_mcp_config_json(content: &str, path: &Path) -> Option<HashMap<String, M
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // -- discover_mcp_servers -------------------------------------------------
-
     #[test]
     fn test_discover_no_files_returns_empty() {
-        // Passing a nonexistent workspace; global ~/.mcp/servers.json may or
-        // may not exist on the CI machine, but that is fine — we only assert
-        // the function does not panic.
         let servers = discover_mcp_servers(Some(Path::new("/nonexistent/path")));
-        // Result may be non-empty if the test runner has ~/.mcp/servers.json.
-        // We only verify the call succeeds.
         let _ = servers;
     }
 
@@ -219,10 +168,11 @@ mod tests {
 
         assert_eq!(project_servers.len(), 1);
         assert_eq!(project_servers[0].name, "db");
-        assert_eq!(project_servers[0].url, "http://localhost:4000");
+        match &project_servers[0].transport {
+            McpTransportType::Http { url } => assert_eq!(url, "http://localhost:4000"),
+            _ => panic!("Expected HTTP transport"),
+        }
     }
-
-    // -- load_mcp_config ------------------------------------------------------
 
     #[test]
     fn test_load_mcp_config_missing_file() {
@@ -246,13 +196,7 @@ mod tests {
         .unwrap();
 
         let servers = load_mcp_config(&path, "test").unwrap();
-        assert_eq!(
-            servers.len(),
-            1,
-            "Only the server with url should be included"
-        );
-        assert_eq!(servers[0].name, "github");
-        assert_eq!(servers[0].url, "http://localhost:3000");
+        assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].source, "test");
     }
 
@@ -293,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_mcp_config_all_stdio_returns_empty_vec() {
+    fn test_load_mcp_config_all_stdio_returns_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("servers.json");
         std::fs::write(
@@ -302,9 +246,12 @@ mod tests {
         )
         .unwrap();
 
-        // Returns Some(vec![]) — file was parseable, just no HTTP servers.
         let servers = load_mcp_config(&path, "global").unwrap();
-        assert!(servers.is_empty(), "No URL entries → empty vec, not None");
+        assert_eq!(servers.len(), 1, "stdio entries should be included");
+        assert!(matches!(
+            servers[0].transport,
+            McpTransportType::Stdio { .. }
+        ));
     }
 
     #[test]
@@ -325,10 +272,7 @@ mod tests {
         let path = dir.path().join("empty.json");
         std::fs::write(&path, "{}").unwrap();
 
-        // Empty object: wrapper parse succeeds, servers key is None, falls
-        // through to bare-map parse which gives an empty HashMap.
         let result = load_mcp_config(&path, "test");
-        // Either Some([]) or None are valid — ensure no panic.
         let _ = result;
     }
 
@@ -351,28 +295,117 @@ mod tests {
 
         let servers = load_mcp_config(&path, "global").unwrap();
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].url, "http://localhost:5000");
+        match &servers[0].transport {
+            McpTransportType::Http { url } => assert_eq!(url, "http://localhost:5000"),
+            _ => panic!("Expected HTTP transport"),
+        }
     }
 
-    // -- DiscoveredMcpServer --------------------------------------------------
+    #[test]
+    fn test_load_mcp_config_stdio_entry_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("servers.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "mcpServers": {
+                    "http-server": { "url": "http://localhost:3000" },
+                    "stdio-server": { "command": "node", "args": ["server.js"] }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let servers = load_mcp_config(&path, "test").unwrap();
+        assert_eq!(servers.len(), 2, "Both HTTP and stdio should be included");
+
+        let http = servers.iter().find(|s| s.name == "http-server").unwrap();
+        assert!(matches!(http.transport, McpTransportType::Http { .. }));
+
+        let stdio = servers.iter().find(|s| s.name == "stdio-server").unwrap();
+        assert!(matches!(stdio.transport, McpTransportType::Stdio { .. }));
+    }
+
+    #[test]
+    fn test_load_mcp_config_both_url_and_command_prefers_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("servers.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"both": {"url": "http://localhost:3000", "command": "node", "args": ["server.js"]}}}"#,
+        )
+        .unwrap();
+
+        let servers = load_mcp_config(&path, "test").unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(matches!(
+            servers[0].transport,
+            McpTransportType::Http { .. }
+        ));
+    }
+
+    #[test]
+    fn test_load_mcp_config_no_url_no_command_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("servers.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"empty": {"env": {"KEY": "val"}}}}"#,
+        )
+        .unwrap();
+
+        let servers = load_mcp_config(&path, "test").unwrap();
+        assert!(
+            servers.is_empty(),
+            "Entry with neither url nor command should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_mcp_transport_type_http_fields() {
+        let t = McpTransportType::Http {
+            url: "http://localhost:3000".to_string(),
+        };
+        assert!(matches!(t, McpTransportType::Http { .. }));
+    }
+
+    #[test]
+    fn test_mcp_transport_type_stdio_fields() {
+        let t = McpTransportType::Stdio {
+            command: "node".to_string(),
+            args: vec!["server.js".to_string()],
+            env: HashMap::from([("KEY".to_string(), "val".to_string())]),
+        };
+        if let McpTransportType::Stdio { command, args, env } = t {
+            assert_eq!(command, "node");
+            assert_eq!(args, vec!["server.js"]);
+            assert_eq!(env.get("KEY"), Some(&"val".to_string()));
+        } else {
+            panic!("Expected Stdio variant");
+        }
+    }
 
     #[test]
     fn test_discovered_server_fields() {
         let s = DiscoveredMcpServer {
             name: "my-server".to_string(),
-            url: "http://localhost:9000".to_string(),
+            transport: McpTransportType::Http {
+                url: "http://localhost:9000".to_string(),
+            },
             source: "global".to_string(),
         };
         assert_eq!(s.name, "my-server");
-        assert_eq!(s.url, "http://localhost:9000");
         assert_eq!(s.source, "global");
+        assert!(matches!(s.transport, McpTransportType::Http { .. }));
     }
 
     #[test]
     fn test_discovered_server_equality() {
         let a = DiscoveredMcpServer {
             name: "svc".to_string(),
-            url: "http://localhost:1234".to_string(),
+            transport: McpTransportType::Http {
+                url: "http://localhost:1234".to_string(),
+            },
             source: "project".to_string(),
         };
         let b = a.clone();

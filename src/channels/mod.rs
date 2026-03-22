@@ -114,6 +114,8 @@ mod factory;
 pub mod lark;
 mod manager;
 pub mod model_switch;
+#[cfg(feature = "mqtt")]
+pub mod mqtt;
 pub mod persona_switch;
 pub mod plugin;
 #[cfg(feature = "hardware")]
@@ -123,14 +125,17 @@ pub mod telegram;
 pub mod telegram_markdown;
 mod types;
 pub mod webhook;
-pub mod whatsapp;
 pub mod whatsapp_cloud;
+#[cfg(feature = "whatsapp-web")]
+pub mod whatsapp_web;
 
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
 pub use factory::register_configured_channels;
 pub use lark::LarkChannel;
 pub use manager::ChannelManager;
+#[cfg(feature = "mqtt")]
+pub use mqtt::MqttChannel;
 pub use plugin::ChannelPluginAdapter;
 #[cfg(feature = "hardware")]
 pub use serial::SerialChannel;
@@ -138,5 +143,6 @@ pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use types::{BaseChannelConfig, Channel};
 pub use webhook::{WebhookChannel, WebhookChannelConfig};
-pub use whatsapp::WhatsAppChannel;
 pub use whatsapp_cloud::WhatsAppCloudChannel;
+#[cfg(feature = "whatsapp-web")]
+pub use whatsapp_web::WhatsAppWebChannel;

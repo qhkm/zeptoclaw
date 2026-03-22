@@ -22,6 +22,7 @@
 //! - `ShellTool`: Execute shell commands
 //! - `WebSearchTool`: Search the web via Brave Search API
 //! - `DdgSearchTool`: Free web search via DuckDuckGo HTML scraping (fallback)
+//! - `SearxngSearchTool`: Web search via self-hosted SearXNG instance
 //! - `WebFetchTool`: Fetch URL content and extract text
 //! - `MessageTool`: Send proactive outbound chat messages
 //! - `MemorySearchTool`: Search workspace markdown memory files
@@ -59,14 +60,19 @@
 pub mod android;
 pub mod approval;
 pub mod binary_plugin;
+pub mod clarification;
 pub mod composed;
 pub mod cron;
 pub mod custom;
 pub mod delegate;
+pub mod diff;
+pub mod docx_read;
 pub mod filesystem;
+pub mod find;
 pub mod git;
 #[cfg(feature = "google")]
 pub mod google;
+pub mod grep;
 pub mod gsheets;
 pub mod hardware;
 pub mod http_request;
@@ -97,12 +103,16 @@ pub mod whatsapp;
 #[cfg(feature = "android")]
 pub use android::AndroidTool;
 pub use binary_plugin::BinaryPluginTool;
+pub use clarification::AskClarificationTool;
 pub use composed::{ComposedTool, CreateToolTool};
 pub use custom::CustomTool;
 pub use delegate::DelegateTool;
+pub use docx_read::DocxReadTool;
+pub use find::FindTool;
 pub use git::GitTool;
 #[cfg(feature = "google")]
 pub use google::GoogleTool;
+pub use grep::GrepTool;
 pub use gsheets::GoogleSheetsTool;
 pub use hardware::HardwareTool;
 pub use http_request::HttpRequestTool;
@@ -124,7 +134,8 @@ pub use task::TaskTool;
 pub use transcribe::TranscribeTool;
 pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
 pub use web::{
-    is_blocked_host, resolve_and_check_host, DdgSearchTool, WebFetchTool, WebSearchTool,
+    is_blocked_host, resolve_and_check_host, DdgSearchTool, SearxngSearchTool, WebFetchTool,
+    WebSearchTool,
 };
 pub use whatsapp::WhatsAppTool;
 

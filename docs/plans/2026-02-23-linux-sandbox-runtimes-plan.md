@@ -338,7 +338,7 @@ Replace the file with the full implementation:
 ```rust
 //! Landlock LSM sandbox runtime (Linux only).
 
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 use landlock::{
     Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     RulesetError, RulesetStatus, ABI,
@@ -401,11 +401,11 @@ fn execute_with_landlock(
 ) -> RuntimeResult<CommandOutput> {
     use std::process::Command as StdCommand;
 
-    #[cfg(feature = "sandbox-landlock")]
+    #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
     {
         apply_landlock_rules(ll_config)?;
     }
-    #[cfg(not(feature = "sandbox-landlock"))]
+    #[cfg(not(all(target_os = "linux", feature = "sandbox-landlock")))]
     {
         let _ = ll_config;
         return Err(RuntimeError::NotAvailable(
@@ -450,7 +450,7 @@ fn execute_with_landlock(
     }
 }
 
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 fn apply_landlock_rules(config: &LandlockConfig) -> RuntimeResult<()> {
     use std::os::unix::io::AsFd;
 
@@ -490,7 +490,7 @@ fn apply_landlock_rules(config: &LandlockConfig) -> RuntimeResult<()> {
     }
 }
 
-#[cfg(feature = "sandbox-landlock")]
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
 fn landlock_err(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::ExecutionFailed(format!("Landlock ruleset error: {}", e))
 }
@@ -513,7 +513,7 @@ mod tests {
         assert!(rt.is_available().await);
     }
 
-    #[cfg(feature = "sandbox-landlock")]
+    #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
     #[tokio::test]
     async fn test_landlock_runtime_echo() {
         let rt = LandlockRuntime::new(LandlockConfig::default());
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(out.stdout.trim(), "hello");
     }
 
-    #[cfg(feature = "sandbox-landlock")]
+    #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
     #[tokio::test]
     async fn test_landlock_runtime_timeout() {
         let rt = LandlockRuntime::new(LandlockConfig::default());
@@ -532,7 +532,7 @@ mod tests {
         assert!(matches!(result, Err(RuntimeError::Timeout(1))));
     }
 
-    #[cfg(not(feature = "sandbox-landlock"))]
+    #[cfg(not(all(target_os = "linux", feature = "sandbox-landlock")))]
     #[tokio::test]
     async fn test_landlock_runtime_unavailable_without_feature() {
         let rt = LandlockRuntime::new(LandlockConfig::default());

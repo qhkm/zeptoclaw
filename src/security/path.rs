@@ -158,34 +158,276 @@ fn check_symlink_escape(path: &Path, canonical_workspace: &Path) -> Result<()> {
     for component in relative.components() {
         current.push(component);
 
-        // Only check components that exist on the filesystem
-        if current.exists() {
-            // Canonicalize to resolve any symlinks
-            if let Ok(canonical) = current.canonicalize() {
-                // Check if the canonical path is still within workspace
-                if !canonical.starts_with(canonical_workspace) {
-                    log_audit_event(
-                        AuditCategory::PathSecurity,
-                        AuditSeverity::Critical,
-                        "symlink_escape",
-                        &format!(
-                            "Symlink escape: '{}' resolves to '{}' outside workspace",
-                            current.display(),
-                            canonical.display()
-                        ),
-                        true,
-                    );
-                    return Err(ZeptoError::SecurityViolation(format!(
-                        "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
-                        current.display(),
-                        canonical.display()
-                    )));
+        // Use symlink_metadata instead of exists() — exists() follows symlinks
+        // and returns false for dangling symlinks, letting them bypass validation.
+        // symlink_metadata returns metadata for the symlink itself (lstat).
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    // It's a symlink — try to canonicalize to check where it points
+                    match current.canonicalize() {
+                        Ok(canonical) => {
+                            // Symlink resolves — check if target is within workspace
+                            if !canonical.starts_with(canonical_workspace) {
+                                log_audit_event(
+                                    AuditCategory::PathSecurity,
+                                    AuditSeverity::Critical,
+                                    "symlink_escape",
+                                    &format!(
+                                        "Symlink escape: '{}' resolves to '{}' outside workspace",
+                                        current.display(),
+                                        canonical.display()
+                                    ),
+                                    true,
+                                );
+                                return Err(ZeptoError::SecurityViolation(format!(
+                                    "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
+                                    current.display(),
+                                    canonical.display()
+                                )));
+                            }
+                        }
+                        Err(_) => {
+                            // Dangling symlink — target doesn't exist, so we can't
+                            // verify it stays within workspace. Reject it since the
+                            // target could be created or retargeted outside workspace.
+                            log_audit_event(
+                                AuditCategory::PathSecurity,
+                                AuditSeverity::Critical,
+                                "dangling_symlink",
+                                &format!(
+                                    "Dangling symlink: '{}' cannot be resolved",
+                                    current.display()
+                                ),
+                                true,
+                            );
+                            return Err(ZeptoError::SecurityViolation(format!(
+                                "Dangling symlink detected: '{}' target does not exist and cannot be validated",
+                                current.display()
+                            )));
+                        }
+                    }
+                } else if meta.is_dir() {
+                    // Regular directory — canonicalize to check for nested symlinks
+                    if let Ok(canonical) = current.canonicalize() {
+                        if !canonical.starts_with(canonical_workspace) {
+                            log_audit_event(
+                                AuditCategory::PathSecurity,
+                                AuditSeverity::Critical,
+                                "symlink_escape",
+                                &format!(
+                                    "Symlink escape: '{}' resolves to '{}' outside workspace",
+                                    current.display(),
+                                    canonical.display()
+                                ),
+                                true,
+                            );
+                            return Err(ZeptoError::SecurityViolation(format!(
+                                "Symlink escape detected: '{}' resolves to '{}' which is outside workspace",
+                                current.display(),
+                                canonical.display()
+                            )));
+                        }
+                    }
                 }
+                // Regular files: no escape check needed (they can't redirect traversal)
+            }
+            Err(_) => {
+                // Path component doesn't exist yet — this is fine for new file creation
+                // (e.g., writing to workspace/subdir/newfile.txt where newfile.txt doesn't exist)
             }
         }
     }
 
     Ok(())
+}
+
+/// Re-validates a previously validated path immediately before I/O.
+///
+/// This narrows the TOCTOU window between validation and use. Call this
+/// right before every filesystem read/write operation on a path that was
+/// validated earlier by `validate_path_in_workspace`.
+///
+/// Performs:
+/// 1. Symlink escape check (including dangling symlink detection)
+/// 2. Workspace boundary check via canonicalization
+pub fn revalidate_path(path: &Path, workspace: &str) -> Result<()> {
+    let workspace_path = Path::new(workspace);
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(workspace_path));
+
+    // Re-check symlink escapes (components may have changed since initial validation)
+    check_symlink_escape(path, &canonical_workspace)?;
+
+    // If the path now exists, verify its canonical form is still within workspace
+    if let Ok(canonical) = path.canonicalize() {
+        if !canonical.starts_with(&canonical_workspace) {
+            log_audit_event(
+                AuditCategory::PathSecurity,
+                AuditSeverity::Critical,
+                "toctou_escape",
+                &format!(
+                    "Path moved outside workspace between validation and use: '{}' -> '{}'",
+                    path.display(),
+                    canonical.display()
+                ),
+                true,
+            );
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Path escaped workspace between validation and use: '{}' resolves to '{}'",
+                path.display(),
+                canonical.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Securely ensure a directory chain exists within the workspace.
+///
+/// This creates missing directories one component at a time, re-checking the
+/// workspace boundary and rejecting symlinked or non-directory ancestors.
+pub fn ensure_directory_chain_secure(path: &Path, workspace: &str) -> Result<()> {
+    let workspace_path = Path::new(workspace);
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(workspace_path));
+    let normalized_path = normalize_path(path);
+
+    if !normalized_path.starts_with(&canonical_workspace) {
+        return Err(ZeptoError::SecurityViolation(format!(
+            "Directory path escapes workspace: '{}' is not within '{}'",
+            normalized_path.display(),
+            canonical_workspace.display()
+        )));
+    }
+
+    let relative = normalized_path
+        .strip_prefix(&canonical_workspace)
+        .map_err(|_| {
+            ZeptoError::SecurityViolation(format!(
+                "Directory path escapes workspace: '{}' is not within '{}'",
+                normalized_path.display(),
+                canonical_workspace.display()
+            ))
+        })?;
+
+    let mut current = canonical_workspace.clone();
+    for component in relative.components() {
+        current.push(component);
+
+        check_symlink_escape(&current, &canonical_workspace)?;
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Symlink escape detected while creating directory '{}'",
+                        current.display()
+                    )));
+                }
+                if !meta.is_dir() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Cannot create directory '{}': existing path is not a directory",
+                        current.display()
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(ZeptoError::Tool(format!(
+                            "Failed to create directory '{}': {}",
+                            current.display(),
+                            e
+                        )));
+                    }
+                }
+
+                let meta = std::fs::symlink_metadata(&current).map_err(|e| {
+                    ZeptoError::Tool(format!(
+                        "Failed to inspect directory '{}' after creation: {}",
+                        current.display(),
+                        e
+                    ))
+                })?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(ZeptoError::SecurityViolation(format!(
+                        "Directory '{}' became unsafe during creation",
+                        current.display()
+                    )));
+                }
+            }
+            Err(e) => {
+                return Err(ZeptoError::Tool(format!(
+                    "Failed to inspect directory '{}': {}",
+                    current.display(),
+                    e
+                )));
+            }
+        }
+
+        if let Ok(canonical) = current.canonicalize() {
+            if !canonical.starts_with(&canonical_workspace) {
+                return Err(ZeptoError::SecurityViolation(format!(
+                    "Directory '{}' resolves outside workspace to '{}'",
+                    current.display(),
+                    canonical.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks if a file has multiple hard links, which could indicate it aliases
+/// an inode outside the workspace trust boundary.
+///
+/// Call this before write operations on existing files. A file with `nlink > 1`
+/// inside workspace may be a hardlink to an external inode on the same filesystem,
+/// allowing writes to escape workspace boundaries.
+///
+/// Returns Ok(()) if the file doesn't exist (new file creation) or has exactly 1 link.
+pub fn check_hardlink_write(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            if meta.nlink() > 1 {
+                log_audit_event(
+                    AuditCategory::PathSecurity,
+                    AuditSeverity::Critical,
+                    "hardlink_escape",
+                    &format!(
+                        "File has {} hard links, may alias external inode: '{}'",
+                        meta.nlink(),
+                        path.display()
+                    ),
+                    true,
+                );
+                return Err(ZeptoError::SecurityViolation(format!(
+                    "Write blocked: '{}' has {} hard links and may alias content outside workspace",
+                    path.display(),
+                    meta.nlink()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet — new file creation is fine
+            Ok(())
+        }
+        Err(e) => Err(ZeptoError::Tool(format!(
+            "Failed to check file metadata for '{}': {}",
+            path.display(),
+            e
+        ))),
+    }
 }
 
 /// Normalizes a path by resolving `.` and `..` components.
@@ -509,5 +751,207 @@ mod tests {
             result.is_err(),
             "Should block writing new files through symlinks to outside"
         );
+    }
+
+    // ==================== DANGLING SYMLINK TESTS ====================
+
+    #[test]
+    fn test_dangling_symlink_rejected() {
+        let temp = tempdir().unwrap();
+        // Use canonical workspace to avoid macOS /var -> /private/var mismatch
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink pointing to a non-existent target inside workspace
+        // (target within workspace namespace so starts_with doesn't mask the check)
+        let nonexistent_target = canonical.join("does_not_exist_subdir");
+        let symlink_path = canonical.join("dangling_link");
+        symlink(&nonexistent_target, &symlink_path).unwrap();
+
+        // Dangling symlink should be rejected — target can't be validated
+        let result = validate_path_in_workspace("dangling_link/file.txt", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject dangling symlinks whose target can't be verified"
+        );
+
+        if let Err(ZeptoError::SecurityViolation(msg)) = result {
+            assert!(
+                msg.contains("Dangling symlink") || msg.contains("cannot be validated"),
+                "Expected dangling symlink error, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_dangling_symlink_to_outside_workspace() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink that points outside workspace to a path that doesn't exist
+        let symlink_path = canonical.join("future_escape");
+        symlink("/tmp/attacker_controlled_dir_nonexistent", &symlink_path).unwrap();
+
+        let result = validate_path_in_workspace("future_escape/secret.txt", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject dangling symlink pointing outside workspace"
+        );
+    }
+
+    #[test]
+    fn test_nested_dangling_symlink() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a/dangling where dangling is a broken symlink within workspace namespace
+        fs::create_dir_all(canonical.join("a")).unwrap();
+        let nonexistent_target = canonical.join("no_such_dir");
+        symlink(&nonexistent_target, canonical.join("a/dangling")).unwrap();
+
+        let result = validate_path_in_workspace("a/dangling/file.txt", workspace);
+        assert!(result.is_err(), "Should reject nested dangling symlinks");
+    }
+
+    #[test]
+    fn test_dangling_symlink_direct_access() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a dangling symlink pointing to non-existent path within workspace
+        let nonexistent_target = canonical.join("ghost");
+        let symlink_path = canonical.join("broken_link");
+        symlink(&nonexistent_target, &symlink_path).unwrap();
+
+        // Accessing the symlink itself (not a child) — the symlink is the leaf
+        let result = validate_path_in_workspace("broken_link", workspace);
+        assert!(
+            result.is_err(),
+            "Should reject direct access to dangling symlink"
+        );
+    }
+
+    // ==================== REVALIDATE_PATH TESTS ====================
+
+    #[test]
+    fn test_revalidate_path_valid_file() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        let file = canonical.join("safe.txt");
+        fs::write(&file, "content").unwrap();
+
+        // Revalidation should pass for a normal file
+        let result = revalidate_path(&file, workspace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_revalidate_path_nonexistent_file() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Non-existent file — new file creation is fine
+        let file = canonical.join("new_file.txt");
+        let result = revalidate_path(&file, workspace);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_revalidate_path_symlink_escape() {
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        // Create a symlink pointing outside workspace
+        let escape = canonical.join("escape");
+        symlink(outside.path(), &escape).unwrap();
+
+        let target = escape.join("secret.txt");
+        let result = revalidate_path(&target, workspace);
+        assert!(
+            result.is_err(),
+            "Should detect symlink escape on revalidation"
+        );
+    }
+
+    #[test]
+    fn test_ensure_directory_chain_secure_creates_nested_dirs() {
+        let temp = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+        let nested = canonical.join("a/b/c");
+
+        let result = ensure_directory_chain_secure(&nested, workspace);
+        assert!(result.is_ok());
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn test_ensure_directory_chain_secure_rejects_symlink_parent() {
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let workspace = canonical.to_str().unwrap();
+
+        let linked = canonical.join("linked");
+        symlink(outside.path(), &linked).unwrap();
+
+        let result = ensure_directory_chain_secure(&linked.join("child"), workspace);
+        assert!(result.is_err());
+    }
+
+    // ==================== CHECK_HARDLINK_WRITE TESTS ====================
+
+    #[test]
+    fn test_hardlink_write_single_link() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("single.txt");
+        fs::write(&file, "content").unwrap();
+
+        // Single link (nlink=1) should be allowed
+        let result = check_hardlink_write(&file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_hardlink_write_multiple_links() {
+        let temp = tempdir().unwrap();
+        let original = temp.path().join("original.txt");
+        fs::write(&original, "content").unwrap();
+
+        let link = temp.path().join("hardlink.txt");
+        fs::hard_link(&original, &link).unwrap();
+
+        // nlink=2 should be blocked
+        let result = check_hardlink_write(&link);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hard links"),
+            "Expected hardlink error, got: {}",
+            err
+        );
+
+        // Original also has nlink=2 now
+        let result = check_hardlink_write(&original);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hardlink_write_nonexistent_file() {
+        let temp = tempdir().unwrap();
+        let nonexistent = temp.path().join("does_not_exist.txt");
+
+        // Non-existent file — new file creation is fine
+        let result = check_hardlink_write(&nonexistent);
+        assert!(result.is_ok());
     }
 }

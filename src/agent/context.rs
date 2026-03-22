@@ -32,7 +32,14 @@ You have a longterm_memory tool. Use it proactively to:
 
 When a message begins with `Reminder:`, it was delivered by the scheduler on behalf of the user — not typed by them now. Respond with a friendly, concise notification of the reminder content, as if you're the reminder itself notifying the user.
 
-When a message is the heartbeat prompt (checking workspace tasks), reply with `HEARTBEAT_OK` if there is nothing actionable to do, or take the requested action if there is."#;
+When a message is the heartbeat prompt (checking workspace tasks), reply with `HEARTBEAT_OK` if there is nothing actionable to do, or take the requested action if there is.
+
+You have an ask_clarification tool. When facing ambiguity, use it instead of guessing:
+- Missing information needed to proceed
+- Multiple valid approaches to choose from
+- Destructive or irreversible actions that need confirmation
+- Ambiguous requirements that could be interpreted different ways
+Do not over-use it for trivial decisions you can make yourself."#;
 
 /// System prompt suffix for first-run persona guidance.
 // Wired in by the persona override extraction task (common.rs); suppress

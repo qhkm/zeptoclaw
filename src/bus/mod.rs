@@ -484,7 +484,7 @@ mod tests {
         let received = bus.consume_inbound().await.unwrap();
 
         assert!(received.has_media());
-        let attachment = received.media.unwrap();
+        let attachment = received.media.first().unwrap();
         assert_eq!(attachment.media_type, MediaType::Image);
         assert!(attachment.has_url());
     }

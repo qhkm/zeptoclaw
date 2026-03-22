@@ -46,6 +46,11 @@ pub struct AppState {
     pub usage_metrics: Option<Arc<crate::health::UsageMetrics>>,
     /// Per-tool call stats and token tracking for the current session.
     pub metrics_collector: Option<Arc<crate::utils::metrics::MetricsCollector>>,
+    // ── OpenAI-compatible API fields ─────────────────────────────────────
+    /// LLM provider for `/v1/chat/completions` pass-through.
+    pub provider: Option<Arc<dyn crate::providers::LLMProvider>>,
+    /// Immutable config snapshot for model listing and provider resolution.
+    pub config: Option<Arc<crate::config::Config>>,
 }
 
 impl AppState {
@@ -64,6 +69,8 @@ impl AppState {
             health_registry: None,
             usage_metrics: None,
             metrics_collector: None,
+            provider: None,
+            config: None,
         }
     }
 }
@@ -169,6 +176,12 @@ pub fn build_router(
         )
         // WebSocket
         .route("/ws/events", get(super::routes::ws::ws_events))
+        // OpenAI-compatible API (auth skipped by auth_middleware for /v1/ prefix)
+        .route(
+            "/v1/chat/completions",
+            post(super::routes::openai::chat_completions),
+        )
+        .route("/v1/models", get(super::routes::openai::list_models))
         // Body size limit: 1 MiB.  Applied before the auth middleware so we
         // reject oversized payloads cheaply before any token validation.
         .layer(DefaultBodyLimit::max(1024 * 1024))

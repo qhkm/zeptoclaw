@@ -25,7 +25,7 @@ Every tool receives a `ToolContext` containing:
 
 ## Built-in tools
 
-ZeptoClaw ships with 29 built-in tools:
+ZeptoClaw ships with 32 built-in tools:
 
 | Tool | Description |
 |------|-------------|
@@ -33,7 +33,9 @@ ZeptoClaw ships with 29 built-in tools:
 | `read_file` | Read file contents from workspace |
 | `write_file` | Write or create files in workspace |
 | `list_files` | List directory contents |
-| `edit_file` | Search-and-replace edits |
+| `edit_file` | Search-and-replace edits (string or unified diff mode) |
+| `grep` | Search file contents by regex pattern across the workspace |
+| `find` | Find files by glob pattern (e.g. `**/*.rs`) |
 | `web_search` | Web search via Brave API |
 | `web_fetch` | Fetch and parse web pages |
 | `http_request` | General-purpose HTTP client for arbitrary API calls |
@@ -59,6 +61,14 @@ ZeptoClaw ships with 29 built-in tools:
 | `hardware` | GPIO, serial, and USB peripheral operations (feature-gated) |
 
 Some tools are feature-gated and require compile-time flags: `--features tool-pdf` for PDF, `--features screenshot` for screenshots, `--features android` for Android, `--features hardware` for hardware peripherals.
+
+### Opt-in coding tools
+
+`grep` and `find` are **disabled by default** to keep the core runtime portable for IoT and embedded environments where bash may not be available. Enable them by:
+
+- Using the `coder` template: `zeptoclaw agent --template coder -m "..."`
+- Setting `tools.coding_tools: true` in `~/.zeptoclaw/config.json`
+- Setting `ZEPTOCLAW_TOOLS_CODING_TOOLS=true` env var
 
 ## Parallel execution
 

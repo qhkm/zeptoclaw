@@ -17,17 +17,17 @@ use crate::tools::ToolCategory;
 /// Agent execution mode controlling tool permissions.
 ///
 /// Determines which tool categories are allowed, require approval, or are
-/// blocked during an agent session. The default mode is `Autonomous` for
-/// backward compatibility.
+/// blocked during an agent session. The default mode is `Assistant` so fresh
+/// configs start with approval-gated dangerous actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentMode {
     /// Read-only mode. Only FilesystemRead, NetworkRead, and Memory are allowed.
     Observer,
     /// Read/write mode. Most tools allowed; Shell, Hardware, Destructive need approval.
+    #[default]
     Assistant,
     /// Full access. All tool categories are allowed without restriction.
-    #[default]
     Autonomous,
 }
 
@@ -139,7 +139,7 @@ pub struct AgentModeConfig {
 impl Default for AgentModeConfig {
     fn default() -> Self {
         Self {
-            mode: "autonomous".into(),
+            mode: "assistant".into(),
         }
     }
 }
@@ -341,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mode_is_autonomous() {
-        assert_eq!(AgentMode::default(), AgentMode::Autonomous);
+    fn test_default_mode_is_assistant() {
+        assert_eq!(AgentMode::default(), AgentMode::Assistant);
     }
 
     #[test]
@@ -355,13 +355,13 @@ mod tests {
     #[test]
     fn test_mode_config_defaults() {
         let cfg = AgentModeConfig::default();
-        assert_eq!(cfg.mode, "autonomous");
+        assert_eq!(cfg.mode, "assistant");
     }
 
     #[test]
     fn test_mode_config_resolve() {
         let mut cfg = AgentModeConfig::default();
-        assert_eq!(cfg.resolve(), AgentMode::Autonomous);
+        assert_eq!(cfg.resolve(), AgentMode::Assistant);
 
         cfg.mode = "observer".to_string();
         assert_eq!(cfg.resolve(), AgentMode::Observer);

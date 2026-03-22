@@ -24,7 +24,7 @@
 //! any connection failure or heartbeat timeout.
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +35,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::LarkConfig;
 use crate::error::{Result, ZeptoError};
 
@@ -83,7 +83,7 @@ struct PbHeader {
 
 /// Top-level Lark / Feishu WS frame (pbbp2.proto).
 ///
-/// `method=0` → CONTROL (ping / pong)  
+/// `method=0` → CONTROL (ping / pong)
 /// `method=1` → DATA (events)
 #[derive(Clone, PartialEq, prost::Message)]
 struct PbFrame {
@@ -781,8 +781,8 @@ impl LarkChannel {
                         seen.insert(message_id.clone(), now);
                     }
 
-                    // Decode message text
-                    let text = match message_type {
+                    // Decode message text (image messages use a synthetic description)
+                    let (text, is_image_message) = match message_type {
                         "text" => {
                             let v: serde_json::Value =
                                 match serde_json::from_str(content_str) {
@@ -794,14 +794,23 @@ impl LarkChannel {
                                 .and_then(|t| t.as_str())
                                 .filter(|s| !s.is_empty())
                             {
-                                Some(t) => t.to_string(),
+                                Some(t) => (t.to_string(), false),
                                 None => continue,
                             }
                         }
                         "post" => match parse_post_content(content_str) {
-                            Some(t) => t,
+                            Some(t) => (t, false),
                             None => continue,
                         },
+                        "image" => {
+                            // Image-only message — use placeholder text so the
+                            // agent receives a non-empty InboundMessage, and
+                            // attach the actual bytes separately below.
+                            if chat_type == "group" && !should_respond_in_group(&mentions) {
+                                continue;
+                            }
+                            ("[image]".to_string(), true)
+                        }
                         _ => {
                             debug!(
                                 "Lark WS: skipping unsupported message type '{message_type}'"
@@ -810,24 +819,76 @@ impl LarkChannel {
                         }
                     };
 
-                    // Strip @_user_N placeholders, trim
-                    let text = strip_at_placeholders(&text);
-                    let text = text.trim().to_string();
-                    if text.is_empty() {
+                    // Strip @_user_N placeholders, trim (skip for synthetic image placeholder)
+                    let text = if is_image_message {
+                        text
+                    } else {
+                        let stripped = strip_at_placeholders(&text);
+                        let trimmed = stripped.trim().to_string();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        trimmed
+                    };
+
+                    // Group chat: only reply when @-mentioned (already handled for image above)
+                    if !is_image_message && chat_type == "group" && !should_respond_in_group(&mentions) {
                         continue;
                     }
 
-                    // Group chat: only reply when @-mentioned
-                    if chat_type == "group" && !should_respond_in_group(&mentions) {
-                        continue;
-                    }
-
-                    let inbound = InboundMessage::new(
+                    let mut inbound = InboundMessage::new(
                         self.base_config.name.as_str(),
                         sender_open_id,
                         &chat_id,
                         &text,
                     );
+
+                    // Fetch and attach image data for image-type messages
+                    if is_image_message && !message_id.is_empty() {
+                        if let Ok(content_value) =
+                            serde_json::from_str::<serde_json::Value>(content_str)
+                        {
+                            if let Some(image_key) = content_value["image_key"].as_str() {
+                                match self.get_tenant_token().await {
+                                    Ok(token) => {
+                                        let url = format!(
+                                            "{}/im/v1/messages/{}/resources/{}?type=image",
+                                            self.api_base(),
+                                            message_id,
+                                            image_key
+                                        );
+                                        match reqwest::Client::builder()
+                                            .timeout(Duration::from_secs(30))
+                                            .build()
+                                            .unwrap_or_default()
+                                            .get(&url)
+                                            .bearer_auth(&token)
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                if let Ok(bytes) = resp.bytes().await {
+                                                    if bytes.len() <= 20 * 1024 * 1024 {
+                                                        let media =
+                                                            MediaAttachment::new(MediaType::Image)
+                                                                .with_data(bytes.to_vec())
+                                                                .with_mime_type("image/jpeg");
+                                                        inbound = inbound.with_media(media);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to download Lark image: {}", e)
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Lark: could not get tenant token for image fetch: {}", e)
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     debug!("Lark WS: dispatching message from {sender_open_id} in {chat_id}");
                     if self.bus.publish_inbound(inbound).await.is_err() {
@@ -843,46 +904,53 @@ impl LarkChannel {
                         let app_secret = self.config.app_secret.clone();
                         let msg_id = message_id.clone();
                         let _reaction = tokio::spawn(async move {
-                            match fetch_tenant_token_cached(
-                                api_base_str,
-                                &app_id,
-                                &app_secret,
-                                &token_cache,
-                            )
-                            .await
-                            {
-                                Ok(token) => {
-                                    let url = format!(
-                                        "{}/im/v1/messages/{}/reactions",
-                                        api_base_str, msg_id
-                                    );
-                                    match reqwest::Client::builder()
-                                        .timeout(Duration::from_secs(30))
-                                        .build()
-                                        .unwrap_or_default()
-                                        .post(&url)
-                                        .bearer_auth(&token)
-                                        .json(&serde_json::json!({
-                                            "reaction_type": { "emoji_type": "OK" }
-                                        }))
-                                        .send()
-                                        .await
-                                    {
-                                        Ok(resp) if resp.status().is_success() => {
-                                            debug!("Lark: reaction ack sent for {msg_id}");
-                                        }
-                                        Ok(resp) => {
-                                            let body = resp.text().await.unwrap_or_default();
-                                            warn!("Failed to send Lark reaction: {body}");
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to send Lark reaction: {e}");
+                            let reaction_result = std::panic::AssertUnwindSafe(async move {
+                                match fetch_tenant_token_cached(
+                                    api_base_str,
+                                    &app_id,
+                                    &app_secret,
+                                    &token_cache,
+                                )
+                                .await
+                                {
+                                    Ok(token) => {
+                                        let url = format!(
+                                            "{}/im/v1/messages/{}/reactions",
+                                            api_base_str, msg_id
+                                        );
+                                        match reqwest::Client::builder()
+                                            .timeout(Duration::from_secs(30))
+                                            .build()
+                                            .unwrap_or_default()
+                                            .post(&url)
+                                            .bearer_auth(&token)
+                                            .json(&serde_json::json!({
+                                                "reaction_type": { "emoji_type": "OK" }
+                                            }))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                debug!("Lark: reaction ack sent for {msg_id}");
+                                            }
+                                            Ok(resp) => {
+                                                let body = resp.text().await.unwrap_or_default();
+                                                warn!("Failed to send Lark reaction: {body}");
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to send Lark reaction: {e}");
+                                            }
                                         }
                                     }
+                                    Err(e) => {
+                                        warn!("Failed to send Lark reaction (token error): {e}");
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to send Lark reaction (token error): {e}");
-                                }
+                            })
+                            .catch_unwind()
+                            .await;
+                            if reaction_result.is_err() {
+                                error!("Lark reaction task panicked");
                             }
                         });
                     }
@@ -945,40 +1013,47 @@ impl Channel for LarkChannel {
         // Spawn the reconnect loop as a background task
         let running_clone = Arc::clone(&running);
         tokio::spawn(async move {
-            // Build a temporary channel clone for the async task
-            let base_config = BaseChannelConfig {
-                name: if config.feishu {
-                    "feishu".to_string()
-                } else {
-                    "lark".to_string()
-                },
-                allowlist: config.allowed_senders.clone(),
-                deny_by_default: config.deny_by_default,
-            };
-            let ch = LarkChannel {
-                config,
-                base_config,
-                bus,
-                running: Arc::clone(&running),
-                tenant_token,
-                ws_seen_ids,
-            };
+            let task_result = std::panic::AssertUnwindSafe(async move {
+                // Build a temporary channel clone for the async task
+                let base_config = BaseChannelConfig {
+                    name: if config.feishu {
+                        "feishu".to_string()
+                    } else {
+                        "lark".to_string()
+                    },
+                    allowlist: config.allowed_senders.clone(),
+                    deny_by_default: config.deny_by_default,
+                };
+                let ch = LarkChannel {
+                    config,
+                    base_config,
+                    bus,
+                    running: Arc::clone(&running),
+                    tenant_token,
+                    ws_seen_ids,
+                };
 
-            let mut delay_secs = BASE_RECONNECT_DELAY_SECS;
+                let mut delay_secs = BASE_RECONNECT_DELAY_SECS;
 
-            while running.load(Ordering::SeqCst) {
-                match ch.listen_ws_once().await {
-                    Ok(()) => {
-                        // clean disconnect — reset backoff
-                        delay_secs = BASE_RECONNECT_DELAY_SECS;
-                    }
-                    Err(e) => {
-                        error!("Lark WS error: {e}");
-                        warn!("Lark: reconnecting in {delay_secs}s");
-                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                        delay_secs = (delay_secs * 2).min(MAX_RECONNECT_DELAY_SECS);
+                while running.load(Ordering::SeqCst) {
+                    match ch.listen_ws_once().await {
+                        Ok(()) => {
+                            // clean disconnect — reset backoff
+                            delay_secs = BASE_RECONNECT_DELAY_SECS;
+                        }
+                        Err(e) => {
+                            error!("Lark WS error: {e}");
+                            warn!("Lark: reconnecting in {delay_secs}s");
+                            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                            delay_secs = (delay_secs * 2).min(MAX_RECONNECT_DELAY_SECS);
+                        }
                     }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if task_result.is_err() {
+                error!("Lark channel task panicked");
             }
             running_clone.store(false, Ordering::SeqCst);
             info!("Lark channel stopped");
@@ -999,12 +1074,30 @@ impl Channel for LarkChannel {
             .await
             .map_err(|e| ZeptoError::Channel(format!("Lark: failed to get tenant token: {e}")))?;
 
-        let url = format!("{}/im/v1/messages?receive_id_type=open_id", self.api_base());
-        let content = serde_json::json!({ "text": msg.content }).to_string();
+        // Determine the correct receive_id_type based on the ID prefix.
+        // Lark chat IDs start with "oc_", open IDs start with "ou_".
+        // Using the wrong type causes Feishu error 99992361 "open_id cross app".
+        let receive_id_type = if msg.chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        let url = format!(
+            "{}/im/v1/messages?receive_id_type={}",
+            self.api_base(),
+            receive_id_type
+        );
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [{
+                "tag": "markdown",
+                "content": msg.content,
+            }]
+        });
         let body = serde_json::json!({
             "receive_id": msg.chat_id,
-            "msg_type":   "text",
-            "content":    content,
+            "msg_type":   "interactive",
+            "content":    card.to_string(),
         });
 
         let (status, response) = self
@@ -1326,7 +1419,58 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.app_id, "app123");
-        assert_eq!(parsed.feishu, false);
+        assert!(!parsed.feishu);
         assert!(parsed.allowed_senders.is_empty());
+    }
+
+    // ---- receive_id_type routing ----
+
+    #[test]
+    fn test_send_url_uses_chat_id_type_for_group_chat() {
+        // Group chat IDs start with "oc_" — must use receive_id_type=chat_id
+        let chat_id = "oc_abc123def";
+        let receive_id_type = if chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        assert_eq!(receive_id_type, "chat_id");
+    }
+
+    #[test]
+    fn test_send_url_uses_open_id_type_for_p2p_fallback() {
+        // When chat_id falls back to sender open_id (starts with "ou_")
+        let chat_id = "ou_abc123def";
+        let receive_id_type = if chat_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+        assert_eq!(receive_id_type, "open_id");
+    }
+
+    // ---- interactive card payload ----
+
+    #[test]
+    fn test_send_payload_uses_interactive_card() {
+        let content = "Here is **bold** and `code`";
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [{
+                "tag": "markdown",
+                "content": content,
+            }]
+        });
+        let body = serde_json::json!({
+            "receive_id": "oc_test",
+            "msg_type":   "interactive",
+            "content":    card.to_string(),
+        });
+        assert_eq!(body["msg_type"], "interactive");
+        let parsed_card: serde_json::Value =
+            serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_card["elements"][0]["tag"], "markdown");
+        assert_eq!(parsed_card["elements"][0]["content"], content);
+        assert_eq!(parsed_card["config"]["wide_screen_mode"], true);
     }
 }
