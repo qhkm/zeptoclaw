@@ -36,12 +36,17 @@
 //! ```
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+
+use once_cell::sync::Lazy;
+use regex::Regex;
 
 use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
 use crate::config::Config;
@@ -78,45 +83,184 @@ struct ConfiguredProviders {
     names: Vec<String>,
     models: Vec<(String, String)>,
 }
-/// Bundles both override stores into one DI dependency so that dptree's
-/// 9-parameter arity limit is not exceeded.
+/// Shared map of active typing indicator tasks, keyed by chat_id (or
+/// "chat_id:thread_id" for forum topics). The CancellationToken lets
+/// `send()` stop the typing loop when the response is ready.
+type TypingMap = Arc<DashMap<String, CancellationToken>>;
+
+/// Bundles override stores and shared state into one DI dependency so that
+/// dptree's 9-parameter arity limit is not exceeded.
 #[derive(Clone)]
 struct OverridesDep {
     model: ModelOverrideStore,
     persona: PersonaOverrideStore,
+    typing: TypingMap,
+}
+
+// ---------------------------------------------------------------------------
+// Markdown → Telegram HTML conversion
+// ---------------------------------------------------------------------------
+//
+// Telegram's HTML mode supports a small subset of tags: <b>, <i>, <code>,
+// <pre>, <a href="">, <tg-spoiler>.  Claude emits standard Markdown, so we
+// convert the most common constructs before sending.
+//
+// Strategy: extract code regions into NUL-byte placeholders first (so their
+// content is never touched by Markdown regex), process everything else, then
+// reinsert code with its own HTML escaping.
+
+static RE_FENCED_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```[^\n]*\n(.*?)```").unwrap());
+static RE_INLINE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
+// Bold+italic combined (***text***) must be matched before bold and italic.
+static RE_BOLD_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*\*(.+?)\*\*\*").unwrap());
+static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+// Italic is applied after bold conversion has consumed all ** pairs, so
+// remaining single * delimiters are safe to match without lookbehind.
+static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^\*\n]+?)\*").unwrap());
+// Underscore-style italic: _text_ — matched at word boundaries.
+// Uses `(?:^|[\s])` as a pseudo-lookbehind to avoid snake_case.
+static RE_ITALIC_UNDERSCORE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?:^|(?P<pre>\s))_(?P<body>[^_\n]+?)_(?P<suf>[\s.,;:!?]|$)"#).unwrap()
+});
+static RE_STRIKETHROUGH: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~(.+?)~~").unwrap());
+static RE_LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
+static RE_SPOILER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\|\|(.+?)\|\|").unwrap());
+static RE_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
+static RE_BULLET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*[-*]\s+").unwrap());
+static RE_NUMBERED_LIST: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*\d+\.\s+").unwrap());
+static RE_BLOCKQUOTE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^&gt;\s?(.*)$").unwrap());
+static RE_HR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^-{3,}\s*$").unwrap());
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Validate that HTML tags are properly nested (no crossing tags).
+/// Returns `true` when the tag structure is well-formed.
+fn html_tags_valid(html: &str) -> bool {
+    static RE_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"<(/?)(\w[\w-]*)(?:\s[^>]*)?>").unwrap());
+    let mut stack: Vec<String> = Vec::new();
+    for caps in RE_TAG.captures_iter(html) {
+        let closing = &caps[1] == "/";
+        let tag = caps[2].to_lowercase();
+        if closing {
+            if stack.last().map(|s| s.as_str()) != Some(tag.as_str()) {
+                return false;
+            }
+            stack.pop();
+        } else {
+            stack.push(tag);
+        }
+    }
+    stack.is_empty()
+}
+
+/// Strip all HTML tags, restoring a plain-text representation.
+fn strip_html_tags(html: &str) -> String {
+    static RE_STRIP: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
+    let text = RE_STRIP.replace_all(html, "");
+    // Unescape entities we added so the user sees normal characters.
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 
 fn render_telegram_html(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 16);
-    let mut chars = content.chars().peekable();
-    let mut spoiler_open = false;
+    // Phase 1: Extract fenced code blocks into placeholders.
+    let mut code_blocks: Vec<String> = Vec::new();
+    let mut text = RE_FENCED_CODE
+        .replace_all(content, |caps: &regex::Captures| {
+            let idx = code_blocks.len();
+            let body = caps.get(1).map_or("", |m| m.as_str());
+            code_blocks.push(body.to_string());
+            format!("\x00CODEBLOCK{idx}\x00")
+        })
+        .into_owned();
 
-    while let Some(ch) = chars.next() {
-        if ch == '|' && chars.peek() == Some(&'|') {
-            let _ = chars.next();
-            if spoiler_open {
-                out.push_str("</tg-spoiler>");
-            } else {
-                out.push_str("<tg-spoiler>");
-            }
-            spoiler_open = !spoiler_open;
-            continue;
-        }
+    // Phase 2: Extract inline code into placeholders.
+    let mut inline_codes: Vec<String> = Vec::new();
+    text = RE_INLINE_CODE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let idx = inline_codes.len();
+            inline_codes.push(caps[1].to_string());
+            format!("\x00INLINE{idx}\x00")
+        })
+        .into_owned();
 
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
+    // Phase 3: Escape HTML entities in the remaining text.
+    text = escape_html(&text);
+
+    // Phase 3b: Restore Telegram-native HTML tags that Claude may emit
+    // directly (there is no markdown equivalent for these).
+    text = text
+        .replace("&lt;u&gt;", "<u>")
+        .replace("&lt;/u&gt;", "</u>")
+        .replace("&lt;ins&gt;", "<u>")
+        .replace("&lt;/ins&gt;", "</u>");
+
+    // Phase 4: Block-level conversions.
+    text = RE_HR.replace_all(&text, "").into_owned();
+    text = RE_HEADER.replace_all(&text, "<b>$1</b>\n").into_owned();
+    text = RE_BLOCKQUOTE
+        .replace_all(&text, "<blockquote>$1</blockquote>")
+        .into_owned();
+    text = RE_BULLET.replace_all(&text, "• ").into_owned();
+    text = RE_NUMBERED_LIST
+        .replace_all(&text, |caps: &regex::Captures| {
+            // Preserve the original number prefix but strip the markdown indent.
+            let m = caps.get(0).unwrap().as_str().trim_start();
+            m.to_string()
+        })
+        .into_owned();
+
+    // Phase 5: Inline conversions (bold+italic before bold before italic).
+    text = RE_BOLD_ITALIC
+        .replace_all(&text, "<b><i>$1</i></b>")
+        .into_owned();
+    text = RE_BOLD.replace_all(&text, "<b>$1</b>").into_owned();
+    text = RE_ITALIC.replace_all(&text, "<i>$1</i>").into_owned();
+    text = RE_ITALIC_UNDERSCORE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let pre = caps.name("pre").map_or("", |m| m.as_str());
+            let body = &caps["body"];
+            let suf = caps.name("suf").map_or("", |m| m.as_str());
+            format!("{pre}<i>{body}</i>{suf}")
+        })
+        .into_owned();
+    text = RE_STRIKETHROUGH
+        .replace_all(&text, "<s>$1</s>")
+        .into_owned();
+    text = RE_LINK
+        .replace_all(&text, |caps: &regex::Captures| {
+            format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
+        })
+        .into_owned();
+
+    // Phase 6: Spoilers.
+    text = RE_SPOILER
+        .replace_all(&text, "<tg-spoiler>$1</tg-spoiler>")
+        .into_owned();
+
+    // Phase 7: Reinsert code blocks with their own HTML escaping.
+    for (idx, block) in code_blocks.iter().enumerate() {
+        let tag = format!("<pre>{}</pre>", escape_html(block.trim_end()));
+        text = text.replace(&format!("\x00CODEBLOCK{idx}\x00"), &tag);
+    }
+    for (idx, code) in inline_codes.iter().enumerate() {
+        let tag = format!("<code>{}</code>", escape_html(code));
+        text = text.replace(&format!("\x00INLINE{idx}\x00"), &tag);
     }
 
-    // Graceful fallback for unmatched spoiler marker.
-    if spoiler_open {
-        out.push_str("</tg-spoiler>");
+    // Safety net: if regex substitutions produced crossing tags (e.g. bold
+    // wrapping an italic that extends beyond it), fall back to plain text so
+    // Telegram doesn't reject the message outright.
+    if !html_tags_valid(&text) {
+        return strip_html_tags(&text);
     }
 
-    out
+    text
 }
 
 fn is_numeric_allowlist_entry(entry: &str) -> bool {
@@ -187,6 +331,8 @@ pub struct TelegramChannel {
     configured_models: Vec<(String, String)>,
     /// Long-term memory backing store for model overrides (optional)
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
+    /// Active typing indicator tasks per chat (or chat:thread for forums).
+    typing_indicators: TypingMap,
 }
 
 impl TelegramChannel {
@@ -271,6 +417,7 @@ impl TelegramChannel {
             configured_providers,
             configured_models,
             longterm_memory,
+            typing_indicators: Arc::new(DashMap::new()),
         }
     }
 
@@ -360,6 +507,7 @@ impl Channel for TelegramChannel {
         let overrides_dep = OverridesDep {
             model: self.model_overrides.clone(),
             persona: self.persona_overrides.clone(),
+            typing: self.typing_indicators.clone(),
         };
         let default_model = DefaultModel(self.default_model.clone());
         let configured_providers = ConfiguredProviders {
@@ -460,6 +608,7 @@ impl Channel for TelegramChannel {
                          longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
+                            let typing_indicators = overrides_dep.typing;
                             let configured_providers = configured_providers_dep.names;
                             let configured_models = configured_providers_dep.models;
                             // Extract user ID and optional username
@@ -498,6 +647,58 @@ impl Channel for TelegramChannel {
                                     );
                                 }
                                 return Ok(());
+                            }
+
+                            // Start typing indicator immediately so the user
+                            // sees feedback while the agent processes.
+                            {
+                                use teloxide::types::ChatAction;
+
+                                let typing_key = match msg.thread_id {
+                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
+                                    None => msg.chat.id.0.to_string(),
+                                };
+
+                                // Cancel any stale typing task for this chat
+                                // (e.g. rapid successive messages).
+                                if let Some((_, old_token)) = typing_indicators.remove(&typing_key)
+                                {
+                                    old_token.cancel();
+                                }
+
+                                let cancel_token = CancellationToken::new();
+                                typing_indicators
+                                    .insert(typing_key.clone(), cancel_token.clone());
+
+                                let typing_bot = bot.clone();
+                                let typing_chat_id = msg.chat.id;
+                                let typing_thread_id = msg.thread_id;
+                                let typing_map = typing_indicators.clone();
+                                let typing_map_key = typing_key;
+
+                                tokio::spawn(async move {
+                                    loop {
+                                        let mut action = typing_bot.send_chat_action(
+                                            typing_chat_id,
+                                            ChatAction::Typing,
+                                        );
+                                        if let Some(tid) = typing_thread_id {
+                                            action = action.message_thread_id(tid);
+                                        }
+                                        if let Err(e) = action.await {
+                                            debug!(
+                                                "Typing indicator send failed for {}: {}",
+                                                typing_map_key, e
+                                            );
+                                        }
+
+                                        tokio::select! {
+                                            _ = cancel_token.cancelled() => break,
+                                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                        }
+                                    }
+                                    typing_map.remove(&typing_map_key);
+                                });
                             }
 
                             // Only process text messages
@@ -861,6 +1062,12 @@ impl Channel for TelegramChannel {
         // Clear cached bot
         self.bot = None;
 
+        // Cancel all active typing indicators
+        for entry in self.typing_indicators.iter() {
+            entry.value().cancel();
+        }
+        self.typing_indicators.clear();
+
         info!("Telegram channel stopped");
         Ok(())
     }
@@ -891,6 +1098,15 @@ impl Channel for TelegramChannel {
         let chat_id: i64 = msg.chat_id.parse().map_err(|_| {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
+
+        // Cancel the typing indicator for this chat before sending.
+        let typing_key = match msg.metadata.get("telegram_thread_id") {
+            Some(tid) => format!("{}:{}", chat_id, tid),
+            None => chat_id.to_string(),
+        };
+        if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+            token.cancel();
+        }
 
         info!("Telegram: Sending message to chat {}", chat_id);
 
@@ -1103,8 +1319,152 @@ mod tests {
 
     #[test]
     fn test_render_telegram_html_unmatched_spoiler() {
+        // Unmatched || passes through as literal text (safer than auto-closing,
+        // which can swallow large chunks of content).
         let rendered = render_telegram_html("Dangling ||spoiler");
-        assert_eq!(rendered, "Dangling <tg-spoiler>spoiler</tg-spoiler>");
+        assert_eq!(rendered, "Dangling ||spoiler");
+    }
+
+    #[test]
+    fn test_render_bold() {
+        assert_eq!(
+            render_telegram_html("Hello **world**"),
+            "Hello <b>world</b>"
+        );
+    }
+
+    #[test]
+    fn test_render_italic() {
+        assert_eq!(render_telegram_html("Hello *world*"), "Hello <i>world</i>");
+    }
+
+    #[test]
+    fn test_render_italic_underscore() {
+        assert_eq!(
+            render_telegram_html("something _impossible_."),
+            "something <i>impossible</i>."
+        );
+    }
+
+    #[test]
+    fn test_render_italic_underscore_ignores_snake_case() {
+        // Should NOT italicize parts of snake_case identifiers.
+        assert_eq!(
+            render_telegram_html("use my_var_name here"),
+            "use my_var_name here"
+        );
+    }
+
+    #[test]
+    fn test_render_underline_passthrough() {
+        // Claude emits raw <u> tags since there's no markdown for underline.
+        assert_eq!(
+            render_telegram_html("this is <u>underlined</u> text"),
+            "this is <u>underlined</u> text"
+        );
+    }
+
+    #[test]
+    fn test_render_bold_and_italic() {
+        assert_eq!(
+            render_telegram_html("**bold** and *italic*"),
+            "<b>bold</b> and <i>italic</i>"
+        );
+    }
+
+    #[test]
+    fn test_render_inline_code() {
+        assert_eq!(
+            render_telegram_html("Use `foo()` here"),
+            "Use <code>foo()</code> here"
+        );
+    }
+
+    #[test]
+    fn test_render_inline_code_preserves_html() {
+        assert_eq!(
+            render_telegram_html("Try `x < 5 && y > 2`"),
+            "Try <code>x &lt; 5 &amp;&amp; y &gt; 2</code>"
+        );
+    }
+
+    #[test]
+    fn test_render_fenced_code_block() {
+        let input = "Before\n```rust\nfn main() {\n    println!(\"<hello>\");\n}\n```\nAfter";
+        let rendered = render_telegram_html(input);
+        assert!(rendered.contains("<pre>"));
+        assert!(rendered.contains("&lt;hello&gt;"));
+        assert!(rendered.contains("</pre>"));
+        assert!(rendered.starts_with("Before\n"));
+        assert!(rendered.ends_with("\nAfter"));
+    }
+
+    #[test]
+    fn test_code_block_no_markdown_conversion() {
+        let input = "```\n**not bold** *not italic*\n```";
+        let rendered = render_telegram_html(input);
+        assert!(rendered.contains("**not bold** *not italic*"));
+        assert!(!rendered.contains("<b>"));
+        assert!(!rendered.contains("<i>"));
+    }
+
+    #[test]
+    fn test_render_link() {
+        assert_eq!(
+            render_telegram_html("See [docs](https://example.com)"),
+            "See <a href=\"https://example.com\">docs</a>"
+        );
+    }
+
+    #[test]
+    fn test_render_header() {
+        assert_eq!(render_telegram_html("## Summary"), "<b>Summary</b>\n");
+        assert_eq!(render_telegram_html("### Details"), "<b>Details</b>\n");
+    }
+
+    #[test]
+    fn test_render_bullets() {
+        assert_eq!(
+            render_telegram_html("- item one\n- item two"),
+            "• item one\n• item two"
+        );
+    }
+
+    #[test]
+    fn test_render_star_bullets() {
+        assert_eq!(
+            render_telegram_html("* item one\n* item two"),
+            "• item one\n• item two"
+        );
+    }
+
+    #[test]
+    fn test_render_horizontal_rule() {
+        assert_eq!(render_telegram_html("above\n---\nbelow"), "above\n\nbelow");
+    }
+
+    #[test]
+    fn test_render_spoiler_with_formatting() {
+        assert_eq!(
+            render_telegram_html("||**secret**||"),
+            "<tg-spoiler><b>secret</b></tg-spoiler>"
+        );
+    }
+
+    #[test]
+    fn test_render_empty_input() {
+        assert_eq!(render_telegram_html(""), "");
+    }
+
+    #[test]
+    fn test_render_plain_text_unchanged() {
+        assert_eq!(render_telegram_html("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn test_render_unclosed_bold() {
+        let rendered = render_telegram_html("Hello **world");
+        assert_eq!(rendered, "Hello **world");
     }
 
     #[tokio::test]
@@ -1307,6 +1667,88 @@ mod tests {
         assert_eq!(
             msg.metadata.get("telegram_thread_id"),
             Some(&"42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_html_tags_valid_well_formed() {
+        assert!(html_tags_valid("<b>bold</b>"));
+        assert!(html_tags_valid("<b>bold <i>italic</i></b>"));
+        assert!(html_tags_valid("plain text"));
+    }
+
+    #[test]
+    fn test_html_tags_valid_crossing() {
+        assert!(!html_tags_valid("<b>bold <i>cross</b> bad</i>"));
+    }
+
+    #[test]
+    fn test_html_tags_valid_unclosed() {
+        assert!(!html_tags_valid("<b>unclosed"));
+    }
+
+    #[test]
+    fn test_strip_html_tags() {
+        assert_eq!(strip_html_tags("<b>bold</b>"), "bold");
+        assert_eq!(strip_html_tags("a &amp; b &lt; c"), "a & b < c");
+    }
+
+    #[test]
+    fn test_render_crossing_bold_italic_falls_back() {
+        // Simulate what Claude might output: bold wrapping an italic that
+        // extends past the bold boundary.  The regex approach cannot produce
+        // valid HTML for this, so we should get plain text back.
+        let input = "**bold *cross** end*";
+        let output = render_telegram_html(input);
+        // Should NOT contain unmatched HTML tags — plain-text fallback.
+        assert!(!output.contains("</b>") || html_tags_valid(&output));
+    }
+
+    #[test]
+    fn test_render_strikethrough() {
+        assert_eq!(render_telegram_html("~~removed~~"), "<s>removed</s>");
+    }
+
+    #[test]
+    fn test_render_bold_italic_combined() {
+        assert_eq!(
+            render_telegram_html("***bold and italic***"),
+            "<b><i>bold and italic</i></b>"
+        );
+    }
+
+    #[test]
+    fn test_render_blockquote() {
+        assert_eq!(
+            render_telegram_html("> quoted text"),
+            "<blockquote>quoted text</blockquote>"
+        );
+    }
+
+    #[test]
+    fn test_render_numbered_list() {
+        let input = "1. First\n2. Second";
+        let output = render_telegram_html(input);
+        assert!(output.contains("1. First"));
+        assert!(output.contains("2. Second"));
+        // Should not have leading whitespace from markdown indent
+        assert!(!output.starts_with(' '));
+    }
+
+    #[test]
+    fn test_render_header_with_newline() {
+        let output = render_telegram_html("# Title\nBody");
+        assert!(output.contains("<b>Title</b>"));
+        assert!(output.contains("Body"));
+    }
+
+    #[test]
+    fn test_render_mixed_formatting() {
+        let input = "**bold** and *italic* and ~~struck~~ and `code`";
+        let output = render_telegram_html(input);
+        assert_eq!(
+            output,
+            "<b>bold</b> and <i>italic</i> and <s>struck</s> and <code>code</code>"
         );
     }
 }

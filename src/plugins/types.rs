@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::tools::ToolCategory;
+
 /// Default execution mode for plugins.
 fn default_execution() -> String {
     "command".to_string()
@@ -136,6 +138,11 @@ pub struct PluginToolDef {
     /// Optional environment variables to set during command execution.
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+
+    /// Optional tool category for agent mode enforcement.
+    /// Defaults to `Shell` (fail-closed) if not specified.
+    #[serde(default)]
+    pub category: Option<ToolCategory>,
 }
 
 impl PluginManifest {
@@ -149,6 +156,11 @@ impl PluginToolDef {
     /// Returns the effective timeout in seconds, defaulting to 30.
     pub fn effective_timeout(&self) -> u64 {
         self.timeout_secs.unwrap_or(30)
+    }
+
+    /// Returns the effective tool category, defaulting to Shell (fail-closed).
+    pub fn effective_category(&self) -> ToolCategory {
+        self.category.unwrap_or(ToolCategory::Shell)
     }
 }
 
@@ -270,6 +282,7 @@ mod tests {
                 working_dir: None,
                 timeout_secs: Some(15),
                 env: None,
+                category: None,
             }],
             execution: "command".to_string(),
             binary: None,
@@ -346,6 +359,7 @@ mod tests {
             working_dir: None,
             timeout_secs: Some(60),
             env: None,
+            category: None,
         };
         assert_eq!(tool.effective_timeout(), 60);
 
@@ -357,6 +371,7 @@ mod tests {
             working_dir: None,
             timeout_secs: None,
             env: None,
+            category: None,
         };
         assert_eq!(tool_default.effective_timeout(), 30);
     }
@@ -375,6 +390,7 @@ mod tests {
             working_dir: Some("/tmp".to_string()),
             timeout_secs: Some(5),
             env: Some(env),
+            category: None,
         };
 
         assert_eq!(tool.env.as_ref().unwrap().get("FOO").unwrap(), "bar");
@@ -458,6 +474,7 @@ mod tests {
                 working_dir: None,
                 timeout_secs: None,
                 env: None,
+                category: None,
             }],
             execution: "command".to_string(),
             binary: None,
@@ -515,6 +532,7 @@ mod tests {
             working_dir: None,
             timeout_secs: None,
             env: None,
+            category: None,
         };
 
         let params = &tool.parameters;
@@ -643,5 +661,31 @@ mod tests {
         assert!(manifest.binary.is_none());
         assert!(!manifest.is_binary());
         assert_eq!(manifest.tools[0].command, "echo hello");
+    }
+
+    #[test]
+    fn test_plugin_tool_def_with_category() {
+        let json_str = r#"{
+            "name": "gcal",
+            "description": "Google Calendar",
+            "parameters": {},
+            "category": "network_write"
+        }"#;
+        let def: PluginToolDef = serde_json::from_str(json_str).unwrap();
+        assert_eq!(def.category, Some(ToolCategory::NetworkWrite));
+        assert_eq!(def.effective_category(), ToolCategory::NetworkWrite);
+    }
+
+    #[test]
+    fn test_plugin_tool_def_category_defaults_to_shell() {
+        let json_str = r#"{
+            "name": "tool",
+            "description": "desc",
+            "parameters": {},
+            "command": "echo"
+        }"#;
+        let def: PluginToolDef = serde_json::from_str(json_str).unwrap();
+        assert!(def.category.is_none());
+        assert_eq!(def.effective_category(), ToolCategory::Shell);
     }
 }

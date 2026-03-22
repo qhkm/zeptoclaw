@@ -120,7 +120,7 @@ impl Tool for BinaryPluginTool {
     }
 
     fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
+        self.def.effective_category()
     }
 
     fn parameters(&self) -> Value {
@@ -386,6 +386,7 @@ mod tests {
             working_dir: None,
             timeout_secs: None,
             env: None,
+            category: None,
         }
     }
 
@@ -684,5 +685,24 @@ echo '{"jsonrpc":"2.0","result":{"output":"final answer"},"id":1}'"#,
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
         assert_eq!(result.unwrap().for_llm, "final answer");
+    }
+
+    #[test]
+    fn test_tool_category_from_def() {
+        let mut def = test_tool_def();
+        def.category = Some(ToolCategory::NetworkWrite);
+        let tool = BinaryPluginTool::new(def, "test-plugin", PathBuf::from("/bin/echo"), 30);
+        assert_eq!(tool.category(), ToolCategory::NetworkWrite);
+    }
+
+    #[test]
+    fn test_tool_category_defaults_to_shell() {
+        let tool = BinaryPluginTool::new(
+            test_tool_def(),
+            "test-plugin",
+            PathBuf::from("/bin/echo"),
+            30,
+        );
+        assert_eq!(tool.category(), ToolCategory::Shell);
     }
 }

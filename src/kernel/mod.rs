@@ -174,8 +174,15 @@ impl ZeptoKernel {
             shared_ltm: ltm.clone(),
             template: template.cloned(),
         };
-        let mcp_clients =
+        let (mcp_clients, external_tool_names) =
             registrar::register_all_tools(&mut tools, &config, &filter, &deps).await?;
+
+        // Feed external tool names into the taint engine for default-deny labeling
+        if let Some(ref taint_lock) = taint {
+            if let Ok(mut engine) = taint_lock.write() {
+                engine.register_external_tools(external_tool_names);
+            }
+        }
 
         info!("Kernel boot: {} tools registered", tools.len());
 

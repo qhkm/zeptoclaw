@@ -528,7 +528,8 @@ pub async fn start_health_server_legacy(
     port: u16,
     metrics: Arc<UsageMetrics>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let host = std::env::var("ZEPTOCLAW_HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
     info!(port = port, "Health server listening");
 
     let handle = tokio::spawn(async move {

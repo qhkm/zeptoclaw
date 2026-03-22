@@ -212,12 +212,15 @@ pub async fn register_all_tools(
     config: &Config,
     filter: &ToolFilter,
     deps: &ToolDeps,
-) -> anyhow::Result<Vec<Arc<McpClient>>> {
+) -> anyhow::Result<(Vec<Arc<McpClient>>, HashSet<String>)> {
     use crate::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
     use crate::tools::shell::ShellTool;
 
     // Build shared shell security config from template (once, then cloned per tool)
     let shell_config = build_shell_config(deps.template.as_ref());
+
+    // Track external (plugin/MCP/custom/composed) tool names for taint engine
+    let mut external_tool_names: HashSet<String> = HashSet::new();
 
     // --- Group 1: Simple tools (no dependencies beyond config) ---
     if filter.is_enabled("echo") {
@@ -618,6 +621,7 @@ pub async fn register_all_tools(
                                                 timeout,
                                             ),
                                         ));
+                                        external_tool_names.insert(tool_def.name.clone());
                                         info!(
                                             plugin = %plugin.name(),
                                             tool = %tool_def.name,
@@ -639,6 +643,7 @@ pub async fn register_all_tools(
                                     shell_config.clone(),
                                 ),
                             ));
+                            external_tool_names.insert(tool_def.name.clone());
                             info!(
                                 plugin = %plugin.name(),
                                 tool = %tool_def.name,
@@ -662,6 +667,7 @@ pub async fn register_all_tools(
             continue;
         }
         registry.register(tool);
+        external_tool_names.insert(name.clone());
         info!(tool = %name, "Registered composed tool");
     }
 
@@ -681,6 +687,7 @@ pub async fn register_all_tools(
         let tool =
             crate::tools::custom::CustomTool::with_security(tool_def.clone(), shell_config.clone());
         registry.register(Box::new(tool));
+        external_tool_names.insert(tool_def.name.clone());
         info!(tool = %tool_def.name, "Registered custom CLI tool");
     }
 
@@ -768,6 +775,7 @@ pub async fn register_all_tools(
                         if !filter.is_enabled(&prefixed_name) {
                             continue;
                         }
+                        let prefixed = format!("{}_{}", server.name, tool.name);
                         registry.register(Box::new(McpToolWrapper::new(
                             &server.name,
                             &tool.name,
@@ -775,6 +783,7 @@ pub async fn register_all_tools(
                             tool.input_schema.clone(),
                             Arc::clone(&client),
                         )));
+                        external_tool_names.insert(prefixed);
                         registered_count += 1;
                     }
                     info!(
@@ -796,9 +805,13 @@ pub async fn register_all_tools(
         }
     }
 
-    info!("Registered {} tools", registry.len());
+    info!(
+        "Registered {} tools ({} external)",
+        registry.len(),
+        external_tool_names.len()
+    );
 
-    Ok(mcp_clients)
+    Ok((mcp_clients, external_tool_names))
 }
 
 #[cfg(test)]
