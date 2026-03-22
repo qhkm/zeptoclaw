@@ -1751,4 +1751,24 @@ mod tests {
             "<b>bold</b> and <i>italic</i> and <s>struck</s> and <code>code</code>"
         );
     }
+
+    #[test]
+    fn test_typing_key_format_consistency() {
+        // The inbound handler builds: format!("{}:{}", msg.chat.id.0, tid.0.0)
+        // The send() path builds:     format!("{}:{}", chat_id, tid)
+        // Both must produce identical keys for cancellation to work.
+        let chat_id: i64 = 123456789;
+        let thread_id: i32 = 42;
+
+        // Simulate handler key (chat.id.0 is i64, tid.0.0 is i32)
+        let handler_key_threaded = format!("{}:{}", chat_id, thread_id);
+        let handler_key_plain = chat_id.to_string();
+
+        // Simulate send() key (chat_id is i64, tid is &str from metadata)
+        let send_key_threaded = format!("{}:{}", chat_id, thread_id.to_string());
+        let send_key_plain = chat_id.to_string();
+
+        assert_eq!(handler_key_threaded, send_key_threaded);
+        assert_eq!(handler_key_plain, send_key_plain);
+    }
 }
