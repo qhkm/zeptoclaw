@@ -50,6 +50,11 @@ pub struct TaintConfig {
     pub enabled: bool,
     /// Whether to block on taint violations (`true`) or only warn (`false`).
     pub block_on_violation: bool,
+    /// Tool names exempt from automatic external-tool tainting.
+    /// Tools listed here will NOT be auto-labeled as `ExternalNetwork`
+    /// even if they are plugin/MCP tools.
+    #[serde(default)]
+    pub trusted_tools: Vec<String>,
 }
 
 impl Default for TaintConfig {
@@ -57,6 +62,7 @@ impl Default for TaintConfig {
         Self {
             enabled: true,
             block_on_violation: true,
+            trusted_tools: Vec::new(),
         }
     }
 }
@@ -258,16 +264,31 @@ pub struct TaintEngine {
     tainted_snippets: Vec<TaintedSnippet>,
     /// Maps tool_call_id to taint labels (for explicit registration).
     tainted_outputs: HashMap<String, HashSet<TaintLabel>>,
+    /// Names of plugin/MCP/custom tools (external tools). Their output is
+    /// auto-labeled `ExternalNetwork` unless exempted by `trusted_tools`.
+    external_tool_names: HashSet<String>,
+    /// Precomputed from `config.trusted_tools` for O(1) lookup.
+    trusted_tools: HashSet<String>,
 }
 
 impl TaintEngine {
     /// Create a new taint engine with the given configuration.
     pub fn new(config: TaintConfig) -> Self {
+        let trusted_tools: HashSet<String> = config.trusted_tools.iter().cloned().collect();
         Self {
             config,
             tainted_snippets: Vec::new(),
             tainted_outputs: HashMap::new(),
+            external_tool_names: HashSet::new(),
+            trusted_tools,
         }
+    }
+
+    /// Register tool names as external (plugin/MCP/custom/composed).
+    /// Their output will be auto-labeled `ExternalNetwork` unless the
+    /// tool appears in `trusted_tools`.
+    pub fn register_external_tools(&mut self, names: HashSet<String>) {
+        self.external_tool_names = names;
     }
 
     /// Auto-label a tool's output based on the tool name and content.
@@ -277,6 +298,7 @@ impl TaintEngine {
     ///
     /// Auto-labeling rules:
     /// - `web_fetch`, `http_request`, `web_search` -> `ExternalNetwork`
+    /// - Any plugin/MCP/custom tool (unless in `trusted_tools`) -> `ExternalNetwork`
     /// - Output matching secret patterns -> `Secret`
     pub fn label_output(&mut self, tool_name: &str, output: &str) -> HashSet<TaintLabel> {
         if !self.config.enabled {
@@ -285,8 +307,16 @@ impl TaintEngine {
 
         let mut labels = HashSet::new();
 
-        // Network source tools
+        // Network source tools (hardcoded built-ins)
         if NETWORK_SOURCE_TOOLS.contains(&tool_name) {
+            labels.insert(TaintLabel::ExternalNetwork);
+        }
+
+        // Default-deny: auto-taint plugin/MCP/custom tool outputs unless exempted
+        if !labels.contains(&TaintLabel::ExternalNetwork)
+            && self.external_tool_names.contains(tool_name)
+            && !self.trusted_tools.contains(tool_name)
+        {
             labels.insert(TaintLabel::ExternalNetwork);
         }
 
@@ -581,6 +611,7 @@ mod tests {
         let config = TaintConfig {
             enabled: false,
             block_on_violation: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: TaintConfig = serde_json::from_str(&json).unwrap();
@@ -602,6 +633,7 @@ mod tests {
         let config = TaintConfig {
             enabled: true,
             block_on_violation: false,
+            ..Default::default()
         };
         let mut engine = TaintEngine::new(config);
 
@@ -794,5 +826,92 @@ mod tests {
     fn test_collect_secret_markers_empty() {
         let markers = collect_secret_markers("no secrets here");
         assert!(markers.is_empty());
+    }
+
+    // ── Default-deny external tool tainting ──────────────────────────
+
+    #[test]
+    fn test_external_tool_auto_tainted() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        let mut ext = HashSet::new();
+        ext.insert("google_cli_read_mail".to_string());
+        engine.register_external_tools(ext);
+
+        let labels = engine.label_output("google_cli_read_mail", "email body here");
+        assert!(labels.contains(&TaintLabel::ExternalNetwork));
+    }
+
+    #[test]
+    fn test_external_tool_trusted_exempt() {
+        let config = TaintConfig {
+            trusted_tools: vec!["google_cli_read_mail".to_string()],
+            ..Default::default()
+        };
+        let mut engine = TaintEngine::new(config);
+        let mut ext = HashSet::new();
+        ext.insert("google_cli_read_mail".to_string());
+        engine.register_external_tools(ext);
+
+        let labels = engine.label_output("google_cli_read_mail", "email body here");
+        assert!(!labels.contains(&TaintLabel::ExternalNetwork));
+    }
+
+    #[test]
+    fn test_builtin_tool_not_auto_tainted() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        let mut ext = HashSet::new();
+        ext.insert("some_plugin".to_string());
+        engine.register_external_tools(ext);
+
+        // "echo" is not in external set — should not be tainted
+        let labels = engine.label_output("echo", "hello world");
+        assert!(!labels.contains(&TaintLabel::ExternalNetwork));
+    }
+
+    #[test]
+    fn test_hardcoded_network_tools_still_tainted() {
+        // web_fetch should be tainted even without being in external_tool_names
+        let engine = TaintEngine::new(TaintConfig::default());
+        assert!(NETWORK_SOURCE_TOOLS.contains(&"web_fetch"));
+
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        let labels = engine.label_output("web_fetch", "fetched content");
+        assert!(labels.contains(&TaintLabel::ExternalNetwork));
+    }
+
+    #[test]
+    fn test_external_tool_blocks_shell_sink() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        let mut ext = HashSet::new();
+        ext.insert("slack_read_messages".to_string());
+        engine.register_external_tools(ext);
+
+        // Plugin returns content
+        engine.label_output("slack_read_messages", "rm -rf /");
+
+        // That content should be blocked from shell_execute
+        let input = json!({"command": "rm -rf /"});
+        let result = engine.check_sink("shell_execute", &input);
+        assert!(result.is_err());
+        let violation = result.unwrap_err();
+        assert_eq!(violation.label, TaintLabel::ExternalNetwork);
+    }
+
+    #[test]
+    fn test_trusted_tools_config_serde() {
+        let config = TaintConfig {
+            enabled: true,
+            block_on_violation: true,
+            trusted_tools: vec!["my_safe_tool".to_string(), "another_tool".to_string()],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: TaintConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.trusted_tools.len(), 2);
+        assert!(deserialized
+            .trusted_tools
+            .contains(&"my_safe_tool".to_string()));
+        assert!(deserialized
+            .trusted_tools
+            .contains(&"another_tool".to_string()));
     }
 }

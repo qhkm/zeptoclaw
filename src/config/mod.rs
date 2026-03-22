@@ -1200,6 +1200,13 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_BLOCK_ON_VIOLATION") {
             self.safety.taint.block_on_violation = val.eq_ignore_ascii_case("true") || val == "1";
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_TRUSTED_TOOLS") {
+            self.safety.taint.trusted_tools = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
     }
 
     /// Apply context-compaction environment variable overrides.
