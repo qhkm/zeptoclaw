@@ -17,13 +17,13 @@ use futures::FutureExt;
 use tracing::{debug, error, info, warn};
 
 use super::loop_guard::{truncate_utf8, LoopGuard, LoopGuardAction, ToolCallSig};
-use super::middleware::{PipelineContext, PipelineOutput, Subsystems};
+use super::middleware::{OutputMode, PipelineContext, PipelineOutput, Subsystems};
 use super::pipeline::Terminal;
 use super::{ToolFeedback, ToolFeedbackPhase};
 use crate::agent::context_monitor::ContextMonitor;
 use crate::bus::InboundMessage;
 use crate::error::Result;
-use crate::providers::{LLMToolCall, Usage};
+use crate::providers::{LLMToolCall, StreamEvent, Usage};
 use crate::session::types::ToolCall;
 use crate::session::{Message, Role};
 use crate::tools::{ToolCategory, ToolContext, ToolRegistry};
@@ -332,12 +332,9 @@ fn record_usage(
     token_budget: &crate::agent::budget::TokenBudget,
 ) {
     if let Some(usage) = usage {
-        {
-            let metrics = subsystems.usage_metrics.try_read();
-            if let Ok(metrics) = metrics {
-                metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-            }
-        }
+        subsystems
+            .usage_metrics
+            .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
         subsystems
             .metrics_collector
             .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
@@ -427,6 +424,7 @@ impl Terminal for CoreLoop {
         // --- Tool loop ---
         let max_iterations = config.agents.defaults.max_tool_iterations;
         let mut iteration = 0;
+        let mut tool_limit_hit = false;
         let mut chain_tracker = crate::safety::chain_alert::ChainTracker::new();
         let mut loop_guard = if config.agents.defaults.loop_guard.enabled {
             Some(LoopGuard::new(config.agents.defaults.loop_guard.clone()))
@@ -465,10 +463,9 @@ impl Terminal for CoreLoop {
             }
 
             // Record metrics AFTER truncation so counts reflect actual execution.
-            {
-                let metrics = subsystems.usage_metrics.read().await;
-                metrics.record_tool_calls(response.tool_calls.len() as u64);
-            }
+            subsystems
+                .usage_metrics
+                .record_tool_calls(response.tool_calls.len() as u64);
 
             // Add assistant message with tool calls (post-truncation).
             let mut assistant_msg = Message::assistant(&response.content);
@@ -745,10 +742,7 @@ impl Terminal for CoreLoop {
                         } else {
                             error!(tool = %name, latency_ms = latency_ms, error = %result, "Tool execution failed");
                             hooks.on_error(&name, &result, channel_name, chat_id);
-                            {
-                                let metrics = subs.usage_metrics.read().await;
-                                metrics.record_error();
-                            }
+                            subs.usage_metrics.record_error();
                             if let Some(tx) = subs.tool_feedback_tx.read().await.as_ref() {
                                 let _ = tx.send(ToolFeedback {
                                     tool_name: name.clone(),
@@ -820,6 +814,12 @@ impl Terminal for CoreLoop {
                     info!(budget = %token_budget.summary(), "Token budget also exceeded, skipping synthesis call");
                     response.content =
                         "Tool call limit reached. Token budget exceeded.".to_string();
+                    break;
+                }
+                // For streaming mode, defer the synthesis call to the
+                // post-loop streaming path so it uses chat_stream().
+                if matches!(ctx.output_mode, OutputMode::Streaming { .. }) {
+                    tool_limit_hit = true;
                     break;
                 }
                 let messages =
@@ -916,14 +916,100 @@ impl Terminal for CoreLoop {
         )
         .await;
 
-        // Add final assistant response
-        session.add_message(Message::assistant(&response.content));
+        // --- Final response delivery ---
+        //
+        // For Sync mode: add the final assistant message and return.
+        // For Streaming mode: make a final chat_stream() call and forward
+        // events through the channel.
+        match ctx.output_mode {
+            OutputMode::Sync => {
+                session.add_message(Message::assistant(&response.content));
+                Ok(PipelineOutput::Sync {
+                    response: response.content,
+                    usage: response.usage,
+                    cached: false,
+                })
+            }
+            OutputMode::Streaming { ref tx } => {
+                // If no more tool calls, re-issue via chat_stream for
+                // real-time token delivery. If the tool loop hit max
+                // iterations with pending tool calls, fall back to a
+                // non-streaming Done event with the partial response.
+                if response.has_tool_calls() {
+                    // Still has tool calls after max iterations — send
+                    // final content as a single Done event.
+                    session.add_message(Message::assistant(&response.content));
+                    let _ = tx
+                        .send(StreamEvent::Done {
+                            content: response.content,
+                            usage: response.usage,
+                        })
+                        .await;
+                    return Ok(PipelineOutput::Streaming);
+                }
 
-        Ok(PipelineOutput::Sync {
-            response: response.content,
-            usage: response.usage,
-            cached: false,
-        })
+                // Re-build messages from session (which now includes tool
+                // results from the last iteration) for the streaming call.
+                let messages =
+                    build_resolved_messages(&subsystems, session, memory_override.as_deref()).await;
+
+                // If the tool call limit was hit, pass empty tools so the
+                // model cannot emit further tool calls after the cap.
+                let final_tool_defs = if tool_limit_hit {
+                    vec![]
+                } else {
+                    let tools = subsystems.tools.read().await;
+                    tools.definitions_with_options(config.agents.defaults.compact_tools)
+                };
+
+                let mut stream_rx = provider
+                    .chat_stream(messages, final_tool_defs, model, options)
+                    .await?;
+
+                let mut full_response = String::new();
+                while let Some(event) = stream_rx.recv().await {
+                    match event {
+                        StreamEvent::Done { content, usage } => {
+                            // Record final streaming usage.
+                            record_usage(&subsystems, usage.as_ref(), token_budget);
+                            // Use the assembled content from the stream.
+                            let final_content = if full_response.is_empty() {
+                                content
+                            } else {
+                                full_response
+                            };
+                            session.add_message(Message::assistant(&final_content));
+                            let _ = tx
+                                .send(StreamEvent::Done {
+                                    content: final_content,
+                                    usage,
+                                })
+                                .await;
+                            break;
+                        }
+                        StreamEvent::Delta(ref delta) => {
+                            full_response.push_str(delta);
+                            if tx.send(event).await.is_err() {
+                                // Receiver dropped — stop streaming.
+                                break;
+                            }
+                        }
+                        StreamEvent::ToolCalls(_) => {
+                            // Unexpected tool calls during final streaming
+                            // — forward and let the caller decide.
+                            let _ = tx.send(event).await;
+                            break;
+                        }
+                        StreamEvent::Error(_) => {
+                            let _ = tx.send(event).await;
+                            break;
+                        }
+                    }
+                }
+
+                Ok(PipelineOutput::Streaming)
+            }
+        }
     }
 }
 

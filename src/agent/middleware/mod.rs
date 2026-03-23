@@ -191,7 +191,7 @@ pub struct Subsystems {
     pub approval_gate: Option<ApprovalGate>,
     pub approval_handler: Option<Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>>,
     pub metrics_collector: MetricsCollector,
-    pub usage_metrics: Arc<RwLock<UsageMetrics>>,
+    pub usage_metrics: Arc<UsageMetrics>,
     /// Arc matches AgentLoop field type.
     pub token_budget: Arc<TokenBudget>,
     pub tool_call_limit: ToolCallLimitTracker,

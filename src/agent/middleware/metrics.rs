@@ -65,9 +65,8 @@ impl Middleware for MetricsMiddleware {
                     error = %e,
                     "Pipeline execution failed"
                 );
-                // Record error in usage metrics if available.
-                let usage_metrics = ctx.subsystems.usage_metrics.read().await;
-                usage_metrics.record_error();
+                // Record error in usage metrics.
+                ctx.subsystems.usage_metrics.record_error();
             }
         }
 

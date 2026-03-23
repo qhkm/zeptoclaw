@@ -13,26 +13,40 @@ use futures::FutureExt;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor};
-use crate::agent::loop_guard::{truncate_utf8, LoopGuard, LoopGuardAction, ToolCallSig};
+use crate::agent::context_monitor::ContextMonitor;
+// Loop guard items are used by tests that exercise the old free-function
+// variants; core_loop.rs owns the canonical copies now.
+#[cfg(test)]
+use crate::agent::loop_guard::{LoopGuard, LoopGuardAction, ToolCallSig};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
 use crate::health::UsageMetrics;
-use crate::providers::{ChatOptions, LLMProvider, LLMToolCall};
+use crate::providers::LLMProvider;
+#[cfg(test)]
+use crate::providers::{ChatOptions, LLMToolCall};
 use crate::safety::SafetyLayer;
-use crate::session::{Message, Role, SessionManager, ToolCall};
+#[cfg(test)]
+use crate::session::Message;
+use crate::session::SessionManager;
 use crate::tools::approval::{ApprovalGate, ApprovalRequest, ApprovalResponse};
-use crate::tools::{Tool, ToolCategory, ToolContext, ToolRegistry};
+use crate::tools::{Tool, ToolRegistry};
+#[cfg(test)]
+use crate::tools::{ToolCategory, ToolContext};
 use crate::utils::metrics::MetricsCollector;
 
 use super::budget::TokenBudget;
 use super::context::ContextBuilder;
 use super::tool_call_limit::ToolCallLimitTracker;
 
+// --- Constants and free functions below are used only by tests in this ---
+// --- module. Production code paths now go through core_loop.rs. These  ---
+// --- will be cleaned up or moved to a test helper in Phase 5.          ---
+
 /// System prompt sent during the memory flush turn, instructing the LLM to
 /// persist important facts and deduplicate existing long-term memory entries.
+#[cfg(test)]
 const MEMORY_FLUSH_PROMPT: &str =
     "Review the conversation above. Save any important facts, decisions, \
 user preferences, or learnings to long-term memory using the longterm_memory tool. \
@@ -40,14 +54,18 @@ Also review existing memories for duplicates — merge or delete stale entries. 
 Be selective: only save what would be useful in future conversations.";
 
 /// Maximum wall-clock time (in seconds) allowed for the memory flush LLM turn.
+#[cfg(test)]
 const MEMORY_FLUSH_TIMEOUT_SECS: u64 = 10;
 
+#[cfg(test)]
 const INTERACTIVE_CLI_METADATA_KEY: &str = "interactive_cli";
+#[cfg(test)]
 const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
 
 type ApprovalFuture = Pin<Box<dyn Future<Output = ApprovalResponse> + Send>>;
 type ApprovalHandler = Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>;
 
+#[cfg(test)]
 fn is_trusted_local_session(msg: &InboundMessage) -> bool {
     msg.channel == "cli"
         && msg
@@ -64,42 +82,12 @@ fn is_trusted_local_session(msg: &InboundMessage) -> bool {
             .is_none_or(|value| value != "true")
 }
 
-async fn resolve_tool_approval(
-    gate: &ApprovalGate,
-    approval_handler: Option<&ApprovalHandler>,
-    tool_name: &str,
-    args: &serde_json::Value,
-) -> Option<String> {
-    if !gate.requires_approval(tool_name) {
-        return None;
-    }
-
-    if let Some(handler) = approval_handler {
-        match handler(gate.create_request(tool_name, args)).await {
-            ApprovalResponse::Approved => None,
-            ApprovalResponse::Denied(reason) => Some(format!(
-                "Tool '{}' was denied by user approval. {}",
-                tool_name, reason
-            )),
-            ApprovalResponse::TimedOut => Some(format!(
-                "Tool '{}' approval timed out and was not executed.",
-                tool_name
-            )),
-        }
-    } else {
-        let prompt = gate.format_approval_request(tool_name, args);
-        Some(format!(
-            "Tool '{}' requires user approval and was not executed. {}",
-            tool_name, prompt
-        ))
-    }
-}
-
 /// Returns `true` if any tool in the batch may cause ordering-sensitive side effects
 /// (filesystem writes, shell commands) and the batch should be executed sequentially
 /// rather than in parallel.
 ///
 /// Unknown tools (not found in the registry) default to `true` (fail-safe: serialize).
+#[cfg(test)]
 async fn needs_sequential_execution(
     tools: &Arc<RwLock<ToolRegistry>>,
     tool_calls: &[LLMToolCall],
@@ -116,111 +104,6 @@ async fn needs_sequential_execution(
             })
             .unwrap_or(true) // unknown tool → serialize to be safe
     })
-}
-
-/// Check the loop guard for repeated tool-call patterns.
-///
-/// Returns `true` if the circuit breaker tripped and the caller should break.
-fn check_loop_guard(
-    guard: &mut LoopGuard,
-    tool_calls: &[LLMToolCall],
-    session: &mut crate::session::Session,
-) -> bool {
-    let call_sigs: Vec<ToolCallSig<'_>> = tool_calls
-        .iter()
-        .map(|tc| ToolCallSig {
-            name: tc.name.as_str(),
-            arguments: tc.arguments.as_str(),
-        })
-        .collect();
-    match guard.check(&call_sigs) {
-        LoopGuardAction::Allow => false,
-        LoopGuardAction::Warn {
-            reason,
-            suggested_delay_ms,
-        } => {
-            warn!(reason = %reason, "Loop guard warning");
-            let delay_hint = suggested_delay_ms
-                .map(|ms| format!(" (suggested delay: {}ms)", ms))
-                .unwrap_or_default();
-            session.add_message(Message::system(&format!(
-                "[LoopGuard] {reason}{delay_hint}.",
-            )));
-            false
-        }
-        LoopGuardAction::Block { reason } => {
-            warn!(reason = %reason, "Loop guard blocked tool call");
-            session.add_message(Message::system(&format!("[LoopGuard] blocked: {reason}.",)));
-            true
-        }
-        LoopGuardAction::CircuitBreak { total_repetitions } => {
-            warn!(
-                total_repetitions = total_repetitions,
-                "Loop guard circuit breaker triggered"
-            );
-            session.add_message(Message::system(&format!(
-                "[LoopGuard] circuit breaker tripped ({total_repetitions} total repetitions).",
-            )));
-            true
-        }
-    }
-}
-
-/// Record tool outcomes with the loop guard and check for repeated identical results.
-///
-/// Returns `true` if the circuit breaker tripped and the caller should break.
-fn check_loop_guard_outcomes(
-    guard: &mut LoopGuard,
-    tool_calls: &[LLMToolCall],
-    results: &[(String, String)],
-    session: &mut crate::session::Session,
-) -> bool {
-    // Build a lookup from tool call id -> (name, arguments).
-    let call_map: std::collections::HashMap<&str, (&str, &str)> = tool_calls
-        .iter()
-        .map(|tc| (tc.id.as_str(), (tc.name.as_str(), tc.arguments.as_str())))
-        .collect();
-
-    for (id, result) in results {
-        if let Some((name, args)) = call_map.get(id.as_str()) {
-            let prefix = truncate_utf8(result, 1000);
-            if let Some(action) = guard.record_outcome(name, args, prefix) {
-                match action {
-                    LoopGuardAction::Block { reason } => {
-                        warn!(reason = %reason, "Loop guard blocked repeated outcome");
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] blocked: {reason}.",
-                        )));
-                        return true;
-                    }
-                    LoopGuardAction::CircuitBreak { total_repetitions } => {
-                        warn!(
-                            total_repetitions = total_repetitions,
-                            "Loop guard circuit breaker triggered via outcome"
-                        );
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] circuit breaker tripped ({total_repetitions} total repetitions).",
-                        )));
-                        return true;
-                    }
-                    LoopGuardAction::Warn {
-                        reason,
-                        suggested_delay_ms,
-                    } => {
-                        warn!(reason = %reason, "Loop guard outcome warning");
-                        let delay_hint = suggested_delay_ms
-                            .map(|ms| format!(" (suggested delay: {}ms)", ms))
-                            .unwrap_or_default();
-                        session.add_message(Message::system(&format!(
-                            "[LoopGuard] {reason}{delay_hint}.",
-                        )));
-                    }
-                    LoopGuardAction::Allow => {}
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Propagate channel-specific routing metadata (e.g. `telegram_thread_id`)
@@ -245,6 +128,7 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
 /// When a `MediaStore` is provided the raw bytes are written to disk first and
 /// the resulting relative path is stored as `ImageSource::FilePath`; otherwise
 /// (or on a store-write error) the image is inlined as `ImageSource::Base64`.
+#[cfg(test)]
 async fn inbound_to_message(
     msg: &InboundMessage,
     media_store: Option<&crate::session::media::MediaStore>,
@@ -306,6 +190,7 @@ async fn inbound_to_message(
 /// Relative paths are resolved against `sessions_dir`.  If a file cannot be
 /// read (e.g. it was deleted), the image part is silently dropped from the
 /// message's `content_parts`.
+#[cfg(test)]
 async fn resolve_images_to_base64(
     messages: &mut [crate::session::Message],
     sessions_dir: &std::path::Path,
@@ -665,21 +550,6 @@ impl AgentLoop {
         }
     }
 
-    async fn build_memory_override(&self, user_input: &str) -> Option<String> {
-        let ltm = self.ltm.as_ref()?;
-        let guard = ltm.lock().await;
-        let memory = crate::memory::build_memory_injection(
-            &guard,
-            user_input,
-            crate::memory::MEMORY_INJECTION_BUDGET,
-        );
-        if memory.is_empty() {
-            None
-        } else {
-            Some(memory)
-        }
-    }
-
     /// Check if the agent loop is currently running.
     ///
     /// # Returns
@@ -888,7 +758,8 @@ impl AgentLoop {
         let subsystems = Arc::new(self.build_subsystems().await);
 
         // Build the pipeline context from the inbound message.
-        let mut ctx = self.build_pipeline_context(msg, subsystems);
+        let mut ctx =
+            self.build_pipeline_context(msg, subsystems, super::middleware::OutputMode::Sync);
 
         // Build and execute the middleware pipeline.
         let pipeline = self.build_pipeline();
@@ -947,9 +818,19 @@ impl AgentLoop {
             approval_gate: Some((*self.approval_gate).clone()),
             approval_handler,
             metrics_collector: MetricsCollector::new(),
-            // Use fresh metrics for the pipeline run; gateway-level metrics
-            // are recorded via process_inbound_message which wraps this call.
-            usage_metrics: Arc::new(RwLock::new(crate::health::UsageMetrics::default())),
+            // Use the externally-set usage metrics if available (for tests
+            // and direct callers of process_message / process_message_streaming).
+            // Gateway-level metrics are also recorded via process_inbound_message.
+            usage_metrics: {
+                let external = self.usage_metrics.try_read();
+                match external {
+                    Ok(guard) => match guard.as_ref() {
+                        Some(m) => Arc::clone(m),
+                        None => Arc::new(crate::health::UsageMetrics::default()),
+                    },
+                    Err(_) => Arc::new(crate::health::UsageMetrics::default()),
+                }
+            },
             token_budget: Arc::clone(&self.token_budget),
             tool_call_limit: ToolCallLimitTracker::new(self.tool_call_limit.limit()),
             cache: self.cache.clone(),
@@ -962,11 +843,12 @@ impl AgentLoop {
         }
     }
 
-    /// Build a PipelineContext for a sync process_message call.
+    /// Build a PipelineContext for a pipeline execution.
     fn build_pipeline_context(
         &self,
         msg: &InboundMessage,
         subsystems: Arc<super::middleware::Subsystems>,
+        output_mode: super::middleware::OutputMode,
     ) -> super::middleware::PipelineContext {
         super::middleware::PipelineContext {
             inbound: msg.clone(),
@@ -979,7 +861,7 @@ impl AgentLoop {
             messages: None,
             tool_definitions: None,
             memory_override: None,
-            output_mode: super::middleware::OutputMode::Sync,
+            output_mode,
             dry_run: self.dry_run.load(Ordering::SeqCst),
             subsystems,
         }
@@ -1021,14 +903,14 @@ impl AgentLoop {
     ///
     /// This method works like `process_message()` but streams the final response
     /// token-by-token through the returned receiver. Tool loop iterations are
-    /// still non-streaming. The assembled final response is returned via
-    /// `StreamEvent::Done`.
+    /// still non-streaming (handled by CoreLoop). Only the final response after
+    /// the tool loop uses `provider.chat_stream()` for real-time delivery.
+    ///
+    /// The assembled final response is returned via `StreamEvent::Done`.
     pub async fn process_message_streaming(
         &self,
         msg: &InboundMessage,
     ) -> Result<tokio::sync::mpsc::Receiver<crate::providers::StreamEvent>> {
-        use crate::providers::StreamEvent;
-
         // Acquire per-session lock
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
@@ -1038,678 +920,27 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
-        // Tiered inbound injection scanning (streaming path).
-        if self.config.safety.enabled && self.config.safety.injection_check_enabled {
-            let scan = crate::safety::sanitizer::check_injection(&msg.content);
-            if scan.was_modified {
-                let channel = msg.channel.as_str();
-                match channel {
-                    "webhook" => {
-                        warn!(
-                            channel = channel,
-                            sender = %msg.sender_id,
-                            warnings = ?scan.warnings,
-                            "Inbound injection BLOCKED from untrusted channel (streaming)"
-                        );
-                        crate::audit::log_audit_event(
-                            crate::audit::AuditCategory::InjectionAttempt,
-                            crate::audit::AuditSeverity::Critical,
-                            "inbound_injection_blocked",
-                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
-                            true,
-                        );
-                        return Err(ZeptoError::Tool(
-                            "Message rejected: potential prompt injection detected".into(),
-                        ));
-                    }
-                    _ => {
-                        warn!(
-                            channel = channel,
-                            sender = %msg.sender_id,
-                            warnings = ?scan.warnings,
-                            "Inbound injection WARNING from allowlisted channel (streaming)"
-                        );
-                        crate::audit::log_audit_event(
-                            crate::audit::AuditCategory::InjectionAttempt,
-                            crate::audit::AuditSeverity::Warning,
-                            "inbound_injection_warned",
-                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
+        // Build the shared subsystems snapshot for this pipeline run.
+        let subsystems = Arc::new(self.build_subsystems().await);
 
-        let provider = self
-            .resolve_provider_for_message(msg)
-            .await
-            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
-        let usage_metrics = {
-            let metrics = self.usage_metrics.read().await;
-            metrics.clone()
-        };
-        let metrics_collector = Arc::clone(&self.metrics_collector);
+        // Create the streaming channel. The sender goes into the pipeline
+        // context; the receiver is returned to the caller.
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
 
-        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
+        let mut ctx = self.build_pipeline_context(
+            msg,
+            Arc::clone(&subsystems),
+            super::middleware::OutputMode::Streaming { tx },
+        );
 
-        // Apply three-tier context overflow recovery if needed (streaming)
-        if let Some(ref monitor) = self.context_monitor {
-            if let Some(urgency) = monitor.urgency(&session.messages) {
-                if matches!(urgency, CompactionUrgency::Normal) {
-                    self.memory_flush(&session.messages).await;
-                }
+        // Build and execute the middleware pipeline.
+        // The pipeline runs on the current task. When CoreLoop detects
+        // OutputMode::Streaming, it performs the final LLM call via
+        // chat_stream() and forwards events through the channel.
+        let pipeline = self.build_pipeline();
+        pipeline.execute(&mut ctx).await?;
 
-                let context_limit = self.config.compaction.context_limit;
-                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
-                    session.messages,
-                    context_limit,
-                    urgency,
-                    8,               // keep_recent for tier 1
-                    tool_result_cap, // tool result budget for tier 2
-                );
-                if tier > 0 {
-                    debug!(
-                        tier = tier,
-                        urgency = ?urgency,
-                        "Context recovered via tier {} compaction (streaming)", tier
-                    );
-                }
-                session.messages = recovered;
-            }
-        }
-
-        // Convert inbound message to a session Message with image content parts,
-        // then add it to the session before building the provider message list.
-        let user_message = inbound_to_message(msg, None).await;
-        session.add_message(user_message);
-
-        // Pass an empty user_input: the current user message is already in session.
-        let memory_override = self.build_memory_override(&msg.content).await;
-        let messages = self
-            .build_resolved_messages(&session, memory_override.as_deref())
-            .await;
-
-        let tool_definitions = {
-            let tools = self.tools.read().await;
-            tools.definitions_with_options(self.config.agents.defaults.compact_tools)
-        };
-
-        let options = ChatOptions::new()
-            .with_max_tokens(self.config.agents.defaults.max_tokens)
-            .with_temperature(self.config.agents.defaults.temperature);
-        let model_string = self.resolve_model_for_message(msg);
-        let model = Some(model_string.as_str());
-
-        // Check token budget before first LLM call
-        if self.token_budget.is_exceeded() {
-            return Err(ZeptoError::Provider(format!(
-                "Token budget exceeded: {}",
-                self.token_budget.summary()
-            )));
-        }
-
-        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-            let _ = tx.send(ToolFeedback {
-                tool_name: String::new(),
-                phase: ToolFeedbackPhase::Thinking,
-                args_json: None,
-            });
-        }
-
-        // First call: non-streaming to see if there are tool calls
-        let mut response = provider
-            .chat(messages, tool_definitions, model, options.clone())
-            .await?;
-        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-            let _ = tx.send(ToolFeedback {
-                tool_name: String::new(),
-                phase: ToolFeedbackPhase::ThinkingDone,
-                args_json: None,
-            });
-        }
-        if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref()) {
-            metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-        }
-        if let Some(usage) = response.usage.as_ref() {
-            metrics_collector
-                .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-            self.token_budget
-                .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-        }
-
-        // User message was already added to session before build_messages above.
-
-        // Tool loop (non-streaming)
-        let max_iterations = self.config.agents.defaults.max_tool_iterations;
-        let mut iteration = 0;
-        let mut tool_limit_hit = false;
-        let mut chain_tracker = crate::safety::chain_alert::ChainTracker::new();
-        let mut loop_guard = if self.config.agents.defaults.loop_guard.enabled {
-            Some(LoopGuard::new(
-                self.config.agents.defaults.loop_guard.clone(),
-            ))
-        } else {
-            None
-        };
-
-        while response.has_tool_calls() && iteration < max_iterations {
-            iteration += 1;
-            debug!("Tool iteration {} of {}", iteration, max_iterations);
-
-            // Enforce tool call limit BEFORE adding assistant message to session
-            // (streaming path). Same rationale as non-streaming: avoids orphaned
-            // tool-call messages and keeps transcript consistent.
-            if self.tool_call_limit.is_exceeded() {
-                info!(
-                    count = self.tool_call_limit.count(),
-                    limit = ?self.tool_call_limit.limit(),
-                    "Tool call limit already reached, skipping streaming tool execution"
-                );
-                break;
-            }
-            if let Some(remaining) = self.tool_call_limit.remaining() {
-                let allowed = remaining as usize;
-                if allowed < response.tool_calls.len() {
-                    info!(
-                        batch_size = response.tool_calls.len(),
-                        remaining = allowed,
-                        "Truncating streaming tool call batch to remaining budget"
-                    );
-                    response.tool_calls.truncate(allowed);
-                }
-            }
-
-            if let Some(metrics) = usage_metrics.as_ref() {
-                metrics.record_tool_calls(response.tool_calls.len() as u64);
-            }
-
-            // Add assistant message with tool calls (post-truncation).
-            let mut assistant_msg = Message::assistant(&response.content);
-            assistant_msg.tool_calls = Some(
-                response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCall {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    })
-                    .collect(),
-            );
-            session.add_message(assistant_msg);
-
-            let workspace = self.config.workspace_path();
-            let workspace_str = workspace.to_string_lossy();
-            let tool_ctx = ToolContext::new()
-                .with_channel(&msg.channel, &msg.chat_id)
-                .with_workspace(&workspace_str)
-                .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
-
-            let approval_gate = Arc::clone(&self.approval_gate);
-            let approval_handler = self.approval_handler.read().await.clone();
-            let safety_layer_stream = self.safety_layer.clone();
-            let taint_engine_stream = self.taint.clone();
-            let hook_engine = Arc::new(
-                crate::hooks::HookEngine::new(self.config.hooks.clone())
-                    .with_bus(Arc::clone(&self.bus)),
-            );
-
-            // Compute dynamic tool result budget based on remaining context space
-            let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
-            let context_limit_stream = self.config.compaction.context_limit;
-            let max_result_bytes_stream = self.config.agents.defaults.max_tool_result_bytes;
-            let result_budget_stream = crate::utils::sanitize::compute_tool_result_budget(
-                context_limit_stream,
-                current_tokens_stream,
-                response.tool_calls.len(),
-                max_result_bytes_stream,
-            );
-
-            let tool_feedback_tx = self.tool_feedback_tx.clone();
-            #[cfg(feature = "panel")]
-            let event_bus_clone_stream = self.event_bus.clone();
-            let is_dry_run_stream = self.dry_run.load(Ordering::SeqCst);
-            let current_agent_mode_stream = self.agent_mode;
-            let trusted_local_session = is_trusted_local_session(msg);
-
-            let run_sequential = (!trusted_local_session
-                && approval_handler.is_some()
-                && response
-                    .tool_calls
-                    .iter()
-                    .any(|tool_call| approval_gate.requires_approval(&tool_call.name)))
-                || needs_sequential_execution(&self.tools, &response.tool_calls).await;
-            let tool_timeout_secs = if self.config.agents.defaults.tool_timeout_secs > 0 {
-                self.config.agents.defaults.tool_timeout_secs
-            } else {
-                self.config.agents.defaults.agent_timeout_secs
-            };
-            let tool_timeout = std::time::Duration::from_secs(tool_timeout_secs.max(1));
-
-            // Clone inbound metadata for routing propagation in tool `for_user` messages.
-            let inbound_metadata_stream = msg.metadata.clone();
-
-            let tool_futures: Vec<_> = response
-                .tool_calls
-                .iter()
-                .map(|tool_call| {
-                    let tools = Arc::clone(&self.tools);
-                    let ctx = tool_ctx.clone();
-                    let name = tool_call.name.clone();
-                    let id = tool_call.id.clone();
-                    let raw_args = tool_call.arguments.clone();
-                    let usage_metrics = usage_metrics.clone();
-                    let metrics_collector = Arc::clone(&metrics_collector);
-                    let gate = Arc::clone(&approval_gate);
-                    let approval_handler = approval_handler.clone();
-                    let hooks = Arc::clone(&hook_engine);
-                    let safety = safety_layer_stream.clone();
-                    let taint = taint_engine_stream.clone();
-                    let budget = result_budget_stream;
-                    let tool_feedback_tx = tool_feedback_tx.clone();
-                    #[cfg(feature = "panel")]
-                    let event_bus = event_bus_clone_stream.clone();
-                    let dry_run = is_dry_run_stream;
-                    let agent_mode = current_agent_mode_stream;
-                    let bus_for_tools = Arc::clone(&self.bus);
-                    let inbound_meta = inbound_metadata_stream.clone();
-
-                    async move {
-                        let args: serde_json::Value = match serde_json::from_str(&raw_args) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(tool = %name, error = %e, "Invalid JSON in tool arguments");
-                                serde_json::json!({"_parse_error": format!("Invalid arguments JSON: {}", e)})
-                            }
-                        };
-
-                        let channel_name = ctx.channel.as_deref().unwrap_or("cli");
-                        let chat_id = ctx.chat_id.as_deref().unwrap_or(channel_name);
-                        if let crate::hooks::HookResult::Block(msg) =
-                            hooks.before_tool(&name, &args, channel_name, chat_id)
-                        {
-                            return (id, format!("Tool '{}' blocked by hook: {}", name, msg), false);
-                        }
-
-                        // Agent mode enforcement — same fail-closed logic as non-streaming path.
-                        {
-                            let mode_policy = crate::security::ModePolicy::new(agent_mode);
-                            let tools_guard = tools.read().await;
-                            if let Some(tool) = tools_guard.get(&name) {
-                                let tool_category = tool.category();
-                                match mode_policy.check(tool_category) {
-                                    crate::security::CategoryPermission::Blocked => {
-                                        info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool blocked by agent mode");
-                                        return (id, format!(
-                                            "Tool '{}' is blocked in {} mode (category: {})",
-                                            name, agent_mode, tool_category
-                                        ), false);
-                                    }
-                                    crate::security::CategoryPermission::RequiresApproval => {
-                                        if trusted_local_session {
-                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Trusted local session bypassed approval-gated tool");
-                                        } else if !gate.requires_approval(&name) {
-                                            info!(tool = %name, mode = %agent_mode, category = ?tool_category, "Tool requires approval per agent mode");
-                                            return (id, format!(
-                                                "Tool '{}' requires approval in {} mode (category: {}). Not executed.",
-                                                name, agent_mode, tool_category
-                                            ), false);
-                                        }
-                                    }
-                                    crate::security::CategoryPermission::Allowed => {}
-                                }
-                            }
-                        }
-
-                        // Check approval gate before executing
-                        if !trusted_local_session {
-                            if let Some(message) = resolve_tool_approval(
-                                &gate,
-                                approval_handler.as_ref(),
-                                &name,
-                                &args,
-                            )
-                            .await
-                            {
-                                info!(tool = %name, "Tool requires approval, blocking execution");
-                                return (id, message, false);
-                            }
-                        }
-
-                        // Dry-run mode: describe what would happen without executing
-                        if dry_run {
-                            return (id, Self::dry_run_result(&name, &args, &raw_args, budget), false);
-                        }
-
-                        // Send tool starting feedback
-                        if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                            let _ = tx.send(ToolFeedback {
-                                tool_name: name.clone(),
-                                phase: ToolFeedbackPhase::Starting,
-                                args_json: Some(raw_args.clone()),
-                            });
-                        }
-                        #[cfg(feature = "panel")]
-                        if let Some(bus) = &event_bus {
-                            bus.send(crate::api::events::PanelEvent::ToolStarted {
-                                tool: name.clone(),
-                            });
-                        }
-                        let tool_start = std::time::Instant::now();
-                        let execution = std::panic::AssertUnwindSafe(async {
-                            let tools_guard = tools.read().await;
-                            crate::kernel::execute_tool(
-                                &tools_guard,
-                                &name,
-                                args,
-                                &ctx,
-                                safety.as_ref().map(|s| s.as_ref()),
-                                &metrics_collector,
-                                taint.as_ref().map(|t| t.as_ref()),
-                            )
-                            .await
-                        })
-                        .catch_unwind();
-                        let (result, success, tool_output) = match tokio::time::timeout(tool_timeout, execution).await {
-                            Ok(Ok(Ok(output))) => {
-                                let success = !output.is_error;
-                                let for_llm = output.for_llm.clone();
-                                (for_llm, success, Some(output))
-                            }
-                            Ok(Ok(Err(e))) => (format!("Error: {}", e), false, None),
-                            Ok(Err(_panic)) => {
-                                error!(tool = %name, "Tool panicked during execution");
-                                (format!("Error: Tool '{}' panicked during execution", name), false, None)
-                            }
-                            Err(_) => {
-                                error!(tool = %name, timeout_secs = tool_timeout.as_secs(), "Tool execution timed out");
-                                (format!("Error: Tool '{}' timed out after {}s", name, tool_timeout.as_secs()), false, None)
-                            }
-                        };
-                        let pause = tool_output.as_ref().is_some_and(|o| o.pause_for_input);
-                        let elapsed = tool_start.elapsed();
-                        let latency_ms = elapsed.as_millis() as u64;
-                        if let Some(output) = tool_output {
-                            // Send to user if tool opted in
-                            if let Some(ref user_msg) = output.for_user {
-                                let mut outbound = crate::bus::OutboundMessage::new(
-                                    ctx.channel.as_deref().unwrap_or(""),
-                                    ctx.chat_id.as_deref().unwrap_or(""),
-                                    user_msg,
-                                );
-                                // Propagate routing metadata (e.g. telegram_thread_id)
-                                if let Some(tid) = inbound_meta.get("telegram_thread_id") {
-                                    outbound
-                                        .metadata
-                                        .insert("telegram_thread_id".to_string(), tid.clone());
-                                }
-                                let _ = bus_for_tools.publish_outbound(outbound).await;
-                            }
-                        }
-                        if success {
-                            debug!(tool = %name, latency_ms = latency_ms, "Tool executed successfully");
-                            hooks.after_tool(&name, &result, elapsed, channel_name, chat_id);
-                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                                let _ = tx.send(ToolFeedback {
-                                    tool_name: name.clone(),
-                                    phase: ToolFeedbackPhase::Done {
-                                        elapsed_ms: latency_ms,
-                                    },
-                                    args_json: Some(raw_args.clone()),
-                                });
-                            }
-                            #[cfg(feature = "panel")]
-                            if let Some(bus) = &event_bus {
-                                bus.send(crate::api::events::PanelEvent::ToolDone {
-                                    tool: name.clone(),
-                                    duration_ms: latency_ms,
-                                });
-                            }
-                        } else {
-                            error!(tool = %name, latency_ms = latency_ms, error = %result, "Tool execution failed");
-                            hooks.on_error(&name, &result, channel_name, chat_id);
-                            if let Some(metrics) = usage_metrics.as_ref() {
-                                metrics.record_error();
-                            }
-                            if let Some(tx) = tool_feedback_tx.read().await.as_ref() {
-                                let _ = tx.send(ToolFeedback {
-                                    tool_name: name.clone(),
-                                    phase: ToolFeedbackPhase::Failed {
-                                        elapsed_ms: latency_ms,
-                                        error: result.clone(),
-                                    },
-                                    args_json: Some(raw_args.clone()),
-                                });
-                            }
-                            #[cfg(feature = "panel")]
-                            if let Some(bus) = &event_bus {
-                                bus.send(crate::api::events::PanelEvent::ToolFailed {
-                                    tool: name.clone(),
-                                    error: result.clone(),
-                                });
-                            }
-                        }
-                        let sanitized =
-                            crate::utils::sanitize::sanitize_tool_result(&result, budget);
-
-                        (id, sanitized, pause)
-                    }
-                })
-                .collect();
-
-            let results = if run_sequential {
-                let mut out = Vec::with_capacity(tool_futures.len());
-                for fut in tool_futures {
-                    out.push(fut.await);
-                }
-                out
-            } else {
-                futures::future::join_all(tool_futures).await
-            };
-
-            // Record tool names for chain alerting (streaming path)
-            let tool_names: Vec<String> = response
-                .tool_calls
-                .iter()
-                .map(|tc| tc.name.clone())
-                .collect();
-            chain_tracker.record(&tool_names);
-            let results: Vec<(String, String, bool)> = results;
-            let should_pause = results.iter().any(|(_, _, pause)| *pause);
-            for (id, result, _) in &results {
-                session.add_message(Message::tool_result(id, result));
-            }
-
-            if should_pause {
-                break;
-            }
-
-            // Increment tool call counter after execution.
-            self.tool_call_limit
-                .increment(response.tool_calls.len() as u32);
-            // If the limit is now hit, clear tool_calls so the post-loop code
-            // enters the streaming final call branch, which re-issues the
-            // conversation (with tool results in session) as a proper streamed
-            // response instead of returning the stale tool-call stub.
-            if self.tool_call_limit.is_exceeded() {
-                info!(
-                    count = self.tool_call_limit.count(),
-                    limit = ?self.tool_call_limit.limit(),
-                    "Tool call limit reached, proceeding to final streaming synthesis"
-                );
-                tool_limit_hit = true;
-                response.tool_calls.clear();
-                break;
-            }
-
-            if let Some(guard) = loop_guard.as_mut() {
-                if check_loop_guard(guard, &response.tool_calls, &mut session) {
-                    response.content =
-                        "Stopped tool loop due to repeated tool-call pattern.".to_string();
-                    break;
-                }
-
-                // Record outcomes for outcome-aware blocking.
-                let results_for_guard: Vec<(String, String)> = results
-                    .iter()
-                    .map(|(id, r, _)| (id.clone(), r.clone()))
-                    .collect();
-                if check_loop_guard_outcomes(
-                    guard,
-                    &response.tool_calls,
-                    &results_for_guard,
-                    &mut session,
-                ) {
-                    response.content =
-                        "Stopped tool loop due to repeated identical outcomes.".to_string();
-                    break;
-                }
-            }
-
-            let tool_definitions = {
-                let tools = self.tools.read().await;
-                tools.definitions_with_options(self.config.agents.defaults.compact_tools)
-            };
-
-            // Check token budget before next LLM call
-            if self.token_budget.is_exceeded() {
-                info!(budget = %self.token_budget.summary(), "Token budget exceeded during streaming tool loop");
-                break;
-            }
-
-            let messages = self
-                .build_resolved_messages(&session, memory_override.as_deref())
-                .await;
-
-            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-                let _ = tx.send(ToolFeedback {
-                    tool_name: String::new(),
-                    phase: ToolFeedbackPhase::Thinking,
-                    args_json: None,
-                });
-            }
-
-            response = provider
-                .chat(messages, tool_definitions, model, options.clone())
-                .await?;
-            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-                let _ = tx.send(ToolFeedback {
-                    tool_name: String::new(),
-                    phase: ToolFeedbackPhase::ThinkingDone,
-                    args_json: None,
-                });
-            }
-            if let (Some(metrics), Some(usage)) = (usage_metrics.as_ref(), response.usage.as_ref())
-            {
-                metrics.record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-            }
-            if let Some(usage) = response.usage.as_ref() {
-                metrics_collector
-                    .record_tokens(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-                self.token_budget
-                    .record(usage.prompt_tokens as u64, usage.completion_tokens as u64);
-            }
-        }
-
-        if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-            let _ = tx.send(ToolFeedback {
-                tool_name: String::new(),
-                phase: ToolFeedbackPhase::ResponseReady,
-                args_json: None,
-            });
-        }
-
-        // Final call: if no more tool calls, use streaming
-        if !response.has_tool_calls() {
-            // Re-issue the final call via chat_stream.
-            // If the tool call limit was hit, pass empty tools so the model
-            // cannot emit further tool calls after the cap was enforced.
-            let messages = self
-                .build_resolved_messages(&session, memory_override.as_deref())
-                .await;
-
-            let tool_definitions = if tool_limit_hit {
-                vec![]
-            } else {
-                let tools = self.tools.read().await;
-                tools.definitions_with_options(self.config.agents.defaults.compact_tools)
-            };
-
-            // Signal that tools are done and response is ready (streaming path)
-            if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
-                let _ = tx.send(ToolFeedback {
-                    tool_name: String::new(),
-                    phase: ToolFeedbackPhase::ResponseReady,
-                    args_json: None,
-                });
-            }
-
-            let stream_rx = provider
-                .chat_stream(messages, tool_definitions, model, options)
-                .await?;
-
-            // Wrap in a forwarding task that also saves the session
-            let (out_tx, out_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
-            let session_manager = Arc::clone(&self.session_manager);
-            let session_clone = session.clone();
-            let usage_metrics = usage_metrics.clone();
-            let metrics_collector = Arc::clone(&metrics_collector);
-
-            tokio::spawn(async move {
-                let mut session = session_clone;
-                let mut stream_rx = stream_rx;
-
-                while let Some(event) = stream_rx.recv().await {
-                    match &event {
-                        StreamEvent::Done { content, usage } => {
-                            if let Some(usage) = usage.as_ref() {
-                                if let Some(metrics) = usage_metrics.as_ref() {
-                                    metrics.record_tokens(
-                                        usage.prompt_tokens as u64,
-                                        usage.completion_tokens as u64,
-                                    );
-                                }
-                                metrics_collector.record_tokens(
-                                    usage.prompt_tokens as u64,
-                                    usage.completion_tokens as u64,
-                                );
-                            }
-                            session.add_message(Message::assistant(content));
-                            let _ = session_manager.save(&session).await;
-                            let _ = out_tx.send(event).await;
-                            return;
-                        }
-                        StreamEvent::ToolCalls(_) => {
-                            // Unexpected tool calls during streaming — emit and let caller handle
-                            let _ = out_tx.send(event).await;
-                            return;
-                        }
-                        _ => {
-                            if out_tx.send(event).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            });
-
-            Ok(out_rx)
-        } else {
-            // Still has tool calls after max iterations — return non-streaming result
-            session.add_message(Message::assistant(&response.content));
-            self.session_manager.save(&session).await?;
-
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let _ = tx
-                .send(StreamEvent::Done {
-                    content: response.content,
-                    usage: response.usage,
-                })
-                .await;
-            Ok(rx)
-        }
+        Ok(rx)
     }
 
     /// Run a silent LLM turn to flush important memories before context compaction.
@@ -1719,6 +950,10 @@ impl AgentLoop {
     /// decisions, or user preferences before the context is compacted. The call is
     /// wrapped in a timeout and all failures are logged as warnings — the method
     /// never panics or returns an error.
+    ///
+    /// NOTE: Production code now uses CompactionMiddleware which owns memory
+    /// flush logic.  This method is retained for existing tests.
+    #[cfg(test)]
     async fn memory_flush(&self, messages: &[crate::session::Message]) {
         use tokio::time::{timeout, Duration};
 
@@ -1819,35 +1054,6 @@ impl AgentLoop {
         }
 
         info!("memory_flush: completed");
-    }
-
-    /// Build messages with memory override, resolve image paths to base64,
-    /// and filter out empty user messages (after resolution).
-    ///
-    /// This centralizes the message preparation logic used in tool loops.
-    /// Images are resolved first so that if resolution fails and leaves a
-    /// message empty, it will be correctly filtered out.
-    async fn build_resolved_messages(
-        &self,
-        session: &crate::session::Session,
-        memory_override: Option<&str>,
-    ) -> Vec<Message> {
-        let mut msgs = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override,
-        );
-
-        // Resolve image file paths to base64 before filtering
-        if let Some(dir) = self.session_manager.sessions_dir() {
-            resolve_images_to_base64(&mut msgs, dir).await;
-        }
-
-        // Filter out empty user messages only after resolution
-        // (in case image resolution failed and left the message empty)
-        msgs.retain(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()));
-
-        msgs
     }
 
     async fn session_lock_for(&self, session_key: &str) -> Arc<Mutex<()>> {
@@ -2244,22 +1450,6 @@ impl AgentLoop {
     /// Check if dry-run mode is enabled.
     pub fn is_dry_run(&self) -> bool {
         self.dry_run.load(Ordering::SeqCst)
-    }
-
-    /// Format a dry-run result describing what a tool call would do.
-    fn dry_run_result(
-        name: &str,
-        args: &serde_json::Value,
-        raw_args: &str,
-        budget: usize,
-    ) -> String {
-        let args_display =
-            serde_json::to_string_pretty(args).unwrap_or_else(|_| raw_args.to_string());
-        let sanitized = crate::utils::sanitize::sanitize_tool_result(&args_display, budget);
-        format!(
-            "[DRY RUN] Would execute tool '{}' with arguments: {}",
-            name, sanitized
-        )
     }
 
     /// Set tool feedback sender for CLI tool execution display.
