@@ -625,6 +625,105 @@ pub(crate) fn friendly_api_error(provider: &str, status: u16, body: &str) -> Str
     }
 }
 
+/// Parse model IDs from an OpenAI-format `/models` response.
+/// Works for: Anthropic, OpenAI, OpenRouter, Groq, Gemini (via compat shim), DeepSeek, Kimi.
+pub(crate) fn parse_models_openai_format(json: &serde_json::Value) -> Vec<String> {
+    json.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("id")
+                        .and_then(|id| id.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse model names from an Ollama `/api/tags` response.
+pub(crate) fn parse_models_ollama_format(json: &serde_json::Value) -> Vec<String> {
+    json.get("models")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch available models from a provider's API.
+///
+/// Uses the standard `/models` endpoint for most providers (OpenAI format).
+/// Ollama uses `/api/tags` with a different response format.
+/// Returns sorted model IDs on success; Err on network/parse failure.
+pub(crate) async fn fetch_provider_models(
+    provider: &str,
+    api_key: &str,
+    api_base: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let (url, is_ollama) = match provider {
+        "anthropic" => {
+            let base = api_base.unwrap_or("https://api.anthropic.com");
+            (format!("{}/v1/models", base), false)
+        }
+        "openai" => {
+            let base = api_base.unwrap_or("https://api.openai.com/v1");
+            (format!("{}/models", base), false)
+        }
+        "ollama" => {
+            let base = api_base.unwrap_or("http://localhost:11434/v1");
+            let base_stripped = base
+                .trim_end_matches('/')
+                .trim_end_matches("/v1")
+                .trim_end_matches('/');
+            (format!("{}/api/tags", base_stripped), true)
+        }
+        _ => {
+            // All other OpenAI-compatible providers (openrouter, groq, gemini, deepseek, kimi, etc.)
+            let base = api_base.unwrap_or("https://api.openai.com/v1");
+            (format!("{}/models", base), false)
+        }
+    };
+
+    let mut req = client.get(&url);
+    if provider == "anthropic" {
+        req = req
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "Failed to fetch models from {} (HTTP {})",
+            provider,
+            resp.status().as_u16()
+        );
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let mut models = if is_ollama {
+        parse_models_ollama_format(&body)
+    } else {
+        parse_models_openai_format(&body)
+    };
+    models.sort();
+    Ok(models)
+}
+
 /// Resolve Google access token: stored OAuth -> config fallback.
 #[cfg(feature = "google")]
 async fn resolve_google_token(config: &Config) -> Option<String> {
@@ -918,4 +1017,50 @@ mod tests {
     }
 
     // Provider chain tests moved to zeptoclaw::kernel::provider::tests
+
+    #[test]
+    fn test_parse_openai_models_response() {
+        let json = serde_json::json!({
+            "data": [
+                {"id": "gpt-5.4", "object": "model"},
+                {"id": "gpt-5.4-mini", "object": "model"},
+                {"id": "gpt-5.4-nano", "object": "model"},
+            ]
+        });
+        let models = parse_models_openai_format(&json);
+        assert_eq!(models, vec!["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
+    }
+
+    #[test]
+    fn test_parse_openai_models_empty_data() {
+        let json = serde_json::json!({"data": []});
+        let models = parse_models_openai_format(&json);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_models_missing_data() {
+        let json = serde_json::json!({"error": "unauthorized"});
+        let models = parse_models_openai_format(&json);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ollama_models_response() {
+        let json = serde_json::json!({
+            "models": [
+                {"name": "llama3.3:latest", "size": 123456},
+                {"name": "mistral:latest", "size": 654321},
+            ]
+        });
+        let models = parse_models_ollama_format(&json);
+        assert_eq!(models, vec!["llama3.3:latest", "mistral:latest"]);
+    }
+
+    #[test]
+    fn test_parse_ollama_models_empty() {
+        let json = serde_json::json!({"models": []});
+        let models = parse_models_ollama_format(&json);
+        assert!(models.is_empty());
+    }
 }
