@@ -12,11 +12,8 @@ use std::time::Duration;
 use crate::config::BrowserConfig;
 use crate::error::{Result, ZeptoError};
 
-use super::web::is_blocked_host;
+use super::web::{is_blocked_host, validate_redirect_target_basic};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
-
-/// Navigation commands that take a URL and need SSRF protection.
-const NAVIGATION_COMMANDS: &[&str] = &["open", "goto", "navigate"];
 
 pub struct BrowserTool {
     engine: String,
@@ -55,11 +52,13 @@ impl BrowserTool {
             })?
             .map_err(|e| ZeptoError::Tool(format!("Failed to run agent-browser: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
         if !output.status.success() {
-            let msg = if stderr.is_empty() { stdout } else { stderr };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.is_empty() {
+                String::from_utf8_lossy(&output.stdout)
+            } else {
+                stderr
+            };
             return Err(ZeptoError::Tool(format!(
                 "agent-browser {} failed: {}",
                 command,
@@ -67,33 +66,18 @@ impl BrowserTool {
             )));
         }
 
-        Ok(stdout)
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Validate a URL against SSRF blocklist.
+    /// Validate a URL against SSRF blocklist (scheme + host check).
     fn check_url(url_str: &str) -> Result<()> {
         let parsed = Url::parse(url_str)
             .map_err(|e| ZeptoError::Tool(format!("Invalid URL '{}': {}", url_str, e)))?;
-
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(ZeptoError::SecurityViolation(format!(
-                "Only http/https URLs are allowed, got '{}'",
-                scheme
-            )));
-        }
-
-        if is_blocked_host(&parsed) {
-            return Err(ZeptoError::SecurityViolation(
-                "Blocked URL host (local or private network)".to_string(),
-            ));
-        }
-
-        Ok(())
+        validate_redirect_target_basic(&parsed)
     }
 
     /// Post-navigation check: verify the final URL isn't a private/local address
-    /// (catches redirect-based SSRF).
+    /// (catches redirect-based SSRF). Fails closed on unparseable URLs.
     async fn check_final_url(&self) -> Result<()> {
         let final_url = self.run_command("get", &["url"]).await?;
         let final_url = final_url.trim();
@@ -102,15 +86,28 @@ impl BrowserTool {
             return Ok(());
         }
 
-        if let Ok(parsed) = Url::parse(final_url) {
-            if is_blocked_host(&parsed) {
-                // Kill the page before returning error
-                let _ = self.run_command("close", &[]).await;
+        let parsed = match Url::parse(final_url) {
+            Ok(u) => u,
+            Err(_) => {
+                // Fail closed: unparseable final URL could be an exotic redirect
+                if let Err(e) = self.run_command("close", &[]).await {
+                    tracing::warn!("Failed to close browser after SSRF check: {}", e);
+                }
                 return Err(ZeptoError::SecurityViolation(format!(
-                    "Navigation redirected to blocked host: {}",
+                    "Navigation resulted in unparseable URL: {}",
                     final_url
                 )));
             }
+        };
+
+        if is_blocked_host(&parsed) {
+            if let Err(e) = self.run_command("close", &[]).await {
+                tracing::warn!("Failed to close browser after SSRF block: {}", e);
+            }
+            return Err(ZeptoError::SecurityViolation(format!(
+                "Navigation redirected to blocked host: {}",
+                final_url
+            )));
         }
 
         Ok(())
@@ -124,12 +121,14 @@ impl Tool for BrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Headless browser for navigating and interacting with web pages. \
-         Commands: open <url> (navigate), snapshot (get page content with element refs), \
-         click <ref> (click element), fill <ref> <text> (input text), \
+        "Browse the web: fetch page content, read articles, interact with websites. \
+         Use this tool whenever you need to visit a URL or retrieve web content. \
+         Typical flow: open <url>, then snapshot to read the page. \
+         Commands: open <url> (navigate to page), snapshot (read page content with element refs), \
+         click <ref> (click element), fill <ref> <text> (type into input), \
          find role|text|label <query> (find elements), get text|html|url|title, \
          scroll up|down, back, forward, screenshot [path], wait <selector|ms>. \
-         Element refs like @e1 are assigned by snapshot and used for interaction."
+         Element refs like @e1 are assigned by snapshot and reused for interaction."
     }
 
     fn compact_description(&self) -> &str {
@@ -165,7 +164,7 @@ impl Tool for BrowserTool {
 
         let args_str = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
-        let is_navigation = NAVIGATION_COMMANDS.contains(&command);
+        let is_navigation = command == "open";
 
         // Pre-navigation SSRF check
         if is_navigation {
