@@ -173,6 +173,12 @@ pub struct AgentLoop {
     event_bus: Option<crate::api::events::EventBus>,
     /// MCP clients to shut down when the agent stops (prevents zombie child processes).
     mcp_clients: Arc<tokio::sync::RwLock<Vec<Arc<crate::tools::mcp::client::McpClient>>>>,
+    /// Pre-built middleware pipeline. The chain configuration is identical for
+    /// every message, so we build it once in the constructor.
+    pipeline: super::pipeline::Pipeline,
+    /// Shared subsystems snapshot. Built once, then updated via
+    /// `rebuild_subsystems()` when late-bound setters fire.
+    subsystems: std::sync::RwLock<Arc<super::middleware::Subsystems>>,
 }
 
 impl AgentLoop {
@@ -202,6 +208,82 @@ impl AgentLoop {
         } else {
             None
         }
+    }
+
+    /// Build the middleware pipeline from config. This is a static method so
+    /// it can be called from the constructor before `self` exists.
+    fn build_pipeline_static(config: &Config, has_cache: bool) -> super::pipeline::Pipeline {
+        use super::core_loop::CoreLoop;
+        use super::middleware::{
+            cache::CacheMiddleware, compaction::CompactionMiddleware,
+            context_build::ContextBuildMiddleware, feedback::FeedbackMiddleware,
+            injection_scan::InjectionScanMiddleware, memory_injection::MemoryInjectionMiddleware,
+            metrics::MetricsMiddleware, provider_resolution::ProviderResolutionMiddleware,
+            session::SessionMiddleware, session_save::SessionSaveMiddleware,
+            token_budget::TokenBudgetMiddleware,
+        };
+
+        super::pipeline::Pipeline::builder()
+            .add(SessionSaveMiddleware::new())
+            .add(MetricsMiddleware::new())
+            .add(FeedbackMiddleware::new())
+            .add_if(
+                config.safety.enabled && config.safety.injection_check_enabled,
+                InjectionScanMiddleware::from_config(config),
+            )
+            .add(ProviderResolutionMiddleware::new())
+            .add(SessionMiddleware::new())
+            .add(CompactionMiddleware::new())
+            .add(MemoryInjectionMiddleware::new())
+            .add(ContextBuildMiddleware::new())
+            .add(TokenBudgetMiddleware::new())
+            .add_if(has_cache, CacheMiddleware::new())
+            .build(CoreLoop::new())
+    }
+
+    /// Rebuild the shared Subsystems snapshot from current AgentLoop fields.
+    ///
+    /// Called by late-bound setters (`set_ltm`, `set_taint`, `set_approval_handler`,
+    /// `set_usage_metrics`, `set_event_bus`) which fire rarely (once at startup).
+    fn rebuild_subsystems(&self) {
+        let approval_handler = self
+            .approval_handler
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let usage_metrics = self
+            .usage_metrics
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Arc::clone))
+            .unwrap_or_else(|| Arc::new(crate::health::UsageMetrics::default()));
+
+        let new_subsystems = Arc::new(super::middleware::Subsystems {
+            session_manager: (*self.session_manager).clone(),
+            tools: Arc::clone(&self.tools),
+            context_builder: self.context_builder.clone(),
+            context_monitor: self.context_monitor.clone(),
+            ltm: self.ltm.clone(),
+            safety_layer: self.safety_layer.clone(),
+            taint: self.taint.clone(),
+            approval_gate: Some((*self.approval_gate).clone()),
+            approval_handler,
+            metrics_collector: MetricsCollector::new(),
+            usage_metrics,
+            token_budget: Arc::clone(&self.token_budget),
+            tool_call_limit: ToolCallLimitTracker::new(self.tool_call_limit.limit()),
+            cache: self.cache.clone(),
+            bus: (*self.bus).clone(),
+            agent_mode: self.agent_mode,
+            provider_registry: Arc::clone(&self.provider_registry),
+            tool_feedback_tx: Arc::clone(&self.tool_feedback_tx),
+            #[cfg(feature = "panel")]
+            event_bus: self.event_bus.clone(),
+        });
+
+        let mut guard = self.subsystems.write().expect("subsystems RwLock poisoned");
+        *guard = new_subsystems;
     }
 
     /// Create a new agent loop.
@@ -249,13 +331,40 @@ impl AgentLoop {
         let cache = Self::build_cache(&config);
         let pairing = Self::build_pairing(&config);
         let streaming_default = config.agents.defaults.streaming;
+        let tools = Arc::new(RwLock::new(ToolRegistry::new()));
+        let provider_registry = Arc::new(RwLock::new(HashMap::new()));
+        let token_budget_clone = Arc::clone(&token_budget);
+        let tool_feedback_tx = Arc::new(RwLock::new(None));
+        let pipeline = Self::build_pipeline_static(&config, cache.is_some());
+        let subsystems = Arc::new(super::middleware::Subsystems {
+            session_manager: session_manager.clone(),
+            tools: Arc::clone(&tools),
+            context_builder: ContextBuilder::new(),
+            context_monitor: context_monitor.clone(),
+            ltm: None,
+            safety_layer: safety_layer.clone(),
+            taint: None,
+            approval_gate: Some((*approval_gate).clone()),
+            approval_handler: None,
+            metrics_collector: MetricsCollector::new(),
+            usage_metrics: Arc::new(crate::health::UsageMetrics::default()),
+            token_budget: token_budget_clone,
+            tool_call_limit: ToolCallLimitTracker::new(tool_call_limit.limit()),
+            cache: cache.clone(),
+            bus: (*bus).clone(),
+            agent_mode,
+            provider_registry: Arc::clone(&provider_registry),
+            tool_feedback_tx: Arc::clone(&tool_feedback_tx),
+            #[cfg(feature = "panel")]
+            event_bus: None,
+        });
         Self {
             config,
             session_manager: Arc::new(session_manager),
             bus,
             provider: Arc::new(RwLock::new(None)),
-            provider_registry: Arc::new(RwLock::new(HashMap::new())),
-            tools: Arc::new(RwLock::new(ToolRegistry::new())),
+            provider_registry,
+            tools,
             running: AtomicBool::new(false),
             context_builder: ContextBuilder::new(),
             usage_metrics: Arc::new(RwLock::new(None)),
@@ -272,7 +381,7 @@ impl AgentLoop {
             agent_mode,
             safety_layer,
             context_monitor,
-            tool_feedback_tx: Arc::new(RwLock::new(None)),
+            tool_feedback_tx,
             cache,
             pairing,
             ltm: None,
@@ -280,6 +389,8 @@ impl AgentLoop {
             #[cfg(feature = "panel")]
             event_bus: None,
             mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            pipeline,
+            subsystems: std::sync::RwLock::new(subsystems),
         }
     }
 
@@ -319,13 +430,40 @@ impl AgentLoop {
         let cache = Self::build_cache(&config);
         let pairing = Self::build_pairing(&config);
         let streaming_default = config.agents.defaults.streaming;
+        let tools = Arc::new(RwLock::new(ToolRegistry::new()));
+        let provider_registry = Arc::new(RwLock::new(HashMap::new()));
+        let token_budget_clone = Arc::clone(&token_budget);
+        let tool_feedback_tx = Arc::new(RwLock::new(None));
+        let pipeline = Self::build_pipeline_static(&config, cache.is_some());
+        let subsystems = Arc::new(super::middleware::Subsystems {
+            session_manager: session_manager.clone(),
+            tools: Arc::clone(&tools),
+            context_builder: context_builder.clone(),
+            context_monitor: context_monitor.clone(),
+            ltm: None,
+            safety_layer: safety_layer.clone(),
+            taint: None,
+            approval_gate: Some((*approval_gate).clone()),
+            approval_handler: None,
+            metrics_collector: MetricsCollector::new(),
+            usage_metrics: Arc::new(crate::health::UsageMetrics::default()),
+            token_budget: token_budget_clone,
+            tool_call_limit: ToolCallLimitTracker::new(tool_call_limit.limit()),
+            cache: cache.clone(),
+            bus: (*bus).clone(),
+            agent_mode,
+            provider_registry: Arc::clone(&provider_registry),
+            tool_feedback_tx: Arc::clone(&tool_feedback_tx),
+            #[cfg(feature = "panel")]
+            event_bus: None,
+        });
         Self {
             config,
             session_manager: Arc::new(session_manager),
             bus,
             provider: Arc::new(RwLock::new(None)),
-            provider_registry: Arc::new(RwLock::new(HashMap::new())),
-            tools: Arc::new(RwLock::new(ToolRegistry::new())),
+            provider_registry,
+            tools,
             running: AtomicBool::new(false),
             context_builder,
             usage_metrics: Arc::new(RwLock::new(None)),
@@ -342,7 +480,7 @@ impl AgentLoop {
             agent_mode,
             safety_layer,
             context_monitor,
-            tool_feedback_tx: Arc::new(RwLock::new(None)),
+            tool_feedback_tx,
             cache,
             pairing,
             ltm: None,
@@ -350,6 +488,8 @@ impl AgentLoop {
             #[cfg(feature = "panel")]
             event_bus: None,
             mcp_clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            pipeline,
+            subsystems: std::sync::RwLock::new(subsystems),
         }
     }
 
@@ -374,14 +514,25 @@ impl AgentLoop {
     /// agent.set_provider(Box::new(provider)).await;
     /// ```
     pub async fn set_provider(&self, provider: Box<dyn LLMProvider>) {
-        let mut p = self.provider.write().await;
-        *p = Some(Arc::from(provider));
+        let arc: Arc<dyn LLMProvider> = Arc::from(provider);
+        {
+            let mut p = self.provider.write().await;
+            *p = Some(Arc::clone(&arc));
+        }
+        // Inject into the shared registry so middleware can resolve it.
+        // The registry Arc is shared with Subsystems, so no rebuild needed.
+        let mut reg = self.provider_registry.write().await;
+        reg.insert("__default__".to_string(), arc);
     }
 
     /// Set the provider from an already-assembled Arc (used by kernel boot).
     pub async fn set_provider_arc(&self, provider: Arc<dyn LLMProvider>) {
-        let mut p = self.provider.write().await;
-        *p = Some(provider);
+        {
+            let mut p = self.provider.write().await;
+            *p = Some(Arc::clone(&provider));
+        }
+        let mut reg = self.provider_registry.write().await;
+        reg.insert("__default__".to_string(), provider);
     }
 
     /// Register a named provider in the runtime registry (for /model switching).
@@ -445,6 +596,8 @@ impl AgentLoop {
     pub async fn set_usage_metrics(&self, metrics: Arc<UsageMetrics>) {
         let mut usage_metrics = self.usage_metrics.write().await;
         *usage_metrics = Some(metrics);
+        drop(usage_metrics);
+        self.rebuild_subsystems();
     }
 
     /// Get the per-agent metrics collector.
@@ -477,6 +630,8 @@ impl AgentLoop {
         let wrapped: ApprovalHandler = Arc::new(move |request| handler(request).boxed());
         let mut slot = self.approval_handler.write().await;
         *slot = Some(wrapped);
+        drop(slot);
+        self.rebuild_subsystems();
     }
 
     /// Merge all tools from a kernel ToolRegistry and register MCP clients.
@@ -552,97 +707,26 @@ impl AgentLoop {
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
 
-        // Reset per-run counters so limits apply to each process_message call
-        // independently, not across the lifetime of the AgentLoop struct.
-        self.tool_call_limit.reset();
-        self.token_budget.reset();
-
-        // Build the shared subsystems snapshot for this pipeline run.
-        let subsystems = Arc::new(self.build_subsystems().await);
+        // Grab the pre-built subsystems snapshot (rebuilt by late-bound setters).
+        let subsystems = {
+            let guard = self.subsystems.read().expect("subsystems RwLock poisoned");
+            Arc::clone(&guard)
+        };
 
         // Build the pipeline context from the inbound message.
         let mut ctx =
             self.build_pipeline_context(msg, subsystems, super::middleware::OutputMode::Sync);
 
-        // Build and execute the middleware pipeline.
-        let pipeline = self.build_pipeline();
-        let output = pipeline.execute(&mut ctx).await?;
-
-        // Session was mutated by middlewares (SessionMiddleware loaded it,
-        // CoreLoop added tool results + final assistant message). Save it.
-        if let Some(ref session) = ctx.session {
-            self.session_manager.save(session).await?;
-        }
+        // Execute the pre-built middleware pipeline.
+        // Budget resets are handled by TokenBudgetMiddleware.
+        // Session save is handled by SessionSaveMiddleware.
+        let output = self.pipeline.execute(&mut ctx).await?;
 
         match output {
             super::middleware::PipelineOutput::Sync { response, .. } => Ok(response),
             super::middleware::PipelineOutput::Streaming => {
                 unreachable!("sync path produced streaming output")
             }
-        }
-    }
-
-    /// Build the Subsystems snapshot from current AgentLoop fields.
-    ///
-    /// This is called on each `process_message` invocation so that late-bound
-    /// setters (set_ltm, set_taint, etc.) are picked up.
-    async fn build_subsystems(&self) -> super::middleware::Subsystems {
-        let approval_handler_guard = self.approval_handler.read().await;
-        let approval_handler = approval_handler_guard.clone();
-        drop(approval_handler_guard);
-
-        // Ensure the default provider is available in the registry.
-        // The middleware resolves providers from the registry, but the
-        // default provider set via `set_provider()` may not be registered
-        // there. Copy it into the registry under a well-known key.
-        let provider_registry = {
-            let default_provider = self.provider.read().await.clone();
-            if let Some(ref default_p) = default_provider {
-                let reg = self.provider_registry.read().await;
-                // Only inject if the registry is empty or has no default entry,
-                // to avoid overwriting explicit entries.
-                if reg.is_empty() {
-                    drop(reg);
-                    let mut reg = self.provider_registry.write().await;
-                    reg.insert("__default__".to_string(), Arc::clone(default_p));
-                }
-            }
-            Arc::clone(&self.provider_registry)
-        };
-
-        super::middleware::Subsystems {
-            session_manager: (*self.session_manager).clone(),
-            tools: Arc::clone(&self.tools),
-            context_builder: self.context_builder.clone(),
-            context_monitor: self.context_monitor.clone(),
-            ltm: self.ltm.clone(),
-            safety_layer: self.safety_layer.clone(),
-            taint: self.taint.clone(),
-            approval_gate: Some((*self.approval_gate).clone()),
-            approval_handler,
-            metrics_collector: MetricsCollector::new(),
-            // Use the externally-set usage metrics if available (for tests
-            // and direct callers of process_message / process_message_streaming).
-            // Gateway-level metrics are also recorded via process_inbound_message.
-            usage_metrics: {
-                let external = self.usage_metrics.try_read();
-                match external {
-                    Ok(guard) => match guard.as_ref() {
-                        Some(m) => Arc::clone(m),
-                        None => Arc::new(crate::health::UsageMetrics::default()),
-                    },
-                    Err(_) => Arc::new(crate::health::UsageMetrics::default()),
-                }
-            },
-            token_budget: Arc::clone(&self.token_budget),
-            tool_call_limit: ToolCallLimitTracker::new(self.tool_call_limit.limit()),
-            cache: self.cache.clone(),
-            bus: (*self.bus).clone(),
-            agent_mode: self.agent_mode,
-            provider_registry,
-            tool_feedback_tx: Arc::clone(&self.tool_feedback_tx),
-            #[cfg(feature = "panel")]
-            event_bus: self.event_bus.clone(),
         }
     }
 
@@ -670,38 +754,6 @@ impl AgentLoop {
         }
     }
 
-    /// Build the middleware pipeline with CoreLoop as the terminal.
-    fn build_pipeline(&self) -> super::pipeline::Pipeline {
-        use super::core_loop::CoreLoop;
-        use super::middleware::{
-            cache::CacheMiddleware, compaction::CompactionMiddleware,
-            context_build::ContextBuildMiddleware, feedback::FeedbackMiddleware,
-            injection_scan::InjectionScanMiddleware, memory_injection::MemoryInjectionMiddleware,
-            metrics::MetricsMiddleware, provider_resolution::ProviderResolutionMiddleware,
-            session::SessionMiddleware, session_save::SessionSaveMiddleware,
-            token_budget::TokenBudgetMiddleware,
-        };
-
-        super::pipeline::Pipeline::builder()
-            // Outermost first: session save wraps everything so it runs
-            // on both success and error paths.
-            .add(SessionSaveMiddleware::new())
-            .add(MetricsMiddleware::new())
-            .add(FeedbackMiddleware::new())
-            .add_if(
-                self.config.safety.enabled && self.config.safety.injection_check_enabled,
-                InjectionScanMiddleware::from_config(&self.config),
-            )
-            .add(ProviderResolutionMiddleware::new())
-            .add(SessionMiddleware::new())
-            .add(CompactionMiddleware::new())
-            .add(MemoryInjectionMiddleware::new())
-            .add(ContextBuildMiddleware::new())
-            .add(TokenBudgetMiddleware::new())
-            .add_if(self.cache.is_some(), CacheMiddleware::new())
-            .build(CoreLoop::new())
-    }
-
     /// Process a message with streaming output for the final LLM response.
     ///
     /// This method works like `process_message()` but streams the final response
@@ -718,13 +770,11 @@ impl AgentLoop {
         let session_lock = self.session_lock_for(&msg.session_key).await;
         let _session_guard = session_lock.lock().await;
 
-        // Reset per-run counters so limits apply to each process_message call
-        // independently, not across the lifetime of the AgentLoop struct.
-        self.tool_call_limit.reset();
-        self.token_budget.reset();
-
-        // Build the shared subsystems snapshot for this pipeline run.
-        let subsystems = Arc::new(self.build_subsystems().await);
+        // Grab the pre-built subsystems snapshot.
+        let subsystems = {
+            let guard = self.subsystems.read().expect("subsystems RwLock poisoned");
+            Arc::clone(&guard)
+        };
 
         // Create the streaming channel. The sender goes into the pipeline
         // context; the receiver is returned to the caller.
@@ -732,16 +782,14 @@ impl AgentLoop {
 
         let mut ctx = self.build_pipeline_context(
             msg,
-            Arc::clone(&subsystems),
+            subsystems,
             super::middleware::OutputMode::Streaming { tx },
         );
 
-        // Build and execute the middleware pipeline.
-        // The pipeline runs on the current task. When CoreLoop detects
-        // OutputMode::Streaming, it performs the final LLM call via
-        // chat_stream() and forwards events through the channel.
-        let pipeline = self.build_pipeline();
-        pipeline.execute(&mut ctx).await?;
+        // Execute the pre-built middleware pipeline.
+        // Budget resets are handled by TokenBudgetMiddleware.
+        // Session save is handled by SessionSaveMiddleware.
+        self.pipeline.execute(&mut ctx).await?;
 
         Ok(rx)
     }
@@ -1153,17 +1201,20 @@ impl AgentLoop {
         ltm: Arc<tokio::sync::Mutex<crate::memory::longterm::LongTermMemory>>,
     ) {
         self.ltm = Some(ltm);
+        self.rebuild_subsystems();
     }
 
     /// Set the taint engine (shared with kernel for uniform taint tracking).
     pub fn set_taint(&mut self, taint: Arc<std::sync::RwLock<crate::safety::taint::TaintEngine>>) {
         self.taint = Some(taint);
+        self.rebuild_subsystems();
     }
 
     /// Set the panel event bus for real-time dashboard events.
     #[cfg(feature = "panel")]
     pub fn set_event_bus(&mut self, bus: crate::api::events::EventBus) {
         self.event_bus = Some(bus);
+        self.rebuild_subsystems();
     }
 
     /// Get a reference to the token budget tracker.
