@@ -256,6 +256,18 @@ pub(crate) async fn cmd_agent(
         eprintln!();
     }
 
+    // Warn if configured model doesn't match any known provider.
+    {
+        let provider_names = zeptoclaw::providers::configured_provider_names(&config);
+        let provider_refs: Vec<&str> = provider_names.iter().copied().collect();
+        if let Some(warning) = super::common::model_provider_mismatch_warning(
+            &config.agents.defaults.model,
+            &provider_refs,
+        ) {
+            tracing::warn!("{}", warning);
+        }
+    }
+
     if let Some(msg) = message {
         // Single message mode
         let inbound = cli_inbound_message(&msg);

@@ -748,6 +748,27 @@ async fn resolve_google_token(config: &Config) -> Option<String> {
         .map(String::from)
 }
 
+/// Returns a warning message if the configured model doesn't match any known provider.
+/// Returns `None` if the model matches a provider or no providers are configured.
+pub(crate) fn model_provider_mismatch_warning(
+    model: &str,
+    configured_providers: &[&str],
+) -> Option<String> {
+    if configured_providers.is_empty() {
+        return None;
+    }
+    if zeptoclaw::providers::provider_name_for_model(model).is_some() {
+        return None;
+    }
+    Some(format!(
+        "Model \"{}\" doesn't match any known provider.\n  \
+         Configured providers: {}\n  \
+         Run /model list to see available models.",
+        model,
+        configured_providers.join(", "),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1083,26 @@ mod tests {
         let json = serde_json::json!({"models": []});
         let models = parse_models_ollama_format(&json);
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_model_mismatch_warning_returns_none_when_matched() {
+        assert!(model_provider_mismatch_warning("gpt-5.4", &["openai", "anthropic"]).is_none());
+        assert!(model_provider_mismatch_warning("claude-sonnet-4-6", &["anthropic"]).is_none());
+    }
+
+    #[test]
+    fn test_model_mismatch_warning_returns_message_when_unmatched() {
+        let msg = model_provider_mismatch_warning("some-unknown-model", &["anthropic", "openai"]);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.contains("some-unknown-model"));
+        assert!(msg.contains("anthropic"));
+        assert!(msg.contains("/model list"));
+    }
+
+    #[test]
+    fn test_model_mismatch_warning_returns_none_when_no_providers() {
+        assert!(model_provider_mismatch_warning("gpt-5.4", &[]).is_none());
     }
 }
