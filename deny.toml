@@ -1,6 +1,8 @@
 # cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
 # Run: cargo deny check
 # CI: added to .github/workflows/ci.yml
+#
+# Schema targets cargo-deny v2 (used by EmbarkStudios/cargo-deny-action v2).
 
 [graph]
 targets = [
@@ -11,14 +13,13 @@ targets = [
 ]
 
 [advisories]
-# Deny any crate with a known security vulnerability
-vulnerability = "deny"
-# Warn on unmaintained crates
-unmaintained = "warn"
-# Warn on yanked crates
-yanked = "warn"
 # Ignore specific advisories if needed (add RUSTSEC IDs here)
-ignore = []
+ignore = [
+    # rustls-webpki 0.102.8 pinned by rumqttc 0.25.1 (latest) — no upstream fix available.
+    # Low impact: CRL distribution point matching, requires compromised CA.
+    # Only affects builds with --features mqtt. Remove when rumqttc updates.
+    "RUSTSEC-2026-0049",
+]
 
 [licenses]
 # Crates must use one of these licenses
@@ -35,15 +36,9 @@ allow = [
     "CC0-1.0",
     "OpenSSL",
     "MPL-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "CDLA-Permissive-2.0",
 ]
-# Deny copyleft licenses that would require open-sourcing downstream
-deny = [
-    "AGPL-3.0",
-    "GPL-2.0",
-    "GPL-3.0",
-]
-copyleft = "warn"
-unlicensed = "deny"
 confidence-threshold = 0.8
 
 # Ring uses a custom non-standard license that is permissive (ISC-style + OpenSSL)
@@ -60,12 +55,8 @@ multiple-versions = "warn"
 # Deny wildcard dependencies
 wildcards = "deny"
 highlight = "all"
-# Skip specific duplicate version pairs if unavoidable
-# skip = []
 
 [sources]
 # Only allow crates from crates.io
 unknown-registry = "deny"
 unknown-git = "deny"
-# Allow specific git sources if needed
-# allow-git = []
