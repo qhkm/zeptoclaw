@@ -112,24 +112,30 @@ mod tests {
 
     #[test]
     fn test_create_searcher_disabled_returns_builtin() {
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Disabled;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Disabled,
+            ..Default::default()
+        };
         let searcher = create_searcher(&config);
         assert_eq!(searcher.name(), "builtin");
     }
 
     #[test]
     fn test_create_searcher_qmd_falls_back() {
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Qmd;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Qmd,
+            ..Default::default()
+        };
         let searcher = create_searcher(&config);
         assert_eq!(searcher.name(), "builtin");
     }
 
     #[test]
     fn test_create_searcher_embedding_falls_back() {
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Embedding;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Embedding,
+            ..Default::default()
+        };
         let searcher = create_searcher(&config);
         assert_eq!(searcher.name(), "builtin");
     }
@@ -137,16 +143,20 @@ mod tests {
     #[cfg(feature = "memory-bm25")]
     #[test]
     fn test_create_searcher_bm25() {
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Bm25;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Bm25,
+            ..Default::default()
+        };
         let searcher = create_searcher(&config);
         assert_eq!(searcher.name(), "bm25");
     }
 
     #[test]
     fn test_create_searcher_hnsw_falls_back() {
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Hnsw;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Hnsw,
+            ..Default::default()
+        };
         let searcher = create_searcher(&config);
         assert_eq!(searcher.name(), "builtin");
     }
@@ -159,8 +169,10 @@ mod tests {
     fn test_create_searcher_with_provider_none_embedding_falls_back() {
         // Without a provider, embedding backend must fall back to builtin
         // regardless of the feature flag.
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Embedding;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Embedding,
+            ..Default::default()
+        };
         let searcher = create_searcher_with_provider(&config, None);
         // Either "embedding" (if feature compiled + provider given) or "builtin"
         // Here we pass None so it MUST be "builtin".
@@ -231,8 +243,10 @@ mod tests {
             }
         }
 
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Embedding;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Embedding,
+            ..Default::default()
+        };
         let provider: Option<Arc<dyn LLMProvider>> = Some(Arc::new(FakeProvider));
         let searcher = create_searcher_with_provider(&config, provider);
         assert_eq!(searcher.name(), "embedding");
@@ -269,8 +283,10 @@ mod tests {
             }
         }
 
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Hnsw;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Hnsw,
+            ..Default::default()
+        };
         let provider: Option<Arc<dyn LLMProvider>> = Some(Arc::new(FakeProvider));
         let searcher = create_searcher_with_provider(&config, provider);
         assert_eq!(searcher.name(), "hnsw");
@@ -280,8 +296,10 @@ mod tests {
     fn test_create_searcher_hnsw_without_provider_falls_back() {
         // Without a provider, HNSW backend must fall back to builtin
         // regardless of whether the feature flag is enabled.
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Hnsw;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Hnsw,
+            ..Default::default()
+        };
         let searcher = create_searcher_with_provider(&config, None);
         assert_eq!(searcher.name(), "builtin");
     }

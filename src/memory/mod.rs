@@ -534,10 +534,12 @@ mod tests {
         let workspace = dir.path();
         fs::write(workspace.join("MEMORY.md"), "abc").unwrap();
 
-        let mut config = MemoryConfig::default();
-        config.backend = MemoryBackend::Disabled;
-        config.citations = MemoryCitationsMode::Off;
-        config.include_default_memory = false;
+        let config = MemoryConfig {
+            backend: MemoryBackend::Disabled,
+            citations: MemoryCitationsMode::Off,
+            include_default_memory: false,
+            ..Default::default()
+        };
 
         let files = collect_memory_files(workspace, &config).unwrap();
         assert!(files.is_empty());

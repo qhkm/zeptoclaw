@@ -548,8 +548,10 @@ mod tests {
         );
 
         // Path 3: Safety input block → Ok with is_error=true
-        let mut safety_config = SafetyConfig::default();
-        safety_config.enabled = true;
+        let safety_config = SafetyConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let safety = SafetyLayer::new(safety_config);
         // Inject a known prompt injection pattern to trigger safety block
         let result = execute_tool(

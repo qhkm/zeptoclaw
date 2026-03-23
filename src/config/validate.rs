@@ -676,16 +676,18 @@ mod tests {
 
     #[test]
     fn test_validate_custom_tools_valid() {
-        let mut config = Config::default();
-        config.custom_tools = vec![CustomToolDef {
-            name: "cpu_temp".to_string(),
-            description: "Read CPU temp".to_string(),
-            command: "cat /sys/class/thermal/thermal_zone0/temp".to_string(),
-            parameters: None,
-            working_dir: None,
-            timeout_secs: None,
-            env: None,
-        }];
+        let config = Config {
+            custom_tools: vec![CustomToolDef {
+                name: "cpu_temp".to_string(),
+                description: "Read CPU temp".to_string(),
+                command: "cat /sys/class/thermal/thermal_zone0/temp".to_string(),
+                parameters: None,
+                working_dir: None,
+                timeout_secs: None,
+                env: None,
+            }],
+            ..Default::default()
+        };
         let warnings = validate_custom_tools(&config);
         assert!(
             warnings.is_empty(),
@@ -696,64 +698,72 @@ mod tests {
 
     #[test]
     fn test_validate_custom_tool_name_invalid() {
-        let mut config = Config::default();
-        config.custom_tools = vec![CustomToolDef {
-            name: "123bad".to_string(),
-            description: "Bad".to_string(),
-            command: "echo".to_string(),
-            parameters: None,
-            working_dir: None,
-            timeout_secs: None,
-            env: None,
-        }];
+        let config = Config {
+            custom_tools: vec![CustomToolDef {
+                name: "123bad".to_string(),
+                description: "Bad".to_string(),
+                command: "echo".to_string(),
+                parameters: None,
+                working_dir: None,
+                timeout_secs: None,
+                env: None,
+            }],
+            ..Default::default()
+        };
         let warnings = validate_custom_tools(&config);
         assert!(warnings.iter().any(|w| w.contains("invalid")));
     }
 
     #[test]
     fn test_validate_custom_tool_name_builtin_conflict() {
-        let mut config = Config::default();
-        config.custom_tools = vec![CustomToolDef {
-            name: "shell".to_string(),
-            description: "Conflict".to_string(),
-            command: "echo".to_string(),
-            parameters: None,
-            working_dir: None,
-            timeout_secs: None,
-            env: None,
-        }];
+        let config = Config {
+            custom_tools: vec![CustomToolDef {
+                name: "shell".to_string(),
+                description: "Conflict".to_string(),
+                command: "echo".to_string(),
+                parameters: None,
+                working_dir: None,
+                timeout_secs: None,
+                env: None,
+            }],
+            ..Default::default()
+        };
         let warnings = validate_custom_tools(&config);
         assert!(warnings.iter().any(|w| w.contains("conflicts")));
     }
 
     #[test]
     fn test_validate_custom_tool_empty_command() {
-        let mut config = Config::default();
-        config.custom_tools = vec![CustomToolDef {
-            name: "test_tool".to_string(),
-            description: "Test".to_string(),
-            command: "  ".to_string(),
-            parameters: None,
-            working_dir: None,
-            timeout_secs: None,
-            env: None,
-        }];
+        let config = Config {
+            custom_tools: vec![CustomToolDef {
+                name: "test_tool".to_string(),
+                description: "Test".to_string(),
+                command: "  ".to_string(),
+                parameters: None,
+                working_dir: None,
+                timeout_secs: None,
+                env: None,
+            }],
+            ..Default::default()
+        };
         let warnings = validate_custom_tools(&config);
         assert!(warnings.iter().any(|w| w.contains("empty")));
     }
 
     #[test]
     fn test_validate_custom_tool_long_description() {
-        let mut config = Config::default();
-        config.custom_tools = vec![CustomToolDef {
-            name: "verbose_tool".to_string(),
-            description: "A".repeat(61),
-            command: "echo hi".to_string(),
-            parameters: None,
-            working_dir: None,
-            timeout_secs: None,
-            env: None,
-        }];
+        let config = Config {
+            custom_tools: vec![CustomToolDef {
+                name: "verbose_tool".to_string(),
+                description: "A".repeat(61),
+                command: "echo hi".to_string(),
+                parameters: None,
+                working_dir: None,
+                timeout_secs: None,
+                env: None,
+            }],
+            ..Default::default()
+        };
         let warnings = validate_custom_tools(&config);
         assert!(warnings.iter().any(|w| w.contains("60 chars")));
     }
