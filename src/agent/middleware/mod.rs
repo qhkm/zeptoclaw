@@ -5,7 +5,15 @@
 //! composes them into an ordered chain that wraps the core LLM + tool loop.
 
 pub mod cache;
+pub mod compaction;
+pub mod context_build;
+pub mod feedback;
 pub mod injection_scan;
+pub mod memory_injection;
+pub mod metrics;
+pub mod provider_resolution;
+pub mod session;
+pub mod session_save;
 pub mod token_budget;
 
 #[cfg(test)]
