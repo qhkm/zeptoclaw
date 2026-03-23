@@ -34,6 +34,11 @@ target/
 # External references
 external/
 
+# Test/scratch directories
+test-coding*/
+.fastembed_cache/
+deer-flow/
+
 # Internal docs (local-only)
 docs/internal/
 docs/plans/

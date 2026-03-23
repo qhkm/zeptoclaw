@@ -14,6 +14,58 @@ use crate::security::ShellSecurityConfig;
 
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
+const MAX_OUTPUT_LINES: usize = 2_000;
+const MAX_OUTPUT_BYTES: usize = 50_000;
+
+fn truncate_formatted_output(output: &str) -> String {
+    if output.is_empty() {
+        return String::new();
+    }
+
+    let mut truncated = String::new();
+    let mut byte_count = 0usize;
+    let mut hit_line_limit = false;
+    let mut hit_byte_limit = false;
+
+    for (line_count, segment) in output.split_inclusive('\n').enumerate() {
+        if line_count + 1 > MAX_OUTPUT_LINES {
+            hit_line_limit = true;
+            break;
+        }
+
+        if byte_count + segment.len() > MAX_OUTPUT_BYTES {
+            let remaining = MAX_OUTPUT_BYTES.saturating_sub(byte_count);
+            if remaining > 0 {
+                let mut cut = remaining;
+                while cut > 0 && !segment.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                truncated.push_str(&segment[..cut]);
+            }
+            hit_byte_limit = true;
+            break;
+        }
+
+        truncated.push_str(segment);
+        byte_count += segment.len();
+    }
+
+    if hit_line_limit || hit_byte_limit {
+        if !truncated.ends_with('\n') && !truncated.is_empty() {
+            truncated.push('\n');
+        }
+        let reason = match (hit_line_limit, hit_byte_limit) {
+            (true, true) => format!("{} lines and {} bytes", MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES),
+            (true, false) => format!("{} lines", MAX_OUTPUT_LINES),
+            (false, true) => format!("{} bytes", MAX_OUTPUT_BYTES),
+            (false, false) => unreachable!(),
+        };
+        truncated.push_str(&format!("... [output truncated at {}]", reason));
+    }
+
+    truncated
+}
+
 /// Tool for executing shell commands.
 ///
 /// Executes a shell command and returns the combined stdout and stderr output.
@@ -170,7 +222,9 @@ impl Tool for ShellTool {
             .await
             .map_err(|e| ZeptoError::Tool(e.to_string()))?;
 
-        Ok(ToolOutput::user_visible(output.format()))
+        Ok(ToolOutput::user_visible(truncate_formatted_output(
+            &output.format(),
+        )))
     }
 }
 
@@ -473,5 +527,28 @@ mod tests {
     async fn test_shell_tool_permissive_uses_native_runtime() {
         let tool = ShellTool::permissive();
         assert_eq!(tool.runtime_name(), "native");
+    }
+
+    #[test]
+    fn test_truncate_formatted_output_by_lines() {
+        let input = (0..=MAX_OUTPUT_LINES)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = truncate_formatted_output(&input);
+
+        assert!(output.contains("[output truncated at 2000 lines]"));
+        assert!(!output.contains(&format!("line {}", MAX_OUTPUT_LINES)));
+    }
+
+    #[test]
+    fn test_truncate_formatted_output_by_bytes() {
+        let input = "x".repeat(MAX_OUTPUT_BYTES + 1);
+
+        let output = truncate_formatted_output(&input);
+
+        assert!(output.contains("[output truncated at 50000 bytes]"));
+        assert!(output.starts_with('x'));
     }
 }
