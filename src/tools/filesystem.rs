@@ -398,7 +398,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff)."
+        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff). String replacements must resolve to a single match unless expected_replacements is provided."
     }
 
     fn compact_description(&self) -> &str {
@@ -419,11 +419,15 @@ impl Tool for EditFileTool {
                 },
                 "old_text": {
                     "type": "string",
-                    "description": "The text to search for and replace"
+                    "description": "The text to search for and replace. Must resolve to a single match unless expected_replacements is provided."
                 },
                 "new_text": {
                     "type": "string",
                     "description": "The text to replace it with"
+                },
+                "expected_replacements": {
+                    "type": "integer",
+                    "description": "Optional exact number of matches required before applying the replacement"
                 },
                 "diff": {
                     "type": "string",
@@ -443,6 +447,10 @@ impl Tool for EditFileTool {
         let diff_param = args.get("diff").and_then(|v| v.as_str());
         let old_text = args.get("old_text").and_then(|v| v.as_str());
         let new_text = args.get("new_text").and_then(|v| v.as_str());
+        let expected_replacements = args
+            .get("expected_replacements")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         if diff_param.is_some() && (old_text.is_some() || new_text.is_some()) {
             return Err(ZeptoError::Tool(
@@ -480,11 +488,17 @@ impl Tool for EditFileTool {
             // --- String replacement mode (existing logic) ---
             revalidate_path(full_path_ref, &workspace)?;
 
+            if old_text.is_empty() {
+                return Err(ZeptoError::Tool("'old_text' must not be empty".into()));
+            }
+
             let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
                 ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
             })?;
 
-            if !content.contains(old_text) {
+            let replacements = content.matches(old_text).count();
+
+            if replacements == 0 {
                 return Err(ZeptoError::Tool(format!(
                     "Text '{}' not found in file '{}'",
                     crate::utils::string::preview(old_text, 50),
@@ -492,11 +506,29 @@ impl Tool for EditFileTool {
                 )));
             }
 
+            if let Some(expected) = expected_replacements {
+                if replacements != expected {
+                    return Err(ZeptoError::Tool(format!(
+                        "Expected {} replacement(s) for '{}' in '{}', found {}",
+                        expected,
+                        crate::utils::string::preview(old_text, 50),
+                        full_path,
+                        replacements
+                    )));
+                }
+            } else if replacements > 1 {
+                return Err(ZeptoError::Tool(format!(
+                    "Text '{}' is ambiguous in '{}': found {} matches. Provide 'expected_replacements' to confirm a multi-match replacement.",
+                    crate::utils::string::preview(old_text, 50),
+                    full_path,
+                    replacements
+                )));
+            }
+
             let new_content = content.replace(old_text, new_text);
 
             write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
 
-            let replacements = content.matches(old_text).count();
             Ok(ToolOutput::llm_only(format!(
                 "Successfully replaced {} occurrence(s) in {}",
                 replacements, full_path
@@ -743,11 +775,14 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok());
-        assert!(result.unwrap().for_llm.contains("3 occurrence"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Provide 'expected_replacements'"));
         assert_eq!(
             fs::read_to_string(&file_path).unwrap(),
-            "qux bar qux baz qux"
+            "foo bar foo baz foo"
         );
     }
 
@@ -776,6 +811,88 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found in file"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_rejects_empty_old_text() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_empty_old.txt");
+        fs::write(&file_path, "Hello World").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_empty_old.txt",
+                    "old_text": "",
+                    "new_text": "Replacement"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "Hello World");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_expected_replacements_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_expected_count.txt");
+        fs::write(&file_path, "foo bar foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_expected_count.txt",
+                    "old_text": "foo",
+                    "new_text": "qux",
+                    "expected_replacements": 1
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected 1 replacement(s)"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "foo bar foo");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_expected_replacements_match() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_expected_ok.txt");
+        fs::write(&file_path, "foo bar foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_expected_ok.txt",
+                    "old_text": "foo",
+                    "new_text": "qux",
+                    "expected_replacements": 2
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "qux bar qux");
     }
 
     #[tokio::test]

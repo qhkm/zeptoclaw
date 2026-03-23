@@ -34,7 +34,8 @@ Project-level guidance for coding agents working in this repository.
 - Persona switching: `/persona` command with presets and custom text, LTM persistence per chat
 - CLI interactive mode: TTY-gated local slash commands with rustyline tab completion when available, persisted REPL history, inline tool approval prompts, session-scoped `/trust` override for local use, `/model` and `/persona` overrides, `/tools`, `/template`, and `/clear`
 - Memory injection: per-message query-matched injection via shared LTM on `AgentLoop` (startup static injection removed)
-- Tool execution convergence: agent loop and MCP server both route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording)
+- Tool execution convergence: agent loop, MCP server, and embedded `ZeptoAgent` facade all route through `kernel::execute_tool()` (shared safety scan + taint checks + single metrics recording); the facade also enforces per-tool timeout, panic capture, and optional approval handling for embedded coding backends
+- Coding tool hardening: `grep` now surfaces subprocess failures instead of silently returning "No matches"; `shell` truncates output at 2,000 lines / 50KB; `edit_file` rejects empty `old_text` and supports optional `expected_replacements` for safer surgical edits
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows; safety pre-scan keeps full path scanning while scanning file bodies with a narrow `shell_injection` carve-out instead of skipping content wholesale
 - Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
