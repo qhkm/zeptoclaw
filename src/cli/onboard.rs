@@ -4,6 +4,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 
+use zeptoclaw::channels::model_switch::KNOWN_MODELS;
 use zeptoclaw::channels::persona_switch;
 use zeptoclaw::config::{Config, MemoryBackend, MemoryCitationsMode, RuntimeType};
 use zeptoclaw::providers::configured_provider_names;
@@ -117,6 +118,126 @@ async fn configure_providers(config: &mut Config) -> Result<()> {
             println!();
         }
         configure_openrouter(config).await?;
+    }
+
+    Ok(())
+}
+
+/// Format a numbered model selection menu.
+fn format_model_menu(models: &[String], max_display: usize) -> String {
+    let mut output = String::new();
+    for (i, model) in models.iter().take(max_display).enumerate() {
+        output.push_str(&format!("  {}. {}\n", i + 1, model));
+    }
+    if models.len() > max_display {
+        output.push_str(&format!("  ... ({} more)\n", models.len() - max_display));
+    }
+    output.push_str("  c. Custom (enter model ID)\n");
+    output.push_str("  s. Skip (keep default)\n");
+    output
+}
+
+/// Model selection step for onboarding.
+///
+/// Shows available models for the configured provider(s) and lets the user pick one.
+/// Tries live fetch first, falls back to KNOWN_MODELS.
+async fn configure_model(config: &mut Config) -> Result<()> {
+    let providers = configured_provider_names(config);
+    if providers.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Model Selection");
+    println!("===============");
+
+    // If multiple providers, ask which is primary
+    let primary = if providers.len() > 1 {
+        println!("Multiple providers configured. Which should be your default?");
+        for (i, p) in providers.iter().enumerate() {
+            println!("  {}. {}", i + 1, p);
+        }
+        println!();
+        print!("Choice [1]: ");
+        io::stdout().flush()?;
+        let input = read_line()?;
+        let idx = input.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
+        providers.get(idx).copied().unwrap_or(providers[0])
+    } else {
+        providers[0]
+    };
+
+    // Try live fetch, fall back to KNOWN_MODELS
+    println!();
+    println!("Fetching available models from {}...", primary);
+
+    let selections = zeptoclaw::providers::resolve_runtime_providers(config);
+    let selection = selections.iter().find(|s| s.name == primary);
+
+    let models: Vec<String> = if let Some(s) = selection {
+        match super::common::fetch_provider_models(s.name, &s.api_key, s.api_base.as_deref()).await
+        {
+            Ok(m) if !m.is_empty() => m,
+            _ => {
+                println!("  Could not fetch live models, showing known models.");
+                KNOWN_MODELS
+                    .iter()
+                    .filter(|km| km.provider == primary)
+                    .map(|km| km.model.to_string())
+                    .collect()
+            }
+        }
+    } else {
+        KNOWN_MODELS
+            .iter()
+            .filter(|km| km.provider == primary)
+            .map(|km| km.model.to_string())
+            .collect()
+    };
+
+    if models.is_empty() {
+        println!("  No models found for {}. Keeping default.", primary);
+        return Ok(());
+    }
+
+    println!();
+    println!("Which model would you like to use?");
+    print!("{}", format_model_menu(&models, 15));
+    println!();
+    print!("Choice [1]: ");
+    io::stdout().flush()?;
+
+    let input = read_line()?;
+    let input = input.trim();
+
+    match input {
+        "s" | "S" | "" => {
+            println!("  Keeping default model: {}", config.agents.defaults.model);
+        }
+        "c" | "C" => {
+            print!("Enter model ID: ");
+            io::stdout().flush()?;
+            let custom = read_line()?;
+            let custom = custom.trim();
+            if !custom.is_empty() {
+                config.agents.defaults.model = custom.to_string();
+                println!("  Set model to: {}", custom);
+            }
+        }
+        choice => {
+            if let Ok(idx) = choice.parse::<usize>() {
+                if idx >= 1 && idx <= models.len() {
+                    config.agents.defaults.model = models[idx - 1].clone();
+                    println!("  Set model to: {}", models[idx - 1]);
+                } else {
+                    println!("  Invalid choice. Keeping default.");
+                }
+            } else {
+                // Treat as a direct model ID
+                config.agents.defaults.model = choice.to_string();
+                println!("  Set model to: {}", choice);
+            }
+        }
     }
 
     Ok(())
@@ -248,6 +369,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
 
         println!();
         configure_providers(&mut config).await?;
+        configure_model(&mut config).await?;
         configure_soul(&config)?;
 
         // Configure web search integration
@@ -309,6 +431,8 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         } else {
             configure_providers(&mut config).await?;
         }
+
+        configure_model(&mut config).await?;
 
         configure_soul(&config)?;
 
@@ -1141,5 +1265,28 @@ mod tests {
         assert!(msg.contains("zeptoclaw onboard --full"));
         assert!(msg.contains("zeptoclaw status"));
         assert!(msg.contains("Summarize https://news.ycombinator.com"));
+    }
+
+    #[test]
+    fn test_format_model_menu_with_known_models() {
+        let models = vec![
+            "gpt-5.4".to_string(),
+            "gpt-5.4-mini".to_string(),
+            "gpt-5.4-nano".to_string(),
+        ];
+        let menu = format_model_menu(&models, 10);
+        assert!(menu.contains("1."));
+        assert!(menu.contains("gpt-5.4"));
+        assert!(menu.contains("c."));
+        assert!(menu.contains("s."));
+    }
+
+    #[test]
+    fn test_format_model_menu_truncates_at_max() {
+        let models: Vec<String> = (0..20).map(|i| format!("model-{}", i)).collect();
+        let menu = format_model_menu(&models, 5);
+        assert!(menu.contains("5."));
+        assert!(!menu.contains("6."));
+        assert!(menu.contains("15 more"));
     }
 }
