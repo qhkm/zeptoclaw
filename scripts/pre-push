@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Git pre-push hook — runs the mandatory checklist before push.
+# Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+step() { echo -e "${YELLOW}→ $1${NC}"; }
+pass() { echo -e "${GREEN}✓ $1${NC}"; }
+fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
+
+step "Checking format..."
+cargo fmt -- --check || fail "cargo fmt --check failed. Run: cargo fmt"
+pass "Format OK"
+
+step "Running clippy..."
+cargo clippy -- -D warnings 2>&1 || fail "clippy found warnings"
+pass "Clippy OK"
+
+step "Running lib tests..."
+if command -v cargo-nextest &>/dev/null; then
+    cargo nextest run --lib 2>&1 || fail "lib tests failed"
+else
+    cargo test --lib 2>&1 || fail "lib tests failed"
+fi
+pass "Tests OK"
+
+step "Running doc tests..."
+cargo test --doc 2>&1 || fail "doc tests failed"
+pass "Doc tests OK"
+
+echo -e "\n${GREEN}All pre-push checks passed.${NC}"

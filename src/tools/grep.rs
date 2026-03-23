@@ -113,11 +113,40 @@ impl Tool for GrepTool {
             .map_err(|e| ZeptoError::Tool(format!("Failed to run grep: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.lines().take(limit).collect();
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        if lines.is_empty() {
-            return Ok(ToolOutput::llm_only("No matches found".to_string()));
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) if stderr.trim().is_empty() => {
+                return Ok(ToolOutput::llm_only("No matches found".to_string()));
+            }
+            Some(code) => {
+                let detail = stderr.trim();
+                let suffix = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail)
+                };
+                return Err(ZeptoError::Tool(format!(
+                    "grep failed with exit code {}{}",
+                    code, suffix
+                )));
+            }
+            None => {
+                let detail = stderr.trim();
+                let suffix = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail)
+                };
+                return Err(ZeptoError::Tool(format!(
+                    "grep terminated by signal{}",
+                    suffix
+                )));
+            }
         }
+
+        let lines: Vec<&str> = stdout.lines().take(limit).collect();
 
         let total = stdout.lines().count();
         let mut result = lines.join("\n");
@@ -213,6 +242,23 @@ mod tests {
             .await
             .unwrap();
         assert!(result.for_llm.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_reports_subprocess_errors() {
+        let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let ctx = ToolContext::new().with_workspace(workspace.to_str().unwrap());
+        let result = GrepTool
+            .execute(
+                json!({"pattern": "hello", "path": "Cargo.toml.missing"}),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(ZeptoError::Tool(err)) => assert!(err.contains("grep failed")),
+            other => panic!("expected grep tool error, got {:?}", other),
+        }
     }
 
     #[tokio::test]
