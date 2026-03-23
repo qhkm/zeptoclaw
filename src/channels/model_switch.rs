@@ -28,45 +28,50 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
     // Anthropic
     KnownModel {
         provider: "anthropic",
-        model: "claude-sonnet-4-5-20250929",
-        label: "Claude Sonnet 4.5",
+        model: "claude-opus-4-6",
+        label: "Claude Opus 4.6",
+    },
+    KnownModel {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        label: "Claude Sonnet 4.6",
     },
     KnownModel {
         provider: "anthropic",
         model: "claude-haiku-4-5-20251001",
         label: "Claude Haiku 4.5",
     },
-    KnownModel {
-        provider: "anthropic",
-        model: "claude-opus-4-6",
-        label: "Claude Opus 4.6",
-    },
     // OpenAI
     KnownModel {
         provider: "openai",
-        model: "gpt-5.1",
-        label: "GPT-5.1",
+        model: "gpt-5.4",
+        label: "GPT-5.4",
     },
     KnownModel {
         provider: "openai",
-        model: "gpt-4.1",
-        label: "GPT-4.1",
+        model: "gpt-5.4-mini",
+        label: "GPT-5.4 Mini",
     },
     KnownModel {
         provider: "openai",
-        model: "gpt-4.1-mini",
-        label: "GPT-4.1 Mini",
+        model: "gpt-5.4-nano",
+        label: "GPT-5.4 Nano",
+    },
+    KnownModel {
+        provider: "openai",
+        model: "gpt-5.3-codex",
+        label: "GPT-5.3 Codex",
     },
     // OpenRouter
     KnownModel {
         provider: "openrouter",
-        model: "anthropic/claude-sonnet-4-5",
-        label: "Claude Sonnet 4.5 (OR)",
+        model: "anthropic/claude-sonnet-4-6",
+        label: "Claude Sonnet 4.6 (OR)",
     },
     KnownModel {
         provider: "openrouter",
-        model: "google/gemini-2.5-pro",
-        label: "Gemini 2.5 Pro (OR)",
+        model: "google/gemini-3.1-pro",
+        label: "Gemini 3.1 Pro (OR)",
     },
     // Groq
     KnownModel {
@@ -82,15 +87,15 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
     // Gemini
     KnownModel {
         provider: "gemini",
-        model: "gemini-2.5-pro",
-        label: "Gemini 2.5 Pro",
+        model: "gemini-3.1-pro",
+        label: "Gemini 3.1 Pro",
     },
     KnownModel {
         provider: "gemini",
-        model: "gemini-2.5-flash",
-        label: "Gemini 2.5 Flash",
+        model: "gemini-3.1-flash-lite",
+        label: "Gemini 3.1 Flash Lite",
     },
-    // Ollama (local or cloud)
+    // Ollama (local)
     KnownModel {
         provider: "ollama",
         model: "llama3.3",
@@ -366,24 +371,24 @@ mod tests {
 
     #[test]
     fn test_parse_model_command_set_model_only() {
-        let cmd = parse_model_command("/model gpt-5.1");
+        let cmd = parse_model_command("/model gpt-5.4");
         assert_eq!(
             cmd,
             Some(ModelCommand::Set(ModelOverride {
                 provider: None,
-                model: "gpt-5.1".to_string(),
+                model: "gpt-5.4".to_string(),
             }))
         );
     }
 
     #[test]
     fn test_parse_model_command_set_provider_and_model() {
-        let cmd = parse_model_command("/model openai:gpt-5.1");
+        let cmd = parse_model_command("/model openai:gpt-5.4");
         assert_eq!(
             cmd,
             Some(ModelCommand::Set(ModelOverride {
                 provider: Some("openai".to_string()),
-                model: "gpt-5.1".to_string(),
+                model: "gpt-5.4".to_string(),
             }))
         );
     }
@@ -463,7 +468,7 @@ mod tests {
         let configured = vec!["anthropic".to_string()];
         let current = ModelOverride {
             provider: Some("anthropic".to_string()),
-            model: "claude-sonnet-4-5-20250929".to_string(),
+            model: "claude-opus-4-6".to_string(),
         };
         let output = format_model_list(&configured, Some(&current), &[]);
         assert!(output.contains("current"));
@@ -482,12 +487,9 @@ mod tests {
     fn test_format_model_list_does_not_duplicate_known_model() {
         let configured = vec!["anthropic".to_string()];
         // This model is already in KNOWN_MODELS — should NOT appear twice
-        let configured_models = vec![(
-            "anthropic".to_string(),
-            "claude-sonnet-4-5-20250929".to_string(),
-        )];
+        let configured_models = vec![("anthropic".to_string(), "claude-opus-4-6".to_string())];
         let output = format_model_list(&configured, None, &configured_models);
-        let count = output.matches("claude-sonnet-4-5-20250929").count();
+        let count = output.matches("claude-opus-4-6").count();
         assert_eq!(count, 1);
     }
 
@@ -514,6 +516,38 @@ mod tests {
         assert!(output.contains("glm-4-flash"));
     }
 
+    #[test]
+    fn test_known_models_no_empty_fields() {
+        for km in KNOWN_MODELS {
+            assert!(
+                !km.provider.is_empty(),
+                "provider is empty for {:?}",
+                km.model
+            );
+            assert!(!km.model.is_empty(), "model is empty for {:?}", km.provider);
+            assert!(!km.label.is_empty(), "label is empty for {:?}", km.model);
+        }
+    }
+
+    #[test]
+    fn test_known_models_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for km in KNOWN_MODELS {
+            let key = format!("{}:{}", km.provider, km.model);
+            assert!(seen.insert(key.clone()), "duplicate model entry: {}", key);
+        }
+    }
+
+    #[test]
+    fn test_known_models_includes_default_model() {
+        let default_model = crate::config::AgentDefaults::default().model;
+        assert!(
+            KNOWN_MODELS.iter().any(|km| km.model == default_model),
+            "Default model '{}' must appear in KNOWN_MODELS",
+            default_model
+        );
+    }
+
     #[tokio::test]
     async fn test_persist_and_hydrate_model_overrides() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -528,7 +562,7 @@ mod tests {
                 "chat123".to_string(),
                 ModelOverride {
                     provider: Some("openai".to_string()),
-                    model: "gpt-5.1".to_string(),
+                    model: "gpt-5.4".to_string(),
                 },
             );
         }
@@ -540,7 +574,7 @@ mod tests {
 
         let map = store2.read().await;
         let ov = map.get("chat123").unwrap();
-        assert_eq!(ov.model, "gpt-5.1");
+        assert_eq!(ov.model, "gpt-5.4");
         assert_eq!(ov.provider.as_deref(), Some("openai"));
     }
 }
