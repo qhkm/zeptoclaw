@@ -54,11 +54,8 @@ impl Middleware for ContextBuildMiddleware {
                     ctx.memory_override.as_deref(),
                 );
 
-            // TODO(phase-4): Resolve image file paths to base64.
-            // The `resolve_images_to_base64` utility currently lives as a
-            // private function in loop.rs.  Phase 4 will extract it and
-            // wire it here.  For now, image-bearing messages pass through
-            // with their original ImageSource representation.
+            // TODO: Resolve image file paths to base64 here instead of
+            // in core_loop.rs for cleaner separation of concerns.
 
             // Filter out empty user messages (e.g. after failed image resolution).
             msgs.retain(|m| !(m.role == Role::User && m.content.is_empty() && !m.has_images()));

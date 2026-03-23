@@ -53,11 +53,8 @@ impl Middleware for SessionMiddleware {
 
         // Append the current user message to the session so downstream
         // middleware sees it in the history.
-        //
-        // NOTE: The full `inbound_to_message()` in loop.rs also handles
-        // image media attachments.  That function is private to loop.rs
-        // and will be extracted in Phase 4.  For now we use the text-only
-        // path; image support will be wired when LegacyTerminal is built.
+        // TODO: Wire image media handling (inbound_to_message equivalent)
+        // for multimodal support through the pipeline.
         let user_message = crate::session::Message::user(&ctx.inbound.content);
         session.add_message(user_message);
 

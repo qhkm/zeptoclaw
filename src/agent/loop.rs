@@ -14,97 +14,24 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::agent::context_monitor::ContextMonitor;
-// Loop guard items are used by tests that exercise the old free-function
-// variants; core_loop.rs owns the canonical copies now.
-#[cfg(test)]
-use crate::agent::loop_guard::{LoopGuard, LoopGuardAction, ToolCallSig};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::error::{Result, ZeptoError};
 use crate::health::UsageMetrics;
 use crate::providers::LLMProvider;
-#[cfg(test)]
-use crate::providers::{ChatOptions, LLMToolCall};
 use crate::safety::SafetyLayer;
-#[cfg(test)]
-use crate::session::Message;
 use crate::session::SessionManager;
 use crate::tools::approval::{ApprovalGate, ApprovalRequest, ApprovalResponse};
 use crate::tools::{Tool, ToolRegistry};
-#[cfg(test)]
-use crate::tools::{ToolCategory, ToolContext};
 use crate::utils::metrics::MetricsCollector;
 
 use super::budget::TokenBudget;
 use super::context::ContextBuilder;
 use super::tool_call_limit::ToolCallLimitTracker;
 
-// --- Constants and free functions below are used only by tests in this ---
-// --- module. Production code paths now go through core_loop.rs. These  ---
-// --- will be cleaned up or moved to a test helper in Phase 5.          ---
-
-/// System prompt sent during the memory flush turn, instructing the LLM to
-/// persist important facts and deduplicate existing long-term memory entries.
-#[cfg(test)]
-const MEMORY_FLUSH_PROMPT: &str =
-    "Review the conversation above. Save any important facts, decisions, \
-user preferences, or learnings to long-term memory using the longterm_memory tool. \
-Also review existing memories for duplicates — merge or delete stale entries. \
-Be selective: only save what would be useful in future conversations.";
-
-/// Maximum wall-clock time (in seconds) allowed for the memory flush LLM turn.
-#[cfg(test)]
-const MEMORY_FLUSH_TIMEOUT_SECS: u64 = 10;
-
-#[cfg(test)]
-const INTERACTIVE_CLI_METADATA_KEY: &str = "interactive_cli";
-#[cfg(test)]
-const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
-
 type ApprovalFuture = Pin<Box<dyn Future<Output = ApprovalResponse> + Send>>;
 type ApprovalHandler = Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>;
-
-#[cfg(test)]
-fn is_trusted_local_session(msg: &InboundMessage) -> bool {
-    msg.channel == "cli"
-        && msg
-            .metadata
-            .get(INTERACTIVE_CLI_METADATA_KEY)
-            .is_some_and(|value| value == "true")
-        && msg
-            .metadata
-            .get(TRUSTED_LOCAL_SESSION_METADATA_KEY)
-            .is_some_and(|value| value == "true")
-        && msg
-            .metadata
-            .get("is_batch")
-            .is_none_or(|value| value != "true")
-}
-
-/// Returns `true` if any tool in the batch may cause ordering-sensitive side effects
-/// (filesystem writes, shell commands) and the batch should be executed sequentially
-/// rather than in parallel.
-///
-/// Unknown tools (not found in the registry) default to `true` (fail-safe: serialize).
-#[cfg(test)]
-async fn needs_sequential_execution(
-    tools: &Arc<RwLock<ToolRegistry>>,
-    tool_calls: &[LLMToolCall],
-) -> bool {
-    let guard = tools.read().await;
-    tool_calls.iter().any(|tc| {
-        guard
-            .get(&tc.name)
-            .map(|t| {
-                matches!(
-                    t.category(),
-                    ToolCategory::FilesystemWrite | ToolCategory::Shell
-                )
-            })
-            .unwrap_or(true) // unknown tool → serialize to be safe
-    })
-}
 
 /// Propagate channel-specific routing metadata (e.g. `telegram_thread_id`)
 /// from an inbound message to an outbound message so that the response is
@@ -114,130 +41,6 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
         outbound
             .metadata
             .insert("telegram_thread_id".to_string(), tid.clone());
-    }
-}
-
-/// Convert an inbound message with optional media attachments into a session Message.
-///
-/// If the inbound message has image media with inline binary data, each image is
-/// base64-encoded and attached as a `ContentPart::Image`.  Non-image media and
-/// attachments without data are silently skipped.  Validation (size, MIME type)
-/// is applied via [`crate::session::media::validate_image`]; invalid images are
-/// skipped rather than aborting.
-///
-/// When a `MediaStore` is provided the raw bytes are written to disk first and
-/// the resulting relative path is stored as `ImageSource::FilePath`; otherwise
-/// (or on a store-write error) the image is inlined as `ImageSource::Base64`.
-#[cfg(test)]
-async fn inbound_to_message(
-    msg: &InboundMessage,
-    media_store: Option<&crate::session::media::MediaStore>,
-) -> crate::session::Message {
-    use crate::session::media::validate_image;
-    use crate::session::{ContentPart, ImageSource};
-    use base64::Engine as _;
-
-    let image_media: Vec<&crate::bus::MediaAttachment> = msg
-        .media
-        .iter()
-        .filter(|m| matches!(m.media_type, crate::bus::MediaType::Image))
-        .filter(|m| m.data.is_some())
-        .collect();
-
-    if image_media.is_empty() {
-        return crate::session::Message::user(&msg.content);
-    }
-
-    let mut image_parts: Vec<ContentPart> = Vec::new();
-    for attachment in image_media {
-        let data = attachment.data.as_ref().unwrap();
-        let mime = attachment.mime_type.as_deref().unwrap_or("image/jpeg");
-
-        // Skip images that fail size/type validation.
-        if validate_image(data, mime, 20 * 1024 * 1024).is_err() {
-            continue;
-        }
-
-        let source = if let Some(store) = media_store {
-            match store.save(data, mime).await {
-                Ok(path) => ImageSource::FilePath { path },
-                Err(_) => ImageSource::Base64 {
-                    data: base64::engine::general_purpose::STANDARD.encode(data),
-                },
-            }
-        } else {
-            ImageSource::Base64 {
-                data: base64::engine::general_purpose::STANDARD.encode(data),
-            }
-        };
-
-        image_parts.push(ContentPart::Image {
-            source,
-            media_type: mime.to_string(),
-        });
-    }
-
-    if image_parts.is_empty() {
-        crate::session::Message::user(&msg.content)
-    } else {
-        crate::session::Message::user_with_images(&msg.content, image_parts)
-    }
-}
-
-/// Resolve any `ImageSource::FilePath` entries in `messages` to
-/// `ImageSource::Base64` so that LLM providers can consume them directly.
-///
-/// Relative paths are resolved against `sessions_dir`.  If a file cannot be
-/// read (e.g. it was deleted), the image part is silently dropped from the
-/// message's `content_parts`.
-#[cfg(test)]
-async fn resolve_images_to_base64(
-    messages: &mut [crate::session::Message],
-    sessions_dir: &std::path::Path,
-) {
-    use crate::session::{ContentPart, ImageSource};
-    use base64::Engine as _;
-
-    for msg in messages.iter_mut() {
-        let mut needs_resolve = false;
-        for part in &msg.content_parts {
-            if matches!(
-                part,
-                ContentPart::Image {
-                    source: ImageSource::FilePath { .. },
-                    ..
-                }
-            ) {
-                needs_resolve = true;
-                break;
-            }
-        }
-        if !needs_resolve {
-            continue;
-        }
-
-        let mut resolved_parts: Vec<ContentPart> = Vec::new();
-        for part in std::mem::take(&mut msg.content_parts) {
-            match part {
-                ContentPart::Image {
-                    source: ImageSource::FilePath { ref path },
-                    ref media_type,
-                } => {
-                    let abs_path = sessions_dir.join(path);
-                    if let Ok(data) = tokio::fs::read(&abs_path).await {
-                        resolved_parts.push(ContentPart::Image {
-                            source: ImageSource::Base64 {
-                                data: base64::engine::general_purpose::STANDARD.encode(&data),
-                            },
-                            media_type: media_type.clone(),
-                        });
-                    }
-                    // Unreadable file → silently drop this image part.
-                }
-                other => resolved_parts.push(other),
-            }
-        }
-        msg.content_parts = resolved_parts;
     }
 }
 
@@ -943,119 +746,6 @@ impl AgentLoop {
         Ok(rx)
     }
 
-    /// Run a silent LLM turn to flush important memories before context compaction.
-    ///
-    /// This method sends the current conversation plus a flush prompt to the LLM,
-    /// giving it the `longterm_memory` tool so it can persist any important facts,
-    /// decisions, or user preferences before the context is compacted. The call is
-    /// wrapped in a timeout and all failures are logged as warnings — the method
-    /// never panics or returns an error.
-    ///
-    /// NOTE: Production code now uses CompactionMiddleware which owns memory
-    /// flush logic.  This method is retained for existing tests.
-    #[cfg(test)]
-    async fn memory_flush(&self, messages: &[crate::session::Message]) {
-        use tokio::time::{timeout, Duration};
-
-        // Get the provider, bail silently if none configured
-        let provider = {
-            let guard = self.provider.read().await;
-            match guard.as_ref() {
-                Some(p) => Arc::clone(p),
-                None => {
-                    tracing::warn!("memory_flush: no provider configured, skipping");
-                    return;
-                }
-            }
-        };
-
-        // Get longterm_memory tool definitions, bail if the tool is not registered
-        let tool_defs = {
-            let tools = self.tools.read().await;
-            let defs = tools.definitions_for_tools(&["longterm_memory"]);
-            if defs.is_empty() {
-                tracing::debug!("memory_flush: longterm_memory tool not registered, skipping");
-                return;
-            }
-            defs
-        };
-
-        // Build flush messages: conversation history + flush prompt
-        let mut flush_messages: Vec<crate::session::Message> =
-            vec![Message::system("You are a memory management assistant.")];
-        flush_messages.extend(messages.iter().cloned());
-        flush_messages.push(Message::user(MEMORY_FLUSH_PROMPT));
-
-        let options = ChatOptions::new()
-            .with_max_tokens(1024)
-            .with_temperature(0.0);
-        let model = Some(self.config.agents.defaults.model.as_str());
-
-        info!("memory_flush: running pre-compaction memory flush");
-
-        let flush_result = timeout(
-            Duration::from_secs(MEMORY_FLUSH_TIMEOUT_SECS),
-            provider.chat(flush_messages, tool_defs.clone(), model, options.clone()),
-        )
-        .await;
-
-        let response = match flush_result {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "memory_flush: LLM call failed");
-                return;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "memory_flush: timed out after {}s",
-                    MEMORY_FLUSH_TIMEOUT_SECS
-                );
-                return;
-            }
-        };
-
-        // Execute any tool calls the LLM made (longterm_memory set/delete/etc.)
-        if response.has_tool_calls() {
-            let workspace = self.config.workspace_path();
-            let workspace_str = workspace.to_string_lossy();
-            let tool_ctx = ToolContext::new().with_workspace(&workspace_str);
-
-            for tc in &response.tool_calls {
-                let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = %tc.name,
-                            error = %e,
-                            "memory_flush: invalid tool arguments"
-                        );
-                        continue;
-                    }
-                };
-
-                let result = {
-                    let tools = self.tools.read().await;
-                    tools.execute_with_context(&tc.name, args, &tool_ctx).await
-                };
-
-                match result {
-                    Ok(_) => {
-                        debug!(tool = %tc.name, "memory_flush: tool executed successfully");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = %tc.name,
-                            error = %e,
-                            "memory_flush: tool execution failed"
-                        );
-                    }
-                }
-            }
-        }
-
-        info!("memory_flush: completed");
-    }
-
     async fn session_lock_for(&self, session_key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.session_locks.lock().await;
         locks
@@ -1486,7 +1176,11 @@ impl AgentLoop {
 mod tests {
     use super::*;
     use crate::hooks::{HookAction, HookRule};
-    use crate::providers::{LLMResponse, StreamEvent, ToolDefinition, Usage};
+    use crate::providers::{
+        ChatOptions, LLMResponse, LLMToolCall, StreamEvent, ToolDefinition, Usage,
+    };
+    use crate::session::Message;
+    use crate::tools::{ToolCategory, ToolContext};
     use async_trait::async_trait;
 
     #[derive(Debug)]
@@ -1721,7 +1415,7 @@ mod tests {
             .await;
 
         let msg = InboundMessage::new("cli", "user", "cli", "run a tool")
-            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true");
+            .with_metadata("interactive_cli", "true");
         let result = agent
             .process_message(&msg)
             .await
@@ -1752,23 +1446,14 @@ mod tests {
             .await;
 
         let msg = InboundMessage::new("cli", "user", "cli", "run a tool")
-            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true")
-            .with_metadata(TRUSTED_LOCAL_SESSION_METADATA_KEY, "true");
+            .with_metadata("interactive_cli", "true")
+            .with_metadata("trusted_local_session", "true");
         let result = agent
             .process_message(&msg)
             .await
             .expect("message should succeed");
 
         assert_eq!(result, "done");
-    }
-
-    #[test]
-    fn test_trusted_local_session_requires_cli_channel() {
-        let msg = InboundMessage::new("telegram", "user", "chat", "hello")
-            .with_metadata(INTERACTIVE_CLI_METADATA_KEY, "true")
-            .with_metadata(TRUSTED_LOCAL_SESSION_METADATA_KEY, "true");
-
-        assert!(!is_trusted_local_session(&msg));
     }
 
     #[tokio::test]
@@ -2127,32 +1812,6 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_flush_prompt_is_valid() {
-        assert!(MEMORY_FLUSH_PROMPT.contains("long-term memory"));
-        assert!(MEMORY_FLUSH_PROMPT.contains("longterm_memory"));
-        assert!(MEMORY_FLUSH_PROMPT.contains("duplicates"));
-    }
-
-    #[test]
-    fn test_memory_flush_timeout_is_reasonable() {
-        const { assert!(MEMORY_FLUSH_TIMEOUT_SECS > 0) };
-        const { assert!(MEMORY_FLUSH_TIMEOUT_SECS <= 30) };
-    }
-
-    #[tokio::test]
-    async fn test_memory_flush_no_provider() {
-        // memory_flush should not panic when no provider is configured
-        let config = Config::default();
-        let session_manager = SessionManager::new_memory();
-        let bus = Arc::new(MessageBus::new());
-        let agent = AgentLoop::new(config, session_manager, bus);
-
-        let messages = vec![Message::user("hello"), Message::assistant("hi")];
-        // Should return silently without error
-        agent.memory_flush(&messages).await;
-    }
-
-    #[test]
     fn test_dry_run_default_false() {
         let config = Config::default();
         let session_manager = SessionManager::new_memory();
@@ -2405,10 +2064,6 @@ mod tests {
         );
     }
 
-    // ----------------------------------------------------------------
-    // needs_sequential_execution tests
-    // ----------------------------------------------------------------
-
     /// Minimal mock tool with configurable name and category.
     #[derive(Debug)]
     struct StubTool {
@@ -2477,265 +2132,6 @@ mod tests {
                 Ok(crate::tools::ToolOutput::llm_only("ok"))
             }
         }
-    }
-
-    fn make_tool_call(name: &str) -> LLMToolCall {
-        LLMToolCall {
-            id: format!("call_{name}"),
-            name: name.to_string(),
-            arguments: "{}".to_string(),
-        }
-    }
-
-    fn registry_with(tools: Vec<StubTool>) -> Arc<RwLock<ToolRegistry>> {
-        let mut reg = ToolRegistry::new();
-        for t in tools {
-            reg.register(Box::new(t));
-        }
-        Arc::new(RwLock::new(reg))
-    }
-
-    #[tokio::test]
-    async fn test_sequential_triggered_by_filesystem_write() {
-        let reg = registry_with(vec![
-            StubTool {
-                name: "write_file",
-                category: ToolCategory::FilesystemWrite,
-            },
-            StubTool {
-                name: "read_file",
-                category: ToolCategory::FilesystemRead,
-            },
-        ]);
-        let calls = vec![make_tool_call("write_file"), make_tool_call("read_file")];
-        assert!(needs_sequential_execution(&reg, &calls).await);
-    }
-
-    #[tokio::test]
-    async fn test_sequential_triggered_by_shell() {
-        let reg = registry_with(vec![
-            StubTool {
-                name: "shell",
-                category: ToolCategory::Shell,
-            },
-            StubTool {
-                name: "read_file",
-                category: ToolCategory::FilesystemRead,
-            },
-        ]);
-        let calls = vec![make_tool_call("shell"), make_tool_call("read_file")];
-        assert!(needs_sequential_execution(&reg, &calls).await);
-    }
-
-    #[tokio::test]
-    async fn test_parallel_when_only_reads() {
-        let reg = registry_with(vec![
-            StubTool {
-                name: "read_file",
-                category: ToolCategory::FilesystemRead,
-            },
-            StubTool {
-                name: "web_fetch",
-                category: ToolCategory::NetworkRead,
-            },
-        ]);
-        let calls = vec![make_tool_call("read_file"), make_tool_call("web_fetch")];
-        assert!(!needs_sequential_execution(&reg, &calls).await);
-    }
-
-    #[tokio::test]
-    async fn test_sequential_for_unknown_tool_fail_safe() {
-        let reg = registry_with(vec![StubTool {
-            name: "read_file",
-            category: ToolCategory::FilesystemRead,
-        }]);
-        // "mystery_tool" is not in the registry → should default to sequential.
-        let calls = vec![make_tool_call("read_file"), make_tool_call("mystery_tool")];
-        assert!(needs_sequential_execution(&reg, &calls).await);
-    }
-
-    #[tokio::test]
-    async fn test_parallel_for_single_read_tool() {
-        let reg = registry_with(vec![StubTool {
-            name: "memory_search",
-            category: ToolCategory::Memory,
-        }]);
-        let calls = vec![make_tool_call("memory_search")];
-        assert!(!needs_sequential_execution(&reg, &calls).await);
-    }
-
-    // ----------------------------------------------------------------
-    // inbound_to_message tests (Task 7 — media → ContentPart wiring)
-    // ----------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_inbound_to_message_with_image() {
-        use crate::bus::{MediaAttachment, MediaType};
-
-        let media = MediaAttachment::new(MediaType::Image)
-            .with_data(vec![0xFF, 0xD8, 0xFF, 0xE0])
-            .with_mime_type("image/jpeg");
-        let msg =
-            InboundMessage::new("telegram", "user1", "chat1", "What is this?").with_media(media);
-
-        let result = inbound_to_message(&msg, None).await;
-        assert!(result.has_images(), "message should carry the image part");
-        assert_eq!(result.content_parts.len(), 2, "text + one image part");
-        assert_eq!(result.content, "What is this?");
-    }
-
-    #[tokio::test]
-    async fn test_inbound_to_message_without_media() {
-        let msg = InboundMessage::new("telegram", "user1", "chat1", "Hello");
-        let result = inbound_to_message(&msg, None).await;
-        assert!(!result.has_images(), "message should have no images");
-        assert_eq!(result.content_parts.len(), 1, "text part only");
-    }
-
-    #[tokio::test]
-    async fn test_inbound_to_message_skips_non_image_media() {
-        use crate::bus::{MediaAttachment, MediaType};
-
-        let media = MediaAttachment::new(MediaType::Audio)
-            .with_data(vec![0x00, 0x01])
-            .with_mime_type("audio/mpeg");
-        let msg = InboundMessage::new("telegram", "user1", "chat1", "Listen").with_media(media);
-
-        let result = inbound_to_message(&msg, None).await;
-        assert!(
-            !result.has_images(),
-            "audio media should not become an image part"
-        );
-        assert_eq!(result.content_parts.len(), 1, "text part only");
-    }
-
-    #[tokio::test]
-    async fn test_inbound_to_message_skips_invalid_mime() {
-        use crate::bus::{MediaAttachment, MediaType};
-
-        // "image/tiff" is not in the supported MIME list → skipped by validate_image.
-        let media = MediaAttachment::new(MediaType::Image)
-            .with_data(vec![0x4D, 0x4D, 0x00, 0x2A]) // TIFF magic bytes
-            .with_mime_type("image/tiff");
-        let msg = InboundMessage::new("telegram", "user1", "chat1", "TIFF file").with_media(media);
-
-        let result = inbound_to_message(&msg, None).await;
-        assert!(
-            !result.has_images(),
-            "unsupported MIME type should be skipped"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_inbound_to_message_with_media_store() {
-        use crate::bus::{MediaAttachment, MediaType};
-        use crate::session::media::MediaStore;
-        use tempfile::TempDir;
-
-        let tmp = TempDir::new().unwrap();
-        let store = MediaStore::new(tmp.path().to_path_buf());
-
-        let media = MediaAttachment::new(MediaType::Image)
-            .with_data(vec![0xFF, 0xD8, 0xFF, 0xE0])
-            .with_mime_type("image/jpeg");
-        let msg =
-            InboundMessage::new("telegram", "user1", "chat1", "What is this?").with_media(media);
-
-        let result = inbound_to_message(&msg, Some(&store)).await;
-        assert!(result.has_images());
-
-        // With MediaStore, images should be saved as FilePath, not Base64
-        if let crate::session::ContentPart::Image { source, .. } = &result.content_parts[1] {
-            assert!(
-                matches!(source, crate::session::ImageSource::FilePath { .. }),
-                "Expected FilePath when MediaStore is provided"
-            );
-        } else {
-            panic!("Expected Image content part");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_images_to_base64_resolves_file_path() {
-        use crate::session::{ContentPart, ImageSource, Message};
-        use std::io::Write;
-        use tempfile::TempDir;
-
-        let tmp = TempDir::new().unwrap();
-        let media_dir = tmp.path().join("media");
-        std::fs::create_dir_all(&media_dir).unwrap();
-
-        // Write a tiny fake image file.
-        let file_path = media_dir.join("test.jpg");
-        let fake_data = b"fakeimagedata";
-        let mut f = std::fs::File::create(&file_path).unwrap();
-        f.write_all(fake_data).unwrap();
-
-        let mut msg = Message::user("see image");
-        msg.content_parts = vec![
-            ContentPart::Text {
-                text: "see image".to_string(),
-            },
-            ContentPart::Image {
-                source: ImageSource::FilePath {
-                    path: "media/test.jpg".to_string(),
-                },
-                media_type: "image/jpeg".to_string(),
-            },
-        ];
-
-        let mut messages = vec![msg];
-        resolve_images_to_base64(&mut messages, tmp.path()).await;
-
-        let resolved = &messages[0].content_parts[1];
-        match resolved {
-            ContentPart::Image {
-                source: ImageSource::Base64 { data },
-                ..
-            } => {
-                use base64::Engine as _;
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .unwrap();
-                assert_eq!(decoded, fake_data);
-            }
-            other => panic!("expected Base64 source, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_images_to_base64_skips_missing_file() {
-        use crate::session::{ContentPart, ImageSource, Message};
-        use tempfile::TempDir;
-
-        let tmp = TempDir::new().unwrap();
-
-        let mut msg = Message::user("see image");
-        msg.content_parts = vec![
-            ContentPart::Text {
-                text: "see image".to_string(),
-            },
-            ContentPart::Image {
-                source: ImageSource::FilePath {
-                    path: "media/nonexistent.jpg".to_string(),
-                },
-                media_type: "image/jpeg".to_string(),
-            },
-        ];
-
-        let mut messages = vec![msg];
-        resolve_images_to_base64(&mut messages, tmp.path()).await;
-
-        // The unreadable image part should be silently dropped.
-        assert_eq!(
-            messages[0].content_parts.len(),
-            1,
-            "missing file image part should be dropped"
-        );
-        assert!(
-            matches!(&messages[0].content_parts[0], ContentPart::Text { .. }),
-            "only the text part should remain"
-        );
     }
 
     #[cfg(feature = "panel")]

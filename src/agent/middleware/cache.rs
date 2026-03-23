@@ -149,14 +149,16 @@ mod tests {
 
         let subsystems = subsystems_with_cache();
         let mut ctx = test_context(Arc::clone(&subsystems));
+        // Use unique model+content to avoid key collisions with parallel tests.
+        ctx.model = Some("miss-test-model".to_string());
+        ctx.inbound.content = "miss test input".to_string();
         let output = pipeline.execute(&mut ctx).await.unwrap();
         assert_eq!(output.response(), Some("fresh"));
         assert!(!output.is_cached());
 
         // Verify the response was stored in the cache.
         let cache_mutex = subsystems.cache.as_ref().unwrap();
-        let model = &ctx.config.agents.defaults.model;
-        let key = ResponseCache::cache_key(model, "", &ctx.inbound.content);
+        let key = ResponseCache::cache_key("miss-test-model", "", "miss test input");
         let cached = cache_mutex.lock().unwrap().get(&key);
         assert_eq!(cached, Some("fresh".to_string()));
     }
@@ -215,13 +217,15 @@ mod tests {
 
         let subsystems = subsystems_with_cache();
         let mut ctx = test_context(Arc::clone(&subsystems));
+        // Use unique model+content to avoid key collisions with parallel tests.
+        ctx.model = Some("streaming-test-model".to_string());
+        ctx.inbound.content = "streaming test input".to_string();
         let output = pipeline.execute(&mut ctx).await.unwrap();
         assert!(matches!(output, PipelineOutput::Streaming));
 
         // Cache should remain empty.
         let cache_mutex = subsystems.cache.as_ref().unwrap();
-        let model = &ctx.config.agents.defaults.model;
-        let key = ResponseCache::cache_key(model, "", &ctx.inbound.content);
+        let key = ResponseCache::cache_key("streaming-test-model", "", "streaming test input");
         let cached = cache_mutex.lock().unwrap().get(&key);
         assert!(cached.is_none());
     }
