@@ -50,6 +50,14 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 type ApprovalFuture = Pin<Box<dyn Future<Output = ApprovalResponse> + Send>>;
 type ApprovalHandler = Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>;
 
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let mut preview = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
 async fn resolve_tool_approval(
     gate: &ApprovalGate,
     approval_handler: Option<&ApprovalHandler>,
@@ -155,7 +163,7 @@ impl ZeptoAgent {
                 // Store assistant response in history and return
                 info!(
                     "[ZeptoAgent] LLM returned text response: {:?}",
-                    &response.content[..response.content.len().min(200)]
+                    preview_text(&response.content, 200)
                 );
                 history.push(Message::assistant(&response.content));
                 return Ok(response.content);
@@ -214,10 +222,10 @@ impl ZeptoAgent {
 
                     match tokio::time::timeout(self.tool_timeout, execution).await {
                         Ok(Ok(Ok(output))) => {
+                            let output_preview = preview_text(&output.for_llm, 200);
                             debug!(
                                 "[ZeptoAgent] Tool '{}' succeeded: {}",
-                                tc.name,
-                                &output.for_llm[..output.for_llm.len().min(200)]
+                                tc.name, output_preview
                             );
                             output.for_llm
                         }
@@ -248,11 +256,7 @@ impl ZeptoAgent {
             };
 
             // Notify UI with the result
-            let result_preview = if result.len() > 150 {
-                format!("{}...", &result[..147])
-            } else {
-                result.clone()
-            };
+            let result_preview = preview_text(&result, 147);
             on_step(&tc.name, &format!("Done: {}", result_preview));
 
             let tool_msg = Message::tool_result(&tc.id, &result);
@@ -1020,5 +1024,22 @@ mod tests {
 
         assert_eq!(response, "done");
         assert!(history[2].content.contains("panicked during execution"));
+    }
+
+    #[test]
+    fn test_preview_text_handles_multibyte_without_panicking() {
+        let text = "你".repeat(200);
+        let preview = preview_text(&text, 147);
+
+        assert_eq!(preview.chars().count(), 150);
+        assert!(preview.ends_with("..."));
+        assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_preview_text_leaves_short_text_unchanged() {
+        let text = "short preview";
+
+        assert_eq!(preview_text(text, 147), text);
     }
 }
