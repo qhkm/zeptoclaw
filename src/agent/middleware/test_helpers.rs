@@ -88,6 +88,32 @@ impl ToolExecutor for MockToolExecutor {
 // Test context factories
 // ---------------------------------------------------------------------------
 
+/// Build minimal Subsystems (unboxed) so tests can mutate fields before wrapping.
+pub fn test_subsystems_inner() -> Subsystems {
+    Subsystems {
+        session_manager: crate::session::SessionManager::new_memory(),
+        tools: Arc::new(RwLock::new(ToolRegistry::new())),
+        context_builder: ContextBuilder::new(),
+        context_monitor: None,
+        ltm: None,
+        safety_layer: None,
+        taint: None,
+        approval_gate: None,
+        approval_handler: None,
+        metrics_collector: MetricsCollector::new(),
+        usage_metrics: Arc::new(RwLock::new(crate::health::UsageMetrics::default())),
+        token_budget: Arc::new(TokenBudget::new(0)),
+        tool_call_limit: ToolCallLimitTracker::new(None),
+        cache: None,
+        bus: MessageBus::new(),
+        agent_mode: crate::security::AgentMode::default(),
+        provider_registry: Arc::new(RwLock::new(HashMap::new())),
+        tool_feedback_tx: Arc::new(RwLock::new(None)),
+        #[cfg(feature = "panel")]
+        event_bus: None,
+    }
+}
+
 /// Build minimal Subsystems for unit tests.
 pub fn test_subsystems() -> Arc<Subsystems> {
     Arc::new(Subsystems {
