@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_max_event_id_len_constant() {
-        assert!(MAX_EVENT_ID_LEN >= 64, "must allow standard evt_<uuid> IDs");
-        assert!(MAX_EVENT_ID_LEN <= 1024, "must not allow absurdly long IDs");
+        const { assert!(MAX_EVENT_ID_LEN >= 64, "must allow standard evt_<uuid> IDs") };
+        const { assert!(MAX_EVENT_ID_LEN <= 1024, "must not allow absurdly long IDs") };
     }
 }

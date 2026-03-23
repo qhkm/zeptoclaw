@@ -1154,8 +1154,10 @@ mod tests {
 
     #[test]
     fn test_validate_docker_binary_rejects_relative_path() {
-        let mut config = ContainerAgentConfig::default();
-        config.docker_binary = Some("./my-docker".to_string());
+        let config = ContainerAgentConfig {
+            docker_binary: Some("./my-docker".to_string()),
+            ..Default::default()
+        };
         let result = validate_docker_binary(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("absolute path"));
@@ -1163,8 +1165,10 @@ mod tests {
 
     #[test]
     fn test_validate_docker_binary_rejects_nonexistent_absolute_path() {
-        let mut config = ContainerAgentConfig::default();
-        config.docker_binary = Some("/usr/local/bin/nonexistent-docker-zzz".to_string());
+        let config = ContainerAgentConfig {
+            docker_binary: Some("/usr/local/bin/nonexistent-docker-zzz".to_string()),
+            ..Default::default()
+        };
         let result = validate_docker_binary(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
@@ -1172,18 +1176,23 @@ mod tests {
 
     #[test]
     fn test_validate_docker_binary_defaults_to_docker_when_empty() {
-        let mut config = ContainerAgentConfig::default();
+        let config = ContainerAgentConfig::default();
 
-        // None
-        config.docker_binary = None;
+        // None (already the default)
         assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
 
         // Empty string
-        config.docker_binary = Some(String::new());
+        let config = ContainerAgentConfig {
+            docker_binary: Some(String::new()),
+            ..Default::default()
+        };
         assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
 
         // Whitespace only
-        config.docker_binary = Some("   ".to_string());
+        let config = ContainerAgentConfig {
+            docker_binary: Some("   ".to_string()),
+            ..Default::default()
+        };
         assert_eq!(validate_docker_binary(&config).unwrap(), "docker");
     }
 

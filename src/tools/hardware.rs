@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_hardware_tool_default() {
-        let tool = HardwareTool::default();
+        let tool = HardwareTool;
         assert_eq!(tool.name(), "hardware");
     }
 

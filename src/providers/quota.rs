@@ -1076,7 +1076,7 @@ mod tests {
         // No usage should have been recorded because the call failed.
         let snap = store.snapshot();
         assert!(
-            snap.get("anthropic").is_none(),
+            !snap.contains_key("anthropic"),
             "no usage should be recorded on error, got {snap:?}",
         );
     }

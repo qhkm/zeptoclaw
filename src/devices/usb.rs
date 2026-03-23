@@ -92,7 +92,6 @@ mod tests {
     fn test_monitor_usb_noop_on_non_linux() {
         // On non-Linux, monitor_usb compiles and does nothing — just verify it compiles.
         // This test passes on all platforms.
-        assert!(true);
     }
 
     #[cfg(target_os = "linux")]
