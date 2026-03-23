@@ -1001,6 +1001,15 @@ impl Channel for TelegramChannel {
                                 if let Err(e) = bus.publish_inbound(inbound).await {
                                     error!("Failed to publish inbound message to bus: {}", e);
                                 }
+                            } else {
+                                // Non-text message — cancel typing indicator
+                                let typing_key = match msg.thread_id {
+                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
+                                    None => msg.chat.id.0.to_string(),
+                                };
+                                if let Some((_, token)) = typing_indicators.remove(&typing_key) {
+                                    token.cancel();
+                                }
                             }
 
                             // Acknowledge the message (required by teloxide)
