@@ -874,7 +874,6 @@ mod tests {
     #[test]
     fn test_hardcoded_network_tools_still_tainted() {
         // web_fetch should be tainted even without being in external_tool_names
-        let engine = TaintEngine::new(TaintConfig::default());
         assert!(NETWORK_SOURCE_TOOLS.contains(&"web_fetch"));
 
         let mut engine = TaintEngine::new(TaintConfig::default());
