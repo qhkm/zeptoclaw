@@ -456,6 +456,11 @@ pub(crate) async fn cmd_agent(
                                         config.agents.defaults.model
                                     );
                                 }
+                                ModelCommand::Fetch => {
+                                    println!("Fetching models from configured providers...");
+                                    // TODO(model-fetch): wire fetch_provider_models() in next task
+                                    println!("(not yet implemented — use /model list for now)");
+                                }
                             }
                         } else {
                             println!("Current model: {}", config.agents.defaults.model);

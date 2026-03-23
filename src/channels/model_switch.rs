@@ -150,6 +150,8 @@ pub enum ModelCommand {
     Reset,
     /// `/model list` — show available models
     List,
+    /// `/model fetch` — fetch live models from provider APIs
+    Fetch,
 }
 
 /// Thread-safe store for per-chat model overrides.
@@ -186,6 +188,7 @@ pub fn parse_model_command(text: &str) -> Option<ModelCommand> {
     match rest {
         "reset" => Some(ModelCommand::Reset),
         "list" => Some(ModelCommand::List),
+        "fetch" => Some(ModelCommand::Fetch),
         arg => {
             if let Some((provider, model)) = arg.split_once(':') {
                 Some(ModelCommand::Set(ModelOverride {
@@ -403,6 +406,12 @@ mod tests {
     fn test_parse_model_command_list() {
         let cmd = parse_model_command("/model list");
         assert_eq!(cmd, Some(ModelCommand::List));
+    }
+
+    #[test]
+    fn test_parse_model_command_fetch() {
+        let cmd = parse_model_command("/model fetch");
+        assert_eq!(cmd, Some(ModelCommand::Fetch));
     }
 
     #[test]

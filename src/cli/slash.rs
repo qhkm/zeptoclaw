@@ -27,6 +27,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Show available models",
         },
         SlashCommand {
+            name: "model fetch",
+            description: "Fetch live models from providers",
+        },
+        SlashCommand {
             name: "persona",
             description: "Show or switch persona",
         },
