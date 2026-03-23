@@ -4,6 +4,10 @@
 //! implements the [`Middleware`] trait. A [`Pipeline`](super::pipeline::Pipeline)
 //! composes them into an ordered chain that wraps the core LLM + tool loop.
 
+pub mod cache;
+pub mod injection_scan;
+pub mod token_budget;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
