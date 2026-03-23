@@ -229,6 +229,17 @@ pub struct ApprovalGate {
     auto_approve_timeout_secs: u64,
 }
 
+// Derive Clone manually since the struct only contains Clone-able fields.
+impl Clone for ApprovalGate {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            policy: self.policy.clone(),
+            auto_approve_timeout_secs: self.auto_approve_timeout_secs,
+        }
+    }
+}
+
 impl ApprovalGate {
     /// Create a new `ApprovalGate` from the given configuration.
     ///

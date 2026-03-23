@@ -53,6 +53,7 @@ pub enum CompactionUrgency {
 /// Uses heuristic token estimation to detect when the conversation is
 /// approaching the context window limit, and recommends an appropriate
 /// compaction strategy based on how full the context is.
+#[derive(Clone)]
 pub struct ContextMonitor {
     /// Maximum token capacity of the context window.
     context_limit: usize,
