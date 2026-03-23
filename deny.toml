@@ -17,6 +17,8 @@ targets = [
 # feature's rumqttc → rustls-webpki 0.102.8) are excluded from the audit by
 # not using --all-features in CI. See ci.yml deny/audit steps.
 ignore = []
+# Unmaintained crates are a concern but not a blocker — warn, don't error.
+unmaintained = "workspace"
 
 [licenses]
 # Crates must use one of these licenses
@@ -58,3 +60,7 @@ highlight = "all"
 # Only allow crates from crates.io
 unknown-registry = "deny"
 unknown-git = "deny"
+# Allow our own git dependencies
+allow-git = [
+    "https://github.com/qhkm/gogcli-rs",
+]
