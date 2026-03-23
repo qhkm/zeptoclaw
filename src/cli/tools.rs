@@ -72,6 +72,14 @@ const TOOLS: &[ToolInfo] = &[
         opt_in: false,
     },
     ToolInfo {
+        name: "browser",
+        description: "Headless browser via agent-browser + Lightpanda",
+        requires_config: false,
+        config_hint:
+            "Set tools.browser.enabled=true. Requires: agent-browser and lightpanda binaries",
+        opt_in: true,
+    },
+    ToolInfo {
         name: "memory_search",
         description: "Search workspace markdown memory",
         requires_config: false,
