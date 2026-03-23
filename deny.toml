@@ -35,6 +35,7 @@ allow = [
     "MPL-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "CDLA-Permissive-2.0",
+    "0BSD",
 ]
 confidence-threshold = 0.8
 
