@@ -274,6 +274,24 @@ pub fn configured_provider_models(config: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Match a model string against provider `model_keywords` to infer the provider.
+///
+/// Returns the provider name if any keyword appears (case-insensitive) in the
+/// model string.  E.g. `"gpt-4o"` matches `"gpt"` → `"openai"`,
+/// `"claude-sonnet-4-5-20250929"` matches `"claude"` → `"anthropic"`.
+pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
+    let model_lower = model.to_ascii_lowercase();
+    PROVIDER_REGISTRY
+        .iter()
+        .filter(|spec| spec.runtime_supported)
+        .find(|spec| {
+            spec.model_keywords
+                .iter()
+                .any(|kw| model_lower.contains(kw))
+        })
+        .map(|spec| spec.name)
+}
+
 /// Returns configured provider ids that are not yet runtime-supported.
 pub fn configured_unsupported_provider_names(config: &Config) -> Vec<&'static str> {
     PROVIDER_REGISTRY
@@ -1047,5 +1065,56 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].0, "ollama");
         assert_eq!(models[0].1, "llama3.3");
+    }
+
+    #[test]
+    fn test_provider_name_for_model_openai() {
+        assert_eq!(provider_name_for_model("gpt-4o"), Some("openai"));
+        assert_eq!(provider_name_for_model("gpt-4o-mini"), Some("openai"));
+        assert_eq!(provider_name_for_model("o3-mini"), None);
+    }
+
+    #[test]
+    fn test_provider_name_for_model_anthropic() {
+        assert_eq!(
+            provider_name_for_model("claude-sonnet-4-5-20250929"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            provider_name_for_model("claude-3-haiku-20240307"),
+            Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn test_provider_name_for_model_gemini() {
+        assert_eq!(provider_name_for_model("gemini-2.0-flash"), Some("gemini"));
+    }
+
+    #[test]
+    fn test_provider_name_for_model_deepseek() {
+        assert_eq!(provider_name_for_model("deepseek-chat"), Some("deepseek"));
+    }
+
+    #[test]
+    fn test_provider_name_for_model_ollama_keywords() {
+        assert_eq!(provider_name_for_model("llama3.3"), Some("ollama"));
+        assert_eq!(provider_name_for_model("mistral-7b"), Some("ollama"));
+        assert_eq!(provider_name_for_model("qwen2.5-72b"), Some("ollama"));
+    }
+
+    #[test]
+    fn test_provider_name_for_model_case_insensitive() {
+        assert_eq!(
+            provider_name_for_model("Claude-Sonnet-4"),
+            Some("anthropic")
+        );
+        assert_eq!(provider_name_for_model("GPT-4o"), Some("openai"));
+    }
+
+    #[test]
+    fn test_provider_name_for_model_no_match() {
+        assert_eq!(provider_name_for_model("some-unknown-model"), None);
+        assert_eq!(provider_name_for_model(""), None);
     }
 }
