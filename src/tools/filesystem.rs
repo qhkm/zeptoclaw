@@ -639,6 +639,9 @@ fn normalize_whitespace(s: &str) -> String {
 
 /// Count non-overlapping occurrences and collect their byte offsets.
 fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
     let mut positions = Vec::new();
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(needle) {
@@ -651,33 +654,39 @@ fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
 /// Map a byte range in an NFC-normalized string back to the original string.
 ///
 /// NFC normalization can merge multiple original chars into one (e.g. `e` +
-/// combining accent -> precomposed `é`). This walks original chars one at a
-/// time, tracking cumulative NFC byte position to map back.
+/// combining accent -> precomposed `é`). We build a byte-level mapping from
+/// NFC byte positions back to original byte positions by NFC-normalizing the
+/// original one char at a time and tracking boundaries.
 fn map_nfc_range_to_original(
     original: &str,
     _nfc: &str,
     nfc_start: usize,
     nfc_end: usize,
 ) -> (usize, usize) {
-    let mut orig_start = 0;
-    let mut orig_end = original.len();
-    let mut nfc_byte_pos = 0;
-    let mut found_start = false;
+    // Build mapping: for each NFC byte, record which original byte it came from.
+    // A single original char may produce multiple NFC bytes (or fewer via composition).
+    let mut nfc_to_orig: Vec<usize> = Vec::new();
+    let mut orig_ends: Vec<usize> = Vec::new();
 
     for (orig_byte, ch) in original.char_indices() {
         let orig_next = orig_byte + ch.len_utf8();
-        let nfc_len: usize = ch.nfc().map(|c| c.len_utf8()).sum();
-
-        if !found_start && nfc_byte_pos + nfc_len > nfc_start {
-            orig_start = orig_byte;
-            found_start = true;
-        }
-        nfc_byte_pos += nfc_len;
-        if found_start && nfc_byte_pos >= nfc_end {
-            orig_end = orig_next;
-            break;
+        for nfc_ch in ch.nfc() {
+            for _ in 0..nfc_ch.len_utf8() {
+                nfc_to_orig.push(orig_byte);
+                orig_ends.push(orig_next);
+            }
         }
     }
+
+    let orig_start = nfc_to_orig.get(nfc_start).copied().unwrap_or(0);
+    let orig_end = if nfc_end > 0 {
+        orig_ends
+            .get(nfc_end - 1)
+            .copied()
+            .unwrap_or(original.len())
+    } else {
+        0
+    };
 
     (orig_start, orig_end)
 }

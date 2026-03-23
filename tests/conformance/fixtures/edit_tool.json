@@ -50,6 +50,12 @@
       "expected": {"is_error": false, "file_exact": "a\nb"}
     },
     {
+      "name": "unicode_nfc_normalization",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "caf\u0065\u0301 latte"}],
+      "input": {"path": "test.txt", "old_text": "caf\u00e9", "new_text": "tea"},
+      "expected": {"is_error": false, "file_exact": "tea latte"}
+    },
+    {
       "name": "fuzzy_multi_match_errors",
       "setup": [{"type": "create_file", "path": "test.txt", "content": "fn\tmain() {}\nfn\t\tmain() {}"}],
       "input": {"path": "test.txt", "old_text": "fn main() {}", "new_text": "fn run() {}"},

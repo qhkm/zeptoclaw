@@ -181,32 +181,32 @@ async fn run_single_case(tool: &dyn Tool, case: &TestCase) -> Result<(), String>
             .or_else(|| case.input.get("file_path"))
             .and_then(|v| v.as_str());
 
-        if let Some(path) = rel_path {
-            let full = canonical.join(path);
-            let file_content = fs::read_to_string(&full)
-                .await
-                .map_err(|e| format!("reading file '{}' for assertion: {}", path, e))?;
+        let path = rel_path
+            .ok_or_else(|| "file_* assertions require input.path or input.file_path".to_string())?;
+        let full = canonical.join(path);
+        let file_content = fs::read_to_string(&full)
+            .await
+            .map_err(|e| format!("reading file '{}' for assertion: {}", path, e))?;
 
-            if let Some(ref contains) = case.expected.file_contains {
-                if !file_content.contains(contains) {
-                    return Err(format!("file '{}' does not contain '{}'", path, contains));
-                }
+        if let Some(ref contains) = case.expected.file_contains {
+            if !file_content.contains(contains) {
+                return Err(format!("file '{}' does not contain '{}'", path, contains));
             }
-            if let Some(ref not_contains) = case.expected.file_not_contains {
-                if file_content.contains(not_contains) {
-                    return Err(format!(
-                        "file '{}' should not contain '{}' but does",
-                        path, not_contains
-                    ));
-                }
+        }
+        if let Some(ref not_contains) = case.expected.file_not_contains {
+            if file_content.contains(not_contains) {
+                return Err(format!(
+                    "file '{}' should not contain '{}' but does",
+                    path, not_contains
+                ));
             }
-            if let Some(ref exact) = case.expected.file_exact {
-                if file_content != *exact {
-                    return Err(format!(
-                        "file '{}' content '{}' != expected '{}'",
-                        path, file_content, exact
-                    ));
-                }
+        }
+        if let Some(ref exact) = case.expected.file_exact {
+            if file_content != *exact {
+                return Err(format!(
+                    "file '{}' content '{}' != expected '{}'",
+                    path, file_content, exact
+                ));
             }
         }
     }
