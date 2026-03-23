@@ -1561,7 +1561,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.agents.defaults.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(config.agents.defaults.model, "claude-sonnet-4-6");
         assert_eq!(config.agents.defaults.max_tokens, 8192);
         assert_eq!(config.agents.defaults.temperature, 0.7);
         assert_eq!(config.agents.defaults.max_tool_iterations, 20);
@@ -1594,7 +1594,7 @@ mod tests {
     fn test_config_to_json() {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("claude-sonnet-4-5-20250929"));
+        assert!(json.contains("claude-sonnet-4-6"));
         assert!(json.contains("8192"));
     }
 
@@ -1605,7 +1605,7 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.gateway.port, 9090);
         assert_eq!(config.gateway.host, "0.0.0.0"); // Default
-        assert_eq!(config.agents.defaults.model, "claude-sonnet-4-5-20250929"); // Default
+        assert_eq!(config.agents.defaults.model, "claude-sonnet-4-6"); // Default
     }
 
     #[test]

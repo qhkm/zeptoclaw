@@ -259,7 +259,7 @@ pub(crate) async fn cmd_agent(
     // Warn if configured model doesn't match any known provider.
     {
         let provider_names = zeptoclaw::providers::configured_provider_names(&config);
-        let provider_refs: Vec<&str> = provider_names.iter().copied().collect();
+        let provider_refs: Vec<&str> = provider_names.to_vec();
         if let Some(warning) = super::common::model_provider_mismatch_warning(
             &config.agents.defaults.model,
             &provider_refs,
