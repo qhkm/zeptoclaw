@@ -277,7 +277,7 @@ pub fn format_model_list(
         output.push('\n');
     }
 
-    output.push_str("\n");
+    output.push('\n');
     output.push_str("Switch model:  /model <model-id>\n");
     output.push_str("With provider: /model <provider>:<model-id>\n");
     output.push_str("Reset:         /model reset\n");
