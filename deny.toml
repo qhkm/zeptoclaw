@@ -13,13 +13,10 @@ targets = [
 ]
 
 [advisories]
-# Ignore specific advisories if needed (add RUSTSEC IDs here)
-ignore = [
-    # rustls-webpki 0.102.8 pinned by rumqttc 0.25.1 (latest) — no upstream fix available.
-    # Low impact: CRL distribution point matching, requires compromised CA.
-    # Only affects builds with --features mqtt. Remove when rumqttc updates.
-    "RUSTSEC-2026-0049",
-]
+# Zero-tolerance: no ignored advisories. Vulnerable optional deps (e.g. mqtt
+# feature's rumqttc → rustls-webpki 0.102.8) are excluded from the audit by
+# not using --all-features in CI. See ci.yml deny/audit steps.
+ignore = []
 
 [licenses]
 # Crates must use one of these licenses
