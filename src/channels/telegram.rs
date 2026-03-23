@@ -822,6 +822,10 @@ impl Channel for TelegramChannel {
                                             let _ = apply_thread_id(req, &thread_id).await;
                                         }
                                     }
+                                    // Cancel typing indicator before returning
+                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
+                                    }
                                     return Ok(());
                                 }
 
@@ -904,6 +908,10 @@ impl Channel for TelegramChannel {
                                                 );
                                             let _ = apply_thread_id(req, &thread_id).await;
                                         }
+                                    }
+                                    // Cancel typing indicator before returning
+                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
                                     }
                                     return Ok(());
                                 }
