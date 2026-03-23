@@ -1,0 +1,41 @@
+{
+  "tool": "grep",
+  "cases": [
+    {
+      "name": "basic_match",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello world\nfoo bar\nhello again"}],
+      "input": {"pattern": "hello", "path": "test.txt"},
+      "expected": {"is_error": false, "output_contains": "hello"}
+    },
+    {
+      "name": "no_match",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello world"}],
+      "input": {"pattern": "nonexistent", "path": "test.txt"},
+      "expected": {"is_error": false, "output_contains": "No matches"}
+    },
+    {
+      "name": "case_insensitive",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "Hello World"}],
+      "input": {"pattern": "hello", "path": "test.txt", "ignore_case": true},
+      "expected": {"is_error": false, "output_contains": "Hello"}
+    },
+    {
+      "name": "multiple_files",
+      "setup": [
+        {"type": "create_file", "path": "a.txt", "content": "match here"},
+        {"type": "create_file", "path": "b.txt", "content": "match there"}
+      ],
+      "input": {"pattern": "match", "path": "."},
+      "expected": {"is_error": false, "output_contains": "match"}
+    },
+    {
+      "name": "glob_filter",
+      "setup": [
+        {"type": "create_file", "path": "test.rs", "content": "fn main() {}"},
+        {"type": "create_file", "path": "test.txt", "content": "fn main() {}"}
+      ],
+      "input": {"pattern": "fn main", "path": ".", "glob": "*.rs"},
+      "expected": {"is_error": false, "output_contains": "fn main"}
+    }
+  ]
+}

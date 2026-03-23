@@ -81,6 +81,7 @@ pub mod longterm_memory;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod output;
 pub mod pdf_read;
 pub mod plugin;
 pub mod project;

@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use crate::error::{Result, ZeptoError};
 use crate::security::validate_path_in_workspace;
 
+use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for finding files by glob pattern.
@@ -91,10 +92,11 @@ impl Tool for FindTool {
         }
 
         let count = entries.len();
-        Ok(ToolOutput::llm_only(format!(
-            "{}\n({} files)",
-            entries.join("\n"),
-            count
+        let output = format!("{}\n({} files)", entries.join("\n"), count);
+        Ok(ToolOutput::llm_only(truncate_tool_output(
+            &output,
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
         )))
     }
 }
