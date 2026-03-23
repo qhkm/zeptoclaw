@@ -457,9 +457,38 @@ pub(crate) async fn cmd_agent(
                                     );
                                 }
                                 ModelCommand::Fetch => {
-                                    println!("Fetching models from configured providers...");
-                                    // TODO(model-fetch): wire fetch_provider_models() in next task
-                                    println!("(not yet implemented — use /model list for now)");
+                                    println!("Fetching models from configured providers...\n");
+                                    let selections =
+                                        zeptoclaw::providers::resolve_runtime_providers(&config);
+                                    if selections.is_empty() {
+                                        println!("No providers configured. Run 'zeptoclaw onboard' to set up.");
+                                    } else {
+                                        for s in &selections {
+                                            let api_base = s.api_base.as_deref();
+                                            match super::common::fetch_provider_models(
+                                                s.name, &s.api_key, api_base,
+                                            )
+                                            .await
+                                            {
+                                                Ok(models) => {
+                                                    println!(
+                                                        "{} ({} models):",
+                                                        s.name,
+                                                        models.len()
+                                                    );
+                                                    for m in &models {
+                                                        println!("  {}", m);
+                                                    }
+                                                    println!();
+                                                }
+                                                Err(e) => {
+                                                    println!("{}: failed to fetch ({})", s.name, e);
+                                                    println!();
+                                                }
+                                            }
+                                        }
+                                        println!("Switch: /model <model-id>");
+                                    }
                                 }
                             }
                         } else {
