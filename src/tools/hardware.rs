@@ -1,25 +1,8 @@
-//! Hardware tool -- agent-facing tool for hardware discovery and peripheral interaction.
-//!
-//! The `HardwareTool` dispatches based on the `action` parameter:
-//! - `list_devices` -- discover connected USB devices
-//! - `device_info` -- get info about a specific device
-//! - `connect` -- connect to a peripheral (placeholder)
-//! - `send_command` -- send a command to a connected peripheral (placeholder)
-//! - `read_data` -- read data from a connected peripheral (placeholder)
-//! - `disconnect` -- disconnect a peripheral (placeholder)
-//!
-//! When compiled WITHOUT the `hardware` feature, the tool returns an informative
-//! error directing the user to rebuild with the feature enabled.
-
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{Result, ZeptoError};
 use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
-
-// ============================================================================
-// Feature-gated implementation (with hardware feature)
-// ============================================================================
 
 #[cfg(feature = "hardware")]
 use crate::hardware::HardwareManager;
@@ -136,7 +119,6 @@ impl Tool for HardwareTool {
                     .ok_or_else(|| {
                         ZeptoError::Tool("Missing 'device' parameter for connect action".into())
                     })?;
-                // TODO: Implement peripheral connection management
                 Ok(ToolOutput::llm_only(format!(
                     "Connect to '{}' is not yet implemented. Use the peripheral-specific tools directly.",
                     device
@@ -145,12 +127,10 @@ impl Tool for HardwareTool {
             "send_command" => {
                 let _device = args.get("device").and_then(|v| v.as_str());
                 let _command = args.get("command").and_then(|v| v.as_str());
-                // TODO: Implement command dispatch to connected peripherals
                 Ok(ToolOutput::llm_only("send_command is not yet implemented. Connect a peripheral first.".to_string()))
             }
             "read_data" => {
                 let _device = args.get("device").and_then(|v| v.as_str());
-                // TODO: Implement data reading from connected peripherals
                 Ok(ToolOutput::llm_only("read_data is not yet implemented. Connect a peripheral first.".to_string()))
             }
             "disconnect" => {
@@ -162,7 +142,6 @@ impl Tool for HardwareTool {
                             "Missing 'device' parameter for disconnect action".into(),
                         )
                     })?;
-                // TODO: Implement peripheral disconnection
                 Ok(ToolOutput::llm_only(format!(
                     "Disconnect from '{}' is not yet implemented.",
                     device
@@ -175,10 +154,6 @@ impl Tool for HardwareTool {
         }
     }
 }
-
-// ============================================================================
-// Stub implementation (without hardware feature)
-// ============================================================================
 
 /// Stub HardwareTool when the `hardware` feature is not enabled.
 ///
@@ -282,12 +257,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::default_constructed_unit_structs)] // unit struct only without `hardware` feature
     fn test_hardware_tool_default() {
         let tool = HardwareTool::default();
         assert_eq!(tool.name(), "hardware");
     }
 
-    // In default build (no hardware feature), execute should return error
     #[cfg(not(feature = "hardware"))]
     #[tokio::test]
     async fn test_hardware_tool_stub_returns_error() {
@@ -314,7 +289,6 @@ mod tests {
         assert!(err.contains("cargo build --features hardware"));
     }
 
-    // Feature-gated tests (only run with --features hardware)
     #[cfg(feature = "hardware")]
     #[tokio::test]
     async fn test_hardware_tool_list_devices() {
@@ -323,7 +297,6 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"action": "list_devices"}), &ctx)
             .await;
-        // Should succeed (may return empty list or devices)
         assert!(result.is_ok());
     }
 

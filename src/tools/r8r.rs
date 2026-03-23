@@ -780,8 +780,8 @@ mod tests {
             .await;
 
         // If r8r is running and workflow exists, should succeed
-        if result.is_ok() {
-            let output = result.unwrap().for_llm;
+        if let Ok(output_result) = result {
+            let output = output_result.for_llm;
             assert!(output.contains("completed") || output.contains("Execution ID"));
         }
     }

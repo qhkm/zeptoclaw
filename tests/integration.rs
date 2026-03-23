@@ -1182,9 +1182,11 @@ async fn test_shell_tool_runtime_with_workspace() {
 async fn test_config_runtime_serialization() {
     use zeptoclaw::config::{RuntimeConfig, RuntimeType};
 
-    let mut config = RuntimeConfig::default();
-    config.runtime_type = RuntimeType::Docker;
-    config.allow_fallback_to_native = true;
+    let mut config = RuntimeConfig {
+        runtime_type: RuntimeType::Docker,
+        allow_fallback_to_native: true,
+        ..Default::default()
+    };
     config.docker.image = "ubuntu:22.04".to_string();
 
     let json = serde_json::to_string(&config).unwrap();
