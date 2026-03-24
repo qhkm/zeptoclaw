@@ -654,17 +654,14 @@ impl Channel for TelegramChannel {
                             {
                                 use teloxide::types::ChatAction;
 
+                                // Key includes message ID so concurrent messages
+                                // in the same chat each get their own indicator.
                                 let typing_key = match msg.thread_id {
-                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
-                                    None => msg.chat.id.0.to_string(),
+                                    Some(tid) => {
+                                        format!("{}:{}:{}", msg.chat.id.0, tid.0 .0, msg.id.0)
+                                    }
+                                    None => format!("{}:{}", msg.chat.id.0, msg.id.0),
                                 };
-
-                                // Cancel any stale typing task for this chat
-                                // (e.g. rapid successive messages).
-                                if let Some((_, old_token)) = typing_indicators.remove(&typing_key)
-                                {
-                                    old_token.cancel();
-                                }
 
                                 let cancel_token = CancellationToken::new();
                                 typing_indicators
@@ -919,6 +916,13 @@ impl Channel for TelegramChannel {
                                 let mut inbound =
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
 
+                                // Attach the inbound message ID so send() can
+                                // cancel the correct per-message typing indicator.
+                                inbound = inbound.with_metadata(
+                                    "telegram_message_id",
+                                    &msg.id.0.to_string(),
+                                );
+
                                 // For forum topics, override session key to isolate
                                 // per-topic conversations and attach thread metadata
                                 // so outbound replies route to the correct topic.
@@ -1106,13 +1110,17 @@ impl Channel for TelegramChannel {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
 
-        // Cancel the typing indicator for this chat before sending.
-        let typing_key = match msg.metadata.get("telegram_thread_id") {
-            Some(tid) => format!("{}:{}", chat_id, tid),
-            None => chat_id.to_string(),
-        };
-        if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
-            token.cancel();
+        // Cancel the typing indicator for this specific message before sending.
+        // The key includes the inbound message ID so concurrent messages in the
+        // same chat each have their own indicator (fixes race condition).
+        if let Some(msg_id) = msg.metadata.get("telegram_message_id") {
+            let typing_key = match msg.metadata.get("telegram_thread_id") {
+                Some(tid) => format!("{}:{}:{}", chat_id, tid, msg_id),
+                None => format!("{}:{}", chat_id, msg_id),
+            };
+            if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+                token.cancel();
+            }
         }
 
         info!("Telegram: Sending message to chat {}", chat_id);
@@ -1761,21 +1769,41 @@ mod tests {
 
     #[test]
     fn test_typing_key_format_consistency() {
-        // The inbound handler builds: format!("{}:{}", msg.chat.id.0, tid.0.0)
-        // The send() path builds:     format!("{}:{}", chat_id, tid)
+        // The inbound handler builds: format!("{}:{}:{}", chat_id, tid, msg_id)
+        // The send() path builds:     format!("{}:{}:{}", chat_id, tid, msg_id)
         // Both must produce identical keys for cancellation to work.
         let chat_id: i64 = 123456789;
         let thread_id: i32 = 42;
+        let msg_id: i32 = 100;
 
-        // Simulate handler key (chat.id.0 is i64, tid.0.0 is i32)
-        let handler_key_threaded = format!("{}:{}", chat_id, thread_id);
-        let handler_key_plain = chat_id.to_string();
+        // Simulate handler key (chat.id.0 is i64, tid.0.0 is i32, msg.id.0 is i32)
+        let handler_key_threaded = format!("{}:{}:{}", chat_id, thread_id, msg_id);
+        let handler_key_plain = format!("{}:{}", chat_id, msg_id);
 
-        // Simulate send() key (chat_id is i64, tid is &str from metadata)
-        let send_key_threaded = format!("{}:{}", chat_id, thread_id.to_string());
-        let send_key_plain = chat_id.to_string();
+        // Simulate send() key (chat_id is i64, tid and msg_id are &str from metadata)
+        let send_key_threaded = format!(
+            "{}:{}:{}",
+            chat_id,
+            thread_id.to_string(),
+            msg_id.to_string()
+        );
+        let send_key_plain = format!("{}:{}", chat_id, msg_id.to_string());
 
         assert_eq!(handler_key_threaded, send_key_threaded);
         assert_eq!(handler_key_plain, send_key_plain);
+    }
+
+    #[test]
+    fn test_typing_key_per_message_isolation() {
+        // Two messages in the same chat should have different typing keys
+        // so cancelling one doesn't affect the other.
+        let chat_id: i64 = 123456789;
+        let msg_id_a: i32 = 100;
+        let msg_id_b: i32 = 101;
+
+        let key_a = format!("{}:{}", chat_id, msg_id_a);
+        let key_b = format!("{}:{}", chat_id, msg_id_b);
+
+        assert_ne!(key_a, key_b);
     }
 }
