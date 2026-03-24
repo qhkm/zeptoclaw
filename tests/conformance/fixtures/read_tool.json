@@ -1,0 +1,35 @@
+{
+  "tool": "read_file",
+  "cases": [
+    {
+      "name": "read_existing_file",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello world"}],
+      "input": {"path": "test.txt"},
+      "expected": {"is_error": false, "output_contains": "hello world"}
+    },
+    {
+      "name": "read_nonexistent_file",
+      "setup": [],
+      "input": {"path": "nonexistent.txt"},
+      "expected": {"is_error": true, "error_contains": "Failed to read"}
+    },
+    {
+      "name": "read_unicode_content",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "こんにちは世界"}],
+      "input": {"path": "test.txt"},
+      "expected": {"is_error": false, "output_exact": "こんにちは世界"}
+    },
+    {
+      "name": "read_empty_file",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": ""}],
+      "input": {"path": "test.txt"},
+      "expected": {"is_error": false}
+    },
+    {
+      "name": "read_multiline",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "line1\nline2\nline3"}],
+      "input": {"path": "test.txt"},
+      "expected": {"is_error": false, "output_contains": "line2"}
+    }
+  ]
+}

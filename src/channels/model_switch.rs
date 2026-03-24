@@ -277,6 +277,12 @@ pub fn format_model_list(
         output.push('\n');
     }
 
+    output.push('\n');
+    output.push_str("Switch model:  /model <model-id>\n");
+    output.push_str("With provider: /model <provider>:<model-id>\n");
+    output.push_str("Reset:         /model reset\n");
+    output.push_str("Config:        agents.defaults.model in ~/.zeptoclaw/config.json");
+
     output.trim_end().to_string()
 }
 
@@ -512,6 +518,21 @@ mod tests {
         // zhipu isn't in KNOWN_MODELS by_provider grouping, should appear as a new section
         assert!(output.contains("zhipu"));
         assert!(output.contains("glm-4-flash"));
+    }
+
+    #[test]
+    fn test_format_model_list_includes_usage_hints() {
+        let configured = vec!["anthropic".to_string()];
+        let output = format_model_list(&configured, None, &[]);
+        assert!(
+            output.contains("Switch model:"),
+            "should include switch hint"
+        );
+        assert!(output.contains("/model reset"), "should include reset hint");
+        assert!(
+            output.contains("agents.defaults.model"),
+            "should include config hint"
+        );
     }
 
     #[tokio::test]

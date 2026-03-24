@@ -12,12 +12,15 @@ use std::path::Path;
 #[cfg(unix)]
 use std::{fs::OpenOptions, io::Write as _, os::unix::fs::MetadataExt};
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::error::{Result, ZeptoError};
 #[cfg(not(unix))]
 use crate::security::check_hardlink_write;
 use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
 use crate::tools::diff::apply_unified_diff;
 
+use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Resolve and validate a path relative to the workspace.
@@ -186,7 +189,11 @@ impl Tool for ReadFileTool {
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
-        Ok(ToolOutput::llm_only(content))
+        Ok(ToolOutput::llm_only(truncate_tool_output(
+            &content,
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
+        )))
     }
 }
 
@@ -359,7 +366,12 @@ impl Tool for ListDirTool {
         }
 
         items.sort();
-        Ok(ToolOutput::llm_only(items.join("\n")))
+        let joined = items.join("\n");
+        Ok(ToolOutput::llm_only(truncate_tool_output(
+            &joined,
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
+        )))
     }
 }
 
@@ -398,7 +410,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff)."
+        "Edit a file using either exact string replacement (old_text/new_text) or a unified diff patch (diff). String replacements must resolve to a single match unless expected_replacements is provided."
     }
 
     fn compact_description(&self) -> &str {
@@ -419,15 +431,23 @@ impl Tool for EditFileTool {
                 },
                 "old_text": {
                     "type": "string",
-                    "description": "The text to search for and replace"
+                    "description": "The text to search for and replace. Must resolve to a single match unless expected_replacements is provided."
                 },
                 "new_text": {
                     "type": "string",
                     "description": "The text to replace it with"
                 },
+                "expected_replacements": {
+                    "type": "integer",
+                    "description": "Optional exact number of matches required before applying the replacement"
+                },
                 "diff": {
                     "type": "string",
                     "description": "A unified diff patch to apply. Use standard @@ hunk headers with +/- lines. Mutually exclusive with old_text/new_text."
+                },
+                "expected_replacements": {
+                    "type": "integer",
+                    "description": "Exact number of occurrences to replace. When provided, all exact matches are replaced with count validation. When omitted, the match must be unique (fuzzy matching is used as fallback)."
                 }
             },
             "required": ["path"]
@@ -443,6 +463,10 @@ impl Tool for EditFileTool {
         let diff_param = args.get("diff").and_then(|v| v.as_str());
         let old_text = args.get("old_text").and_then(|v| v.as_str());
         let new_text = args.get("new_text").and_then(|v| v.as_str());
+        let expected_replacements = args
+            .get("expected_replacements")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
 
         if diff_param.is_some() && (old_text.is_some() || new_text.is_some()) {
             return Err(ZeptoError::Tool(
@@ -477,36 +501,342 @@ impl Tool for EditFileTool {
                 summary.hunks_applied, summary.lines_added, summary.lines_removed, full_path
             )))
         } else if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
-            // --- String replacement mode (existing logic) ---
+            // --- String replacement mode ---
             revalidate_path(full_path_ref, &workspace)?;
+
+            if old_text.is_empty() {
+                return Err(ZeptoError::Tool("'old_text' must not be empty".into()));
+            }
 
             let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
                 ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e))
             })?;
 
-            if !content.contains(old_text) {
-                return Err(ZeptoError::Tool(format!(
-                    "Text '{}' not found in file '{}'",
-                    crate::utils::string::preview(old_text, 50),
-                    full_path
-                )));
+            if let Some(expected) = expected_replacements {
+                // Guarded multi-match: exact matching with count check
+                let replacements = content.matches(old_text).count();
+                if replacements == 0 {
+                    return Err(ZeptoError::Tool(format!(
+                        "Text '{}' not found in file '{}'",
+                        crate::utils::string::preview(old_text, 50),
+                        full_path
+                    )));
+                }
+                if replacements != expected {
+                    return Err(ZeptoError::Tool(format!(
+                        "Expected {} replacement(s) for '{}' in '{}', found {}",
+                        expected,
+                        crate::utils::string::preview(old_text, 50),
+                        full_path,
+                        replacements
+                    )));
+                }
+                let new_content = content.replace(old_text, new_text);
+                write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
+                Ok(ToolOutput::llm_only(format!(
+                    "Successfully replaced {} occurrence(s) in {}",
+                    replacements, full_path
+                )))
+            } else {
+                // Unique match with tiered fuzzy matching
+                match find_unique_match(&content, old_text) {
+                    Ok(m) => {
+                        let mut new_content = String::with_capacity(content.len());
+                        new_content.push_str(&content[..m.start]);
+                        new_content.push_str(new_text);
+                        new_content.push_str(&content[m.end..]);
+                        write_file_secure(full_path_ref, &workspace, new_content.as_bytes())
+                            .await?;
+                        Ok(ToolOutput::llm_only(format!(
+                            "Successfully replaced 1 occurrence ({} match) in {}",
+                            m.tier, full_path
+                        )))
+                    }
+                    Err(EditMatchError::MultipleMatches(n)) => {
+                        Err(ZeptoError::Tool(format!(
+                            "Found {} occurrences of text in '{}'. Provide more surrounding context to uniquely identify the location.",
+                            n, full_path
+                        )))
+                    }
+                    Err(EditMatchError::NotFound) => {
+                        Err(ZeptoError::Tool(format!(
+                            "Text '{}' not found in file '{}'",
+                            crate::utils::string::preview(old_text, 50),
+                            full_path
+                        )))
+                    }
+                }
             }
-
-            let new_content = content.replace(old_text, new_text);
-
-            write_file_secure(full_path_ref, &workspace, new_content.as_bytes()).await?;
-
-            let replacements = content.matches(old_text).count();
-            Ok(ToolOutput::llm_only(format!(
-                "Successfully replaced {} occurrence(s) in {}",
-                replacements, full_path
-            )))
         } else {
             // unreachable due to early validation, but kept for safety
             Err(ZeptoError::Tool(
                 "Provide either 'diff' or 'old_text'/'new_text'".into(),
             ))
         }
+    }
+}
+
+// --- Fuzzy matching for edit_file ---
+#[derive(Debug)]
+enum MatchTier {
+    Exact,
+    UnicodeNormalized,
+    WhitespaceNormalized,
+}
+
+impl std::fmt::Display for MatchTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchTier::Exact => write!(f, "exact"),
+            MatchTier::UnicodeNormalized => write!(f, "unicode-normalized"),
+            MatchTier::WhitespaceNormalized => write!(f, "whitespace-normalized"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UniqueMatch {
+    start: usize,
+    end: usize,
+    tier: MatchTier,
+}
+
+#[derive(Debug)]
+enum EditMatchError {
+    NotFound,
+    MultipleMatches(usize),
+}
+
+impl std::fmt::Display for EditMatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditMatchError::NotFound => write!(f, "not found"),
+            EditMatchError::MultipleMatches(n) => write!(f, "Found {} occurrences", n),
+        }
+    }
+}
+
+/// Normalize whitespace: collapse runs of spaces/tabs to single space,
+/// trim trailing whitespace per line, normalize \r\n to \n.
+fn normalize_whitespace(s: &str) -> String {
+    s.replace("\r\n", "\n")
+        .lines()
+        .map(|line| {
+            let mut result = String::new();
+            let mut prev_ws = false;
+            for ch in line.chars() {
+                if ch == ' ' || ch == '\t' {
+                    if !prev_ws {
+                        result.push(' ');
+                    }
+                    prev_ws = true;
+                } else {
+                    result.push(ch);
+                    prev_ws = false;
+                }
+            }
+            result.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Count non-overlapping occurrences and collect their byte offsets.
+fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        positions.push(start + pos);
+        start += pos + needle.len();
+    }
+    positions
+}
+
+/// Map a byte range in an NFC-normalized string back to the original string.
+///
+/// NFC normalization can merge multiple original chars into one (e.g. `e` +
+/// combining accent -> precomposed `é`). We build a byte-level mapping from
+/// NFC byte positions back to original byte positions by NFC-normalizing the
+/// original one char at a time and tracking boundaries.
+fn map_nfc_range_to_original(
+    original: &str,
+    _nfc: &str,
+    nfc_start: usize,
+    nfc_end: usize,
+) -> (usize, usize) {
+    // Build mapping: for each NFC byte, record which original byte it came from.
+    // A single original char may produce multiple NFC bytes (or fewer via composition).
+    let mut nfc_to_orig: Vec<usize> = Vec::new();
+    let mut orig_ends: Vec<usize> = Vec::new();
+
+    for (orig_byte, ch) in original.char_indices() {
+        let orig_next = orig_byte + ch.len_utf8();
+        for nfc_ch in ch.nfc() {
+            for _ in 0..nfc_ch.len_utf8() {
+                nfc_to_orig.push(orig_byte);
+                orig_ends.push(orig_next);
+            }
+        }
+    }
+
+    let orig_start = nfc_to_orig.get(nfc_start).copied().unwrap_or(0);
+    let orig_end = if nfc_end > 0 {
+        orig_ends
+            .get(nfc_end - 1)
+            .copied()
+            .unwrap_or(original.len())
+    } else {
+        0
+    };
+
+    (orig_start, orig_end)
+}
+
+/// Map a byte range in a whitespace-normalized string back to the original.
+///
+/// Handles `\r\n` -> `\n` mapping, whitespace collapse (runs of spaces/tabs
+/// become a single space), and trailing whitespace trimming.
+fn map_ws_range_to_original(
+    original: &str,
+    normalized: &str,
+    norm_start: usize,
+    norm_end: usize,
+) -> (usize, usize) {
+    let orig_bytes = original.as_bytes();
+    let norm_bytes = normalized.as_bytes();
+
+    let mut orig_i = 0;
+    let mut norm_i = 0;
+    let mut result_start = 0;
+    let mut result_end = original.len();
+
+    while norm_i < norm_bytes.len() && orig_i < orig_bytes.len() {
+        if norm_i == norm_start {
+            result_start = orig_i;
+        }
+        if norm_i == norm_end {
+            result_end = orig_i;
+            break;
+        }
+
+        // Handle \r\n -> \n mapping
+        if orig_bytes[orig_i] == b'\r'
+            && orig_i + 1 < orig_bytes.len()
+            && orig_bytes[orig_i + 1] == b'\n'
+            && norm_bytes[norm_i] == b'\n'
+        {
+            orig_i += 2;
+            norm_i += 1;
+            continue;
+        }
+
+        // Handle whitespace collapse
+        if (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t') && norm_bytes[norm_i] == b' '
+        {
+            orig_i += 1;
+            norm_i += 1;
+            while orig_i < orig_bytes.len()
+                && (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t')
+            {
+                orig_i += 1;
+            }
+            continue;
+        }
+
+        // Handle trailing whitespace in original (trimmed in normalized)
+        if (orig_bytes[orig_i] == b' ' || orig_bytes[orig_i] == b'\t')
+            && (norm_i >= norm_bytes.len() || norm_bytes[norm_i] == b'\n')
+        {
+            orig_i += 1;
+            continue;
+        }
+
+        orig_i += 1;
+        norm_i += 1;
+    }
+
+    if norm_end >= norm_bytes.len() && result_end == original.len() {
+        result_end = original.len();
+    }
+
+    (result_start, result_end)
+}
+
+/// Find a unique match for `old_text` in `content` using 3-tier fuzzy matching.
+///
+/// Tries in order:
+/// 1. **Exact** byte-for-byte match
+/// 2. **Unicode NFC** normalized match (only if normalization changes either string)
+/// 3. **Whitespace normalized** match (collapse runs, trim trailing, CRLF -> LF)
+///
+/// Returns `EditMatchError::MultipleMatches` if any tier finds 2+ matches.
+/// Returns `EditMatchError::NotFound` if no tier finds a match.
+fn find_unique_match(
+    content: &str,
+    old_text: &str,
+) -> std::result::Result<UniqueMatch, EditMatchError> {
+    // Tier 1: Exact match
+    let positions = find_all_occurrences(content, old_text);
+    match positions.len() {
+        1 => {
+            return Ok(UniqueMatch {
+                start: positions[0],
+                end: positions[0] + old_text.len(),
+                tier: MatchTier::Exact,
+            });
+        }
+        n if n > 1 => return Err(EditMatchError::MultipleMatches(n)),
+        _ => {}
+    }
+
+    // Tier 2: Unicode NFC normalized
+    let content_nfc: String = content.nfc().collect();
+    let search_nfc: String = old_text.nfc().collect();
+    // Only try NFC tier if normalization actually changed something
+    if content_nfc != content || search_nfc != old_text {
+        let positions = find_all_occurrences(&content_nfc, &search_nfc);
+        match positions.len() {
+            1 => {
+                let (orig_start, orig_end) = map_nfc_range_to_original(
+                    content,
+                    &content_nfc,
+                    positions[0],
+                    positions[0] + search_nfc.len(),
+                );
+                return Ok(UniqueMatch {
+                    start: orig_start,
+                    end: orig_end,
+                    tier: MatchTier::UnicodeNormalized,
+                });
+            }
+            n if n > 1 => return Err(EditMatchError::MultipleMatches(n)),
+            _ => {}
+        }
+    }
+
+    // Tier 3: Whitespace normalized
+    let content_ws = normalize_whitespace(content);
+    let search_ws = normalize_whitespace(old_text);
+    let positions = find_all_occurrences(&content_ws, &search_ws);
+    match positions.len() {
+        1 => {
+            let (orig_start, orig_end) = map_ws_range_to_original(
+                content,
+                &content_ws,
+                positions[0],
+                positions[0] + search_ws.len(),
+            );
+            Ok(UniqueMatch {
+                start: orig_start,
+                end: orig_end,
+                tier: MatchTier::WhitespaceNormalized,
+            })
+        }
+        n if n > 1 => Err(EditMatchError::MultipleMatches(n)),
+        _ => Err(EditMatchError::NotFound),
     }
 }
 
@@ -732,19 +1062,21 @@ mod tests {
         let tool = EditFileTool;
         let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
 
+        // With expected_replacements matching actual count, all occurrences are replaced
         let result = tool
             .execute(
                 json!({
                     "path": "edit_multi.txt",
                     "old_text": "foo",
-                    "new_text": "qux"
+                    "new_text": "qux",
+                    "expected_replacements": 3
                 }),
                 &ctx,
             )
             .await;
 
         assert!(result.is_ok());
-        assert!(result.unwrap().for_llm.contains("3 occurrence"));
+        assert!(result.unwrap().for_llm.contains("replaced 3 occurrence"));
         assert_eq!(
             fs::read_to_string(&file_path).unwrap(),
             "qux bar qux baz qux"
@@ -776,6 +1108,88 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found in file"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_rejects_empty_old_text() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_empty_old.txt");
+        fs::write(&file_path, "Hello World").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_empty_old.txt",
+                    "old_text": "",
+                    "new_text": "Replacement"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "Hello World");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_expected_replacements_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_expected_count.txt");
+        fs::write(&file_path, "foo bar foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_expected_count.txt",
+                    "old_text": "foo",
+                    "new_text": "qux",
+                    "expected_replacements": 1
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected 1 replacement(s)"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "foo bar foo");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_expected_replacements_match() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("edit_expected_ok.txt");
+        fs::write(&file_path, "foo bar foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "edit_expected_ok.txt",
+                    "old_text": "foo",
+                    "new_text": "qux",
+                    "expected_replacements": 2
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "qux bar qux");
     }
 
     #[tokio::test]
@@ -1161,5 +1575,147 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not both"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_multi_match_without_expected_errors() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "foo bar foo baz foo").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "old_text": "foo",
+                    "new_text": "qux"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("3 occurrences"));
+        assert!(err.contains("more surrounding context"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tool_fuzzy_whitespace_match() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "fn\tmain()\t{}").unwrap();
+
+        let tool = EditFileTool;
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+
+        let result = tool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "old_text": "fn main() {}",
+                    "new_text": "fn run() {}"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "fn run() {}");
+    }
+
+    // --- find_unique_match tests ---
+    use super::{find_unique_match, MatchTier};
+
+    #[test]
+    fn test_exact_single_match() {
+        let content = "fn main() {}";
+        let result = find_unique_match(content, "main").unwrap();
+        assert_eq!(&content[result.start..result.end], "main");
+        assert!(matches!(result.tier, MatchTier::Exact));
+    }
+
+    #[test]
+    fn test_exact_multi_match_errors() {
+        let content = "foo bar foo baz foo";
+        let result = find_unique_match(content, "foo");
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("3"));
+    }
+
+    #[test]
+    fn test_not_found_errors() {
+        let content = "fn main() {}";
+        let result = find_unique_match(content, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unicode_nfc_fallback() {
+        let content = "caf\u{0065}\u{0301}"; // NFD: e + combining acute = 6 bytes
+        let search = "caf\u{00E9}"; // NFC: precomposed e-acute
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::UnicodeNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_unicode_nfc_mid_string() {
+        let content = "hello caf\u{0065}\u{0301} world";
+        let search = "caf\u{00E9}";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::UnicodeNormalized));
+        assert_eq!(result.start, 6);
+        assert_eq!(&content[result.start..result.end], "caf\u{0065}\u{0301}");
+    }
+
+    #[test]
+    fn test_whitespace_tabs_vs_spaces() {
+        let content = "fn\tmain()\t{}";
+        let search = "fn main() {}";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_whitespace_trailing() {
+        // Trailing spaces on a line prevent exact match but whitespace
+        // normalization trims them, producing a match.
+        let content = "hello   \nworld";
+        let search = "hello\nworld";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_whitespace_crlf_normalization() {
+        let content = "line1\r\nline2";
+        let search = "line1\nline2";
+        let result = find_unique_match(content, search).unwrap();
+        assert!(matches!(result.tier, MatchTier::WhitespaceNormalized));
+        assert_eq!(result.start, 0);
+        assert_eq!(result.end, content.len());
+    }
+
+    #[test]
+    fn test_fuzzy_multi_match_errors() {
+        let content = "fn\tmain() {}\nfn\t\tmain() {}";
+        let search = "fn main() {}";
+        let result = find_unique_match(content, search);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_content() {
+        let result = find_unique_match("", "search");
+        assert!(result.is_err());
     }
 }

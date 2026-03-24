@@ -326,8 +326,11 @@ impl TaintEngine {
             labels.insert(TaintLabel::Secret);
         }
 
-        // Store snippet if we assigned any labels
-        if !labels.is_empty() {
+        // Store snippet if we assigned any labels.
+        // Skip empty output — `String::contains("")` is always true, so an
+        // empty snippet would cause every subsequent `check_sink` to
+        // false-positive as tainted.
+        if !labels.is_empty() && !output.is_empty() {
             let snippet = truncate_utf8(output, SNIPPET_MAX_LEN).to_string();
 
             self.tainted_snippets.push(TaintedSnippet {
@@ -871,7 +874,6 @@ mod tests {
     #[test]
     fn test_hardcoded_network_tools_still_tainted() {
         // web_fetch should be tainted even without being in external_tool_names
-        let engine = TaintEngine::new(TaintConfig::default());
         assert!(NETWORK_SOURCE_TOOLS.contains(&"web_fetch"));
 
         let mut engine = TaintEngine::new(TaintConfig::default());
@@ -895,6 +897,24 @@ mod tests {
         assert!(result.is_err());
         let violation = result.unwrap_err();
         assert_eq!(violation.label, TaintLabel::ExternalNetwork);
+    }
+
+    #[test]
+    fn test_empty_output_not_stored_as_snippet() {
+        let mut engine = TaintEngine::new(TaintConfig::default());
+        let mut ext = HashSet::new();
+        ext.insert("empty_plugin".to_string());
+        engine.register_external_tools(ext);
+
+        // External tool returns empty output — should NOT store a snippet
+        let labels = engine.label_output("empty_plugin", "");
+        assert!(labels.contains(&TaintLabel::ExternalNetwork));
+        assert!(engine.tainted_snippets.is_empty());
+
+        // Subsequent check_sink must NOT false-positive
+        let input = json!({"command": "ls -la"});
+        let result = engine.check_sink("shell_execute", &input);
+        assert!(result.is_ok());
     }
 
     #[test]

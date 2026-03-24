@@ -1,0 +1,83 @@
+{
+  "tool": "edit_file",
+  "cases": [
+    {
+      "name": "exact_single_match",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello world"}],
+      "input": {"path": "test.txt", "old_text": "hello", "new_text": "goodbye"},
+      "expected": {"is_error": false, "output_contains": "replaced 1 occurrence", "file_exact": "goodbye world"}
+    },
+    {
+      "name": "exact_multi_match_errors",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "foo bar foo baz foo"}],
+      "input": {"path": "test.txt", "old_text": "foo", "new_text": "qux"},
+      "expected": {"is_error": true, "error_contains": "3 occurrences"}
+    },
+    {
+      "name": "text_not_found",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello world"}],
+      "input": {"path": "test.txt", "old_text": "nonexistent", "new_text": "replacement"},
+      "expected": {"is_error": true, "error_contains": "not found"}
+    },
+    {
+      "name": "empty_old_text",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "hello"}],
+      "input": {"path": "test.txt", "old_text": "", "new_text": "x"},
+      "expected": {"is_error": true, "error_contains": "must not be empty"}
+    },
+    {
+      "name": "expected_replacements_match",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "aaa bbb aaa"}],
+      "input": {"path": "test.txt", "old_text": "aaa", "new_text": "ccc", "expected_replacements": 2},
+      "expected": {"is_error": false, "output_contains": "replaced 2 occurrence", "file_exact": "ccc bbb ccc"}
+    },
+    {
+      "name": "expected_replacements_mismatch",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "aaa bbb aaa"}],
+      "input": {"path": "test.txt", "old_text": "aaa", "new_text": "ccc", "expected_replacements": 1},
+      "expected": {"is_error": true, "error_contains": "Expected 1 replacement"}
+    },
+    {
+      "name": "whitespace_tabs_vs_spaces",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "fn\tmain()\t{}"}],
+      "input": {"path": "test.txt", "old_text": "fn main() {}", "new_text": "fn run() {}"},
+      "expected": {"is_error": false, "file_exact": "fn run() {}"}
+    },
+    {
+      "name": "whitespace_crlf",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "line1\r\nline2"}],
+      "input": {"path": "test.txt", "old_text": "line1\nline2", "new_text": "a\nb"},
+      "expected": {"is_error": false, "file_exact": "a\nb"}
+    },
+    {
+      "name": "unicode_nfc_normalization",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "caf\u0065\u0301 latte"}],
+      "input": {"path": "test.txt", "old_text": "caf\u00e9", "new_text": "tea"},
+      "expected": {"is_error": false, "file_exact": "tea latte"}
+    },
+    {
+      "name": "fuzzy_multi_match_errors",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "fn\tmain() {}\nfn\t\tmain() {}"}],
+      "input": {"path": "test.txt", "old_text": "fn main() {}", "new_text": "fn run() {}"},
+      "expected": {"is_error": true, "error_contains": "occurrences"}
+    },
+    {
+      "name": "file_not_contains_after_replace",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "old_value = 42"}],
+      "input": {"path": "test.txt", "old_text": "old_value", "new_text": "new_value"},
+      "expected": {"is_error": false, "file_not_contains": "old_value", "file_contains": "new_value"}
+    },
+    {
+      "name": "diff_mode_basic",
+      "setup": [{"type": "create_file", "path": "test.txt", "content": "line1\nline2\nline3\n"}],
+      "input": {"path": "test.txt", "diff": "--- a/test.txt\n+++ b/test.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+replaced\n line3\n"},
+      "expected": {"is_error": false, "output_contains": "Applied 1 hunk", "file_contains": "replaced"}
+    },
+    {
+      "name": "missing_path",
+      "setup": [],
+      "input": {"old_text": "foo", "new_text": "bar"},
+      "expected": {"is_error": true, "error_contains": "path"}
+    }
+  ]
+}

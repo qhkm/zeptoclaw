@@ -1,0 +1,18 @@
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        # Fail if overall coverage drops by more than 2%
+        threshold: 2%
+    patch:
+      default:
+        # New code in PRs must have at least 50% coverage
+        target: 50%
+
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+  require_changes: true
