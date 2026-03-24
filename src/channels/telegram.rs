@@ -659,49 +659,59 @@ impl Channel for TelegramChannel {
                                     None => msg.chat.id.0.to_string(),
                                 };
 
-                                // Cancel any stale typing task for this chat
-                                // (e.g. rapid successive messages).
-                                if let Some((_, (old_token, _))) =
-                                    typing_indicators.remove(&typing_key)
-                                {
-                                    old_token.cancel();
-                                }
-
-                                let cancel_token = CancellationToken::new();
-                                typing_indicators.insert(
-                                    typing_key.clone(),
-                                    (cancel_token.clone(), AtomicUsize::new(1)),
-                                );
-
-                                let typing_bot = bot.clone();
-                                let typing_chat_id = msg.chat.id;
-                                let typing_thread_id = msg.thread_id;
-                                let typing_map = typing_indicators.clone();
-                                let typing_map_key = typing_key;
-
-                                tokio::spawn(async move {
-                                    loop {
-                                        let mut action = typing_bot.send_chat_action(
-                                            typing_chat_id,
-                                            ChatAction::Typing,
-                                        );
-                                        if let Some(tid) = typing_thread_id {
-                                            action = action.message_thread_id(tid);
+                                // Use entry() API for atomic insert-or-increment.
+                                // If a typing loop is already running for this chat,
+                                // just bump the refcount. Otherwise, start a new loop.
+                                let spawn_token = {
+                                    let entry = typing_indicators.entry(typing_key.clone());
+                                    match entry {
+                                        dashmap::mapref::entry::Entry::Occupied(o) => {
+                                            o.get().1.fetch_add(1, Ordering::AcqRel);
+                                            None
                                         }
-                                        if let Err(e) = action.await {
-                                            debug!(
-                                                "Typing indicator send failed for {}: {}",
-                                                typing_map_key, e
-                                            );
-                                        }
-
-                                        tokio::select! {
-                                            _ = cancel_token.cancelled() => break,
-                                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                        dashmap::mapref::entry::Entry::Vacant(v) => {
+                                            let cancel_token = CancellationToken::new();
+                                            let cloned = cancel_token.clone();
+                                            v.insert((
+                                                cancel_token,
+                                                AtomicUsize::new(1),
+                                            ));
+                                            Some(cloned)
                                         }
                                     }
-                                    typing_map.remove(&typing_map_key);
-                                });
+                                };
+
+                                if let Some(cancel_token) = spawn_token {
+                                    let typing_bot = bot.clone();
+                                    let typing_chat_id = msg.chat.id;
+                                    let typing_thread_id = msg.thread_id;
+                                    let typing_map_key = typing_key;
+
+                                    tokio::spawn(async move {
+                                        loop {
+                                            let mut action = typing_bot.send_chat_action(
+                                                typing_chat_id,
+                                                ChatAction::Typing,
+                                            );
+                                            if let Some(tid) = typing_thread_id {
+                                                action = action.message_thread_id(tid);
+                                            }
+                                            if let Err(e) = action.await {
+                                                debug!(
+                                                    "Typing indicator send failed for {}: {}",
+                                                    typing_map_key, e
+                                                );
+                                            }
+
+                                            tokio::select! {
+                                                _ = cancel_token.cancelled() => break,
+                                                _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                            }
+                                        }
+                                        // Do NOT remove the entry here. Entry removal is
+                                        // the sole responsibility of send() and stop().
+                                    });
+                                }
                             }
 
                             // Only process text messages
@@ -1795,5 +1805,40 @@ mod tests {
 
         let entry = map.get("chat:123").unwrap();
         assert_eq!(entry.value().1.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_typing_refcount_increments_on_second_arrival() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use dashmap::DashMap;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+
+        // Simulate first message: vacant entry, insert with rc=1
+        {
+            let entry = map.entry(key.clone());
+            match entry {
+                dashmap::mapref::entry::Entry::Vacant(v) => {
+                    v.insert((CancellationToken::new(), AtomicUsize::new(1)));
+                }
+                dashmap::mapref::entry::Entry::Occupied(_) => panic!("should be vacant"),
+            }
+        }
+        assert_eq!(map.get(&key).unwrap().value().1.load(Ordering::Relaxed), 1);
+
+        // Simulate second message: occupied entry, increment rc
+        {
+            let entry = map.entry(key.clone());
+            match entry {
+                dashmap::mapref::entry::Entry::Vacant(_) => panic!("should be occupied"),
+                dashmap::mapref::entry::Entry::Occupied(o) => {
+                    o.get().1.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }
+        assert_eq!(map.get(&key).unwrap().value().1.load(Ordering::Relaxed), 2);
     }
 }
