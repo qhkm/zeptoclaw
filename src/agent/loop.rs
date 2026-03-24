@@ -232,6 +232,11 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
             .metadata
             .insert("telegram_thread_id".to_string(), tid.clone());
     }
+    if let Some(mid) = inbound.metadata.get("telegram_message_id") {
+        outbound
+            .metadata
+            .insert("telegram_message_id".to_string(), mid.clone());
+    }
 }
 
 /// Convert an inbound message with optional media attachments into a session Message.

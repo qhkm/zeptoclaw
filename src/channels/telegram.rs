@@ -1189,6 +1189,13 @@ impl Channel for TelegramChannel {
                                 let mut inbound =
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
 
+                                // Store the Telegram message ID so the outbound reply
+                                // can thread back to this message.
+                                inbound = inbound.with_metadata(
+                                    "telegram_message_id",
+                                    &msg.id.0.to_string(),
+                                );
+
                                 // For forum topics, override session key to isolate
                                 // per-topic conversations and attach thread metadata
                                 // so outbound replies route to the correct topic.
@@ -1355,7 +1362,7 @@ impl Channel for TelegramChannel {
     /// - The Telegram API request fails (possibly after partial delivery)
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
-        use teloxide::types::{ChatId, ParseMode};
+        use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
 
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
@@ -1400,6 +1407,21 @@ impl Channel for TelegramChannel {
                     req = req.message_thread_id(teloxide::types::ThreadId(
                         teloxide::types::MessageId(tid),
                     ));
+                }
+            }
+
+            // Thread the first chunk as a reply to the original message.
+            if i == 0 {
+                let reply_id = msg
+                    .reply_to
+                    .as_deref()
+                    .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()));
+                if let Some(id_str) = reply_id {
+                    if let Ok(id) = id_str.parse::<i32>() {
+                        req = req.reply_parameters(
+                            ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
+                        );
+                    }
                 }
             }
 
