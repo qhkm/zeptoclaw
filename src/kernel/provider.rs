@@ -11,8 +11,9 @@ use tracing::warn;
 use crate::auth::{self, AuthMethod};
 use crate::config::Config;
 use crate::providers::{
-    provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
-    GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
+    provider_config_by_name, provider_name_for_model, resolve_runtime_providers, ClaudeProvider,
+    FallbackProvider, GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider,
+    RuntimeProviderSelection,
 };
 
 /// Build the complete provider chain from config.
@@ -137,6 +138,23 @@ pub fn build_runtime_provider_chain(
                 backend = selection.backend,
                 "Skipping runtime provider with unsupported backend"
             );
+        }
+    }
+
+    // Reorder candidates so the provider matching the configured model name
+    // comes first.  E.g. model "gpt-4o" promotes the "openai" candidate to
+    // the front, even though "anthropic" is first in the registry.
+    if let Some(preferred) = provider_name_for_model(configured_model) {
+        if let Some(idx) = candidates.iter().position(|c| c.name == preferred) {
+            if idx > 0 {
+                let promoted = candidates.remove(idx);
+                candidates.insert(0, promoted);
+                tracing::info!(
+                    model = configured_model,
+                    provider = preferred,
+                    "Auto-selected provider based on model name"
+                );
+            }
         }
     }
 
@@ -536,6 +554,66 @@ mod tests {
 
         assert!(err.to_string().contains("rate limit"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_model_name_promotes_openai_over_anthropic() {
+        let mut config = Config::default();
+        config.agents.defaults.model = "gpt-4o".to_string();
+        config.providers.anthropic = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-ant-test".to_string()),
+            ..Default::default()
+        });
+        config.providers.openai = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-openai-test".to_string()),
+            ..Default::default()
+        });
+        let (_, names) =
+            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        assert_eq!(
+            names[0], "openai",
+            "gpt-4o model should promote openai to first"
+        );
+    }
+
+    #[test]
+    fn test_model_name_keeps_anthropic_when_claude() {
+        let mut config = Config::default();
+        config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+        config.providers.anthropic = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-ant-test".to_string()),
+            ..Default::default()
+        });
+        config.providers.openai = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-openai-test".to_string()),
+            ..Default::default()
+        });
+        let (_, names) =
+            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        assert_eq!(
+            names[0], "anthropic",
+            "claude model should keep anthropic first"
+        );
+    }
+
+    #[test]
+    fn test_model_name_no_match_keeps_registry_order() {
+        let mut config = Config::default();
+        config.agents.defaults.model = "some-unknown-model".to_string();
+        config.providers.anthropic = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-ant-test".to_string()),
+            ..Default::default()
+        });
+        config.providers.openai = Some(crate::config::ProviderConfig {
+            api_key: Some("sk-openai-test".to_string()),
+            ..Default::default()
+        });
+        let (_, names) =
+            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        assert_eq!(
+            names[0], "anthropic",
+            "unknown model should keep registry order"
+        );
     }
 
     #[tokio::test]

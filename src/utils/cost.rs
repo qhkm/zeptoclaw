@@ -28,6 +28,13 @@ pub fn default_pricing() -> HashMap<String, ModelPricing> {
 
     // Anthropic Claude models
     m.insert(
+        "claude-sonnet-4-6".to_string(),
+        ModelPricing {
+            input_cost_per_million: 3.0,
+            output_cost_per_million: 15.0,
+        },
+    );
+    m.insert(
         "claude-sonnet-4-5-20250929".to_string(),
         ModelPricing {
             input_cost_per_million: 3.0,
@@ -261,6 +268,7 @@ mod tests {
     fn test_default_pricing_contains_all_expected_models() {
         let prices = default_pricing();
         let expected = [
+            "claude-sonnet-4-6",
             "claude-sonnet-4-5-20250929",
             "claude-3-5-sonnet-20241022",
             "claude-opus-4-6",

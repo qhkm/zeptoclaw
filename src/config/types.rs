@@ -770,7 +770,7 @@ fn default_max_tool_result_bytes() -> usize {
 /// Set `ZEPTOCLAW_DEFAULT_MODEL` at compile time to override.
 const COMPILE_TIME_DEFAULT_MODEL: &str = match option_env!("ZEPTOCLAW_DEFAULT_MODEL") {
     Some(v) => v,
-    None => "claude-sonnet-4-5-20250929",
+    None => "claude-sonnet-4-6",
 };
 
 impl Default for AgentDefaults {

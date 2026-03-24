@@ -45,7 +45,7 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// Can be overridden at compile time with `ZEPTOCLAW_CLAUDE_DEFAULT_MODEL` env var.
 const DEFAULT_MODEL: &str = match option_env!("ZEPTOCLAW_CLAUDE_DEFAULT_MODEL") {
     Some(v) => v,
-    None => "claude-sonnet-4-5-20250929",
+    None => "claude-sonnet-4-6",
 };
 
 /// The Anthropic API version header value.
@@ -862,7 +862,7 @@ mod tests {
     fn test_claude_provider_creation() {
         let provider = ClaudeProvider::new("test-key");
         assert_eq!(provider.name(), "claude");
-        assert_eq!(provider.default_model(), "claude-sonnet-4-5-20250929");
+        assert_eq!(provider.default_model(), "claude-sonnet-4-6");
     }
 
     #[test]

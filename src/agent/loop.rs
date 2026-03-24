@@ -744,12 +744,15 @@ impl AgentLoop {
 
     /// Resolve the provider for a given inbound message.
     ///
-    /// Checks `metadata[\"provider_override\"]` and looks up in provider registry.
-    /// Falls back to the default provider.
+    /// Priority:
+    /// 1. Explicit `provider_override` metadata → look up in registry
+    /// 2. `model_override` metadata → infer provider via [`provider_name_for_model`]
+    /// 3. Fall back to the default provider
     pub async fn resolve_provider_for_message(
         &self,
         msg: &InboundMessage,
     ) -> Option<Arc<dyn LLMProvider>> {
+        // 1. Explicit provider override
         if let Some(provider_name) = msg
             .metadata
             .get("provider_override")
@@ -764,6 +767,21 @@ impl AgentLoop {
                 provider_name
             );
         }
+
+        // 2. Infer provider from model name (e.g. "gpt-5.4" → "openai")
+        if let Some(model) = msg.metadata.get("model_override").filter(|m| !m.is_empty()) {
+            if let Some(inferred) = crate::providers::provider_name_for_model(model) {
+                if let Some(provider) = self.get_provider_by_name(inferred).await {
+                    tracing::info!(
+                        model = %model,
+                        provider = inferred,
+                        "Auto-selected provider from model override"
+                    );
+                    return Some(provider);
+                }
+            }
+        }
+
         let p = self.provider.read().await;
         p.clone()
     }
@@ -3018,6 +3036,93 @@ mod tests {
         let msg = InboundMessage::new("telegram", "user1", "chat1", "hello");
         let model = agent.resolve_model_for_message(&msg);
         assert_eq!(model, "claude-sonnet-4-5-20250929");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_provider_infers_from_model_override() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        // Register openai provider in registry
+        agent
+            .set_provider_in_registry(
+                "openai",
+                Box::new(TestProvider {
+                    name: "openai",
+                    model: "gpt-5.4",
+                }),
+            )
+            .await;
+
+        // Message has model_override but NO provider_override —
+        // should infer "openai" from the "gpt" prefix.
+        let msg = InboundMessage::new("cli", "user1", "chat1", "hello")
+            .with_metadata("model_override", "gpt-5.4");
+
+        let provider = agent.resolve_provider_for_message(&msg).await;
+        assert!(
+            provider.is_some(),
+            "should resolve provider from model name"
+        );
+        assert_eq!(provider.unwrap().name(), "openai");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_provider_explicit_override_takes_precedence() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        agent
+            .set_provider_in_registry(
+                "openai",
+                Box::new(TestProvider {
+                    name: "openai",
+                    model: "gpt-5.4",
+                }),
+            )
+            .await;
+        agent
+            .set_provider_in_registry(
+                "groq",
+                Box::new(TestProvider {
+                    name: "groq",
+                    model: "llama-4",
+                }),
+            )
+            .await;
+
+        // Explicit provider_override should win over model-name inference.
+        let msg = InboundMessage::new("cli", "user1", "chat1", "hello")
+            .with_metadata("model_override", "gpt-5.4")
+            .with_metadata("provider_override", "groq");
+
+        let provider = agent.resolve_provider_for_message(&msg).await;
+        assert_eq!(provider.unwrap().name(), "groq");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_provider_falls_back_when_model_unknown() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let default_provider = Box::new(TestProvider {
+            name: "claude",
+            model: "claude-sonnet",
+        });
+        agent.set_provider(default_provider).await;
+
+        // Unknown model name — should fall back to default provider.
+        let msg = InboundMessage::new("cli", "user1", "chat1", "hello")
+            .with_metadata("model_override", "some-unknown-model-xyz");
+
+        let provider = agent.resolve_provider_for_message(&msg).await;
+        assert_eq!(provider.unwrap().name(), "claude");
     }
 
     #[tokio::test]

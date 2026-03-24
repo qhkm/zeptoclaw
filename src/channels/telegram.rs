@@ -821,6 +821,13 @@ impl Channel for TelegramChannel {
                                                 );
                                             let _ = apply_thread_id(req, &thread_id).await;
                                         }
+                                        ModelCommand::Fetch => {
+                                            let req = bot.send_message(
+                                                teloxide::types::ChatId(chat_id_num),
+                                                "Use /model list to see available models.\n/model fetch is only available in CLI mode.",
+                                            );
+                                            let _ = apply_thread_id(req, &thread_id).await;
+                                        }
                                     }
                                     return Ok(());
                                 }

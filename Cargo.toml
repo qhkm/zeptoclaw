@@ -1,13 +1,7 @@
 [package]
 name = "zeptoclaw"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2021"
-
-[lints.rust.unexpected_cfgs]
-# mqtt feature is temporarily disabled (RUSTSEC-2026-0049) but code stays
-# behind #[cfg(feature = "mqtt")] — suppress the unknown-cfg warning.
-level = "warn"
-check-cfg = ['cfg(feature, values("mqtt"))']
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
 license = "Apache-2.0"
@@ -17,6 +11,12 @@ homepage = "https://github.com/qhkm/zeptoclaw"
 keywords = ["ai", "agent", "llm", "cli", "rust"]
 categories = ["command-line-utilities"]
 autobins = false
+
+[lints.rust.unexpected_cfgs]
+# mqtt feature is temporarily disabled (RUSTSEC-2026-0049) but code stays
+# behind #[cfg(feature = "mqtt")] — suppress the unknown-cfg warning.
+level = "warn"
+check-cfg = ['cfg(feature, values("mqtt"))']
 
 [dependencies]
 # =============================================================================
@@ -59,7 +59,7 @@ scraper = "0.25"
 # Command-line argument parsing with derive macros
 clap = { version = "4.5", features = ["derive"] }
 # Readline with tab-completion for interactive CLI
-rustyline = "15.0"
+rustyline = "17.0"
 
 # =============================================================================
 # LOGGING & DIAGNOSTICS
@@ -243,7 +243,7 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = t
 # JWT token generation/validation for panel auth
 jsonwebtoken = { version = "10", optional = true }
 # Password hashing for panel password auth mode
-bcrypt = { version = "0.18", optional = true }
+bcrypt = { version = "0.19", optional = true }
 unicode-normalization = "0.1.25"
 
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)

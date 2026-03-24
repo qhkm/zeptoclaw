@@ -120,7 +120,7 @@ Add a new `configure_model()` function called **after** `configure_providers()` 
 4. If multiple providers → first ask which is the primary provider, then show that provider's model menu
 
 **Step 3/4 — primary provider selection (only when multiple):**
-```
+```text
 Multiple providers configured. Which should be your default?
   1. anthropic
   2. openai
@@ -137,7 +137,7 @@ Choice [1]:
 4. User picks a number, enters a custom model ID, or skips
 5. Selected model is written to `config.agents.defaults.model`
 
-```
+```text
 Model Selection
 ===============
 Fetching available models from OpenAI...
@@ -158,7 +158,7 @@ Choice [1]:
 
 Append usage hints to `format_model_list()` output:
 
-```
+```text
 Switch model:  /model <model-id>
 With provider: /model openai:gpt-5.4
 Reset:         /model reset
@@ -178,12 +178,12 @@ New subcommand that fetches models from all configured providers in real-time.
 - Add dispatch in `src/channels/telegram.rs` (or use `_ => {}` catch-all if Telegram shouldn't support it — Fetch requires async network calls which may not suit all channel contexts)
 - Add `"model fetch"` entry to `builtin_commands()` in `src/cli/slash.rs`
 
-```
+```text
 /model fetch
 ```
 
 Output:
-```
+```text
 Fetching models from configured providers...
 
 anthropic (2 models):
@@ -205,7 +205,7 @@ This is the async/network version. Default `/model list` stays fast (no network 
 
 In `cli/common.rs` during agent setup, after provider chain is built, if `provider_name_for_model()` returns `None` and providers are configured:
 
-```
+```text
 ⚠ Model "some-unknown-model" doesn't match any known provider.
   Configured providers: anthropic, openai
   Run /model list to see available models.
