@@ -677,25 +677,32 @@ impl Channel for TelegramChannel {
                                 let typing_map_key = typing_key;
 
                                 tokio::spawn(async move {
-                                    loop {
-                                        let mut action = typing_bot.send_chat_action(
-                                            typing_chat_id,
-                                            ChatAction::Typing,
-                                        );
-                                        if let Some(tid) = typing_thread_id {
-                                            action = action.message_thread_id(tid);
-                                        }
-                                        if let Err(e) = action.await {
-                                            debug!(
-                                                "Typing indicator send failed for {}: {}",
-                                                typing_map_key, e
-                                            );
-                                        }
+                                    tokio::select! {
+                                        _ = async {
+                                            loop {
+                                                let mut action = typing_bot.send_chat_action(
+                                                    typing_chat_id,
+                                                    ChatAction::Typing,
+                                                );
+                                                if let Some(tid) = typing_thread_id {
+                                                    action = action.message_thread_id(tid);
+                                                }
+                                                if let Err(e) = action.await {
+                                                    debug!(
+                                                        "Typing indicator send failed for {}: {}",
+                                                        typing_map_key, e
+                                                    );
+                                                }
 
-                                        tokio::select! {
-                                            _ = cancel_token.cancelled() => break,
-                                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
-                                        }
+                                                tokio::select! {
+                                                    _ = cancel_token.cancelled() => break,
+                                                    _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                                }
+                                            }
+                                        } => {},
+                                        _ = tokio::time::sleep(Duration::from_secs(300)) => {
+                                            debug!("Typing indicator timed out for {}", typing_map_key);
+                                        },
                                     }
                                     typing_map.remove(&typing_map_key);
                                 });
@@ -999,6 +1006,10 @@ impl Channel for TelegramChannel {
                                 }
 
                                 if let Err(e) = bus.publish_inbound(inbound).await {
+                                    // Cancel typing indicator on publish failure
+                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
+                                    }
                                     error!("Failed to publish inbound message to bus: {}", e);
                                 }
                             } else {
