@@ -63,18 +63,20 @@ pub fn truncate_tool_output(output: &str, max_lines: usize, max_bytes: usize) ->
         if byte_count + segment_bytes > max_bytes {
             // How many bytes we can still take from this segment
             let remaining_budget = max_bytes.saturating_sub(byte_count);
+            let mut kept_from_segment = 0;
             if remaining_budget > 0 {
                 // Walk backward to a char boundary within the budget
                 let mut end = remaining_budget;
                 while end > 0 && !segment.is_char_boundary(end) {
                     end -= 1;
                 }
+                kept_from_segment = end;
                 if end > 0 {
                     result.push_str(&segment[..end]);
                 }
             }
             let total_bytes = output.len();
-            let kept_bytes = byte_count + remaining_budget;
+            let kept_bytes = byte_count + kept_from_segment;
             if !result.ends_with('\n') {
                 result.push('\n');
             }
@@ -164,5 +166,21 @@ mod tests {
         // Byte limit 100 (permissive), line limit 2
         let result2 = truncate_tool_output(&input, 2, 100);
         assert!(result2.contains("[output truncated at 2 lines"));
+    }
+
+    #[test]
+    fn byte_trailer_accurate_after_backtrack() {
+        // 4 emojis, each 4 bytes = 16 bytes total. Byte limit 6 falls mid-emoji.
+        // Backtrack keeps 1 emoji (4 bytes), so 12 bytes should be omitted.
+        let input = "\u{1F600}\u{1F600}\u{1F600}\u{1F600}";
+        assert_eq!(input.len(), 16);
+
+        let result = truncate_tool_output(input, DEFAULT_MAX_LINES, 6);
+        // After backtrack: kept 4 bytes (1 emoji), omitted 12
+        assert!(
+            result.contains("12 bytes omitted"),
+            "Expected '12 bytes omitted' in: {}",
+            result
+        );
     }
 }

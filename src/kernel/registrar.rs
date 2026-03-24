@@ -364,7 +364,9 @@ pub async fn register_all_tools(
             config.tools.browser.engine
         );
     }
-    if filter.is_enabled("web_fetch") && !config.tools.browser.enabled {
+    if filter.is_enabled("web_fetch")
+        && !(config.tools.browser.enabled && filter.is_enabled("browser"))
+    {
         registry.register(Box::new(crate::tools::WebFetchTool::new()));
         info!("Registered web_fetch tool");
     }

@@ -53,9 +53,16 @@ impl BrowserTool {
         cmd.args(args);
         cmd.env("AGENT_BROWSER_ENGINE", engine);
         cmd.env("LIGHTPANDA_DISABLE_TELEMETRY", "true");
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| ZeptoError::Tool(format!("Failed to run agent-browser: {}", e)))?;
 
         let timeout = Duration::from_secs(self.timeout_secs);
-        let output = tokio::time::timeout(timeout, cmd.output())
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .map_err(|_| {
                 ZeptoError::Tool(format!(
@@ -239,7 +246,7 @@ impl Tool for BrowserTool {
         let cmd_args: Vec<&str> = if args_str.is_empty() {
             vec![]
         } else {
-            args_str.split_whitespace().collect()
+            vec![args_str]
         };
 
         let (output, engine) = match self

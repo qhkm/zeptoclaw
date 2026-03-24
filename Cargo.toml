@@ -2,12 +2,6 @@
 name = "zeptoclaw"
 version = "0.8.0"
 edition = "2021"
-
-[lints.rust.unexpected_cfgs]
-# mqtt feature is temporarily disabled (RUSTSEC-2026-0049) but code stays
-# behind #[cfg(feature = "mqtt")] — suppress the unknown-cfg warning.
-level = "warn"
-check-cfg = ['cfg(feature, values("mqtt"))']
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
 license = "Apache-2.0"
@@ -17,6 +11,12 @@ homepage = "https://github.com/qhkm/zeptoclaw"
 keywords = ["ai", "agent", "llm", "cli", "rust"]
 categories = ["command-line-utilities"]
 autobins = false
+
+[lints.rust.unexpected_cfgs]
+# mqtt feature is temporarily disabled (RUSTSEC-2026-0049) but code stays
+# behind #[cfg(feature = "mqtt")] — suppress the unknown-cfg warning.
+level = "warn"
+check-cfg = ['cfg(feature, values("mqtt"))']
 
 [dependencies]
 # =============================================================================

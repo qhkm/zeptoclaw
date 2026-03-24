@@ -658,33 +658,70 @@ fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
 /// Map a byte range in an NFC-normalized string back to the original string.
 ///
 /// NFC normalization can merge multiple original chars into one (e.g. `e` +
-/// combining accent -> precomposed `é`). We build a byte-level mapping from
-/// NFC byte positions back to original byte positions by NFC-normalizing the
-/// original one char at a time and tracking boundaries.
+/// combining accent -> precomposed `é`). We normalize the full string (so
+/// cross-character composition happens correctly) and build a byte-level
+/// mapping by walking original characters alongside the NFC output.
 fn map_nfc_range_to_original(
     original: &str,
     _nfc: &str,
     nfc_start: usize,
     nfc_end: usize,
 ) -> (usize, usize) {
-    // Build mapping: for each NFC byte, record which original byte it came from.
-    // A single original char may produce multiple NFC bytes (or fewer via composition).
-    let mut nfc_to_orig: Vec<usize> = Vec::new();
-    let mut orig_ends: Vec<usize> = Vec::new();
+    use unicode_normalization::UnicodeNormalization;
 
-    for (orig_byte, ch) in original.char_indices() {
-        let orig_next = orig_byte + ch.len_utf8();
-        for nfc_ch in ch.nfc() {
-            for _ in 0..nfc_ch.len_utf8() {
-                nfc_to_orig.push(orig_byte);
-                orig_ends.push(orig_next);
+    // Collect original char boundaries: (start_byte, end_byte) for each char.
+    let orig_indices: Vec<(usize, usize)> = original
+        .char_indices()
+        .map(|(i, ch)| (i, i + ch.len_utf8()))
+        .collect();
+
+    // For each NFC byte, record which original byte range it maps to.
+    let mut nfc_to_orig_start: Vec<usize> = Vec::new();
+    let mut nfc_to_orig_end: Vec<usize> = Vec::new();
+
+    // Walk NFC chars produced from the full original string, consuming
+    // original chars until the NFC of the accumulated slice matches the
+    // expected NFC char. For non-composing chars this is 1 iteration;
+    // for composed sequences (e + combining accent -> é) this is 2+.
+    let mut orig_idx = 0;
+    for nfc_ch in original.nfc() {
+        let orig_start_byte = orig_indices
+            .get(orig_idx)
+            .map(|&(s, _)| s)
+            .unwrap_or(original.len());
+
+        loop {
+            orig_idx += 1;
+            let scan_end = orig_indices
+                .get(orig_idx)
+                .map(|&(s, _)| s)
+                .unwrap_or(original.len());
+            let slice = &original[orig_start_byte..scan_end];
+            let normalized: String = slice.nfc().collect();
+            // Check if the NFC of this span is exactly our target char.
+            // "e".nfc() == "e" (not "é"), so this correctly keeps consuming
+            // until the combining mark is included: "e\u{0301}".nfc() == "é".
+            if (normalized.len() == nfc_ch.len_utf8() && normalized.starts_with(nfc_ch))
+                || orig_idx >= orig_indices.len()
+            {
+                break;
             }
+        }
+
+        let orig_end_byte = orig_indices
+            .get(orig_idx)
+            .map(|&(s, _)| s)
+            .unwrap_or(original.len());
+
+        for _ in 0..nfc_ch.len_utf8() {
+            nfc_to_orig_start.push(orig_start_byte);
+            nfc_to_orig_end.push(orig_end_byte);
         }
     }
 
-    let orig_start = nfc_to_orig.get(nfc_start).copied().unwrap_or(0);
+    let orig_start = nfc_to_orig_start.get(nfc_start).copied().unwrap_or(0);
     let orig_end = if nfc_end > 0 {
-        orig_ends
+        nfc_to_orig_end
             .get(nfc_end - 1)
             .copied()
             .unwrap_or(original.len())
@@ -1671,6 +1708,47 @@ mod tests {
         assert!(matches!(result.tier, MatchTier::UnicodeNormalized));
         assert_eq!(result.start, 6);
         assert_eq!(&content[result.start..result.end], "caf\u{0065}\u{0301}");
+    }
+
+    #[test]
+    fn test_nfc_offset_map_combining_accent() {
+        // "e\u{0301}" is 3 bytes (e=1 + combining acute=2). NFC gives "é" (2 bytes).
+        // Searching for "é" should map back to the full 3-byte original span.
+        let original = "e\u{0301}";
+        let nfc: String = original.nfc().collect();
+        assert_eq!(nfc, "\u{00E9}");
+        let (start, end) = map_nfc_range_to_original(original, &nfc, 0, nfc.len());
+        assert_eq!(start, 0);
+        assert_eq!(end, original.len()); // 3 bytes
+    }
+
+    #[test]
+    fn test_nfc_offset_map_no_drift_after_composition() {
+        // "cafe\u{0301} x nai\u{0308}ve" — two composed sequences.
+        // Searching for "naïve" in the NFC form should map to the correct
+        // original bytes without drift from the earlier "é" composition.
+        let original = "cafe\u{0301} x nai\u{0308}ve";
+        let nfc: String = original.nfc().collect();
+        assert_eq!(nfc, "café x naïve");
+        // "naïve" starts at NFC byte 7 ("café x " = 7 bytes in NFC)
+        let naive_nfc_start = nfc.find("naïve").unwrap();
+        let naive_nfc_end = naive_nfc_start + "naïve".len();
+        let (start, end) =
+            map_nfc_range_to_original(original, &nfc, naive_nfc_start, naive_nfc_end);
+        // In original: "nai\u{0308}ve" starts at byte 9 ("cafe\u{0301} x " = 9 bytes)
+        let expected_start = original.find("nai").unwrap();
+        let expected_end = original.len();
+        assert_eq!(start, expected_start);
+        assert_eq!(end, expected_end);
+    }
+
+    #[test]
+    fn test_nfc_offset_map_ascii_identity() {
+        let original = "hello world";
+        let nfc: String = original.nfc().collect();
+        let (start, end) = map_nfc_range_to_original(original, &nfc, 6, 11);
+        assert_eq!(start, 6);
+        assert_eq!(end, 11);
     }
 
     #[test]

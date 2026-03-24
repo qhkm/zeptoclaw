@@ -137,6 +137,11 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Escape a string for use inside an HTML attribute value (double-quoted).
+fn escape_html_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;")
+}
+
 /// Validate that HTML tags are properly nested (no crossing tags).
 /// Returns `true` when the tag structure is well-formed.
 fn html_tags_valid(html: &str) -> bool {
@@ -234,7 +239,11 @@ fn render_telegram_html(content: &str) -> String {
         .into_owned();
     text = RE_LINK
         .replace_all(&text, |caps: &regex::Captures| {
-            format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
+            format!(
+                "<a href=\"{}\">{}</a>",
+                escape_html_attr(&caps[2]),
+                &caps[1]
+            )
         })
         .into_owned();
 
