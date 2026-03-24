@@ -1127,13 +1127,15 @@ impl Channel for TelegramChannel {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
 
-        // Cancel the typing indicator for this chat before sending.
         let typing_key = match msg.metadata.get("telegram_thread_id") {
             Some(tid) => format!("{}:{}", chat_id, tid),
             None => chat_id.to_string(),
         };
-        if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
-            token.cancel();
+        let keep_typing = msg.metadata.get("keep_typing").is_some_and(|v| v == "true");
+        if !keep_typing {
+            if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+                token.cancel();
+            }
         }
 
         info!("Telegram: Sending message to chat {}", chat_id);
