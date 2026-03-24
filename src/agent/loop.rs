@@ -240,7 +240,7 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
 /// - Text document media (text/plain, text/*, application/json) are decoded and appended to message content.
 /// - Other media types and attachments without data are silently skipped.
 ///
-/// Validation (size, MIME type) is applied via [`crate::session::media::validate_image`]; 
+/// Validation (size, MIME type) is applied via [`crate::session::media::validate_image`];
 /// invalid images are skipped rather than aborting.
 ///
 /// When a `MediaStore` is provided the raw bytes are written to disk first and
@@ -278,15 +278,18 @@ async fn inbound_to_message(
         .collect();
 
     let mut content = msg.content.clone();
-    
+
     // Append text document content
     for doc in text_docs {
         let data = doc.data.as_ref().unwrap();
         // Skip documents larger than 100KB to prevent context overflow
         if data.len() > 100 * 1024 {
             if let Some(name) = doc.filename.as_deref() {
-                content.push_str(&format!("\n\n[Text file '{}' too large ({} KB), skipped]", 
-                    name, data.len() / 1024));
+                content.push_str(&format!(
+                    "\n\n[Text file '{}' too large ({} KB), skipped]",
+                    name,
+                    data.len() / 1024
+                ));
             }
             continue;
         }
@@ -294,8 +297,12 @@ async fn inbound_to_message(
         match std::str::from_utf8(data) {
             Ok(text) => {
                 let filename = doc.filename.as_deref().unwrap_or("attachment");
-                content.push_str(&format!("\n\n--- Begin file: {} ---\n{}\n--- End file: {} ---",
-                    filename, text.trim(), filename));
+                content.push_str(&format!(
+                    "\n\n--- Begin file: {} ---\n{}\n--- End file: {} ---",
+                    filename,
+                    text.trim(),
+                    filename
+                ));
             }
             Err(_) => {
                 if let Some(name) = doc.filename.as_deref() {

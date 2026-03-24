@@ -1070,11 +1070,11 @@ impl DiscordChannel {
                                                                         }
 
                                                                         let content_type = att.content_type.as_ref().unwrap();
-                                                                        
+
                                                                         // Determine media type - only handle images and text documents
                                                                         let media_type = if content_type.starts_with("image/") {
                                                                             Some(MediaType::Image)
-                                                                        } else if content_type.starts_with("text/") 
+                                                                        } else if content_type.starts_with("text/")
                                                                             || content_type == "application/pdf"
                                                                             || content_type == "application/msword"
                                                                             || content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1109,7 +1109,7 @@ impl DiscordChannel {
                                                                             }
                                                                         }
                                                                     }
-                                                                    
+
                                                                     // Append attachment info to message content for non-image files
                                                                     if !attachment_info.is_empty() {
                                                                         let mut content = inbound.content.clone();
