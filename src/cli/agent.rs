@@ -256,6 +256,18 @@ pub(crate) async fn cmd_agent(
         eprintln!();
     }
 
+    // Warn if configured model doesn't match any known provider.
+    {
+        let provider_names = zeptoclaw::providers::configured_provider_names(&config);
+        let provider_refs: Vec<&str> = provider_names.to_vec();
+        if let Some(warning) = super::common::model_provider_mismatch_warning(
+            &config.agents.defaults.model,
+            &provider_refs,
+        ) {
+            tracing::warn!("{}", warning);
+        }
+    }
+
     if let Some(msg) = message {
         // Single message mode
         let inbound = cli_inbound_message(&msg);
@@ -455,6 +467,35 @@ pub(crate) async fn cmd_agent(
                                         "Model reset to default: {}",
                                         config.agents.defaults.model
                                     );
+                                }
+                                ModelCommand::Fetch => {
+                                    println!("Fetching models from configured providers...\n");
+                                    let selections =
+                                        zeptoclaw::providers::resolve_runtime_providers(&config);
+                                    if selections.is_empty() {
+                                        println!("No providers configured. Run 'zeptoclaw onboard' to set up.");
+                                    } else {
+                                        for s in &selections {
+                                            match super::common::fetch_provider_models(s).await {
+                                                Ok(models) => {
+                                                    println!(
+                                                        "{} ({} models):",
+                                                        s.name,
+                                                        models.len()
+                                                    );
+                                                    for m in &models {
+                                                        println!("  {}", m);
+                                                    }
+                                                    println!();
+                                                }
+                                                Err(e) => {
+                                                    println!("{}: failed to fetch ({})", s.name, e);
+                                                    println!();
+                                                }
+                                            }
+                                        }
+                                        println!("Switch: /model <model-id>");
+                                    }
                                 }
                             }
                         } else {
