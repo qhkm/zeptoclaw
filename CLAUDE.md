@@ -21,13 +21,13 @@ Every Claude Code session MUST follow these rules:
 
 ### 1. Session Start — Check open issues
 ```bash
-gh issue list --repo qhkm/zeptoclaw --state open --limit 20
+gh issue list --state open --limit 20
 ```
 Present issues, ask what to work on.
 
 ### 2. New Work — Create issue first
 ```bash
-gh issue create --repo qhkm/zeptoclaw \
+gh issue create \
   --title "feat: short description" \
   --label "feat,area:tools" \
   --body "Brief description of the work."
@@ -87,6 +87,7 @@ For detailed module docs see `docs/claude/architecture.md`.
 
 - Embedded `ZeptoAgent` tool calls use the same `kernel::execute_tool()` path as the main agent loop and MCP server, so safety scanning, taint checks, and tool metrics stay aligned across entry points.
 - Embedded `ZeptoAgent` also supports per-tool timeout, panic capture, and configurable approval gating via the builder for safer embedded coding-agent execution.
+- Model-driven provider inference treats vendor-prefixed gateway IDs like `anthropic/...` as OpenRouter models only when OpenRouter is actually available, and live provider model discovery now carries `api-version` while normalizing Azure deployment bases to `/openai/models`.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".
 - `edit_file` rejects empty `old_text` and accepts optional `expected_replacements` to guard exact-match edits.

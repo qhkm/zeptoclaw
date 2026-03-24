@@ -21,6 +21,7 @@ Project-level guidance for coding agents working in this repository.
 - Runtime provider resolution: builds chain in registry order only when `providers.fallback.enabled`; honors `providers.fallback.provider`; can wrap chain with `RetryProvider` via `providers.retry.*`
 - Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
 - Provider onboarding validation: Anthropic uses `GET /v1/models`; OpenAI-compatible presets validate keys with read-only endpoint checks, including Zhipu/GLM via `GET /models`
+- Model discoverability hardening: gateway-style slash IDs (for example `anthropic/...`) only infer OpenRouter when that provider is actually available, and live `/model fetch` now honors `api_version` while normalizing Azure deployment bases to `/openai/models`
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
 - Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
@@ -58,7 +59,7 @@ Project-level guidance for coding agents working in this repository.
 
 **Every session MUST track work via GitHub Issues.**
 
-1. **Start of session** — Run `gh issue list --repo qhkm/zeptoclaw --state open --limit 20` and present open issues
+1. **Start of session** — Run `gh issue list --state open --limit 20` and present open issues
 2. **New work** — If no issue exists for the requested work, create one with `gh issue create` before writing code. Use labels: type (`bug`/`feat`/`rfc`/`chore`/`docs`), area (`area:tools`/`area:channels`/etc.), priority (`P1`/`P2`/`P3`)
 3. **End of work** — Create PR with `Closes #N` in body, or `gh issue close N` for direct commits
 4. **NEVER merge PRs** — Only the user merges PRs. After creating a PR, wait for CI, present the URL to the user, and only merge after explicit user approval
