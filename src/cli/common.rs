@@ -691,7 +691,18 @@ pub(crate) async fn fetch_provider_models(
         }
         _ => {
             // All other OpenAI-compatible providers (openrouter, groq, gemini, deepseek, kimi, etc.)
-            let base = api_base.unwrap_or("https://api.openai.com/v1");
+            // Look up default_base_url from registry to avoid sending keys to wrong endpoint.
+            let registry_base = zeptoclaw::providers::PROVIDER_REGISTRY
+                .iter()
+                .find(|s| s.name == provider)
+                .and_then(|s| s.default_base_url);
+            let base = match api_base.or(registry_base) {
+                Some(b) => b,
+                None => anyhow::bail!(
+                    "No api_base configured for provider '{}' and no default known",
+                    provider
+                ),
+            };
             (format!("{}/models", base), false)
         }
     };
@@ -748,8 +759,8 @@ async fn resolve_google_token(config: &Config) -> Option<String> {
         .map(String::from)
 }
 
-/// Returns a warning message if the configured model doesn't match any known provider.
-/// Returns `None` if the model matches a provider or no providers are configured.
+/// Returns a warning message if the configured model doesn't match any configured provider.
+/// Returns `None` if the model matches a configured provider or no providers are configured.
 pub(crate) fn model_provider_mismatch_warning(
     model: &str,
     configured_providers: &[&str],
@@ -757,8 +768,20 @@ pub(crate) fn model_provider_mismatch_warning(
     if configured_providers.is_empty() {
         return None;
     }
-    if zeptoclaw::providers::provider_name_for_model(model).is_some() {
-        return None;
+    // Only suppress the warning if the inferred provider is actually configured.
+    if let Some(inferred) = zeptoclaw::providers::provider_name_for_model(model) {
+        if configured_providers.contains(&inferred) {
+            return None;
+        }
+        // Model matches a known provider, but that provider isn't configured.
+        return Some(format!(
+            "Model \"{}\" requires the \"{}\" provider, but it is not configured.\n  \
+             Configured providers: {}\n  \
+             Run /model list to see available models.",
+            model,
+            inferred,
+            configured_providers.join(", "),
+        ));
     }
     Some(format!(
         "Model \"{}\" doesn't match any known provider.\n  \

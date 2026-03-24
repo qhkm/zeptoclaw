@@ -211,7 +211,12 @@ async fn configure_model(config: &mut Config) -> Result<()> {
     let input = input.trim();
 
     match input {
-        "s" | "S" | "" => {
+        "" => {
+            // Enter = pick choice 1 (matches the "[1]" prompt hint)
+            config.agents.defaults.model = models[0].clone();
+            println!("  Set model to: {}", models[0]);
+        }
+        "s" | "S" => {
             println!("  Keeping default model: {}", config.agents.defaults.model);
         }
         "c" | "C" => {

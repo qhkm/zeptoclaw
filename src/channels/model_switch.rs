@@ -190,11 +190,23 @@ pub fn parse_model_command(text: &str) -> Option<ModelCommand> {
         "list" => Some(ModelCommand::List),
         "fetch" => Some(ModelCommand::Fetch),
         arg => {
-            if let Some((provider, model)) = arg.split_once(':') {
-                Some(ModelCommand::Set(ModelOverride {
-                    provider: Some(provider.to_string()),
-                    model: model.to_string(),
-                }))
+            // Only treat "x:y" as provider:model when x is a known provider name.
+            // This avoids mis-parsing Ollama tags like "llama3.3:latest".
+            if let Some((left, right)) = arg.split_once(':') {
+                let is_provider = crate::providers::PROVIDER_REGISTRY
+                    .iter()
+                    .any(|s| s.name == left);
+                if is_provider {
+                    Some(ModelCommand::Set(ModelOverride {
+                        provider: Some(left.to_string()),
+                        model: right.to_string(),
+                    }))
+                } else {
+                    Some(ModelCommand::Set(ModelOverride {
+                        provider: None,
+                        model: arg.to_string(),
+                    }))
+                }
             } else {
                 Some(ModelCommand::Set(ModelOverride {
                     provider: None,
@@ -354,11 +366,21 @@ fn parse_override_value(value: &str) -> Option<ModelOverride> {
     if value.is_empty() {
         return None;
     }
-    if let Some((provider, model)) = value.split_once(':') {
-        Some(ModelOverride {
-            provider: Some(provider.to_string()),
-            model: model.to_string(),
-        })
+    if let Some((left, right)) = value.split_once(':') {
+        let is_provider = crate::providers::PROVIDER_REGISTRY
+            .iter()
+            .any(|s| s.name == left);
+        if is_provider {
+            Some(ModelOverride {
+                provider: Some(left.to_string()),
+                model: right.to_string(),
+            })
+        } else {
+            Some(ModelOverride {
+                provider: None,
+                model: value.to_string(),
+            })
+        }
     } else {
         Some(ModelOverride {
             provider: None,
@@ -412,6 +434,19 @@ mod tests {
     fn test_parse_model_command_fetch() {
         let cmd = parse_model_command("/model fetch");
         assert_eq!(cmd, Some(ModelCommand::Fetch));
+    }
+
+    #[test]
+    fn test_parse_model_command_ollama_tag_not_split() {
+        // "llama3.3:latest" should NOT be split into provider=llama3.3, model=latest
+        let cmd = parse_model_command("/model llama3.3:latest");
+        assert_eq!(
+            cmd,
+            Some(ModelCommand::Set(ModelOverride {
+                provider: None,
+                model: "llama3.3:latest".to_string(),
+            }))
+        );
     }
 
     #[test]
