@@ -8,10 +8,12 @@
 use async_trait::async_trait;
 use reqwest::Url;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::config::BrowserConfig;
+use crate::deps::{DepKind, Dependency, HasDependencies, HealthCheck};
 use crate::error::{Result, ZeptoError};
 
 use super::web::{is_blocked_host, validate_redirect_target_basic};
@@ -57,9 +59,19 @@ impl BrowserTool {
         cmd.stderr(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| ZeptoError::Tool(format!("Failed to run agent-browser: {}", e)))?;
+        let child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ZeptoError::Tool(format!(
+                    "'{}' not found. Install it with:\n  \
+                     npm install -g agent-browser   # or: brew install agent-browser\n  \
+                     agent-browser install           # downloads Chrome\n\
+                     For LightPanda (optional, faster): see https://agent-browser.dev/engines/lightpanda",
+                    self.executable
+                ))
+            } else {
+                ZeptoError::Tool(format!("Failed to run agent-browser: {}", e))
+            }
+        })?;
 
         let timeout = Duration::from_secs(self.timeout_secs);
         let output = tokio::time::timeout(timeout, child.wait_with_output())
@@ -153,6 +165,39 @@ impl BrowserTool {
             "screenshot" => Some("Screenshot captured".to_string()),
             _ => None,
         }
+    }
+}
+
+impl HasDependencies for BrowserTool {
+    fn dependencies(&self) -> Vec<Dependency> {
+        vec![
+            Dependency {
+                name: "agent-browser".to_string(),
+                kind: DepKind::NpmPackage {
+                    package: "agent-browser".to_string(),
+                    version: "latest".to_string(),
+                    entry_point: "agent-browser".to_string(),
+                },
+                health_check: HealthCheck::Command {
+                    command: "agent-browser --version".to_string(),
+                },
+                env: HashMap::new(),
+                args: vec![],
+            },
+            Dependency {
+                name: "lightpanda".to_string(),
+                kind: DepKind::Binary {
+                    repo: "lightpanda-io/browser".to_string(),
+                    asset_pattern: "lightpanda-{arch}-{os}".to_string(),
+                    version: "nightly".to_string(),
+                },
+                health_check: HealthCheck::Command {
+                    command: "lightpanda --version".to_string(),
+                },
+                env: HashMap::new(),
+                args: vec![],
+            },
+        ]
     }
 }
 
