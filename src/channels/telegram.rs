@@ -61,6 +61,8 @@ const MAX_STARTUP_RETRIES: u32 = 10;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum delay (in seconds) for exponential backoff on startup retries.
 const MAX_RETRY_DELAY_SECS: u64 = 120;
+/// Maximum byte-length for a single Telegram text message (UTF-8 encoded).
+const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
 
 use super::model_switch::{
     format_current_model, format_model_list, hydrate_overrides, new_override_store,
@@ -165,6 +167,165 @@ fn strip_html_tags(html: &str) -> String {
     text.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+}
+
+/// Split raw markdown into logical blocks at `\n\n` boundaries while keeping
+/// fenced code blocks (` ``` `) as single indivisible units.
+fn split_into_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut fence_marker: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            let backticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
+            if let Some(ref marker) = fence_marker {
+                if backticks == *marker {
+                    fence_marker = None;
+                }
+            } else {
+                fence_marker = Some(backticks);
+            }
+        }
+
+        if fence_marker.is_none() && line.trim().is_empty() && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        } else {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line);
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
+}
+
+/// Split a single oversized block by line boundaries, greedily accumulating
+/// lines until the rendered output would exceed `max_len`.
+fn split_block_by_lines(block: &str, max_len: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in block.lines() {
+        let candidate = if current.is_empty() {
+            line.to_string()
+        } else {
+            format!("{}\n{}", current, line)
+        };
+
+        // Raw length is a lower bound for rendered length (HTML tags only add
+        // bytes). Skip the expensive render when clearly under the limit.
+        let needs_split =
+            candidate.len() > max_len && render_telegram_html(&candidate).len() > max_len;
+
+        if needs_split && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current = line.to_string();
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    // Final safety: if any chunk is still over the limit (single very long
+    // line), hard-split the rendered output.
+    let mut result = Vec::new();
+    for chunk in chunks {
+        let rendered = render_telegram_html(&chunk);
+        if rendered.len() <= max_len {
+            result.push(chunk);
+        } else {
+            // Hard-split the rendered HTML at safe boundaries, avoiding cuts
+            // inside HTML entities (&...;) or tags (<...>).
+            let rendered = render_telegram_html(&chunk);
+            let bytes = rendered.as_bytes();
+            let mut start = 0;
+            while start < bytes.len() {
+                let mut end = (start + max_len).min(bytes.len());
+                // Snap to a UTF-8 char boundary.
+                while end < bytes.len() && !rendered.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end < bytes.len() {
+                    let window = &rendered[start..end];
+                    // Back up past a partial HTML entity (&...without;).
+                    if let Some(amp_pos) = window.rfind('&') {
+                        if !window[amp_pos..].contains(';') {
+                            end = start + amp_pos;
+                        }
+                    }
+                    // Back up past a partial HTML tag (<...without>).
+                    if let Some(lt_pos) = rendered[start..end].rfind('<') {
+                        if !rendered[start + lt_pos..end].contains('>') {
+                            end = start + lt_pos;
+                        }
+                    }
+                }
+                // Guarantee forward progress.
+                if end <= start {
+                    end = start + rendered[start..].chars().next().map_or(1, |c| c.len_utf8());
+                }
+                result.push(strip_html_tags(&rendered[start..end]));
+                start = end;
+            }
+        }
+    }
+    result
+}
+
+/// Split a markdown message into chunks whose rendered HTML fits within
+/// `max_len` bytes. Splits at natural block boundaries (paragraphs, code
+/// fences) and falls back to line-level and character-level splitting for
+/// oversized blocks.
+fn split_markdown_chunks(content: &str, max_len: usize) -> Vec<String> {
+    // Fast path: most messages fit in a single send.
+    if render_telegram_html(content).len() <= max_len {
+        return vec![content.to_string()];
+    }
+
+    let blocks = split_into_blocks(content);
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for block in &blocks {
+        let candidate = if current.is_empty() {
+            block.clone()
+        } else {
+            format!("{}\n\n{}", current, block)
+        };
+
+        if render_telegram_html(&candidate).len() <= max_len {
+            current = candidate;
+        } else if current.is_empty() {
+            // Single block exceeds the limit — split it further.
+            let sub_chunks = split_block_by_lines(block, max_len);
+            chunks.extend(sub_chunks);
+        } else {
+            // Finalize current chunk, then try this block fresh.
+            chunks.push(std::mem::take(&mut current));
+            if render_telegram_html(block).len() <= max_len {
+                current = block.clone();
+            } else {
+                let sub_chunks = split_block_by_lines(block, max_len);
+                chunks.extend(sub_chunks);
+            }
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        vec![content.to_string()]
+    } else {
+        chunks
+    }
 }
 
 fn render_telegram_html(content: &str) -> String {
@@ -1081,6 +1242,11 @@ impl Channel for TelegramChannel {
 
     /// Sends an outbound message to a Telegram chat.
     ///
+    /// For messages exceeding Telegram's 4096-byte limit, the content is split
+    /// into multiple chunks sent sequentially. If sending fails mid-way, earlier
+    /// chunks will have been delivered; the returned error indicates partial
+    /// delivery.
+    ///
     /// # Arguments
     ///
     /// * `msg` - The outbound message containing chat_id and content
@@ -1089,7 +1255,7 @@ impl Channel for TelegramChannel {
     ///
     /// Returns an error if:
     /// - The chat_id cannot be parsed as an integer
-    /// - The Telegram API request fails
+    /// - The Telegram API request fails (possibly after partial delivery)
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
         use teloxide::types::{ChatId, ParseMode};
@@ -1123,21 +1289,32 @@ impl Channel for TelegramChannel {
             .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
 
-        let rendered = render_telegram_html(&msg.content);
-        let mut req = bot
-            .send_message(ChatId(chat_id), rendered)
-            .parse_mode(ParseMode::Html);
+        let chunks = split_markdown_chunks(&msg.content, TELEGRAM_MAX_MESSAGE_LENGTH);
+        let chunk_count = chunks.len();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let rendered = render_telegram_html(chunk);
+            let mut req = bot
+                .send_message(ChatId(chat_id), rendered)
+                .parse_mode(ParseMode::Html);
 
-        // Route reply to the correct forum topic when thread metadata is present.
-        if let Some(thread_id_str) = msg.metadata.get("telegram_thread_id") {
-            if let Ok(tid) = thread_id_str.parse::<i32>() {
-                req = req
-                    .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
+            // Route reply to the correct forum topic when thread metadata is present.
+            if let Some(thread_id_str) = msg.metadata.get("telegram_thread_id") {
+                if let Ok(tid) = thread_id_str.parse::<i32>() {
+                    req = req.message_thread_id(teloxide::types::ThreadId(
+                        teloxide::types::MessageId(tid),
+                    ));
+                }
             }
-        }
 
-        req.await
-            .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
+            req.await.map_err(|e| {
+                ZeptoError::Channel(format!(
+                    "Failed to send Telegram message chunk {}/{}: {}",
+                    i + 1,
+                    chunk_count,
+                    e
+                ))
+            })?;
+        }
 
         info!("Telegram: Message sent successfully to chat {}", chat_id);
         Ok(())
@@ -1757,6 +1934,138 @@ mod tests {
             output,
             "<b>bold</b> and <i>italic</i> and <s>struck</s> and <code>code</code>"
         );
+    }
+
+    // ── Message splitting tests ───────────────────────────────────────
+
+    #[test]
+    fn test_split_short_message() {
+        let msg = "Hello, world!";
+        let chunks = split_markdown_chunks(msg, TELEGRAM_MAX_MESSAGE_LENGTH);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], msg);
+    }
+
+    #[test]
+    fn test_split_empty_content() {
+        let chunks = split_markdown_chunks("", TELEGRAM_MAX_MESSAGE_LENGTH);
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_split_paragraphs() {
+        // Build a message with paragraphs that together exceed the limit.
+        let para = "A".repeat(2000);
+        let msg = format!("{}\n\n{}\n\n{}", para, para, para);
+        let chunks = split_markdown_chunks(&msg, TELEGRAM_MAX_MESSAGE_LENGTH);
+        assert!(
+            chunks.len() >= 2,
+            "Expected multiple chunks, got {}",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                render_telegram_html(chunk).len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "Chunk rendered to {} bytes, exceeding limit",
+                render_telegram_html(chunk).len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_preserves_code_block() {
+        // A code block with internal blank lines should stay together.
+        let code = "```\nline1\n\nline2\n\nline3\n```";
+        let msg = format!("Intro paragraph\n\n{}\n\nOutro paragraph", code);
+        let blocks = split_into_blocks(&msg);
+        // The code block should be a single block.
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.contains("line1") && b.contains("line3")),
+            "Code block was split: {:?}",
+            blocks
+        );
+    }
+
+    #[test]
+    fn test_split_into_blocks_respects_fences() {
+        let content = "before\n\n```\nfirst\n\nsecond\n```\n\nafter";
+        let blocks = split_into_blocks(content);
+        assert_eq!(blocks.len(), 3, "Expected 3 blocks, got {:?}", blocks);
+        assert_eq!(blocks[0], "before");
+        assert!(blocks[1].starts_with("```"));
+        assert_eq!(blocks[2], "after");
+    }
+
+    #[test]
+    fn test_split_oversized_block() {
+        // A single block bigger than the limit should be split by lines.
+        let lines: Vec<String> = (0..100)
+            .map(|i| format!("Line {} {}", i, "x".repeat(80)))
+            .collect();
+        let block = lines.join("\n");
+        assert!(
+            render_telegram_html(&block).len() > TELEGRAM_MAX_MESSAGE_LENGTH,
+            "Test block should exceed limit"
+        );
+        let chunks = split_markdown_chunks(&block, TELEGRAM_MAX_MESSAGE_LENGTH);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(
+                render_telegram_html(chunk).len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "Chunk rendered to {} bytes",
+                render_telegram_html(chunk).len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_chunks_under_limit() {
+        // Property test: a mixed message with paragraphs, code, and formatting.
+        let msg = format!(
+            "{}\n\n```rust\n{}\n```\n\n{}\n\n**{}**\n\n{}",
+            "Hello world. ".repeat(200),
+            "let x = 42;\n".repeat(50),
+            "Another paragraph. ".repeat(150),
+            "Bold text. ".repeat(100),
+            "Final section. ".repeat(200),
+        );
+        let chunks = split_markdown_chunks(&msg, TELEGRAM_MAX_MESSAGE_LENGTH);
+        assert!(chunks.len() > 1, "Message should have been split");
+        for (i, chunk) in chunks.iter().enumerate() {
+            let rendered_len = render_telegram_html(chunk).len();
+            assert!(
+                rendered_len <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "Chunk {} rendered to {} bytes (limit {})",
+                i,
+                rendered_len,
+                TELEGRAM_MAX_MESSAGE_LENGTH
+            );
+        }
+        // All content should be preserved (no data loss).
+        let reassembled = chunks.join("\n\n");
+        assert!(
+            reassembled.contains("Hello world"),
+            "Content was lost during splitting"
+        );
+        assert!(
+            reassembled.contains("let x = 42"),
+            "Code block content was lost"
+        );
+        assert!(
+            reassembled.contains("Final section"),
+            "Trailing content was lost"
+        );
+    }
+
+    #[test]
+    fn test_split_no_empty_chunks() {
+        let msg = "A\n\n\n\nB\n\n\n\nC";
+        let chunks = split_markdown_chunks(&msg, TELEGRAM_MAX_MESSAGE_LENGTH);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(!chunk.is_empty(), "Chunk {} is empty", i);
+        }
     }
 
     #[test]
