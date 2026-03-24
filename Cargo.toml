@@ -59,7 +59,7 @@ scraper = "0.25"
 # Command-line argument parsing with derive macros
 clap = { version = "4.5", features = ["derive"] }
 # Readline with tab-completion for interactive CLI
-rustyline = "15.0"
+rustyline = "17.0"
 
 # =============================================================================
 # LOGGING & DIAGNOSTICS
