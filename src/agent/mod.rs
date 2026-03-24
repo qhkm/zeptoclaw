@@ -58,9 +58,12 @@ pub mod budget;
 pub mod compaction;
 mod context;
 pub mod context_monitor;
+pub mod core_loop;
 pub mod facade;
 mod r#loop;
 pub mod loop_guard;
+pub mod middleware;
+pub mod pipeline;
 pub mod scratchpad;
 pub mod tool_call_limit;
 

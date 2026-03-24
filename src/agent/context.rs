@@ -257,6 +257,7 @@ impl RuntimeContext {
 /// let messages = builder.build_messages(&[], "Hello!");
 /// assert_eq!(messages.len(), 2); // system + user message
 /// ```
+#[derive(Clone)]
 pub struct ContextBuilder {
     /// The system prompt to use
     system_prompt: String,
