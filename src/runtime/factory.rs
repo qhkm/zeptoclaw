@@ -223,8 +223,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_apple_container_blocked_by_default() {
-        let mut config = RuntimeConfig::default();
-        config.runtime_type = RuntimeType::AppleContainer;
+        let config = RuntimeConfig {
+            runtime_type: RuntimeType::AppleContainer,
+            ..Default::default()
+        };
         // allow_experimental defaults to false
         assert!(!config.apple.allow_experimental);
 
@@ -251,9 +253,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_docker_runtime_with_extra_mounts_requires_allowlist() {
-        let mut config = RuntimeConfig::default();
-        config.runtime_type = RuntimeType::Docker;
-        config.mount_allowlist_path = "/nonexistent/allowlist.json".to_string();
+        let mut config = RuntimeConfig {
+            runtime_type: RuntimeType::Docker,
+            mount_allowlist_path: "/nonexistent/allowlist.json".to_string(),
+            ..Default::default()
+        };
         config
             .docker
             .extra_mounts

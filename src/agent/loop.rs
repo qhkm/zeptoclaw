@@ -3518,8 +3518,8 @@ mod tests {
 
     #[test]
     fn test_memory_flush_timeout_is_reasonable() {
-        assert!(MEMORY_FLUSH_TIMEOUT_SECS > 0);
-        assert!(MEMORY_FLUSH_TIMEOUT_SECS <= 30);
+        const { assert!(MEMORY_FLUSH_TIMEOUT_SECS > 0) };
+        const { assert!(MEMORY_FLUSH_TIMEOUT_SECS <= 30) };
     }
 
     #[tokio::test]

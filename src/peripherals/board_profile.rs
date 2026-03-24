@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn test_esp32_capabilities() {
-        assert!(ESP32_PROFILE.has_nvs);
-        assert!(ESP32_PROFILE.has_pwm);
+        const { assert!(ESP32_PROFILE.has_nvs) };
+        const { assert!(ESP32_PROFILE.has_pwm) };
     }
 
     #[test]
@@ -255,8 +255,8 @@ mod tests {
 
     #[test]
     fn test_rpi_capabilities() {
-        assert!(!RPI_PROFILE.has_nvs);
-        assert!(RPI_PROFILE.has_pwm);
+        const { assert!(!RPI_PROFILE.has_nvs) };
+        const { assert!(RPI_PROFILE.has_pwm) };
     }
 
     #[test]

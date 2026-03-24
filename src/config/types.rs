@@ -1370,6 +1370,9 @@ pub struct ProvidersConfig {
     /// Baidu Qianfan configuration (OpenAI-compatible v2 endpoint).
     #[serde(default)]
     pub qianfan: Option<ProviderConfig>,
+    /// Novita AI configuration (OpenAI-compatible endpoint).
+    #[serde(default)]
+    pub novita: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
