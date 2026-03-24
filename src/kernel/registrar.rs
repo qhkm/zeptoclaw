@@ -786,7 +786,6 @@ pub async fn register_all_tools(
                         if !filter.is_enabled(&prefixed_name) {
                             continue;
                         }
-                        let prefixed = format!("{}_{}", server.name, tool.name);
                         registry.register(Box::new(McpToolWrapper::new(
                             &server.name,
                             &tool.name,
@@ -794,7 +793,7 @@ pub async fn register_all_tools(
                             tool.input_schema.clone(),
                             Arc::clone(&client),
                         )));
-                        external_tool_names.insert(prefixed);
+                        external_tool_names.insert(prefixed_name);
                         registered_count += 1;
                     }
                     info!(

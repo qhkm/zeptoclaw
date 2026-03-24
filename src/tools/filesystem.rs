@@ -437,10 +437,6 @@ impl Tool for EditFileTool {
                     "type": "string",
                     "description": "The text to replace it with"
                 },
-                "expected_replacements": {
-                    "type": "integer",
-                    "description": "Optional exact number of matches required before applying the replacement"
-                },
                 "diff": {
                     "type": "string",
                     "description": "A unified diff patch to apply. Use standard @@ hunk headers with +/- lines. Mutually exclusive with old_text/new_text."
