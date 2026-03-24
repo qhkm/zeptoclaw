@@ -2,6 +2,12 @@
 name = "zeptoclaw"
 version = "0.8.0"
 edition = "2021"
+
+[lints.rust.unexpected_cfgs]
+# mqtt feature is temporarily disabled (RUSTSEC-2026-0049) but code stays
+# behind #[cfg(feature = "mqtt")] — suppress the unknown-cfg warning.
+level = "warn"
+check-cfg = ['cfg(feature, values("mqtt"))']
 authors = ["ZeptoClaw Contributors"]
 description = "Ultra-lightweight personal AI assistant"
 license = "Apache-2.0"
@@ -180,7 +186,10 @@ webpki-roots = { version = "1.0", optional = true }
 # MQTT (optional — feature-gated)
 # =============================================================================
 # Lightweight async MQTT client for IoT device communication
-rumqttc = { version = "0.25", optional = true }
+# TEMPORARILY REMOVED: rumqttc 0.25.1 pins rustls-webpki 0.102.8
+# (RUSTSEC-2026-0049, no upstream fix). Code stays behind #[cfg(feature = "mqtt")].
+# Re-add when rumqttc ships a version with updated rustls deps.
+# rumqttc = { version = "0.25", optional = true }
 
 # =============================================================================
 # WHATSAPP WEB (optional — feature-gated behind "whatsapp-web")
@@ -269,8 +278,8 @@ peripheral-rpi = ["rppal"]
 peripheral-esp32 = ["hardware"]
 # Debug probe for STM32/Nucleo memory read via USB (adds ~50 deps)
 probe = ["probe-rs"]
-# MQTT channel for IoT device communication (rumqttc async client)
-mqtt = ["dep:rumqttc"]
+# MQTT channel — temporarily disabled (RUSTSEC-2026-0049, see dep comment above)
+# mqtt = ["dep:rumqttc"]
 # WhatsApp Web native client (wa-rs + SQLite session storage)
 whatsapp-web = [
     "dep:wa-rs",
