@@ -662,12 +662,16 @@ pub(crate) fn parse_models_ollama_format(json: &serde_json::Value) -> Vec<String
 ///
 /// Uses the standard `/models` endpoint for most providers (OpenAI format).
 /// Ollama uses `/api/tags` with a different response format.
+/// Accepts the full resolved selection to support OAuth, custom auth headers,
+/// and api_version fields.
 /// Returns sorted model IDs on success; Err on network/parse failure.
 pub(crate) async fn fetch_provider_models(
-    provider: &str,
-    api_key: &str,
-    api_base: Option<&str>,
+    selection: &zeptoclaw::providers::RuntimeProviderSelection,
 ) -> anyhow::Result<Vec<String>> {
+    let provider = selection.name;
+    let api_base = selection.api_base.as_deref();
+    let credential_value = selection.credential.value();
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -710,10 +714,13 @@ pub(crate) async fn fetch_provider_models(
     let mut req = client.get(&url);
     if provider == "anthropic" {
         req = req
-            .header("x-api-key", api_key)
+            .header("x-api-key", credential_value)
             .header("anthropic-version", "2023-06-01");
-    } else if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
+    } else if let Some(ref header) = selection.auth_header {
+        // Custom auth header (e.g. Azure uses api-key header)
+        req = req.header(header.as_str(), credential_value);
+    } else if !credential_value.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", credential_value));
     }
 
     let resp = req.send().await?;

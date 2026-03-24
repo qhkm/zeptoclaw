@@ -971,7 +971,12 @@ Expected: ALL PASS
 git add src/ && git diff --cached --quiet || git commit -m "chore: fmt"
 ```
 
-- [ ] **Step 6: Verify format check**
+- [ ] **Step 6: Update repo documentation**
+
+Update `CLAUDE.md`: architecture tree, test counts, module descriptions, any new CLI flags.
+Update `AGENTS.md`: project snapshot with current state.
+
+- [ ] **Step 7: Verify format check**
 
 Run: `cargo fmt -- --check`
 Expected: No changes needed

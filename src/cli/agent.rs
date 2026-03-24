@@ -476,12 +476,7 @@ pub(crate) async fn cmd_agent(
                                         println!("No providers configured. Run 'zeptoclaw onboard' to set up.");
                                     } else {
                                         for s in &selections {
-                                            let api_base = s.api_base.as_deref();
-                                            match super::common::fetch_provider_models(
-                                                s.name, &s.api_key, api_base,
-                                            )
-                                            .await
-                                            {
+                                            match super::common::fetch_provider_models(s).await {
                                                 Ok(models) => {
                                                     println!(
                                                         "{} ({} models):",

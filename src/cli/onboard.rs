@@ -175,8 +175,7 @@ async fn configure_model(config: &mut Config) -> Result<()> {
     let selection = selections.iter().find(|s| s.name == primary);
 
     let models: Vec<String> = if let Some(s) = selection {
-        match super::common::fetch_provider_models(s.name, &s.api_key, s.api_base.as_deref()).await
-        {
+        match super::common::fetch_provider_models(s).await {
             Ok(m) if !m.is_empty() => m,
             _ => {
                 println!("  Could not fetch live models, showing known models.");
@@ -790,9 +789,9 @@ async fn configure_anthropic(config: &mut Config) -> Result<()> {
                     .anthropic
                     .get_or_insert_with(Default::default);
                 provider_config.api_key = Some(api_key);
-                config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+                config.agents.defaults.model = "claude-sonnet-4-6".to_string();
                 println!("  Anthropic API key configured.");
-                println!("  Default model set to: claude-sonnet-4-5-20250929");
+                println!("  Default model set to: claude-sonnet-4-6");
             } else {
                 println!("  No key entered. Skipped Anthropic configuration.");
             }
@@ -862,11 +861,11 @@ fn configure_anthropic_subscription_token(config: &mut Config) -> Result<()> {
         .anthropic
         .get_or_insert_with(Default::default);
     provider_config.auth_method = Some("auto".to_string());
-    config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
+    config.agents.defaults.model = "claude-sonnet-4-6".to_string();
 
     println!("  Subscription token stored and encrypted.");
     println!("  Auth method set to \"auto\" (OAuth first, API key fallback).");
-    println!("  Default model set to: claude-sonnet-4-5-20250929");
+    println!("  Default model set to: claude-sonnet-4-6");
 
     Ok(())
 }

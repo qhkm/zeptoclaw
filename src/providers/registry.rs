@@ -125,7 +125,7 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
     },
     ProviderSpec {
         name: "ollama",
-        model_keywords: &["ollama", "llama", "mistral", "phi", "qwen"],
+        model_keywords: &["ollama"],
         runtime_supported: true,
         default_base_url: Some("http://localhost:11434/v1"),
         backend: "openai",
@@ -279,8 +279,33 @@ pub fn configured_provider_models(config: &Config) -> Vec<(String, String)> {
 /// Returns the provider name if any keyword appears (case-insensitive) in the
 /// model string.  E.g. `"gpt-4o"` matches `"gpt"` → `"openai"`,
 /// `"claude-sonnet-4-5-20250929"` matches `"claude"` → `"anthropic"`.
+///
+/// Handles OpenRouter-style prefixed IDs (e.g. `"anthropic/claude-..."`) by
+/// first checking if the prefix before `/` is itself a provider name, which
+/// indicates the model is served via that aggregator rather than the prefix
+/// provider directly.
 pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
     let model_lower = model.to_ascii_lowercase();
+
+    // 1. Check for "provider/" prefix (OpenRouter, Bedrock, etc.)
+    //    e.g. "anthropic/claude-..." → the prefix "anthropic" is just a vendor
+    //    namespace, not the serving provider.  But "openrouter" itself or a
+    //    provider name as prefix means the *prefix* is the provider.
+    if let Some((prefix, _)) = model_lower.split_once('/') {
+        // If the prefix is a known runtime provider name, return it directly.
+        if let Some(spec) = PROVIDER_REGISTRY
+            .iter()
+            .filter(|s| s.runtime_supported)
+            .find(|s| s.name == prefix)
+        {
+            return Some(spec.name);
+        }
+        // Otherwise, strip the prefix and match on the model part only.
+        // e.g. "meta/llama-4-..." → match on "llama-4-..." (won't hit Ollama
+        //       because Ollama keywords are "ollama" only).
+    }
+
+    // 2. Keyword-based heuristic on the full model string.
     PROVIDER_REGISTRY
         .iter()
         .filter(|spec| spec.runtime_supported)
@@ -1097,10 +1122,27 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_name_for_model_ollama_keywords() {
-        assert_eq!(provider_name_for_model("llama3.3"), Some("ollama"));
-        assert_eq!(provider_name_for_model("mistral-7b"), Some("ollama"));
-        assert_eq!(provider_name_for_model("qwen2.5-72b"), Some("ollama"));
+    fn test_provider_name_for_model_ollama_keyword() {
+        // Only "ollama" keyword matches now; model-family names (llama, mistral, etc.)
+        // are not Ollama-specific and should not infer Ollama.
+        assert_eq!(provider_name_for_model("ollama-custom"), Some("ollama"));
+        // Model families served by multiple providers should return None.
+        assert_eq!(provider_name_for_model("llama3.3"), None);
+        assert_eq!(provider_name_for_model("mistral-7b"), None);
+        assert_eq!(provider_name_for_model("qwen2.5-72b"), None);
+    }
+
+    #[test]
+    fn test_provider_name_for_model_prefixed_ids() {
+        // OpenRouter-style "provider/model" prefixes: if the prefix is a known
+        // provider name, return that provider.
+        assert_eq!(
+            provider_name_for_model("anthropic/claude-sonnet-4-6"),
+            Some("anthropic")
+        );
+        assert_eq!(provider_name_for_model("openai/gpt-5.4"), Some("openai"));
+        // Non-provider prefix like "meta/" should not match Ollama.
+        assert_eq!(provider_name_for_model("meta/llama-4-scout-17b"), None);
     }
 
     #[test]
