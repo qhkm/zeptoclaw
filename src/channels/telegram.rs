@@ -942,6 +942,17 @@ impl Channel for TelegramChannel {
                                 });
                             }
 
+                            // React with 👀 to acknowledge receipt before processing.
+                            {
+                                use teloxide::types::ReactionType;
+                                let _ = bot
+                                    .set_message_reaction(msg.chat.id, msg.id)
+                                    .reaction(vec![ReactionType::Emoji {
+                                        emoji: "\u{1F440}".to_string(),
+                                    }])
+                                    .await;
+                            }
+
                             // Process text messages, captions, and bare photo/image messages
                             let has_photo = msg.photo().is_some();
                             let has_image_doc = msg.document()
@@ -1362,7 +1373,7 @@ impl Channel for TelegramChannel {
     /// - The Telegram API request fails (possibly after partial delivery)
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
-        use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
+        use teloxide::types::{ChatId, MessageId, ParseMode, ReactionType, ReplyParameters};
 
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
@@ -1385,13 +1396,25 @@ impl Channel for TelegramChannel {
             token.cancel();
         }
 
-        info!("Telegram: Sending message to chat {}", chat_id);
-
         // Use cached bot instance
         let bot = self
             .bot
             .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
+
+        // Clear the processing reaction (👀) set when the message was received.
+        if let Some(mid_str) = msg.metadata.get("telegram_message_id") {
+            if let Ok(mid) = mid_str.parse::<i32>() {
+                let _ = bot
+                    .set_message_reaction(ChatId(chat_id), MessageId(mid))
+                    .reaction(vec![ReactionType::Emoji {
+                        emoji: "\u{2705}".to_string(),
+                    }])
+                    .await;
+            }
+        }
+
+        info!("Telegram: Sending message to chat {}", chat_id);
 
         let chunks = split_markdown_chunks(&msg.content, TELEGRAM_MAX_MESSAGE_LENGTH);
         let chunk_count = chunks.len();
