@@ -35,6 +35,7 @@ gh issue create --repo qhkm/zeptoclaw \
 Labels: `bug`, `feat`, `rfc`, `chore`, `docs` + `area:tools`, `area:channels`, `area:providers`, `area:safety`, `area:config`, `area:cli`, `area:memory` + `P1-critical`, `P2-high`, `P3-normal`. Skip for trivial changes.
 
 ### 3. Session End — Link and close
+- Follow the PR guidelines in `docs/claude/pr.md` and use the template at `.github/PULL_REQUEST_TEMPLATE.md`
 - PR body: include `Closes #N`
 - **NEVER merge PRs without explicit user approval.** Wait for CI, present URL, merge only after user says to
 - Merge: `gh pr merge <number> --squash --delete-branch --admin`
