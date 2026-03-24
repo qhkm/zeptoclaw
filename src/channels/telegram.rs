@@ -38,7 +38,7 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::FutureExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -86,7 +86,7 @@ struct ConfiguredProviders {
 /// Shared map of active typing indicator tasks, keyed by chat_id (or
 /// "chat_id:thread_id" for forum topics). The CancellationToken lets
 /// `send()` stop the typing loop when the response is ready.
-type TypingMap = Arc<DashMap<String, CancellationToken>>;
+type TypingMap = Arc<DashMap<String, (CancellationToken, AtomicUsize)>>;
 
 /// Bundles override stores and shared state into one DI dependency so that
 /// dptree's 9-parameter arity limit is not exceeded.
@@ -661,14 +661,17 @@ impl Channel for TelegramChannel {
 
                                 // Cancel any stale typing task for this chat
                                 // (e.g. rapid successive messages).
-                                if let Some((_, old_token)) = typing_indicators.remove(&typing_key)
+                                if let Some((_, (old_token, _))) =
+                                    typing_indicators.remove(&typing_key)
                                 {
                                     old_token.cancel();
                                 }
 
                                 let cancel_token = CancellationToken::new();
-                                typing_indicators
-                                    .insert(typing_key.clone(), cancel_token.clone());
+                                typing_indicators.insert(
+                                    typing_key.clone(),
+                                    (cancel_token.clone(), AtomicUsize::new(1)),
+                                );
 
                                 let typing_bot = bot.clone();
                                 let typing_chat_id = msg.chat.id;
@@ -1071,7 +1074,7 @@ impl Channel for TelegramChannel {
 
         // Cancel all active typing indicators
         for entry in self.typing_indicators.iter() {
-            entry.value().cancel();
+            entry.value().0.cancel();
         }
         self.typing_indicators.clear();
 
@@ -1111,7 +1114,7 @@ impl Channel for TelegramChannel {
             Some(tid) => format!("{}:{}", chat_id, tid),
             None => chat_id.to_string(),
         };
-        if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+        if let Some((_, (token, _))) = self.typing_indicators.remove(&typing_key) {
             token.cancel();
         }
 
@@ -1777,5 +1780,20 @@ mod tests {
 
         assert_eq!(handler_key_threaded, send_key_threaded);
         assert_eq!(handler_key_plain, send_key_plain);
+    }
+
+    #[test]
+    fn test_typing_map_stores_refcount() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use dashmap::DashMap;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let token = CancellationToken::new();
+        map.insert("chat:123".to_string(), (token, AtomicUsize::new(1)));
+
+        let entry = map.get("chat:123").unwrap();
+        assert_eq!(entry.value().1.load(Ordering::Relaxed), 1);
     }
 }
