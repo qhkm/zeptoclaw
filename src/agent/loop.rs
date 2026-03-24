@@ -236,11 +236,12 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
 
 /// Convert an inbound message with optional media attachments into a session Message.
 ///
-/// If the inbound message has image media with inline binary data, each image is
-/// base64-encoded and attached as a `ContentPart::Image`.  Non-image media and
-/// attachments without data are silently skipped.  Validation (size, MIME type)
-/// is applied via [`crate::session::media::validate_image`]; invalid images are
-/// skipped rather than aborting.
+/// - Image media with inline binary data are base64-encoded and attached as `ContentPart::Image`.
+/// - Text document media (text/plain, text/*, application/json) are decoded and appended to message content.
+/// - Other media types and attachments without data are silently skipped.
+///
+/// Validation (size, MIME type) is applied via [`crate::session::media::validate_image`]; 
+/// invalid images are skipped rather than aborting.
 ///
 /// When a `MediaStore` is provided the raw bytes are written to disk first and
 /// the resulting relative path is stored as `ImageSource::FilePath`; otherwise
@@ -260,8 +261,52 @@ async fn inbound_to_message(
         .filter(|m| m.data.is_some())
         .collect();
 
+    // Extract text documents and append to content
+    let text_docs: Vec<&crate::bus::MediaAttachment> = msg
+        .media
+        .iter()
+        .filter(|m| matches!(m.media_type, crate::bus::MediaType::Document))
+        .filter(|m| m.data.is_some())
+        .filter(|m| {
+            // Only process text-based documents
+            if let Some(mime) = m.mime_type.as_deref() {
+                mime.starts_with("text/") || mime == "application/json"
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    let mut content = msg.content.clone();
+    
+    // Append text document content
+    for doc in text_docs {
+        let data = doc.data.as_ref().unwrap();
+        // Skip documents larger than 100KB to prevent context overflow
+        if data.len() > 100 * 1024 {
+            if let Some(name) = doc.filename.as_deref() {
+                content.push_str(&format!("\n\n[Text file '{}' too large ({} KB), skipped]", 
+                    name, data.len() / 1024));
+            }
+            continue;
+        }
+
+        match std::str::from_utf8(data) {
+            Ok(text) => {
+                let filename = doc.filename.as_deref().unwrap_or("attachment");
+                content.push_str(&format!("\n\n--- Begin file: {} ---\n{}\n--- End file: {} ---",
+                    filename, text.trim(), filename));
+            }
+            Err(_) => {
+                if let Some(name) = doc.filename.as_deref() {
+                    content.push_str(&format!("\n\n[File '{}' is not valid UTF-8 text]", name));
+                }
+            }
+        }
+    }
+
     if image_media.is_empty() {
-        return crate::session::Message::user(&msg.content);
+        return crate::session::Message::user(&content);
     }
 
     let mut image_parts: Vec<ContentPart> = Vec::new();
@@ -294,9 +339,9 @@ async fn inbound_to_message(
     }
 
     if image_parts.is_empty() {
-        crate::session::Message::user(&msg.content)
+        crate::session::Message::user(&content)
     } else {
-        crate::session::Message::user_with_images(&msg.content, image_parts)
+        crate::session::Message::user_with_images(&content, image_parts)
     }
 }
 

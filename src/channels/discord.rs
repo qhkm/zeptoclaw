@@ -1055,29 +1055,69 @@ impl DiscordChannel {
                                                             if let Some(mut inbound) =
                                                                 Self::parse_message_create(data, &allowlist, deny_by_default)
                                                             {
-                                                                // Download image attachments
+                                                                // Download image and text document attachments
                                                                 if let Ok(msg_data) = serde_json::from_value::<MessageCreateData>(data.clone()) {
+                                                                    let mut attachment_info = Vec::new();
                                                                     for att in &msg_data.attachments {
-                                                                        if let Some(ref ct) = att.content_type {
-                                                                            if ct.starts_with("image/")
-                                                                                && att.size.is_none_or(|s| s <= 20 * 1024 * 1024)
-                                                                            {
-                                                                                match client.get(&att.url).send().await {
-                                                                                    Ok(resp) => {
-                                                                                        if let Ok(bytes) = resp.bytes().await {
-                                                                                            let mut media = MediaAttachment::new(MediaType::Image)
-                                                                                                .with_data(bytes.to_vec())
-                                                                                                .with_mime_type(ct);
-                                                                                            if let Some(ref name) = att.filename {
-                                                                                                media = media.with_filename(name);
-                                                                                            }
-                                                                                            inbound = inbound.with_media(media);
-                                                                                        }
-                                                                                    }
-                                                                                    Err(e) => warn!("Failed to download Discord attachment: {}", e),
+                                                                        // Skip if no content type or size is too large (>20MB)
+                                                                        if att.content_type.is_none() || att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
+                                                                            if let Some(ref name) = att.filename {
+                                                                                if att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
+                                                                                    attachment_info.push(format!("[Attachment: {} (too large: {} MB)]", name, att.size.unwrap() / 1024 / 1024));
                                                                                 }
                                                                             }
+                                                                            continue;
                                                                         }
+
+                                                                        let content_type = att.content_type.as_ref().unwrap();
+                                                                        
+                                                                        // Determine media type - only handle images and text documents
+                                                                        let media_type = if content_type.starts_with("image/") {
+                                                                            Some(MediaType::Image)
+                                                                        } else if content_type.starts_with("text/") 
+                                                                            || content_type == "application/pdf"
+                                                                            || content_type == "application/msword"
+                                                                            || content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                                                            || content_type == "application/vnd.ms-excel"
+                                                                            || content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                                                            || content_type == "application/rtf"
+                                                                            || content_type == "application/json" {
+                                                                            Some(MediaType::Document)
+                                                                        } else {
+                                                                            None
+                                                                        };
+
+                                                                        if let Some(mt) = media_type {
+                                                                            match client.get(&att.url).send().await {
+                                                                                Ok(resp) => {
+                                                                                    if let Ok(bytes) = resp.bytes().await {
+                                                                                        let mut media = MediaAttachment::new(mt.clone())
+                                                                                            .with_data(bytes.to_vec())
+                                                                                            .with_mime_type(content_type);
+                                                                                        if let Some(ref name) = att.filename {
+                                                                                            media = media.with_filename(name);
+                                                                                            // For non-image attachments, add info to message
+                                                                                            if mt != MediaType::Image {
+                                                                                                let size_kb = bytes.len() / 1024;
+                                                                                                attachment_info.push(format!("[Attachment: {} ({} KB, type: {})]", name, size_kb, content_type));
+                                                                                            }
+                                                                                        }
+                                                                                        inbound = inbound.with_media(media);
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => warn!("Failed to download Discord attachment: {}", e),
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    // Append attachment info to message content for non-image files
+                                                                    if !attachment_info.is_empty() {
+                                                                        let mut content = inbound.content.clone();
+                                                                        if !content.is_empty() {
+                                                                            content.push_str("\n\n");
+                                                                        }
+                                                                        content.push_str(&attachment_info.join("\n"));
+                                                                        inbound.content = content;
                                                                     }
                                                                 }
                                                                 if let Err(e) =
