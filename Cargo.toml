@@ -243,7 +243,7 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = t
 # JWT token generation/validation for panel auth
 jsonwebtoken = { version = "10", optional = true }
 # Password hashing for panel password auth mode
-bcrypt = { version = "0.18", optional = true }
+bcrypt = { version = "0.19", optional = true }
 unicode-normalization = "0.1.25"
 
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
