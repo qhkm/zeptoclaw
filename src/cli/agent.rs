@@ -887,13 +887,13 @@ mod tests {
     #[test]
     fn test_active_model_override_marks_current_in_formatted_list() {
         let current = active_model_override(
-            &Some((Some("openai".to_string()), "gpt-5.1".to_string())),
+            &Some((Some("openai".to_string()), "gpt-5.4".to_string())),
             "anthropic:claude-sonnet-4-5-20250929",
         );
         let providers = vec!["openai".to_string()];
         let list =
             zeptoclaw::channels::model_switch::format_model_list(&providers, current.as_ref(), &[]);
-        assert!(list.contains("gpt-5.1 GPT-5.1 (current)"));
+        assert!(list.contains("gpt-5.4 GPT-5.4 (current)"));
     }
 
     #[test]

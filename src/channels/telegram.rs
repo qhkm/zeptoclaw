@@ -174,14 +174,22 @@ fn strip_html_tags(html: &str) -> String {
 fn split_into_blocks(content: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut current = String::new();
-    let mut in_fence = false;
+    let mut fence_marker: Option<String> = None;
 
     for line in content.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            let backticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
+            if let Some(ref marker) = fence_marker {
+                if backticks == *marker {
+                    fence_marker = None;
+                }
+            } else {
+                fence_marker = Some(backticks);
+            }
         }
 
-        if !in_fence && line.trim().is_empty() && !current.is_empty() {
+        if fence_marker.is_none() && line.trim().is_empty() && !current.is_empty() {
             blocks.push(std::mem::take(&mut current));
         } else {
             if !current.is_empty() {
@@ -209,7 +217,12 @@ fn split_block_by_lines(block: &str, max_len: usize) -> Vec<String> {
             format!("{}\n{}", current, line)
         };
 
-        if render_telegram_html(&candidate).len() > max_len && !current.is_empty() {
+        // Raw length is a lower bound for rendered length (HTML tags only add
+        // bytes). Skip the expensive render when clearly under the limit.
+        let needs_split =
+            candidate.len() > max_len && render_telegram_html(&candidate).len() > max_len;
+
+        if needs_split && !current.is_empty() {
             chunks.push(std::mem::take(&mut current));
             current = line.to_string();
         } else {
@@ -228,13 +241,38 @@ fn split_block_by_lines(block: &str, max_len: usize) -> Vec<String> {
         if rendered.len() <= max_len {
             result.push(chunk);
         } else {
-            // Hard-split the raw text at char boundaries to stay under the
-            // rendered limit. Use a conservative raw limit to leave room for
-            // HTML tag overhead.
-            let raw_limit = max_len.saturating_sub(200);
-            let chars: Vec<char> = chunk.chars().collect();
-            for sub in chars.chunks(raw_limit.max(1)) {
-                result.push(sub.iter().collect());
+            // Hard-split the rendered HTML at safe boundaries, avoiding cuts
+            // inside HTML entities (&...;) or tags (<...>).
+            let rendered = render_telegram_html(&chunk);
+            let bytes = rendered.as_bytes();
+            let mut start = 0;
+            while start < bytes.len() {
+                let mut end = (start + max_len).min(bytes.len());
+                // Snap to a UTF-8 char boundary.
+                while end < bytes.len() && !rendered.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end < bytes.len() {
+                    let window = &rendered[start..end];
+                    // Back up past a partial HTML entity (&...without;).
+                    if let Some(amp_pos) = window.rfind('&') {
+                        if !window[amp_pos..].contains(';') {
+                            end = start + amp_pos;
+                        }
+                    }
+                    // Back up past a partial HTML tag (<...without>).
+                    if let Some(lt_pos) = rendered[start..end].rfind('<') {
+                        if !rendered[start + lt_pos..end].contains('>') {
+                            end = start + lt_pos;
+                        }
+                    }
+                }
+                // Guarantee forward progress.
+                if end <= start {
+                    end = start + rendered[start..].chars().next().map_or(1, |c| c.len_utf8());
+                }
+                result.push(strip_html_tags(&rendered[start..end]));
+                start = end;
             }
         }
     }
@@ -1204,6 +1242,11 @@ impl Channel for TelegramChannel {
 
     /// Sends an outbound message to a Telegram chat.
     ///
+    /// For messages exceeding Telegram's 4096-byte limit, the content is split
+    /// into multiple chunks sent sequentially. If sending fails mid-way, earlier
+    /// chunks will have been delivered; the returned error indicates partial
+    /// delivery.
+    ///
     /// # Arguments
     ///
     /// * `msg` - The outbound message containing chat_id and content
@@ -1212,7 +1255,7 @@ impl Channel for TelegramChannel {
     ///
     /// Returns an error if:
     /// - The chat_id cannot be parsed as an integer
-    /// - The Telegram API request fails
+    /// - The Telegram API request fails (possibly after partial delivery)
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
         use teloxide::types::{ChatId, ParseMode};
