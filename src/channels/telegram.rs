@@ -1007,7 +1007,8 @@ impl Channel for TelegramChannel {
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
 
                                 // Attach the inbound message ID so send() can
-                                // cancel the correct per-message typing indicator.
+                                // cancel the correct per-message typing indicator
+                                // and thread the reply back to this message.
                                 inbound = inbound.with_metadata(
                                     "telegram_message_id",
                                     &msg.id.0.to_string(),
@@ -1174,7 +1175,7 @@ impl Channel for TelegramChannel {
     /// - The Telegram API request fails
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
-        use teloxide::types::{ChatId, ParseMode};
+        use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
 
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
@@ -1219,6 +1220,21 @@ impl Channel for TelegramChannel {
             if let Ok(tid) = thread_id_str.parse::<i32>() {
                 req = req
                     .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
+            }
+        }
+
+        // Thread the reply back to the original inbound message.
+        {
+            let reply_id = msg
+                .reply_to
+                .as_deref()
+                .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()));
+            if let Some(id_str) = reply_id {
+                if let Ok(id) = id_str.parse::<i32>() {
+                    req = req.reply_parameters(
+                        ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
+                    );
+                }
             }
         }
 
