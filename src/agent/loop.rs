@@ -2558,6 +2558,9 @@ impl AgentLoop {
                 );
 
                 let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
+                outbound
+                    .metadata
+                    .insert("typing_done".to_string(), "true".to_string());
                 propagate_routing_metadata(&mut outbound, msg);
                 if let Err(e) = self.bus.publish_outbound(outbound).await {
                     error!("Failed to publish outbound message: {}", e);
@@ -2576,6 +2579,9 @@ impl AgentLoop {
 
                 let mut error_msg =
                     OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("Error: {}", e));
+                error_msg
+                    .metadata
+                    .insert("typing_done".to_string(), "true".to_string());
                 propagate_routing_metadata(&mut error_msg, msg);
                 self.bus.publish_outbound(error_msg).await.ok();
                 false
@@ -2595,6 +2601,9 @@ impl AgentLoop {
                         timeout_secs
                     ),
                 );
+                timeout_msg
+                    .metadata
+                    .insert("typing_done".to_string(), "true".to_string());
                 propagate_routing_metadata(&mut timeout_msg, msg);
                 self.bus.publish_outbound(timeout_msg).await.ok();
                 false
@@ -2700,6 +2709,9 @@ impl AgentLoop {
                                     &msg.chat_id,
                                     "Access denied: device not paired. Use `zeptoclaw pair new` to generate a pairing code.",
                                 );
+                                rejection
+                                    .metadata
+                                    .insert("typing_done".to_string(), "true".to_string());
                                 propagate_routing_metadata(&mut rejection, &msg);
                                 if let Err(e) = self.bus.publish_outbound(rejection).await {
                                     error!("Failed to publish pairing rejection: {}", e);
@@ -4223,6 +4235,24 @@ mod tests {
         assert!(
             matches!(&messages[0].content_parts[0], ContentPart::Text { .. }),
             "only the text part should remain"
+        );
+    }
+
+    #[test]
+    fn test_propagate_routing_metadata_preserves_typing_done() {
+        use crate::bus::{InboundMessage, OutboundMessage};
+
+        let inbound = InboundMessage::new("telegram", "user1", "chat1", "hello");
+        let mut outbound = OutboundMessage::new("telegram", "chat1", "response");
+        outbound
+            .metadata
+            .insert("typing_done".to_string(), "true".to_string());
+        propagate_routing_metadata(&mut outbound, &inbound);
+
+        // typing_done should survive propagation
+        assert_eq!(
+            outbound.metadata.get("typing_done"),
+            Some(&"true".to_string())
         );
     }
 
