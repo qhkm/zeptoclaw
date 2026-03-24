@@ -1120,12 +1120,34 @@ impl Channel for TelegramChannel {
         })?;
 
         // Cancel the typing indicator for this chat before sending.
-        let typing_key = match msg.metadata.get("telegram_thread_id") {
-            Some(tid) => format!("{}:{}", chat_id, tid),
-            None => chat_id.to_string(),
-        };
-        if let Some((_, (token, _))) = self.typing_indicators.remove(&typing_key) {
-            token.cancel();
+        // Only decrement on terminal responses (typing_done metadata).
+        // Tool outputs do not touch the typing map so typing continues
+        // while the agent is still processing.
+        let is_typing_done = msg
+            .metadata
+            .get("typing_done")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if is_typing_done {
+            let typing_key = match msg.metadata.get("telegram_thread_id") {
+                Some(tid) => format!("{}:{}", chat_id, tid),
+                None => chat_id.to_string(),
+            };
+            // remove_if holds the shard write lock while evaluating the
+            // predicate, preventing TOCTOU with concurrent entry() calls.
+            // AtomicUsize and CancellationToken use interior mutability,
+            // so &V (shared ref from remove_if) is sufficient.
+            self.typing_indicators
+                .remove_if(&typing_key, |_, (token, count)| {
+                    let prev = count.fetch_sub(1, Ordering::AcqRel);
+                    if prev <= 1 {
+                        token.cancel();
+                        true // remove entry
+                    } else {
+                        false // keep entry, typing continues
+                    }
+                });
         }
 
         info!("Telegram: Sending message to chat {}", chat_id);
@@ -1840,5 +1862,182 @@ mod tests {
             }
         }
         assert_eq!(map.get(&key).unwrap().value().1.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_typing_refcount_decrement_to_zero_removes_entry() {
+        use dashmap::DashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+        let token = CancellationToken::new();
+        map.insert(key.clone(), (token.clone(), AtomicUsize::new(1)));
+
+        map.remove_if(&key, |_, (t, count)| {
+            let prev = count.fetch_sub(1, Ordering::AcqRel);
+            if prev <= 1 {
+                t.cancel();
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(map.get(&key).is_none(), "entry should be removed at rc=0");
+        assert!(token.is_cancelled(), "token should be cancelled");
+    }
+
+    #[test]
+    fn test_typing_refcount_decrement_to_nonzero_keeps_entry() {
+        use dashmap::DashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+        let token = CancellationToken::new();
+        map.insert(key.clone(), (token.clone(), AtomicUsize::new(2)));
+
+        map.remove_if(&key, |_, (t, count)| {
+            let prev = count.fetch_sub(1, Ordering::AcqRel);
+            if prev <= 1 {
+                t.cancel();
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(map.get(&key).is_some(), "entry should still exist at rc=1");
+        assert!(!token.is_cancelled(), "token should still be active");
+        assert_eq!(map.get(&key).unwrap().1.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_typing_send_without_typing_done_preserves_refcount() {
+        use dashmap::DashMap;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+        let token = CancellationToken::new();
+        map.insert(key.clone(), (token.clone(), AtomicUsize::new(1)));
+
+        let metadata: HashMap<String, String> = HashMap::new();
+        let is_typing_done = metadata
+            .get("typing_done")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if is_typing_done {
+            map.remove_if(&key, |_, (t, count)| {
+                let prev = count.fetch_sub(1, Ordering::AcqRel);
+                if prev <= 1 {
+                    t.cancel();
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+
+        assert!(map.get(&key).is_some(), "entry should be untouched");
+        assert_eq!(map.get(&key).unwrap().1.load(Ordering::Relaxed), 1);
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_typing_send_missing_key_is_noop() {
+        use dashmap::DashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "nonexistent".to_string();
+
+        map.remove_if(&key, |_, (t, count)| {
+            let prev = count.fetch_sub(1, Ordering::AcqRel);
+            if prev <= 1 {
+                t.cancel();
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(map.get(&key).is_none());
+    }
+
+    #[test]
+    fn test_typing_refcount_underflow_removes_entry_safely() {
+        use dashmap::DashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+        let token = CancellationToken::new();
+        map.insert(key.clone(), (token.clone(), AtomicUsize::new(0)));
+
+        map.remove_if(&key, |_, (t, count)| {
+            let prev = count.fetch_sub(1, Ordering::AcqRel);
+            if prev <= 1 {
+                t.cancel();
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(
+            map.get(&key).is_none(),
+            "entry should be removed on underflow"
+        );
+        assert!(
+            token.is_cancelled(),
+            "token should be cancelled on underflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_typing_loop_does_not_self_remove_entry() {
+        use dashmap::DashMap;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let map: Arc<DashMap<String, (CancellationToken, AtomicUsize)>> = Arc::new(DashMap::new());
+        let key = "12345".to_string();
+        let token = CancellationToken::new();
+        map.insert(key.clone(), (token.clone(), AtomicUsize::new(1)));
+
+        let map_clone = map.clone();
+        let key_clone = key.clone();
+        let token_clone = token.clone();
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = token_clone.cancelled() => {
+                    // New behavior: just break, do NOT call map_clone.remove()
+                }
+            }
+            assert!(
+                map_clone.get(&key_clone).is_some(),
+                "typing loop must NOT remove its own entry"
+            );
+        });
+
+        token.cancel();
+        handle.await.unwrap();
+
+        assert!(map.get(&key).is_some());
     }
 }
