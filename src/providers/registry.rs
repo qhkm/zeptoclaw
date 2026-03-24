@@ -285,38 +285,41 @@ pub fn configured_provider_models(config: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Match a model string against provider `model_keywords` to infer the provider.
-///
-/// Returns the provider name if any keyword appears (case-insensitive) in the
-/// model string.  E.g. `"gpt-4o"` matches `"gpt"` → `"openai"`,
-/// `"claude-sonnet-4-5-20250929"` matches `"claude"` → `"anthropic"`.
-///
-/// Handles OpenRouter-style prefixed IDs (e.g. `"anthropic/claude-..."`) by
-/// first checking if the prefix before `/` is itself a provider name, which
-/// indicates the model is served via that aggregator rather than the prefix
-/// provider directly.
-pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
+fn infer_provider_name_for_model(
+    model: &str,
+    available_providers: &[&str],
+) -> Option<&'static str> {
     let model_lower = model.to_ascii_lowercase();
 
-    // 1. Check for "provider/" prefix (OpenRouter, Bedrock, etc.)
-    //    e.g. "anthropic/claude-..." → the prefix "anthropic" is just a vendor
-    //    namespace, not the serving provider.  But "openrouter" itself or a
-    //    provider name as prefix means the *prefix* is the provider.
-    if let Some((prefix, _)) = model_lower.split_once('/') {
-        // If the prefix is a known runtime provider name, return it directly.
+    if let Some((prefix, suffix)) = model_lower.split_once('/') {
+        // Gateway-style IDs like "anthropic/claude-..." should resolve to
+        // OpenRouter when it is actually available, not to the vendor prefix.
+        if prefix == "openrouter" || available_providers.contains(&"openrouter") {
+            return Some("openrouter");
+        }
+
+        // If the prefix matches a configured provider, use it directly.
+        // E.g. "anthropic/claude-sonnet-4-6" with ["anthropic"] → "anthropic".
         if let Some(spec) = PROVIDER_REGISTRY
             .iter()
-            .filter(|s| s.runtime_supported)
-            .find(|s| s.name == prefix)
+            .filter(|spec| spec.runtime_supported)
+            .find(|spec| spec.name == prefix)
         {
-            return Some(spec.name);
+            if available_providers.contains(&spec.name) {
+                return Some(spec.name);
+            }
         }
-        // Otherwise, strip the prefix and match on the model part only.
-        // e.g. "meta/llama-4-..." → match on "llama-4-..." (won't hit Ollama
-        //       because Ollama keywords are "ollama" only).
+
+        // Fall through to keyword matching on the model suffix so that
+        // "anthropic/claude-sonnet-4-6" can still resolve via "claude" keyword
+        // when the prefix itself isn't a configured provider.
+        return PROVIDER_REGISTRY
+            .iter()
+            .filter(|spec| spec.runtime_supported)
+            .find(|spec| spec.model_keywords.iter().any(|kw| suffix.contains(kw)))
+            .map(|spec| spec.name);
     }
 
-    // 2. Keyword-based heuristic on the full model string.
     PROVIDER_REGISTRY
         .iter()
         .filter(|spec| spec.runtime_supported)
@@ -326,6 +329,27 @@ pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
                 .any(|kw| model_lower.contains(kw))
         })
         .map(|spec| spec.name)
+}
+
+/// Match a model string against provider `model_keywords` to infer the provider.
+///
+/// Returns the provider name if any keyword appears (case-insensitive) in the
+/// model string. E.g. `"gpt-4o"` matches `"gpt"` → `"openai"`,
+/// `"claude-sonnet-4-5-20250929"` matches `"claude"` → `"anthropic"`.
+///
+/// Slash-prefixed gateway IDs are only resolved when the serving provider is
+/// explicit in the ID itself (e.g. `openrouter/auto`).
+pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
+    infer_provider_name_for_model(model, &[])
+}
+
+/// Like [`provider_name_for_model`], but prefers configured gateway providers
+/// such as OpenRouter for vendor-prefixed model IDs.
+pub fn provider_name_for_model_with_available(
+    model: &str,
+    available_providers: &[&str],
+) -> Option<&'static str> {
+    infer_provider_name_for_model(model, available_providers)
 }
 
 /// Returns configured provider ids that are not yet runtime-supported.
@@ -1162,15 +1186,35 @@ mod tests {
 
     #[test]
     fn test_provider_name_for_model_prefixed_ids() {
-        // OpenRouter-style "provider/model" prefixes: if the prefix is a known
-        // provider name, return that provider.
+        assert_eq!(
+            provider_name_for_model("openrouter/auto"),
+            Some("openrouter")
+        );
+        // No available providers, but keyword matching on suffix still works.
         assert_eq!(
             provider_name_for_model("anthropic/claude-sonnet-4-6"),
             Some("anthropic")
         );
         assert_eq!(provider_name_for_model("openai/gpt-5.4"), Some("openai"));
-        // Non-provider prefix like "meta/" should not match Ollama.
+        // "llama" isn't a keyword for any provider, so no match.
         assert_eq!(provider_name_for_model("meta/llama-4-scout-17b"), None);
+    }
+
+    #[test]
+    fn test_provider_name_for_model_prefers_openrouter_when_available() {
+        assert_eq!(
+            provider_name_for_model_with_available("anthropic/claude-sonnet-4-6", &["openrouter"]),
+            Some("openrouter")
+        );
+        assert_eq!(
+            provider_name_for_model_with_available("openai/gpt-5.4", &["anthropic", "openrouter"]),
+            Some("openrouter")
+        );
+        // Prefix matches available provider directly.
+        assert_eq!(
+            provider_name_for_model_with_available("anthropic/claude-sonnet-4-6", &["anthropic"]),
+            Some("anthropic")
+        );
     }
 
     #[test]
