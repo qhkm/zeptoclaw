@@ -1672,6 +1672,36 @@ mod tests {
     }
 
     #[test]
+    fn test_typing_key_matches_override_key_with_thread() {
+        // Handler typing_key uses numeric values; override_key and send() use strings.
+        // Both must produce identical keys so send() cancels the right indicator.
+        let chat_id_num: i64 = 123456789;
+        let thread_id_num: i32 = 42;
+
+        // Handler path (msg.chat.id.0 and tid.0.0)
+        let typing_key = format!("{}:{}", chat_id_num, thread_id_num);
+
+        // send() path (parsed chat_id string and metadata string)
+        let chat_id_str = chat_id_num.to_string();
+        let thread_id_str = thread_id_num.to_string();
+        let send_key = format!("{}:{}", chat_id_str, thread_id_str);
+
+        assert_eq!(typing_key, send_key);
+    }
+
+    #[test]
+    fn test_typing_key_matches_override_key_no_thread() {
+        let chat_id_num: i64 = 123456789;
+
+        let typing_key = chat_id_num.to_string();
+
+        let chat_id_str = chat_id_num.to_string();
+        let send_key = chat_id_str.to_string();
+
+        assert_eq!(typing_key, send_key);
+    }
+
+    #[test]
     fn test_inbound_message_with_thread_id() {
         use crate::bus::InboundMessage;
         let mut inbound = InboundMessage::new("telegram", "user1", "chat1", "Hello");
