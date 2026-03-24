@@ -55,6 +55,8 @@ use crate::error::{Result, ZeptoError};
 use crate::memory::builtin_searcher::BuiltinSearcher;
 use crate::memory::longterm::LongTermMemory;
 
+/// Synthetic text used when a photo is sent without a caption.
+const BARE_PHOTO_PLACEHOLDER: &str = "Please analyze this image.";
 /// Maximum number of startup connectivity retries before giving up.
 const MAX_STARTUP_RETRIES: u32 = 10;
 /// Base delay (in seconds) for exponential backoff on startup retries.
@@ -453,6 +455,76 @@ fn telegram_allowlist_allows(
             }))
 }
 
+/// Downloads a photo from Telegram's file API and returns it as a [`MediaAttachment`].
+///
+/// Returns `None` (with a `warn!` log) on any failure: timeout, network error,
+/// empty file path, oversized image, or byte-read error.
+async fn download_telegram_photo(
+    bot: &teloxide::Bot,
+    file_id: teloxide::types::FileId,
+    http_client: &reqwest::Client,
+) -> Option<MediaAttachment> {
+    use crate::session::media::MAX_IMAGE_SIZE;
+    use teloxide::prelude::Requester;
+
+    let file = match tokio::time::timeout(Duration::from_secs(15), bot.get_file(file_id)).await {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => {
+            warn!("Failed to get Telegram file info: {}", e);
+            return None;
+        }
+        Err(_) => {
+            warn!("Telegram get_file timed out after 15s");
+            return None;
+        }
+    };
+
+    if file.path.is_empty() {
+        warn!("Telegram file path is empty for photo");
+        return None;
+    }
+
+    let download_url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
+
+    let resp = match http_client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download Telegram photo: {}", e);
+            return None;
+        }
+    };
+
+    let mime_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .filter(|ct| ct.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to read Telegram photo bytes: {}", e);
+            return None;
+        }
+    };
+
+    if bytes.len() > MAX_IMAGE_SIZE {
+        warn!("Telegram photo too large: {} bytes", bytes.len());
+        return None;
+    }
+    Some(
+        MediaAttachment::new(MediaType::Image)
+            .with_data(bytes.to_vec())
+            .with_mime_type(&mime_type),
+    )
+}
+
 /// Telegram channel implementation using teloxide.
 ///
 /// This channel connects to Telegram's Bot API to receive and send messages.
@@ -494,6 +566,8 @@ pub struct TelegramChannel {
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
     /// Active typing indicator tasks per chat (or chat:thread for forums).
     typing_indicators: TypingMap,
+    /// Shared HTTP client for downloading media (connection pool reuse).
+    http_client: reqwest::Client,
 }
 
 impl TelegramChannel {
@@ -579,6 +653,10 @@ impl TelegramChannel {
             configured_models,
             longterm_memory,
             typing_indicators: Arc::new(DashMap::new()),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("Failed to build HTTP client"),
         }
     }
 
@@ -676,6 +754,7 @@ impl Channel for TelegramChannel {
             models: self.configured_models.clone(),
         };
         let longterm_memory = self.longterm_memory.clone();
+        let http_client = self.http_client.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
 
@@ -766,7 +845,8 @@ impl Channel for TelegramChannel {
                          overrides_dep: OverridesDep,
                          DefaultModel(default_model): DefaultModel,
                          configured_providers_dep: ConfiguredProviders,
-                         longterm_memory: Option<Arc<Mutex<LongTermMemory>>>| async move {
+                         longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
+                         http_client: reqwest::Client| async move {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
                             let typing_indicators = overrides_dep.typing;
@@ -862,8 +942,37 @@ impl Channel for TelegramChannel {
                                 });
                             }
 
-                            // Only process text messages
-                            if let Some(text) = msg.text() {
+                            // Process text messages, captions, and bare photo/image messages
+                            let has_photo = msg.photo().is_some();
+                            let has_image_doc = msg.document()
+                                .and_then(|d| d.mime_type.as_ref())
+                                .map(|m| m.as_ref().starts_with("image/"))
+                                .unwrap_or(false);
+                            let has_image = has_photo || has_image_doc;
+
+                            // Debug: write media type detection to file for troubleshooting
+                            {
+                                let debug_msg = format!(
+                                    "[{}] photo={} doc={} animation={} video={} sticker={} text={} caption={:?}\n",
+                                    chrono::Utc::now().format("%H:%M:%S"),
+                                    msg.photo().is_some(),
+                                    msg.document().map(|d| format!("mime={:?}", d.mime_type)).unwrap_or_else(|| "none".into()),
+                                    msg.animation().is_some(),
+                                    msg.video().is_some(),
+                                    msg.sticker().is_some(),
+                                    msg.text().is_some(),
+                                    msg.caption().map(|c| crate::utils::string::preview(c, 50)),
+                                );
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("/home/ironbank/.zeptoclaw/sessions/telegram_debug.log")
+                                    .and_then(|mut f| std::io::Write::write_all(&mut f, debug_msg.as_bytes()));
+                            }
+                            if let Some(text) = msg.text()
+                                .or_else(|| msg.caption())
+                                .or(if has_image { Some(BARE_PHOTO_PLACEHOLDER) } else { None })
+                            {
                                 let chat_id = msg.chat.id.0.to_string();
                                 let chat_id_num = msg.chat.id.0;
 
@@ -1111,54 +1220,41 @@ impl Channel for TelegramChannel {
                                         .with_metadata("persona_override", &persona_value);
                                 }
 
-                                // Extract photo attachment if present (largest size)
+                                // Download image attachment (photo or image document)
+                                let mut image_ok = !has_image;
                                 if let Some(photos) = msg.photo() {
                                     if let Some(largest) = photos.last() {
-                                        match bot.get_file(largest.file.id.clone()).await {
-                                            Ok(file) => {
-                                                if !file.path.is_empty() {
-                                                    let download_url = format!(
-                                                        "https://api.telegram.org/file/bot{}/{}",
-                                                        bot.token(),
-                                                        file.path
-                                                    );
-                                                    match reqwest::get(&download_url).await {
-                                                        Ok(resp) => {
-                                                            if let Ok(bytes) = resp.bytes().await {
-                                                                if bytes.len()
-                                                                    <= 20 * 1024 * 1024
-                                                                {
-                                                                    let media =
-                                                                        MediaAttachment::new(
-                                                                            MediaType::Image,
-                                                                        )
-                                                                        .with_data(
-                                                                            bytes.to_vec(),
-                                                                        )
-                                                                        .with_mime_type(
-                                                                            "image/jpeg",
-                                                                        );
-                                                                    inbound =
-                                                                        inbound.with_media(media);
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => warn!(
-                                                            "Failed to download Telegram photo: {}",
-                                                            e
-                                                        ),
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => warn!(
-                                                "Failed to get Telegram file info: {}",
-                                                e
-                                            ),
+                                        if let Some(media) = download_telegram_photo(&bot, largest.file.id.clone(), &http_client).await {
+                                            inbound = inbound.with_media(media);
+                                            image_ok = true;
+                                        }
+                                    }
+                                }
+                                if !image_ok && has_image_doc {
+                                    if let Some(doc) = msg.document() {
+                                        let mime_str = doc.mime_type.as_ref()
+                                            .map(|m| m.to_string())
+                                            .unwrap_or_else(|| "image/jpeg".to_string());
+                                        if let Some(media) = download_telegram_photo(&bot, doc.file.id.clone(), &http_client).await {
+                                            inbound = inbound.with_media(
+                                                media.with_mime_type(&mime_str),
+                                            );
+                                            image_ok = true;
                                         }
                                     }
                                 }
 
-                                if let Err(e) = bus.publish_inbound(inbound).await {
+                                if !image_ok && has_image {
+                                    let req = bot.send_message(
+                                        teloxide::types::ChatId(chat_id_num),
+                                        "⚠️ Failed to download your image. Please try again.",
+                                    );
+                                    let _ = apply_thread_id(req, &thread_id).await;
+                                }
+
+                                // Skip publishing if image failed and text is the synthetic placeholder
+                                if !image_ok && text == BARE_PHOTO_PLACEHOLDER {
+                                } else if let Err(e) = bus.publish_inbound(inbound).await {
                                     error!("Failed to publish inbound message to bus: {}", e);
                                 }
                             }
@@ -1178,7 +1274,8 @@ impl Channel for TelegramChannel {
                         overrides_dep,
                         default_model,
                         configured_providers,
-                        longterm_memory
+                        longterm_memory,
+                        http_client
                     ])
                     .build();
 
