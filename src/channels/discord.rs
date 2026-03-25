@@ -53,6 +53,8 @@ const BASE_RECONNECT_DELAY_SECS: u64 = 2;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 /// Maximum time (in seconds) to wait for attachment download to prevent blocking the gateway loop.
 const ATTACHMENT_FETCH_TIMEOUT_SECS: u64 = 10;
+/// Maximum attachment size (in bytes) to download from Discord.
+const MAX_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024; // 20MB
 
 /// Discord Gateway intents bitmask.
 /// GUILDS (1 << 0) | GUILD_MESSAGES (1 << 9) | DIRECT_MESSAGES (1 << 12) | MESSAGE_CONTENT (1 << 15)
@@ -1070,9 +1072,9 @@ impl DiscordChannel {
                                                                         }
                                                                         
                                                                         // Skip if size is too large (>20MB)
-                                                                        if att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
-                                                                            let size_mb = att.size.unwrap_or(0) / 1024 / 1024;
-                                                                            attachment_info.push(format!("[Attachment: {} (too large: {} MB)]", filename, size_mb));
+                                                                        if att.size.is_some_and(|s| s > MAX_ATTACHMENT_SIZE) {
+                                                                            let size_mb = (att.size.unwrap_or(0) as f64) / (1024.0 * 1024.0);
+                                                                            attachment_info.push(format!("[Attachment: {} (too large: {:.1} MB)]", filename, size_mb));
                                                                             continue;
                                                                         }
 

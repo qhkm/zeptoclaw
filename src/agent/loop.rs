@@ -42,6 +42,11 @@ Be selective: only save what would be useful in future conversations.";
 /// Maximum wall-clock time (in seconds) allowed for the memory flush LLM turn.
 const MEMORY_FLUSH_TIMEOUT_SECS: u64 = 10;
 
+/// Maximum text document size (in bytes) to inline into message content.
+const MAX_TEXT_DOCUMENT_SIZE: usize = 100 * 1024; // 100KB
+/// Maximum image size (in bytes) to validate and process.
+const MAX_IMAGE_SIZE: usize = 20 * 1024 * 1024; // 20MB
+
 const INTERACTIVE_CLI_METADATA_KEY: &str = "interactive_cli";
 const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
 
@@ -283,12 +288,13 @@ async fn inbound_to_message(
     for doc in text_docs {
         let data = doc.data.as_ref().unwrap();
         // Skip documents larger than 100KB to prevent context overflow
-        if data.len() > 100 * 1024 {
+        if data.len() > MAX_TEXT_DOCUMENT_SIZE {
             if let Some(name) = doc.filename.as_deref() {
+                let size_mb = (data.len() as f64) / (1024.0 * 1024.0);
                 content.push_str(&format!(
-                    "\n\n[Text file '{}' too large ({} KB), skipped]",
+                    "\n\n[Text file '{}' too large ({:.1} MB), skipped]",
                     name,
-                    data.len() / 1024
+                    size_mb
                 ));
             }
             continue;
@@ -322,7 +328,7 @@ async fn inbound_to_message(
         let mime = attachment.mime_type.as_deref().unwrap_or("image/jpeg");
 
         // Skip images that fail size/type validation.
-        if validate_image(data, mime, 20 * 1024 * 1024).is_err() {
+        if validate_image(data, mime, MAX_IMAGE_SIZE).is_err() {
             continue;
         }
 
