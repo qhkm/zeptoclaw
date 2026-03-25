@@ -251,23 +251,6 @@ impl AcpChannel {
     /// `Text` blocks contribute their text directly. `ResourceLink` blocks
     /// contribute a reference line so the agent is aware of the resource.
     /// Other block types (Image, Audio, Resource) are not extracted.
-    pub(crate) fn prompt_blocks_to_text(
-        prompt: &[super::acp_protocol::PromptContentBlock],
-    ) -> String {
-        use super::acp_protocol::PromptContentBlock;
-        let mut parts = Vec::new();
-        for block in prompt {
-            match block {
-                PromptContentBlock::Text { text } => parts.push(text.clone()),
-                PromptContentBlock::ResourceLink { uri, name, .. } => {
-                    parts.push(format!("[Resource: {} ({})]", name, uri));
-                }
-                _ => {}
-            }
-        }
-        parts.join("\n").trim().to_string()
-    }
-
     /// Handle session/prompt: publish to bus and record pending response.
     async fn handle_session_prompt(
         &self,
@@ -321,7 +304,7 @@ impl AcpChannel {
                 }
             };
         let session_id = params.session_id;
-        let content = Self::prompt_blocks_to_text(&params.prompt);
+        let content = super::acp_protocol::prompt_blocks_to_text(&params.prompt);
         if content.is_empty() {
             let response = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
@@ -744,7 +727,7 @@ impl AcpChannel {
             state.initialized = true;
         }
         let result = InitializeResult {
-            protocol_version: serde_json::json!(1),
+            protocol_version: serde_json::json!("1"),
             agent_capabilities: AgentCapabilities {
                 load_session: Some(false),
                 prompt_capabilities: Some(
@@ -885,11 +868,11 @@ impl Channel for AcpChannel {
             debug!(session_id = %session_id, "ACP: outbound for unknown session, skipping");
             return Ok(());
         }
-        // session/update (agent_message_chunk) — sent for both prompted and proactive replies
+        // session/update (agent_message) — sent for both prompted and proactive replies
         let update = SessionUpdateParams {
             session_id: session_id.clone(),
             update: SessionUpdatePayload {
-                session_update: "agent_message_chunk".to_string(),
+                session_update: "agent_message".to_string(),
                 content: Some(ContentBlock::text(&msg.content)),
                 tool_call_id: None,
                 title: None,
@@ -988,7 +971,7 @@ mod tests {
                 text: "World".to_string(),
             },
         ];
-        let text = AcpChannel::prompt_blocks_to_text(&blocks);
+        let text = crate::channels::acp_protocol::prompt_blocks_to_text(&blocks);
         assert_eq!(text, "Hello\nWorld");
     }
 
@@ -1001,7 +984,7 @@ mod tests {
             },
             PromptContentBlock::Other,
         ];
-        let text = AcpChannel::prompt_blocks_to_text(&blocks);
+        let text = crate::channels::acp_protocol::prompt_blocks_to_text(&blocks);
         assert_eq!(text, "Only this");
     }
 

@@ -37,7 +37,7 @@ use crate::error::{Result, ZeptoError};
 
 use super::acp_protocol::{
     AgentCapabilities, AgentInfo, ContentBlock, InitializeResult, JsonRpcRequest,
-    PromptContentBlock, SessionInfo, SessionListParams, SessionListResult, SessionNewResult,
+    SessionInfo, SessionListParams, SessionListResult, SessionNewResult,
     SessionPromptResult, SessionUpdateParams, SessionUpdatePayload,
 };
 use super::{BaseChannelConfig, Channel};
@@ -297,7 +297,7 @@ impl AcpHttpChannel {
             }
         }
         let result = InitializeResult {
-            protocol_version: serde_json::json!(1),
+            protocol_version: serde_json::json!("1"),
             agent_capabilities: AgentCapabilities {
                 load_session: Some(false),
                 prompt_capabilities: Some(serde_json::json!({
@@ -471,7 +471,7 @@ impl AcpHttpChannel {
                 }
             };
         let session_id = params.session_id.clone();
-        let content = prompt_blocks_to_text(&params.prompt);
+        let content = super::acp_protocol::prompt_blocks_to_text(&params.prompt);
         if content.is_empty() {
             return Ok(Err(Self::json_rpc_error(
                 id,
@@ -589,7 +589,7 @@ impl AcpHttpChannel {
         let update = SessionUpdateParams {
             session_id: session_id.to_string(),
             update: SessionUpdatePayload {
-                session_update: "agent_message_chunk".to_string(),
+                session_update: "agent_message".to_string(),
                 content: Some(ContentBlock::text(&content)),
                 tool_call_id: None,
                 title: None,
@@ -1062,20 +1062,6 @@ impl Channel for AcpHttpChannel {
 ///
 /// `Text` blocks contribute their text directly. `ResourceLink` blocks
 /// contribute a reference line so the agent is aware of the resource.
-fn prompt_blocks_to_text(blocks: &[PromptContentBlock]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for b in blocks {
-        match b {
-            PromptContentBlock::Text { text } => parts.push(text.clone()),
-            PromptContentBlock::ResourceLink { uri, name, .. } => {
-                parts.push(format!("[Resource: {} ({})]", name, uri));
-            }
-            _ => {}
-        }
-    }
-    parts.join("\n").trim().to_string()
-}
-
 /// Constant-time string comparison (prevents timing side-channels on auth tokens).
 ///
 /// Does NOT short-circuit on length mismatch — XORs up to `max(a.len(), b.len())`
@@ -1135,7 +1121,10 @@ mod tests {
                 text: "World".to_string(),
             },
         ];
-        assert_eq!(prompt_blocks_to_text(&blocks), "Hello\nWorld");
+        assert_eq!(
+            crate::channels::acp_protocol::prompt_blocks_to_text(&blocks),
+            "Hello\nWorld"
+        );
     }
 
     #[test]
@@ -1147,7 +1136,10 @@ mod tests {
             },
             PromptContentBlock::Other,
         ];
-        assert_eq!(prompt_blocks_to_text(&blocks), "only this");
+        assert_eq!(
+            crate::channels::acp_protocol::prompt_blocks_to_text(&blocks),
+            "only this"
+        );
     }
 
     #[tokio::test]
@@ -1462,8 +1454,8 @@ mod tests {
             AcpHttpChannel::do_initialize(&ch.config, Some(serde_json::json!(1)), None).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(
-            v["result"]["protocolVersion"].is_number(),
-            "protocolVersion must be present"
+            v["result"]["protocolVersion"].is_string(),
+            "protocolVersion must be a string"
         );
         assert!(
             v["result"]["agentCapabilities"].is_object(),

@@ -69,6 +69,24 @@ pub fn new_id() -> String {
     ulid::Ulid::new().to_string()
 }
 
+/// Convert a slice of prompt content blocks into a flat text string.
+///
+/// `Text` blocks are joined with newlines; `ResourceLink` blocks become a
+/// `[Resource: name (uri)]` placeholder. All other block types are skipped.
+pub fn prompt_blocks_to_text(blocks: &[PromptContentBlock]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for block in blocks {
+        match block {
+            PromptContentBlock::Text { text } => parts.push(text.clone()),
+            PromptContentBlock::ResourceLink { uri, name, .. } => {
+                parts.push(format!("[Resource: {} ({})]", name, uri));
+            }
+            _ => {}
+        }
+    }
+    parts.join("\n").trim().to_string()
+}
+
 /// initialize result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
