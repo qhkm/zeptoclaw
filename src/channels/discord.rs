@@ -51,6 +51,8 @@ const MAX_RECONNECT_DELAY_SECS: u64 = 120;
 const BASE_RECONNECT_DELAY_SECS: u64 = 2;
 /// Maximum number of consecutive reconnect attempts before resetting backoff.
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+/// Maximum time (in seconds) to wait for attachment download to prevent blocking the gateway loop.
+const ATTACHMENT_FETCH_TIMEOUT_SECS: u64 = 10;
 
 /// Discord Gateway intents bitmask.
 /// GUILDS (1 << 0) | GUILD_MESSAGES (1 << 9) | DIRECT_MESSAGES (1 << 12) | MESSAGE_CONTENT (1 << 15)
@@ -1082,24 +1084,40 @@ impl DiscordChannel {
                                                                         };
 
                                                                         if let Some(mt) = media_type {
-                                                                            match client.get(&att.url).send().await {
-                                                                                Ok(resp) => {
-                                                                                    if let Ok(bytes) = resp.bytes().await {
-                                                                                        let mut media = MediaAttachment::new(mt.clone())
-                                                                                            .with_data(bytes.to_vec())
-                                                                                            .with_mime_type(content_type);
-                                                                                        if let Some(ref name) = att.filename {
-                                                                                            media = media.with_filename(name);
-                                                                                            // For non-image attachments, add info to message
-                                                                                            if mt != MediaType::Image {
-                                                                                                let size_kb = bytes.len() / 1024;
-                                                                                                attachment_info.push(format!("[Attachment: {} ({} KB, type: {})]", name, size_kb, content_type));
-                                                                                            }
+                                                                            // Fetch attachment with timeout to avoid blocking gateway loop
+                                                                            let fetch_timeout = Duration::from_secs(ATTACHMENT_FETCH_TIMEOUT_SECS);
+                                                                            let fetch_result = tokio::time::timeout(
+                                                                                fetch_timeout,
+                                                                                async {
+                                                                                    let resp = client.get(&att.url).send().await?;
+                                                                                    let bytes = resp.bytes().await?;
+                                                                                    Ok::<_, reqwest::Error>(bytes)
+                                                                                }
+                                                                            ).await;
+
+                                                                            match fetch_result {
+                                                                                Ok(Ok(bytes)) => {
+                                                                                    let mut media = MediaAttachment::new(mt.clone())
+                                                                                        .with_data(bytes.to_vec())
+                                                                                        .with_mime_type(content_type);
+                                                                                    if let Some(ref name) = att.filename {
+                                                                                        media = media.with_filename(name);
+                                                                                        // For non-image attachments, add info to message
+                                                                                        if mt != MediaType::Image {
+                                                                                            let size_kb = bytes.len() / 1024;
+                                                                                            attachment_info.push(format!("[Attachment: {} ({} KB, type: {})]", name, size_kb, content_type));
                                                                                         }
-                                                                                        inbound = inbound.with_media(media);
+                                                                                    }
+                                                                                    inbound = inbound.with_media(media);
+                                                                                }
+                                                                                Ok(Err(e)) => warn!("Failed to download Discord attachment: {}", e),
+                                                                                Err(_) => {
+                                                                                    if let Some(ref name) = att.filename {
+                                                                                        warn!("Timeout downloading Discord attachment: {}", name);
+                                                                                    } else {
+                                                                                        warn!("Timeout downloading Discord attachment");
                                                                                     }
                                                                                 }
-                                                                                Err(e) => warn!("Failed to download Discord attachment: {}", e),
                                                                             }
                                                                         }
                                                                     }
