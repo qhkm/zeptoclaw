@@ -131,7 +131,7 @@ Add `pub mod output;` to `src/tools/mod.rs`.
 
 ### Structure
 
-```
+```text
 tests/
 ├── conformance.rs                  # Top-level test entry point
 └── conformance/

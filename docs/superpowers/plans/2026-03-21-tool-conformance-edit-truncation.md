@@ -607,9 +607,7 @@ fn find_unique_match(content: &str, old_text: &str) -> std::result::Result<Uniqu
                 });
             }
             n if n > 1 => {
-                return Err(EditMatchError(format!(
-                    "Found {} occurrences", n
-                )));
+                return Err(EditMatchError::MultipleMatches(n));
             }
             _ => {}
         }
@@ -1303,7 +1301,7 @@ git add -A && git commit -m "chore: fmt + clippy fixups for #391"
 
 ## Task Dependency Graph
 
-```
+```text
 Task 1 (shared truncation) ─────→ Task 2 (apply to tools) ──┐
                                                               ├──→ Task 7 (fixture files) ──→ Task 8 (finalize)
 Task 3 (unicode-normalization) ──→ Task 4 (find_unique_match) ──→ Task 5 (wire into EditFileTool) ──┘
