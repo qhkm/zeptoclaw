@@ -360,7 +360,10 @@ pub async fn register_all_tools(
         registry.register(Box::new(crate::tools::BrowserTool::new(
             &config.tools.browser,
         )));
-        info!("Registered browser tool (engine: {})", config.tools.browser.engine);
+        info!(
+            "Registered browser tool (engine: {})",
+            config.tools.browser.engine
+        );
     }
     if filter.is_enabled("web_fetch")
         && !(config.tools.browser.enabled && filter.is_enabled("browser"))

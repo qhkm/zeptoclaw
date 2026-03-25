@@ -159,7 +159,8 @@ const TOOLS: &[ToolInfo] = &[
         name: "browser",
         description: "Headless browser via agent-browser + Lightpanda",
         requires_config: false,
-        config_hint: "Set tools.browser.enabled=true. Requires: agent-browser and lightpanda binaries",
+        config_hint:
+            "Set tools.browser.enabled=true. Requires: agent-browser and lightpanda binaries",
         opt_in: true,
     },
     ToolInfo {
