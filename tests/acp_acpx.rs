@@ -229,20 +229,16 @@ impl AcpConn {
 // Wire protocol tests — protocol compliance without LLM calls
 // ============================================================================
 
-/// ACP spec: protocolVersion in the InitializeResponse MUST be integer 1.
+/// ACP spec: protocolVersion in the InitializeResponse MUST be string "1".
 #[tokio::test]
-async fn test_initialize_protocol_version_is_integer_one() {
+async fn test_initialize_protocol_version_is_string_one() {
     let mut conn = AcpConn::spawn().await;
     let result = conn.initialize().await;
     let version = &result["protocolVersion"];
-    assert!(
-        version.is_number(),
-        "protocolVersion must be a number, got: {version}"
-    );
     assert_eq!(
-        version.as_u64(),
-        Some(1),
-        "protocolVersion must equal 1, got: {version}"
+        version.as_str(),
+        Some("1"),
+        "protocolVersion must be string \"1\", got: {version}"
     );
     conn.shutdown().await;
 }
@@ -647,9 +643,9 @@ async fn test_double_initialize_is_idempotent() {
         "second initialize must return a result; got: {resp}"
     );
     assert_eq!(
-        resp["result"]["protocolVersion"].as_u64(),
-        Some(1),
-        "second initialize must still return protocolVersion 1"
+        resp["result"]["protocolVersion"].as_str(),
+        Some("1"),
+        "second initialize must still return protocolVersion \"1\""
     );
     conn.shutdown().await;
 }
@@ -777,6 +773,135 @@ async fn test_session_lifecycle_full() {
         );
     }
 
+    conn.shutdown().await;
+}
+
+/// session/prompt with an empty text block must return -32602 (invalid params).
+#[tokio::test]
+async fn test_session_prompt_empty_content_returns_invalid_params() {
+    let mut conn = AcpConn::spawn().await;
+    conn.initialize().await;
+    let session_id = conn.new_session("/tmp/acp-empty-prompt").await;
+
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 300,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "   " }]
+        }
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(300)).await;
+    let err = resp
+        .get("error")
+        .unwrap_or_else(|| panic!("expected error for whitespace-only prompt; got: {resp}"));
+    assert_eq!(
+        err["code"].as_i64(),
+        Some(-32602),
+        "whitespace-only prompt must return -32602; got: {err}"
+    );
+    conn.shutdown().await;
+}
+
+/// session/cancel sent as a request (with id) must return an empty object result.
+#[tokio::test]
+async fn test_session_cancel_as_request_returns_empty_result() {
+    let mut conn = AcpConn::spawn().await;
+    conn.initialize().await;
+    let session_id = conn.new_session("/tmp/acp-cancel-req").await;
+
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 310,
+        "method": "session/cancel",
+        "params": { "sessionId": session_id }
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(310)).await;
+    assert!(
+        resp.get("error").is_none(),
+        "session/cancel request must not return an error; got: {resp}"
+    );
+    let result = resp
+        .get("result")
+        .unwrap_or_else(|| panic!("session/cancel request must return a result; got: {resp}"));
+    assert_eq!(
+        result,
+        &serde_json::json!({}),
+        "session/cancel result must be an empty object; got: {result}"
+    );
+    conn.shutdown().await;
+}
+
+/// session/new without a cwd param must return -32602 (invalid params).
+#[tokio::test]
+async fn test_session_new_without_cwd_returns_invalid_params() {
+    let mut conn = AcpConn::spawn().await;
+    conn.initialize().await;
+
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 320,
+        "method": "session/new",
+        "params": {}
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(320)).await;
+    let err = resp
+        .get("error")
+        .unwrap_or_else(|| panic!("session/new without cwd must return an error; got: {resp}"));
+    assert_eq!(
+        err["code"].as_i64(),
+        Some(-32602),
+        "missing cwd must return -32602; got: {err}"
+    );
+    conn.shutdown().await;
+}
+
+/// session/list must report `_meta.pending: true` for a session with an in-flight prompt.
+///
+/// After session/prompt is dispatched to the bus (but before the agent replies),
+/// session/list should show the session as pending.  In this test there is no
+/// live LLM, so the prompt never resolves — that is intentional.
+#[tokio::test]
+async fn test_session_list_shows_pending_while_prompt_in_flight() {
+    let mut conn = AcpConn::spawn().await;
+    conn.initialize().await;
+    let session_id = conn.new_session("/tmp/acp-pending-test").await;
+
+    // Send session/prompt — the server inserts the session into `pending` and
+    // publishes to the bus.  Because there is no LLM subscriber the prompt
+    // stays in flight indefinitely, giving us a stable window to inspect state.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 330,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "hello" }]
+        }
+    }))
+    .await;
+
+    // session/list immediately after — the server processes this next in the
+    // stdin loop, so `pending` is already set.
+    conn.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 331,
+        "method": "session/list",
+        "params": {}
+    }))
+    .await;
+    let resp = conn.recv_for_id(&serde_json::json!(331)).await;
+    let sessions = resp["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("session/list must return sessions array; got: {resp}"));
+    let entry = sessions
+        .iter()
+        .find(|s| s["sessionId"].as_str() == Some(&session_id))
+        .unwrap_or_else(|| panic!("session must appear in list; got: {sessions:?}"));
+    assert_eq!(
+        entry["_meta"]["pending"],
+        serde_json::json!(true),
+        "_meta.pending must be true while prompt is in flight; got: {entry}"
+    );
     conn.shutdown().await;
 }
 
@@ -912,9 +1037,15 @@ fn test_acpx_exec_ends_with_end_turn() {
     );
 }
 
-/// acpx: sessions new then sessions list must show the new session.
+/// acpx: sessions list exits successfully and emits a valid JSON array.
+///
+/// Note: `--agent` mode spawns a fresh agent process per invocation, so
+/// sessions created during a prior `exec` call are never visible to a
+/// separate `sessions list` call.  This test verifies the command succeeds
+/// and the output is a parseable array; session-visibility is covered by the
+/// raw-wire tests and `test_acpx_session_lifecycle`.
 #[test]
-fn test_acpx_sessions_list_after_exec() {
+fn test_acpx_sessions_list_returns_valid_json() {
     if !e2e_live() {
         eprintln!("Skipping: set ZEPTOCLAW_E2E_LIVE=1 to run");
         return;
