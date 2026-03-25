@@ -1451,6 +1451,10 @@ impl AgentLoop {
                                         .metadata
                                         .insert("telegram_thread_id".to_string(), tid.clone());
                                 }
+                                // Keep typing indicator alive — agent is still working
+                                outbound
+                                    .metadata
+                                    .insert("keep_typing".to_string(), "true".to_string());
                                 let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
                         }
@@ -2108,6 +2112,10 @@ impl AgentLoop {
                                         .metadata
                                         .insert("telegram_thread_id".to_string(), tid.clone());
                                 }
+                                // Keep typing indicator alive — agent is still working
+                                outbound
+                                    .metadata
+                                    .insert("keep_typing".to_string(), "true".to_string());
                                 let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
                         }
