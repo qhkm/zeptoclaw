@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use futures::future::join_all;
+use serde::Deserialize;
 
 use crate::error::Result;
 
@@ -85,7 +85,10 @@ async fn check_skill_md_exists(
     repo: &str,
     token: Option<&str>,
 ) -> Result<bool> {
-    let url = format!("https://api.github.com/repos/{}/{}/contents/SKILL.md", owner, repo);
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/contents/SKILL.md",
+        owner, repo
+    );
     let mut request = client.get(&url).header("User-Agent", "zeptoclaw");
     if let Some(token) = token {
         request = request.header("Authorization", format!("Bearer {}", token));
@@ -95,7 +98,12 @@ async fn check_skill_md_exists(
         reqwest::StatusCode::OK => Ok(true),
         reqwest::StatusCode::NOT_FOUND => Ok(false),
         _ => {
-            tracing::warn!("Unexpected response checking SKILL.md for {}/{}: {}", owner, repo, response.status());
+            tracing::warn!(
+                "Unexpected response checking SKILL.md for {}/{}: {}",
+                owner,
+                repo,
+                response.status()
+            );
             Ok(false)
         }
     }
@@ -203,17 +211,26 @@ pub async fn search_github(
             check_skill_md_exists(client, owner_repo[0], owner_repo[1], github_token)
         });
         let has_skill_md_results = join_all(checks).await;
-        search_response.items.into_iter().zip(has_skill_md_results).map(|(repo, has_skill_md_res): (GitHubRepo, Result<bool>)| {
-            let has_skill_md = has_skill_md_res.unwrap_or(false);
-            let score = compute_quality_score(&repo, has_skill_md);
-            SkillSearchResult::from_github(repo, score)
-        }).collect()
+        search_response
+            .items
+            .into_iter()
+            .zip(has_skill_md_results)
+            .map(|(repo, has_skill_md_res): (GitHubRepo, Result<bool>)| {
+                let has_skill_md = has_skill_md_res.unwrap_or(false);
+                let score = compute_quality_score(&repo, has_skill_md);
+                SkillSearchResult::from_github(repo, score)
+            })
+            .collect()
     } else {
         // Fast mode
-        search_response.items.into_iter().map(|repo| {
-            let score = compute_quality_score(&repo, false);
-            SkillSearchResult::from_github(repo, score)
-        }).collect()
+        search_response
+            .items
+            .into_iter()
+            .map(|repo| {
+                let score = compute_quality_score(&repo, false);
+                SkillSearchResult::from_github(repo, score)
+            })
+            .collect()
     };
 
     Ok(results)

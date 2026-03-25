@@ -196,7 +196,14 @@ async fn cmd_skills_search(config: &Config, query: &str, source: &str) -> Result
     // GitHub search
     if source == "all" || source == "github" {
         let topics = &["zeptoclaw-skill", "openclaw-skill"];
-        match zeptoclaw::skills::github_source::search_github(&client, query, topics, config.skills.github_token.as_deref()).await {
+        match zeptoclaw::skills::github_source::search_github(
+            &client,
+            query,
+            topics,
+            config.skills.github_token.as_deref(),
+        )
+        .await
+        {
             Ok(results) => all_results.extend(results),
             Err(e) => eprintln!("GitHub search failed: {}", e),
         }
