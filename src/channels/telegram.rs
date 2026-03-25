@@ -88,9 +88,10 @@ struct ConfiguredProviders {
     models: Vec<(String, String)>,
 }
 /// Shared map of active typing indicator tasks, keyed by chat_id (or
-/// "chat_id:thread_id" for forum topics). The CancellationToken lets
-/// `send()` stop the typing loop when the response is ready.
-type TypingMap = Arc<DashMap<String, CancellationToken>>;
+/// "chat_id:thread_id" for forum topics). Each entry stores a generation
+/// counter alongside the CancellationToken so that an old task's cleanup
+/// cannot accidentally remove a newer task's entry.
+type TypingMap = Arc<DashMap<String, (u64, CancellationToken)>>;
 
 /// Bundles override stores and shared state into one DI dependency so that
 /// dptree's 9-parameter arity limit is not exceeded.
@@ -99,6 +100,7 @@ struct OverridesDep {
     model: ModelOverrideStore,
     persona: PersonaOverrideStore,
     typing: TypingMap,
+    typing_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +458,8 @@ pub struct TelegramChannel {
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
     /// Active typing indicator tasks per chat (or chat:thread for forums).
     typing_indicators: TypingMap,
+    /// Monotonic counter for typing indicator generations (prevents race conditions).
+    typing_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Shared HTTP client for downloading media (connection pool reuse).
     http_client: reqwest::Client,
 }
@@ -543,6 +547,7 @@ impl TelegramChannel {
             configured_models,
             longterm_memory,
             typing_indicators: Arc::new(DashMap::new()),
+            typing_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -637,6 +642,7 @@ impl Channel for TelegramChannel {
             model: self.model_overrides.clone(),
             persona: self.persona_overrides.clone(),
             typing: self.typing_indicators.clone(),
+            typing_gen: self.typing_generation.clone(),
         };
         let default_model = DefaultModel(self.default_model.clone());
         let configured_providers = ConfiguredProviders {
@@ -742,6 +748,7 @@ impl Channel for TelegramChannel {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
                             let typing_indicators = overrides_dep.typing;
+                            let typing_gen = overrides_dep.typing_gen;
                             let configured_providers = configured_providers_dep.names;
                             let configured_models = configured_providers_dep.models;
                             // Extract user ID and optional username
@@ -794,14 +801,15 @@ impl Channel for TelegramChannel {
 
                                 // Cancel any stale typing task for this chat
                                 // (e.g. rapid successive messages).
-                                if let Some((_, old_token)) = typing_indicators.remove(&typing_key)
+                                if let Some((_, (_, old_token))) = typing_indicators.remove(&typing_key)
                                 {
                                     old_token.cancel();
                                 }
 
+                                let gen = typing_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let cancel_token = CancellationToken::new();
                                 typing_indicators
-                                    .insert(typing_key.clone(), cancel_token.clone());
+                                    .insert(typing_key.clone(), (gen, cancel_token.clone()));
 
                                 let typing_bot = bot.clone();
                                 let typing_chat_id = msg.chat.id;
@@ -837,7 +845,8 @@ impl Channel for TelegramChannel {
                                             debug!("Typing indicator timed out for {}", typing_map_key);
                                         },
                                     }
-                                    typing_map.remove(&typing_map_key);
+                                    // Only remove if this task's generation still owns the entry.
+                                    typing_map.remove_if(&typing_map_key, |_, (stored_gen, _)| *stored_gen == gen);
                                 });
                             }
 
@@ -980,7 +989,7 @@ impl Channel for TelegramChannel {
                                         }
                                     }
                                     // Cancel typing indicator before returning
-                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
                                         token.cancel();
                                     }
                                     return Ok(());
@@ -1067,7 +1076,7 @@ impl Channel for TelegramChannel {
                                         }
                                     }
                                     // Cancel typing indicator before returning
-                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
                                         token.cancel();
                                     }
                                     return Ok(());
@@ -1166,7 +1175,7 @@ impl Channel for TelegramChannel {
                                 if !image_ok && text == BARE_PHOTO_PLACEHOLDER {
                                 } else if let Err(e) = bus.publish_inbound(inbound).await {
                                     // Cancel typing indicator on publish failure
-                                    if let Some((_, token)) = typing_indicators.remove(&override_key) {
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
                                         token.cancel();
                                     }
                                     error!("Failed to publish inbound message to bus: {}", e);
@@ -1177,7 +1186,7 @@ impl Channel for TelegramChannel {
                                     Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
                                     None => msg.chat.id.0.to_string(),
                                 };
-                                if let Some((_, token)) = typing_indicators.remove(&typing_key) {
+                                if let Some((_, (_, token))) = typing_indicators.remove(&typing_key) {
                                     token.cancel();
                                 }
                             }
@@ -1253,7 +1262,7 @@ impl Channel for TelegramChannel {
 
         // Cancel all active typing indicators
         for entry in self.typing_indicators.iter() {
-            entry.value().cancel();
+            entry.value().1.cancel();
         }
         self.typing_indicators.clear();
 
@@ -1294,7 +1303,7 @@ impl Channel for TelegramChannel {
         };
         let keep_typing = msg.metadata.get("keep_typing").is_some_and(|v| v == "true");
         if !keep_typing {
-            if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+            if let Some((_, (_, token))) = self.typing_indicators.remove(&typing_key) {
                 token.cancel();
             }
         }

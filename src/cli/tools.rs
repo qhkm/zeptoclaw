@@ -157,11 +157,11 @@ const TOOLS: &[ToolInfo] = &[
     },
     ToolInfo {
         name: "browser",
-        description: "Headless browser via agent-browser + Lightpanda",
-        requires_config: false,
+        description: "Headless browser via agent-browser (Lightpanda + Chrome fallback)",
+        requires_config: true,
         config_hint:
-            "Set tools.browser.enabled=true. Requires: agent-browser and lightpanda binaries",
-        opt_in: true,
+            "Set tools.browser.enabled=true. Requires: agent-browser + Chrome; Lightpanda optional",
+        opt_in: false,
     },
     ToolInfo {
         name: "grep",
@@ -413,8 +413,7 @@ mod tests {
     #[test]
     fn test_opt_in_tools_exist() {
         let opt_in: Vec<_> = TOOLS.iter().filter(|t| t.opt_in).collect();
-        assert_eq!(opt_in.len(), 3);
-        assert!(opt_in.iter().any(|t| t.name == "browser"));
+        assert_eq!(opt_in.len(), 2);
         assert!(opt_in.iter().any(|t| t.name == "grep"));
         assert!(opt_in.iter().any(|t| t.name == "find"));
     }
