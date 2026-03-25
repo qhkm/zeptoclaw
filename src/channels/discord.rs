@@ -1071,7 +1071,7 @@ impl DiscordChannel {
                                                                         
                                                                         // Skip if size is too large (>20MB)
                                                                         if att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
-                                                                            let size_mb = att.size.unwrap() / 1024 / 1024;
+                                                                            let size_mb = att.size.unwrap_or(0) / 1024 / 1024;
                                                                             attachment_info.push(format!("[Attachment: {} (too large: {} MB)]", filename, size_mb));
                                                                             continue;
                                                                         }
