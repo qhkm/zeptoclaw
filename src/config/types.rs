@@ -1691,6 +1691,8 @@ fn default_transcribe_model() -> String {
 pub struct ToolsConfig {
     /// Web tools configuration
     pub web: WebToolsConfig,
+    /// Browser tool configuration (agent-browser + Lightpanda)
+    pub browser: BrowserConfig,
     /// WhatsApp Cloud API tool configuration
     pub whatsapp: WhatsAppToolConfig,
     /// Google Sheets tool configuration
@@ -1749,6 +1751,32 @@ fn default_http_request_max_bytes() -> usize {
 pub struct WebToolsConfig {
     /// Web search configuration
     pub search: WebSearchConfig,
+}
+
+/// Browser tool configuration (agent-browser + Lightpanda)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Enable the browser tool. When enabled, replaces web_fetch.
+    pub enabled: bool,
+    /// Browser engine: "lightpanda" or "chrome"
+    pub engine: String,
+    /// Custom path to agent-browser binary
+    #[serde(default)]
+    pub executable_path: Option<String>,
+    /// Command timeout in seconds
+    pub timeout_secs: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: "lightpanda".to_string(),
+            executable_path: None,
+            timeout_secs: 30,
+        }
+    }
 }
 
 /// Web search configuration
