@@ -10,10 +10,11 @@ use crate::session::Message;
 
 /// Format a timestamp envelope for a user message.
 ///
-/// Returns a string like "[Mon 2026-02-16 12:51 +08:00]" to prepend to user messages.
+/// Returns a string like "[Monday 2026-02-16 12:51 +08:00]" to prepend to user messages.
 /// Uses the system's local timezone via `chrono::Local`.
+/// Full day-of-week name (%A) is used to prevent LLM day-of-week hallucination.
 pub fn format_message_envelope() -> String {
-    format!("[{}]", Local::now().format("%a %Y-%m-%d %H:%M %:z"))
+    format!("[{}]", Local::now().format("%A %Y-%m-%d %H:%M %:z"))
 }
 
 /// Default system prompt for ZeptoClaw agent
@@ -225,8 +226,9 @@ impl RuntimeContext {
             let now = Local::now();
             parts.push(format!(
                 "- Current time: {}",
-                now.format("%a %Y-%m-%d %H:%M %:z")
+                now.format("%A, %Y-%m-%d %H:%M %:z")
             ));
+            parts.push(format!("- Today is: {}", now.format("%A, %B %-d, %Y")));
             parts.push(format!("- Timezone: {}", now.format("%:z")));
         }
         if let Some(ref workspace) = self.workspace {
