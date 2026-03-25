@@ -758,8 +758,8 @@ mod tests {
         let result = tool
             .execute(json!({"action": "list", "workflow": "_"}), &ctx)
             .await;
-        // Should either succeed or fail gracefully
-        assert!(result.is_ok() || result.is_err());
+        // Integration test: succeeds or fails gracefully (no panic).
+        let _result = result;
     }
 
     #[tokio::test]
@@ -780,9 +780,16 @@ mod tests {
             .await;
 
         // If r8r is running and workflow exists, should succeed
-        if let Ok(output_result) = result {
-            let output = output_result.for_llm;
-            assert!(output.contains("completed") || output.contains("Execution ID"));
+        match result {
+            Ok(output_result) => {
+                let output = output_result.for_llm;
+                assert!(
+                    output.contains("completed") || output.contains("Execution ID"),
+                    "Unexpected output: {}",
+                    output
+                );
+            }
+            Err(e) => eprintln!("r8r integration test skipped (server not reachable): {}", e),
         }
     }
 }
