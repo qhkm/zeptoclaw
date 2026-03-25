@@ -941,55 +941,14 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
-        // Resolve the provider early and avoid holding the RwLock across multi-second LLM
-        // calls and tool executions, which would block set_provider() writes.
-        let provider = self
-            .resolve_provider_for_message(msg)
-            .await
-            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
-        let usage_metrics = {
-            let metrics = self.usage_metrics.read().await;
-            metrics.clone()
-        };
-        let metrics_collector = Arc::clone(&self.metrics_collector);
-
-        // Get or create session
-        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
-
-        // Apply three-tier context overflow recovery if needed
-        if let Some(ref monitor) = self.context_monitor {
-            if let Some(urgency) = monitor.urgency(&session.messages) {
-                if matches!(urgency, CompactionUrgency::Normal) {
-                    // Skip memory flush in emergency/critical mode to recover faster.
-                    self.memory_flush(&session.messages).await;
-                }
-
-                let context_limit = self.config.compaction.context_limit;
-                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
-                    session.messages,
-                    context_limit,
-                    urgency,
-                    8,               // keep_recent for tier 1
-                    tool_result_cap, // tool result budget for tier 2
-                );
-                if tier > 0 {
-                    debug!(
-                        tier = tier,
-                        urgency = ?urgency,
-                        "Context recovered via tier {} compaction", tier
-                    );
-                }
-                session.messages = recovered;
-            }
-        }
-
-        // Convert the inbound message to a session Message, attaching any image
-        // media as ContentPart::Image entries (base64-encoded inline).
+        // Resolve the inbound message content first (inlines text attachments) so the
+        // injection scanner sees the fully-expanded prompt, not just msg.content.
         let user_message = inbound_to_message(msg, None).await;
         let resolved_user_prompt = user_message.content.clone();
 
         // Tiered inbound injection scanning: block untrusted channels, warn others.
+        // Runs before provider resolution so injected payloads are rejected immediately
+        // without touching the session or LLM.
         // Scans the RESOLVED content (after text attachments are inlined) so injected
         // payloads in attachments never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
@@ -1031,6 +990,49 @@ impl AgentLoop {
                         );
                     }
                 }
+            }
+        }
+
+        // Resolve the provider. Held until end of the function but not across
+        // awaits that would block set_provider() writes for long.
+        let provider = self
+            .resolve_provider_for_message(msg)
+            .await
+            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
+        let usage_metrics = {
+            let metrics = self.usage_metrics.read().await;
+            metrics.clone()
+        };
+        let metrics_collector = Arc::clone(&self.metrics_collector);
+
+        // Get or create session
+        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
+
+        // Apply three-tier context overflow recovery if needed
+        if let Some(ref monitor) = self.context_monitor {
+            if let Some(urgency) = monitor.urgency(&session.messages) {
+                if matches!(urgency, CompactionUrgency::Normal) {
+                    // Skip memory flush in emergency/critical mode to recover faster.
+                    self.memory_flush(&session.messages).await;
+                }
+
+                let context_limit = self.config.compaction.context_limit;
+                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
+                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
+                    session.messages,
+                    context_limit,
+                    urgency,
+                    8,               // keep_recent for tier 1
+                    tool_result_cap, // tool result budget for tier 2
+                );
+                if tier > 0 {
+                    debug!(
+                        tier = tier,
+                        urgency = ?urgency,
+                        "Context recovered via tier {} compaction", tier
+                    );
+                }
+                session.messages = recovered;
             }
         }
 
@@ -1669,50 +1671,14 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
-        let provider = self
-            .resolve_provider_for_message(msg)
-            .await
-            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
-        let usage_metrics = {
-            let metrics = self.usage_metrics.read().await;
-            metrics.clone()
-        };
-        let metrics_collector = Arc::clone(&self.metrics_collector);
-
-        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
-
-        // Apply three-tier context overflow recovery if needed (streaming)
-        if let Some(ref monitor) = self.context_monitor {
-            if let Some(urgency) = monitor.urgency(&session.messages) {
-                if matches!(urgency, CompactionUrgency::Normal) {
-                    self.memory_flush(&session.messages).await;
-                }
-
-                let context_limit = self.config.compaction.context_limit;
-                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
-                    session.messages,
-                    context_limit,
-                    urgency,
-                    8,               // keep_recent for tier 1
-                    tool_result_cap, // tool result budget for tier 2
-                );
-                if tier > 0 {
-                    debug!(
-                        tier = tier,
-                        urgency = ?urgency,
-                        "Context recovered via tier {} compaction (streaming)", tier
-                    );
-                }
-                session.messages = recovered;
-            }
-        }
-
-        // Convert inbound message to a session Message with image content parts.
+        // Resolve the inbound message content first (inlines text attachments) so the
+        // injection scanner sees the fully-expanded prompt, not just msg.content.
         let user_message = inbound_to_message(msg, None).await;
         let resolved_user_prompt = user_message.content.clone();
 
         // Tiered inbound injection scanning (streaming path).
+        // Runs before provider resolution so injected payloads are rejected immediately
+        // without touching the session or LLM.
         // Scans the RESOLVED content (after text attachments are inlined) so injected
         // payloads in attachments never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
@@ -1754,6 +1720,45 @@ impl AgentLoop {
                         );
                     }
                 }
+            }
+        }
+
+        let provider = self
+            .resolve_provider_for_message(msg)
+            .await
+            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
+        let usage_metrics = {
+            let metrics = self.usage_metrics.read().await;
+            metrics.clone()
+        };
+        let metrics_collector = Arc::clone(&self.metrics_collector);
+
+        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
+
+        // Apply three-tier context overflow recovery if needed (streaming)
+        if let Some(ref monitor) = self.context_monitor {
+            if let Some(urgency) = monitor.urgency(&session.messages) {
+                if matches!(urgency, CompactionUrgency::Normal) {
+                    self.memory_flush(&session.messages).await;
+                }
+
+                let context_limit = self.config.compaction.context_limit;
+                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
+                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
+                    session.messages,
+                    context_limit,
+                    urgency,
+                    8,               // keep_recent for tier 1
+                    tool_result_cap, // tool result budget for tier 2
+                );
+                if tier > 0 {
+                    debug!(
+                        tier = tier,
+                        urgency = ?urgency,
+                        "Context recovered via tier {} compaction (streaming)", tier
+                    );
+                }
+                session.messages = recovered;
             }
         }
 
@@ -4098,6 +4103,145 @@ mod tests {
         } else {
             panic!("Expected Image content part");
         }
+    }
+
+    // ----------------------------------------------------------------
+    // inbound_to_message tests — text document inlining
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_inbound_to_message_appends_text_document() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        let content = b"hello from attachment".to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("note.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "Check this").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("--- Begin file: note.txt ---"),
+            "should contain begin marker"
+        );
+        assert!(
+            result.content.contains("hello from attachment"),
+            "should contain file content"
+        );
+        assert!(
+            result.content.contains("--- End file: note.txt ---"),
+            "should contain end marker"
+        );
+        assert!(
+            result.content.starts_with("Check this"),
+            "original message should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_appends_json_document() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        let content = br#"{"key":"value"}"#.to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("application/json")
+            .with_filename("data.json");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "parse this").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(result.content.contains("--- Begin file: data.json ---"));
+        assert!(result.content.contains(r#"{"key":"value"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_oversized_text_document_shows_skip_message() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // Create data just over 100KB
+        let content = vec![b'a'; MAX_TEXT_DOCUMENT_SIZE + 1];
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("big.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "big file").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("big.txt"),
+            "filename should appear in skip message"
+        );
+        assert!(
+            result.content.contains("too large"),
+            "skip message should mention size"
+        );
+        assert!(
+            result.content.contains("MB"),
+            "skip message should use MB units"
+        );
+        assert!(
+            !result.content.contains("--- Begin file:"),
+            "oversized file should not be inlined"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_non_utf8_document_shows_skip_message() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // Invalid UTF-8 bytes
+        let content = vec![0xFF, 0xFE, 0x00, 0x01];
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("binary.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "bad file").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("binary.txt"),
+            "filename should appear in error message"
+        );
+        assert!(
+            result.content.contains("not valid UTF-8"),
+            "should report encoding error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_binary_document_type_ignored() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // A PDF-like MIME type on a Document attachment — should be silently ignored
+        // because inbound_to_message only processes text/* and application/json.
+        let content = b"%PDF-1.4".to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("application/pdf")
+            .with_filename("doc.pdf");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "read pdf").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        // PDF should neither be inlined nor produce an error — it just has no effect
+        assert_eq!(
+            result.content, "read pdf",
+            "unsupported document MIME type should leave content unchanged"
+        );
+        assert!(!result.content.contains("--- Begin file:"));
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_document_without_data_ignored() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // A document with no data blob should be silently skipped
+        let media = MediaAttachment::new(MediaType::Document).with_mime_type("text/plain");
+        let msg =
+            InboundMessage::new("discord", "user1", "chat1", "empty attachment").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert_eq!(result.content, "empty attachment");
     }
 
     #[tokio::test]
