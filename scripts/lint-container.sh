@@ -42,15 +42,22 @@ detect_engine() {
     return
   fi
 
-  # Prefer podman when available — it reads Dockerfiles natively and avoids
-  # buildx driver issues that break on some setups (see #424).
-  if command -v podman &>/dev/null; then
-    echo "podman"
+  # Try docker first (most common), but detect Podman-as-Docker (#435).
+  # Podman-as-Docker breaks buildx's docker-container driver (#424).
+  if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    if docker info 2>/dev/null | grep -qi podman; then
+      # Docker CLI is actually a Podman alias — use podman directly
+      if command -v podman &>/dev/null; then
+        echo "podman"
+        return
+      fi
+    fi
+    echo "docker"
     return
   fi
 
-  if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-    echo "docker"
+  if command -v podman &>/dev/null; then
+    echo "podman"
     return
   fi
 
