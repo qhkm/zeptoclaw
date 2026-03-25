@@ -942,50 +942,6 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
-        // Tiered inbound injection scanning: block untrusted channels, warn others.
-        // Runs before any LLM call so injected payloads never reach the model.
-        if self.config.safety.enabled && self.config.safety.injection_check_enabled {
-            let scan = crate::safety::sanitizer::check_injection(&msg.content);
-            if scan.was_modified {
-                let channel = msg.channel.as_str();
-                match channel {
-                    "webhook" => {
-                        warn!(
-                            channel = channel,
-                            sender = %msg.sender_id,
-                            warnings = ?scan.warnings,
-                            "Inbound injection BLOCKED from untrusted channel"
-                        );
-                        crate::audit::log_audit_event(
-                            crate::audit::AuditCategory::InjectionAttempt,
-                            crate::audit::AuditSeverity::Critical,
-                            "inbound_injection_blocked",
-                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
-                            true,
-                        );
-                        return Err(ZeptoError::Tool(
-                            "Message rejected: potential prompt injection detected".into(),
-                        ));
-                    }
-                    _ => {
-                        warn!(
-                            channel = channel,
-                            sender = %msg.sender_id,
-                            warnings = ?scan.warnings,
-                            "Inbound injection WARNING from allowlisted channel"
-                        );
-                        crate::audit::log_audit_event(
-                            crate::audit::AuditCategory::InjectionAttempt,
-                            crate::audit::AuditSeverity::Warning,
-                            "inbound_injection_warned",
-                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
-
         // Resolve the provider early and avoid holding the RwLock across multi-second LLM
         // calls and tool executions, which would block set_provider() writes.
         let provider = self
@@ -1031,11 +987,55 @@ impl AgentLoop {
 
         // Convert the inbound message to a session Message, attaching any image
         // media as ContentPart::Image entries (base64-encoded inline).
-        // The user message is added to the session *before* building the context
-        // so that the history slice passed to the provider already contains images
-        // for the current turn.
         let user_message = inbound_to_message(msg, None).await;
         let resolved_user_prompt = user_message.content.clone();
+
+        // Tiered inbound injection scanning: block untrusted channels, warn others.
+        // Scans the RESOLVED content (after text attachments are inlined) so injected
+        // payloads in attachments never reach the model.
+        if self.config.safety.enabled && self.config.safety.injection_check_enabled {
+            let scan = crate::safety::sanitizer::check_injection(&resolved_user_prompt);
+            if scan.was_modified {
+                let channel = msg.channel.as_str();
+                match channel {
+                    "webhook" => {
+                        warn!(
+                            channel = channel,
+                            sender = %msg.sender_id,
+                            warnings = ?scan.warnings,
+                            "Inbound injection BLOCKED from untrusted channel"
+                        );
+                        crate::audit::log_audit_event(
+                            crate::audit::AuditCategory::InjectionAttempt,
+                            crate::audit::AuditSeverity::Critical,
+                            "inbound_injection_blocked",
+                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
+                            true,
+                        );
+                        return Err(ZeptoError::Tool(
+                            "Message rejected: potential prompt injection detected".into(),
+                        ));
+                    }
+                    _ => {
+                        warn!(
+                            channel = channel,
+                            sender = %msg.sender_id,
+                            warnings = ?scan.warnings,
+                            "Inbound injection WARNING from allowlisted channel"
+                        );
+                        crate::audit::log_audit_event(
+                            crate::audit::AuditCategory::InjectionAttempt,
+                            crate::audit::AuditSeverity::Warning,
+                            "inbound_injection_warned",
+                            &format!("Channel: {}, sender: {}", channel, msg.sender_id),
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Add the user message to the session after passing injection checks.
         session.add_message(user_message);
 
         // Build messages with history and per-message memory override.
@@ -1670,9 +1670,54 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
+        let provider = self
+            .resolve_provider_for_message(msg)
+            .await
+            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
+        let usage_metrics = {
+            let metrics = self.usage_metrics.read().await;
+            metrics.clone()
+        };
+        let metrics_collector = Arc::clone(&self.metrics_collector);
+
+        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
+
+        // Apply three-tier context overflow recovery if needed (streaming)
+        if let Some(ref monitor) = self.context_monitor {
+            if let Some(urgency) = monitor.urgency(&session.messages) {
+                if matches!(urgency, CompactionUrgency::Normal) {
+                    self.memory_flush(&session.messages).await;
+                }
+
+                let context_limit = self.config.compaction.context_limit;
+                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
+                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
+                    session.messages,
+                    context_limit,
+                    urgency,
+                    8,               // keep_recent for tier 1
+                    tool_result_cap, // tool result budget for tier 2
+                );
+                if tier > 0 {
+                    debug!(
+                        tier = tier,
+                        urgency = ?urgency,
+                        "Context recovered via tier {} compaction (streaming)", tier
+                    );
+                }
+                session.messages = recovered;
+            }
+        }
+
+        // Convert inbound message to a session Message with image content parts.
+        let user_message = inbound_to_message(msg, None).await;
+        let resolved_user_prompt = user_message.content.clone();
+
         // Tiered inbound injection scanning (streaming path).
+        // Scans the RESOLVED content (after text attachments are inlined) so injected
+        // payloads in attachments never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
-            let scan = crate::safety::sanitizer::check_injection(&msg.content);
+            let scan = crate::safety::sanitizer::check_injection(&resolved_user_prompt);
             if scan.was_modified {
                 let channel = msg.channel.as_str();
                 match channel {
@@ -1713,49 +1758,7 @@ impl AgentLoop {
             }
         }
 
-        let provider = self
-            .resolve_provider_for_message(msg)
-            .await
-            .ok_or_else(|| ZeptoError::Provider("No provider configured".into()))?;
-        let usage_metrics = {
-            let metrics = self.usage_metrics.read().await;
-            metrics.clone()
-        };
-        let metrics_collector = Arc::clone(&self.metrics_collector);
-
-        let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
-
-        // Apply three-tier context overflow recovery if needed (streaming)
-        if let Some(ref monitor) = self.context_monitor {
-            if let Some(urgency) = monitor.urgency(&session.messages) {
-                if matches!(urgency, CompactionUrgency::Normal) {
-                    self.memory_flush(&session.messages).await;
-                }
-
-                let context_limit = self.config.compaction.context_limit;
-                let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
-                let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
-                    session.messages,
-                    context_limit,
-                    urgency,
-                    8,               // keep_recent for tier 1
-                    tool_result_cap, // tool result budget for tier 2
-                );
-                if tier > 0 {
-                    debug!(
-                        tier = tier,
-                        urgency = ?urgency,
-                        "Context recovered via tier {} compaction (streaming)", tier
-                    );
-                }
-                session.messages = recovered;
-            }
-        }
-
-        // Convert inbound message to a session Message with image content parts,
-        // then add it to the session before building the provider message list.
-        let user_message = inbound_to_message(msg, None).await;
-        let resolved_user_prompt = user_message.content.clone();
+        // Add the user message to the session after passing injection checks.
         session.add_message(user_message);
 
         // Pass an empty user_input: the current user message is already in session.
