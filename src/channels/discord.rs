@@ -1075,12 +1075,6 @@ impl DiscordChannel {
                                                                         let media_type = if content_type.starts_with("image/") {
                                                                             Some(MediaType::Image)
                                                                         } else if content_type.starts_with("text/")
-                                                                            || content_type == "application/pdf"
-                                                                            || content_type == "application/msword"
-                                                                            || content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                                                            || content_type == "application/vnd.ms-excel"
-                                                                            || content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                                                            || content_type == "application/rtf"
                                                                             || content_type == "application/json" {
                                                                             Some(MediaType::Document)
                                                                         } else {
