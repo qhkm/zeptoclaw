@@ -6,6 +6,7 @@
 #   ./scripts/lint-container.sh              # build with cache mounts
 #   ./scripts/lint-container.sh --no-cache   # build without cache
 #   ./scripts/lint-container.sh --fallback   # force mount-free fallback
+#   CONTAINER_ENGINE=podman ./scripts/lint-container.sh  # force engine
 set -euo pipefail
 
 IMAGE="zeptoclaw:dev-lint"
@@ -22,15 +23,35 @@ for arg in "$@"; do
 done
 
 # ── Detect container engine ──────────────────────────────────────────────────
+# Set CONTAINER_ENGINE=podman (or docker) to skip auto-detection.
 
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-  ENGINE="docker"
-elif command -v podman &>/dev/null; then
-  ENGINE="podman"
-else
+detect_engine() {
+  if [ -n "${CONTAINER_ENGINE:-}" ]; then
+    if ! command -v "$CONTAINER_ENGINE" &>/dev/null; then
+      echo "Error: CONTAINER_ENGINE=$CONTAINER_ENGINE not found" >&2
+      exit 1
+    fi
+    echo "$CONTAINER_ENGINE"
+    return
+  fi
+
+  # Prefer podman when available — it reads Dockerfiles natively and avoids
+  # buildx driver issues that break on some setups (see #424).
+  if command -v podman &>/dev/null; then
+    echo "podman"
+    return
+  fi
+
+  if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    echo "docker"
+    return
+  fi
+
   echo "Error: neither docker nor podman found" >&2
   exit 1
-fi
+}
+
+ENGINE=$(detect_engine)
 
 echo "Engine: $ENGINE"
 
