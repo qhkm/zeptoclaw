@@ -408,6 +408,7 @@ mod tests {
             allow_from: Vec::new(),
             deny_by_default: false,
             http: None,
+            session_ttl_secs: None,
         });
 
         let manager = ChannelManager::new(bus.clone(), config.clone());

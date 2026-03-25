@@ -59,22 +59,41 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 128;
 /// How long (seconds) to wait for the agent to reply to session/prompt.
 const PROMPT_TIMEOUT_SECS: u64 = 300;
 
-// --- Static HTTP response fragments ---
+// --- HTTP response helpers ---
 
-const HTTP_204_CORS: &str = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n";
+/// Returns the CORS header line when open, or an empty string when restricted.
+fn cors_line(open_cors: bool) -> &'static str {
+    if open_cors {
+        "Access-Control-Allow-Origin: *\r\n"
+    } else {
+        ""
+    }
+}
 
-/// Returned for JSON-RPC notifications: 204 No Content with no body.
-/// Per JSON-RPC 2.0 §4.1, servers MUST NOT reply to notifications.
-const HTTP_204_NOTIFICATION: &str =
-    "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
+/// Build a CORS preflight response (OPTIONS). When `open_cors` is false the
+/// `Access-Control-Allow-Origin` header is omitted so browsers enforce
+/// same-origin policy.
+fn build_cors_preflight(open_cors: bool) -> String {
+    format!(
+        "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n",
+        cors_line(open_cors),
+    )
+}
 
-const HTTP_400_PREFIX: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n";
+/// Build a 204 No Content response for JSON-RPC notifications (no body).
+fn build_204_notification(open_cors: bool) -> String {
+    format!(
+        "HTTP/1.1 204 No Content\r\n{}Content-Length: 0\r\n\r\n",
+        cors_line(open_cors),
+    )
+}
 
 /// Build a self-contained HTTP error response with a correct Content-Length.
-fn build_http_error(status_line: &str, body: &str) -> String {
+fn build_http_error(status_line: &str, body: &str, open_cors: bool) -> String {
     format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_line,
+        cors_line(open_cors),
         body.len(),
         body
     )
@@ -95,10 +114,16 @@ struct PendingPrompt {
 /// reply to the waiting HTTP connection handler.
 type PromptMap = Arc<Mutex<HashMap<String, oneshot::Sender<(String, bool)>>>>;
 
+/// A live ACP session: working directory + last-active timestamp.
+struct SessionEntry {
+    cwd: String,
+    last_active: std::time::Instant,
+}
+
 /// Mutable per-channel ACP state shared between the accept loop and `send()`.
 struct AcpHttpState {
-    /// Session IDs → working directory (absolute path, required by ACP spec).
-    sessions: HashMap<String, String>,
+    /// Session IDs → session entry (cwd + last-active timestamp).
+    sessions: HashMap<String, SessionEntry>,
     /// Tracks in-flight session/prompt requests so `send()` can retrieve the
     /// original request id and cancelled flag when the agent replies.
     pending: HashMap<String, PendingPrompt>,
@@ -109,6 +134,22 @@ impl AcpHttpState {
         Self {
             sessions: HashMap::new(),
             pending: HashMap::new(),
+        }
+    }
+
+    /// Remove sessions whose `last_active` is older than `ttl`.  Also removes
+    /// their pending entries so no orphan prompts remain.
+    fn sweep_expired(&mut self, ttl: Duration) {
+        let now = std::time::Instant::now();
+        let expired: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_active) >= ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.sessions.remove(id);
+            self.pending.remove(id);
         }
     }
 }
@@ -252,20 +293,24 @@ impl AcpHttpChannel {
         })
     }
 
-    /// Wrap a JSON-RPC body in an HTTP 200 response with CORS headers.
-    fn http_200(body: &str) -> String {
+    /// Wrap a JSON-RPC body in an HTTP 200 response. When `open_cors` is true
+    /// the `Access-Control-Allow-Origin: *` header is included; otherwise it is
+    /// omitted so browsers enforce same-origin policy.
+    fn http_200(body: &str, open_cors: bool) -> String {
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            cors_line(open_cors),
             body.len(),
             body
         )
     }
 
-    /// Wrap a JSON-RPC body in an HTTP 400 response with CORS headers.
-    fn http_400(body: &str) -> String {
+    /// Wrap a JSON-RPC body in an HTTP 400 response. CORS header inclusion is
+    /// controlled by `open_cors`.
+    fn http_400(body: &str, open_cors: bool) -> String {
         format!(
-            "{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-            HTTP_400_PREFIX,
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            cors_line(open_cors),
             body.len(),
             body
         )
@@ -326,6 +371,7 @@ impl AcpHttpChannel {
     async fn do_session_new(
         state: &Arc<Mutex<AcpHttpState>>,
         base_config: &BaseChannelConfig,
+        config: &AcpChannelConfig,
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> String {
@@ -347,9 +393,20 @@ impl AcpHttpChannel {
         if cwd.len() > 4096 {
             return Self::json_rpc_error(id, -32602, "session/new: cwd exceeds 4096 bytes");
         }
+        if cwd_contains_traversal(&cwd) {
+            return Self::json_rpc_error(
+                id,
+                -32602,
+                "session/new: cwd must not contain '..' path segments",
+            );
+        }
         let session_id = format!("acph_{}", super::acp_protocol::new_id());
         {
             let mut st = state.lock().await;
+            // Sweep expired sessions before the cap check when a TTL is configured.
+            if let Some(ttl) = config.session_ttl_secs {
+                st.sweep_expired(Duration::from_secs(ttl));
+            }
             if st.sessions.len() >= MAX_ACP_SESSIONS {
                 return Self::json_rpc_error(
                     id,
@@ -357,7 +414,13 @@ impl AcpHttpChannel {
                     &format!("too many sessions (limit: {})", MAX_ACP_SESSIONS),
                 );
             }
-            st.sessions.insert(session_id.clone(), cwd);
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd,
+                    last_active: std::time::Instant::now(),
+                },
+            );
         }
         let result = SessionNewResult { session_id };
         match serde_json::to_value(result) {
@@ -414,16 +477,16 @@ impl AcpHttpChannel {
         let sessions: Vec<SessionInfo> = st
             .sessions
             .iter()
-            .filter(|(_, cwd)| {
+            .filter(|(_, entry)| {
                 if let Some(ref filter) = cwd_filter {
-                    cwd.as_str() == filter.as_str()
+                    entry.cwd.as_str() == filter.as_str()
                 } else {
                     true
                 }
             })
-            .map(|(sid, cwd)| SessionInfo {
+            .map(|(sid, entry)| SessionInfo {
                 session_id: sid.clone(),
-                cwd: cwd.clone(),
+                cwd: entry.cwd.clone(),
                 title: None,
                 updated_at: None,
                 meta: Some(serde_json::json!({ "pending": st.pending.contains_key(sid) })),
@@ -492,12 +555,17 @@ impl AcpHttpChannel {
         }
         {
             let mut st = state.lock().await;
-            if !st.sessions.contains_key(&session_id) {
-                return Ok(Err(Self::json_rpc_error(
-                    id,
-                    -32000,
-                    &format!("ACP: unknown session {}", session_id),
-                )));
+            match st.sessions.get_mut(&session_id) {
+                None => {
+                    return Ok(Err(Self::json_rpc_error(
+                        id,
+                        -32000,
+                        &format!("ACP: unknown session {}", session_id),
+                    )));
+                }
+                Some(entry) => {
+                    entry.last_active = std::time::Instant::now();
+                }
             }
             if st.pending.contains_key(&session_id) {
                 return Ok(Err(Self::json_rpc_error(
@@ -543,9 +611,13 @@ impl AcpHttpChannel {
         rx: oneshot::Receiver<(String, bool)>,
         state: &Arc<Mutex<AcpHttpState>>,
         pending_http: &PromptMap,
+        open_cors: bool,
     ) {
         // Keep connection alive; client reads SSE events as they arrive.
-        let sse_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n";
+        let sse_headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{}X-Accel-Buffering: no\r\n\r\n",
+            cors_line(open_cors),
+        );
         if stream.write_all(sse_headers.as_bytes()).await.is_err() {
             // Client disconnected before we could start.
             state.lock().await.pending.remove(session_id);
@@ -635,6 +707,10 @@ impl AcpHttpChannel {
         state: Arc<Mutex<AcpHttpState>>,
         pending_http: PromptMap,
     ) {
+        // When auth is configured, omit CORS headers so browsers enforce
+        // same-origin policy. Without auth, keep open CORS for local dev.
+        let open_cors = http_config.auth_token.is_none();
+
         // Read the full request (headers + body) with a per-request size cap.
         // The outer 30s deadline prevents slow-loris attacks where a client
         // drips one byte at a time, resetting a per-read timeout indefinitely.
@@ -678,8 +754,11 @@ impl AcpHttpChannel {
         match read_result {
             Ok(Ok(())) => {}
             Ok(Err("payload too large")) => {
-                let resp =
-                    build_http_error("413 Payload Too Large", r#"{"error":"payload too large"}"#);
+                let resp = build_http_error(
+                    "413 Payload Too Large",
+                    r#"{"error":"payload too large"}"#,
+                    open_cors,
+                );
                 let _ = stream.write_all(resp.as_bytes()).await;
                 return;
             }
@@ -696,20 +775,23 @@ impl AcpHttpChannel {
         let req = match Self::parse_request(&buf[..total]) {
             Some(r) => r,
             None => {
-                let _ = stream.write_all(Self::http_400("{}").as_bytes()).await;
+                let _ = stream
+                    .write_all(Self::http_400("{}", open_cors).as_bytes())
+                    .await;
                 return;
             }
         };
 
         // CORS preflight.
         if req.method == "OPTIONS" {
-            let _ = stream.write_all(HTTP_204_CORS.as_bytes()).await;
+            let resp = build_cors_preflight(open_cors);
+            let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
 
         // Only POST /acp or POST / is accepted.
         if req.path != "/acp" && req.path != "/" {
-            let resp = build_http_error("404 Not Found", r#"{"error":"not found"}"#);
+            let resp = build_http_error("404 Not Found", r#"{"error":"not found"}"#, open_cors);
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
@@ -717,6 +799,7 @@ impl AcpHttpChannel {
             let resp = build_http_error(
                 "405 Method Not Allowed",
                 r#"{"error":"method not allowed"}"#,
+                open_cors,
             );
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
@@ -724,7 +807,8 @@ impl AcpHttpChannel {
 
         // Bearer token auth.
         if !Self::validate_auth(&req.headers, &http_config.auth_token) {
-            let resp = build_http_error("401 Unauthorized", r#"{"error":"unauthorized"}"#);
+            let resp =
+                build_http_error("401 Unauthorized", r#"{"error":"unauthorized"}"#, open_cors);
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
@@ -734,7 +818,7 @@ impl AcpHttpChannel {
             Ok(r) => r,
             Err(e) => {
                 let body = Self::json_rpc_error(None, -32700, &format!("parse error: {}", e));
-                let resp = Self::http_400(&body);
+                let resp = Self::http_400(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
                 return;
             }
@@ -742,7 +826,7 @@ impl AcpHttpChannel {
         if rpc.jsonrpc != "2.0" {
             let body =
                 Self::json_rpc_error(rpc.id, -32600, "Invalid Request: jsonrpc must be \"2.0\"");
-            let resp = Self::http_200(&body);
+            let resp = Self::http_200(&body, open_cors);
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
@@ -766,29 +850,30 @@ impl AcpHttpChannel {
                     }
                 }
             }
-            let _ = stream.write_all(HTTP_204_NOTIFICATION.as_bytes()).await;
+            let resp = build_204_notification(open_cors);
+            let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
 
         match rpc.method.as_str() {
             "initialize" => {
                 let body = Self::do_initialize(&config, id, params).await;
-                let resp = Self::http_200(&body);
+                let resp = Self::http_200(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/new" => {
-                let body = Self::do_session_new(&state, &base_config, id, params).await;
-                let resp = Self::http_200(&body);
+                let body = Self::do_session_new(&state, &base_config, &config, id, params).await;
+                let resp = Self::http_200(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/cancel" => {
                 let body = Self::do_session_cancel(&state, &base_config, id, params).await;
-                let resp = Self::http_200(&body);
+                let resp = Self::http_200(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/list" => {
                 let body = Self::do_session_list(&state, &base_config, id, params).await;
-                let resp = Self::http_200(&body);
+                let resp = Self::http_200(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
             "session/prompt" => {
@@ -806,12 +891,12 @@ impl AcpHttpChannel {
                         error!("ACP-HTTP: session/prompt internal error: {}", e);
                         let body =
                             Self::json_rpc_error(id, -32603, &format!("internal error: {}", e));
-                        let resp = Self::http_200(&body);
+                        let resp = Self::http_200(&body, open_cors);
                         let _ = stream.write_all(resp.as_bytes()).await;
                     }
                     Ok(Err(err_body)) => {
                         // Validation failure — plain JSON response, no SSE.
-                        let resp = Self::http_200(&err_body);
+                        let resp = Self::http_200(&err_body, open_cors);
                         let _ = stream.write_all(resp.as_bytes()).await;
                     }
                     Ok(Ok((session_id, rx))) => {
@@ -823,6 +908,7 @@ impl AcpHttpChannel {
                             rx,
                             &state,
                             &pending_http,
+                            open_cors,
                         )
                         .await;
                     }
@@ -831,7 +917,7 @@ impl AcpHttpChannel {
             _ => {
                 let body =
                     Self::json_rpc_error(id, -32601, &format!("method not found: {}", rpc.method));
-                let resp = Self::http_200(&body);
+                let resp = Self::http_200(&body, open_cors);
                 let _ = stream.write_all(resp.as_bytes()).await;
             }
         }
@@ -1058,10 +1144,14 @@ impl Channel for AcpHttpChannel {
 // Free helpers
 // -------------------------------------------------------------------------
 
-/// Extract plain text from ACP prompt content blocks.
-///
-/// `Text` blocks contribute their text directly. `ResourceLink` blocks
-/// contribute a reference line so the agent is aware of the resource.
+/// Returns `true` if `cwd` contains `..` path segments, which could be used
+/// for path traversal attacks.
+pub(super) fn cwd_contains_traversal(cwd: &str) -> bool {
+    std::path::Path::new(cwd)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 /// Constant-time string comparison (prevents timing side-channels on auth tokens).
 ///
 /// Does NOT short-circuit on length mismatch — XORs up to `max(a.len(), b.len())`
@@ -1148,7 +1238,13 @@ mod tests {
         let session_id = "acph_test".to_string();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(session_id.clone(), "/test".to_string());
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(session_id.clone(), PendingPrompt { cancelled: false });
         }
@@ -1189,7 +1285,13 @@ mod tests {
         let (tx, rx) = oneshot::channel::<(String, bool)>();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(session_id.clone(), "/test".to_string());
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(session_id.clone(), PendingPrompt { cancelled: false });
             ch.pending_http.lock().await.insert(session_id.clone(), tx);
@@ -1216,7 +1318,13 @@ mod tests {
         let (tx, rx) = oneshot::channel::<(String, bool)>();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(session_id.clone(), "/test".to_string());
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(session_id.clone(), PendingPrompt { cancelled: true });
             ch.pending_http.lock().await.insert(session_id.clone(), tx);
@@ -1256,6 +1364,7 @@ mod tests {
         let result = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(1)),
             Some(serde_json::json!({ "cwd": "/workspace" })),
         )
@@ -1287,7 +1396,7 @@ mod tests {
     #[test]
     fn test_http_200_content_length() {
         let body = r#"{"result":"ok"}"#;
-        let resp = AcpHttpChannel::http_200(body);
+        let resp = AcpHttpChannel::http_200(body, true);
         assert!(resp.contains(&format!("Content-Length: {}", body.len())));
         assert!(resp.ends_with(body));
     }
@@ -1327,8 +1436,20 @@ mod tests {
         let sid_b = "acph_list_b".to_string();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(sid_a.clone(), "/test".to_string());
-            st.sessions.insert(sid_b.clone(), "/test".to_string());
+            st.sessions.insert(
+                sid_a.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
+            st.sessions.insert(
+                sid_b.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(sid_a.clone(), PendingPrompt { cancelled: false });
         }
@@ -1359,7 +1480,13 @@ mod tests {
         let session_id = "acph_notif_cancel".to_string();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(session_id.clone(), "/test".to_string());
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(session_id.clone(), PendingPrompt { cancelled: false });
         }
@@ -1400,7 +1527,13 @@ mod tests {
         let session_id = "acph_req_cancel".to_string();
         {
             let mut st = ch.state.lock().await;
-            st.sessions.insert(session_id.clone(), "/test".to_string());
+            st.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             st.pending
                 .insert(session_id.clone(), PendingPrompt { cancelled: false });
         }
@@ -1422,21 +1555,19 @@ mod tests {
         assert!(v.get("error").is_none(), "no error field expected");
     }
 
-    /// The `HTTP_204_NOTIFICATION` constant must have no body section and
-    /// report Content-Length: 0.
+    /// The `build_204_notification` helper must produce a well-formed 204 with
+    /// no body and Content-Length: 0.
     #[test]
     fn test_http_204_notification_has_no_body() {
+        let resp = build_204_notification(true);
+        assert!(resp.contains("204 No Content"), "must be a 204 status");
         assert!(
-            HTTP_204_NOTIFICATION.contains("204 No Content"),
-            "must be a 204 status"
-        );
-        assert!(
-            HTTP_204_NOTIFICATION.contains("Content-Length: 0"),
+            resp.contains("Content-Length: 0"),
             "Content-Length must be 0"
         );
         // The response must end immediately after the blank line — no body.
         assert!(
-            HTTP_204_NOTIFICATION.ends_with("\r\n\r\n"),
+            resp.ends_with("\r\n\r\n"),
             "response must end with the blank line and no trailing body"
         );
     }
@@ -1477,6 +1608,7 @@ mod tests {
         let new_body = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(2)),
             Some(serde_json::json!({ "cwd": "/workspace" })),
         )
@@ -1503,6 +1635,7 @@ mod tests {
         let new_body = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(2)),
             Some(serde_json::json!({ "cwd": "/workspace" })),
         )
@@ -1542,6 +1675,7 @@ mod tests {
         let body = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(1)),
             None,
         )
@@ -1561,6 +1695,7 @@ mod tests {
         let body = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(1)),
             Some(serde_json::json!({ "cwd": "relative/path" })),
         )
@@ -1580,6 +1715,7 @@ mod tests {
         let body = AcpHttpChannel::do_session_new(
             &ch.state,
             &ch.base_config,
+            &ch.config,
             Some(serde_json::json!(1)),
             Some(serde_json::json!({ "cwd": "/home/user/project" })),
         )
@@ -1592,7 +1728,7 @@ mod tests {
         let sid = v["result"]["sessionId"].as_str().unwrap().to_string();
         let st = ch.state.lock().await;
         assert_eq!(
-            st.sessions.get(&sid).map(|s| s.as_str()),
+            st.sessions.get(&sid).map(|e| e.cwd.as_str()),
             Some("/home/user/project")
         );
     }
@@ -1625,5 +1761,88 @@ mod tests {
             err_body.contains("-32600") || err_body.contains("-32000"),
             "rejection must be an RPC error: {err_body}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // CORS hardening tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_http_200_no_cors_when_auth() {
+        let body = r#"{"result":"ok"}"#;
+        let resp = AcpHttpChannel::http_200(body, false);
+        assert!(
+            !resp.contains("Access-Control-Allow-Origin"),
+            "CORS header must be absent when open_cors=false"
+        );
+        assert!(resp.contains(&format!("Content-Length: {}", body.len())));
+    }
+
+    #[test]
+    fn test_cors_preflight_open() {
+        let resp = build_cors_preflight(true);
+        assert!(resp.contains("Access-Control-Allow-Origin: *"));
+        assert!(resp.contains("Access-Control-Allow-Methods"));
+        assert!(resp.contains("204 No Content"));
+    }
+
+    #[test]
+    fn test_cors_preflight_restricted() {
+        let resp = build_cors_preflight(false);
+        assert!(
+            !resp.contains("Access-Control-Allow-Origin"),
+            "CORS origin header must be absent when restricted"
+        );
+        assert!(resp.contains("Access-Control-Allow-Methods"));
+        assert!(resp.contains("204 No Content"));
+    }
+
+    #[test]
+    fn test_build_http_error_cors() {
+        let open = build_http_error("400 Bad Request", r#"{"error":"bad"}"#, true);
+        assert!(open.contains("Access-Control-Allow-Origin: *"));
+
+        let restricted = build_http_error("400 Bad Request", r#"{"error":"bad"}"#, false);
+        assert!(
+            !restricted.contains("Access-Control-Allow-Origin"),
+            "CORS header must be absent when open_cors=false"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // cwd path traversal tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_cwd_contains_traversal() {
+        assert!(cwd_contains_traversal("/home/user/../etc/passwd"));
+        assert!(cwd_contains_traversal("/home/user/.."));
+        assert!(cwd_contains_traversal("/../root"));
+        assert!(!cwd_contains_traversal("/home/user/project"));
+        assert!(!cwd_contains_traversal("/home/user/..hidden"));
+        assert!(!cwd_contains_traversal("/home/user/a..b"));
+    }
+
+    #[tokio::test]
+    async fn test_session_new_rejects_traversal_cwd() {
+        let ch = make_channel();
+        let body = AcpHttpChannel::do_session_new(
+            &ch.state,
+            &ch.base_config,
+            &ch.config,
+            Some(serde_json::json!(1)),
+            Some(serde_json::json!({ "cwd": "/home/user/../etc" })),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["error"]["code"], -32602,
+            "traversal cwd must give -32602: {body}"
+        );
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("'..'"),
+            "error message must mention '..': {body}"
+        );
+        assert!(ch.state.lock().await.sessions.is_empty());
     }
 }

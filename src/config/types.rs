@@ -910,6 +910,10 @@ pub struct AcpChannelConfig {
     /// HTTP channel is registered alongside (or instead of) the stdio channel.
     #[serde(default)]
     pub http: Option<AcpHttpConfig>,
+    /// Optional session time-to-live in seconds. When set, idle sessions are
+    /// reaped before the session cap is checked on each `session/new` call.
+    #[serde(default)]
+    pub session_ttl_secs: Option<u64>,
 }
 
 /// ACP streamable HTTP transport configuration.

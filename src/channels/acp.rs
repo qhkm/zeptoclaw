@@ -37,12 +37,18 @@ struct PendingPrompt {
     cancelled: bool,
 }
 
+/// A live ACP session: working directory + last-active timestamp.
+struct SessionEntry {
+    cwd: String,
+    last_active: std::time::Instant,
+}
+
 /// Shared state for the ACP channel (sessions and pending prompt per session).
 struct AcpState {
     /// Whether the client has called initialize.
     initialized: bool,
-    /// Session IDs → working directory (absolute path, required by ACP spec).
-    sessions: HashMap<String, String>,
+    /// Session IDs → session entry (cwd + last-active timestamp).
+    sessions: HashMap<String, SessionEntry>,
     /// Per-session pending prompt: we respond when we get the matching outbound message.
     pending: HashMap<String, PendingPrompt>,
 }
@@ -53,6 +59,22 @@ impl AcpState {
             initialized: false,
             sessions: HashMap::new(),
             pending: HashMap::new(),
+        }
+    }
+
+    /// Remove sessions whose `last_active` is older than `ttl`.  Also removes
+    /// their pending entries so no orphan prompts remain.
+    fn sweep_expired(&mut self, ttl: std::time::Duration) {
+        let now = std::time::Instant::now();
+        let expired: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_active) >= ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.sessions.remove(id);
+            self.pending.remove(id);
         }
     }
 }
@@ -201,6 +223,19 @@ impl AcpChannel {
             };
             return self.write_response(&response).await;
         }
+        if super::acp_http::cwd_contains_traversal(&cwd) {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32602,
+                    message: "session/new: cwd must not contain '..' path segments".to_string(),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
         let session_id = format!("acp_{}", super::acp_protocol::new_id());
         {
             let mut state = self.state.lock().await;
@@ -217,6 +252,10 @@ impl AcpChannel {
                 };
                 return self.write_response(&response).await;
             }
+            // Sweep expired sessions before the cap check when a TTL is configured.
+            if let Some(ttl) = self.config.session_ttl_secs {
+                state.sweep_expired(std::time::Duration::from_secs(ttl));
+            }
             if state.sessions.len() >= MAX_ACP_SESSIONS {
                 let response = JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
@@ -230,7 +269,13 @@ impl AcpChannel {
                 };
                 return self.write_response(&response).await;
             }
-            state.sessions.insert(session_id.clone(), cwd);
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd,
+                    last_active: std::time::Instant::now(),
+                },
+            );
         }
         let result = SessionNewResult {
             session_id: session_id.clone(),
@@ -337,18 +382,23 @@ impl AcpChannel {
         }
         {
             let mut state = self.state.lock().await;
-            if !state.sessions.contains_key(&session_id) {
-                let response = JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: id.clone(),
-                    result: None,
-                    error: Some(super::acp_protocol::JsonRpcError {
-                        code: -32000,
-                        message: format!("ACP: unknown session {}", session_id),
-                        data: None,
-                    }),
-                };
-                return self.write_response(&response).await;
+            match state.sessions.get_mut(&session_id) {
+                None => {
+                    let response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: id.clone(),
+                        result: None,
+                        error: Some(super::acp_protocol::JsonRpcError {
+                            code: -32000,
+                            message: format!("ACP: unknown session {}", session_id),
+                            data: None,
+                        }),
+                    };
+                    return self.write_response(&response).await;
+                }
+                Some(entry) => {
+                    entry.last_active = std::time::Instant::now();
+                }
             }
             if state.pending.contains_key(&session_id) {
                 let response = JsonRpcResponse {
@@ -512,16 +562,16 @@ impl AcpChannel {
         let sessions: Vec<SessionInfo> = state
             .sessions
             .iter()
-            .filter(|(_, cwd)| {
+            .filter(|(_, entry)| {
                 if let Some(ref filter) = cwd_filter {
-                    cwd.as_str() == filter.as_str()
+                    entry.cwd.as_str() == filter.as_str()
                 } else {
                     true
                 }
             })
-            .map(|(sid, cwd)| SessionInfo {
+            .map(|(sid, entry)| SessionInfo {
                 session_id: sid.clone(),
-                cwd: cwd.clone(),
+                cwd: entry.cwd.clone(),
                 title: None,
                 updated_at: None,
                 meta: Some(serde_json::json!({ "pending": state.pending.contains_key(sid) })),
@@ -933,9 +983,13 @@ mod tests {
         let session_id = "acp_some_session".to_string();
         {
             let mut state = channel.state.lock().await;
-            state
-                .sessions
-                .insert(session_id.clone(), "/test".to_string());
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             state.pending.insert(
                 session_id.clone(),
                 PendingPrompt {
@@ -1031,9 +1085,13 @@ mod tests {
         {
             let mut state = channel.state.lock().await;
             state.initialized = true;
-            state
-                .sessions
-                .insert(session_id.clone(), "/test".to_string());
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
         }
         let oversized = "a".repeat(MAX_PROMPT_BYTES + 1);
         let params = serde_json::json!({
@@ -1062,9 +1120,13 @@ mod tests {
         {
             let mut state = channel.state.lock().await;
             state.initialized = true;
-            state
-                .sessions
-                .insert(session_id.clone(), "/test".to_string());
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             state.pending.insert(
                 session_id.clone(),
                 PendingPrompt {
@@ -1140,9 +1202,13 @@ mod tests {
         {
             // Seed a session directly to isolate the initialized check.
             let mut state = channel.state.lock().await;
-            state
-                .sessions
-                .insert(session_id.clone(), "/test".to_string());
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
         }
         let params = serde_json::json!({
             "sessionId": session_id,
@@ -1168,7 +1234,13 @@ mod tests {
         let known = "acp_known".to_string();
         {
             let mut state = channel.state.lock().await;
-            state.sessions.insert(known.clone(), "/test".to_string());
+            state.sessions.insert(
+                known.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             state.pending.insert(
                 known.clone(),
                 PendingPrompt {
@@ -1227,9 +1299,13 @@ mod tests {
         let session_id = "acp_proactive".to_string();
         {
             let mut state = channel.state.lock().await;
-            state
-                .sessions
-                .insert(session_id.clone(), "/test".to_string());
+            state.sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
         }
         let msg = OutboundMessage {
             channel: ACP_CHANNEL_NAME.to_string(),
@@ -1259,9 +1335,13 @@ mod tests {
             let mut state = channel.state.lock().await;
             state.initialized = true;
             for i in 0..MAX_ACP_SESSIONS {
-                state
-                    .sessions
-                    .insert(format!("acp_{}", i), "/test".to_string());
+                state.sessions.insert(
+                    format!("acp_{}", i),
+                    SessionEntry {
+                        cwd: "/test".to_string(),
+                        last_active: std::time::Instant::now(),
+                    },
+                );
             }
         }
         let _ = channel
@@ -1306,8 +1386,20 @@ mod tests {
         {
             let mut state = channel.state.lock().await;
             state.initialized = true;
-            state.sessions.insert(sid_a.clone(), "/test".to_string());
-            state.sessions.insert(sid_b.clone(), "/test".to_string());
+            state.sessions.insert(
+                sid_a.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
+            state.sessions.insert(
+                sid_b.clone(),
+                SessionEntry {
+                    cwd: "/test".to_string(),
+                    last_active: std::time::Instant::now(),
+                },
+            );
             // Mark sid_a as having a prompt in flight.
             state.pending.insert(
                 sid_a.clone(),

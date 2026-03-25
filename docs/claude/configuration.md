@@ -30,6 +30,7 @@ Environment variables override config with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 - `ZEPTOCLAW_CHANNELS_ACP_HTTP_PORT` (default: 8765)
 - `ZEPTOCLAW_CHANNELS_ACP_HTTP_BIND` (default: 127.0.0.1)
 - `ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN` — Bearer auth token (default: none)
+- `ZEPTOCLAW_CHANNELS_ACP_SESSION_TTL_SECS` — session idle TTL in seconds; expired sessions are reaped on next session/new (default: none/unlimited)
 
 ### Retry & Fallback
 - `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` (default: false)

@@ -1009,6 +1009,15 @@ impl Config {
                 http.bind = val;
             }
         }
+        if let Ok(Ok(ttl)) =
+            std::env::var("ZEPTOCLAW_CHANNELS_ACP_SESSION_TTL_SECS").map(|v| v.parse::<u64>())
+        {
+            let channel = self
+                .channels
+                .acp
+                .get_or_insert_with(AcpChannelConfig::default);
+            channel.session_ttl_secs = Some(ttl);
+        }
 
         // Runtime: Apple Container
         if let Ok(val) = std::env::var("ZEPTOCLAW_RUNTIME_APPLE_ALLOW_EXPERIMENTAL") {
