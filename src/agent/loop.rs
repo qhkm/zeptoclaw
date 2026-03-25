@@ -1445,11 +1445,16 @@ impl AgentLoop {
                                     ctx.chat_id.as_deref().unwrap_or(""),
                                     user_msg,
                                 );
-                                // Propagate routing metadata (e.g. telegram_thread_id)
+                                // Propagate routing metadata (e.g. telegram_thread_id, telegram_message_id)
                                 if let Some(tid) = inbound_meta.get("telegram_thread_id") {
                                     outbound
                                         .metadata
                                         .insert("telegram_thread_id".to_string(), tid.clone());
+                                }
+                                if let Some(mid) = inbound_meta.get("telegram_message_id") {
+                                    outbound
+                                        .metadata
+                                        .insert("telegram_message_id".to_string(), mid.clone());
                                 }
                                 let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
@@ -2102,11 +2107,16 @@ impl AgentLoop {
                                     ctx.chat_id.as_deref().unwrap_or(""),
                                     user_msg,
                                 );
-                                // Propagate routing metadata (e.g. telegram_thread_id)
+                                // Propagate routing metadata (e.g. telegram_thread_id, telegram_message_id)
                                 if let Some(tid) = inbound_meta.get("telegram_thread_id") {
                                     outbound
                                         .metadata
                                         .insert("telegram_thread_id".to_string(), tid.clone());
+                                }
+                                if let Some(mid) = inbound_meta.get("telegram_message_id") {
+                                    outbound
+                                        .metadata
+                                        .insert("telegram_message_id".to_string(), mid.clone());
                                 }
                                 let _ = bus_for_tools.publish_outbound(outbound).await;
                             }
