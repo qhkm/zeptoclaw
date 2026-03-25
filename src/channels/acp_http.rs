@@ -36,9 +36,9 @@ use crate::config::{AcpChannelConfig, AcpHttpConfig};
 use crate::error::{Result, ZeptoError};
 
 use super::acp_protocol::{
-    AgentCapabilities, AgentInfo, ContentBlock, InitializeResult, JsonRpcRequest,
-    SessionInfo, SessionListParams, SessionListResult, SessionNewResult,
-    SessionPromptResult, SessionUpdateParams, SessionUpdatePayload,
+    AgentCapabilities, AgentInfo, ContentBlock, InitializeResult, JsonRpcRequest, SessionInfo,
+    SessionListParams, SessionListResult, SessionNewResult, SessionPromptResult,
+    SessionUpdateParams, SessionUpdatePayload,
 };
 use super::{BaseChannelConfig, Channel};
 
