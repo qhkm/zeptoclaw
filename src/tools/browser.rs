@@ -16,12 +16,17 @@ use crate::config::BrowserConfig;
 use crate::deps::{DepKind, Dependency, HasDependencies, HealthCheck};
 use crate::error::{Result, ZeptoError};
 
-use super::web::{is_blocked_host, validate_redirect_target_basic};
+use super::web::{is_blocked_host, resolve_and_check_host, validate_redirect_target_basic};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const ENGINE_LIGHTPANDA: &str = "lightpanda";
 const ENGINE_CHROME: &str = "chrome";
 
+/// Browser automation tool wrapping the `agent-browser` CLI.
+///
+/// **Single-tenant**: engine state (`active_engine`) is shared across all
+/// invocations of this tool instance. If multi-tenant isolation is needed,
+/// engine state should move into `ToolContext` per conversation.
 pub struct BrowserTool {
     default_engine: String,
     active_engine: Mutex<String>,
@@ -102,18 +107,25 @@ impl BrowserTool {
     }
 
     fn get_active_engine(&self) -> String {
-        self.active_engine.lock().unwrap().clone()
+        self.active_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn set_active_engine(&self, engine: &str) {
-        *self.active_engine.lock().unwrap() = engine.to_string();
+        *self.active_engine.lock().unwrap_or_else(|e| e.into_inner()) = engine.to_string();
     }
 
-    /// Validate a URL against SSRF blocklist (scheme + host check).
-    fn check_url(url_str: &str) -> Result<()> {
+    /// Validate a URL against SSRF blocklist (scheme + host + DNS resolution).
+    async fn check_url(url_str: &str) -> Result<()> {
         let parsed = Url::parse(url_str)
             .map_err(|e| ZeptoError::Tool(format!("Invalid URL '{}': {}", url_str, e)))?;
-        validate_redirect_target_basic(&parsed)
+        validate_redirect_target_basic(&parsed)?;
+        // DNS-aware check: resolve hostname and verify resolved IPs aren't private.
+        // Catches attacks like metadata.attacker.com → 169.254.169.254.
+        resolve_and_check_host(&parsed).await?;
+        Ok(())
     }
 
     /// Post-navigation SSRF check: verify the final URL isn't a private/local address
@@ -261,8 +273,9 @@ impl Tool for BrowserTool {
         let engine_override = args.get("engine").and_then(|v| v.as_str());
         let is_navigation = command == "open";
 
-        // Pre-navigation SSRF check
-        if is_navigation {
+        // SSRF check: validate URLs in all commands that accept them.
+        // "open" always has a URL; other commands may contain URLs in args.
+        let url_to_check = if is_navigation {
             let url = args_str.split_whitespace().next().unwrap_or(args_str);
             if url.is_empty() {
                 return Err(ZeptoError::Tool(format!(
@@ -270,7 +283,19 @@ impl Tool for BrowserTool {
                     command
                 )));
             }
-            Self::check_url(url)?;
+            Some(url.to_string())
+        } else {
+            // Check for URLs in args of other commands that can accept them
+            // (tab new <url>, connect <url>, network route <url>).
+            // Also catch any arg that looks like a URL to be safe.
+            args_str
+                .split_whitespace()
+                .find(|arg| arg.starts_with("http://") || arg.starts_with("https://"))
+                .map(|s| s.to_string())
+        };
+
+        if let Some(ref url) = url_to_check {
+            Self::check_url(url).await?;
         }
 
         if command == "close" {
@@ -288,10 +313,11 @@ impl Tool for BrowserTool {
             self.get_active_engine()
         };
 
+        // Split args into separate tokens for proper CLI argument passing.
         let cmd_args: Vec<&str> = if args_str.is_empty() {
             vec![]
         } else {
-            vec![args_str]
+            args_str.split_whitespace().collect()
         };
 
         let (output, engine) = match self
@@ -326,7 +352,7 @@ impl Tool for BrowserTool {
         };
 
         // Post-navigation SSRF check (catches redirects)
-        if is_navigation {
+        if url_to_check.is_some() {
             self.check_final_url(&engine).await?;
         }
 
@@ -351,35 +377,37 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_check_url_blocks_localhost() {
-        assert!(BrowserTool::check_url("http://localhost").is_err());
-        assert!(BrowserTool::check_url("http://localhost:8080").is_err());
-        assert!(BrowserTool::check_url("http://127.0.0.1").is_err());
+    #[tokio::test]
+    async fn test_check_url_blocks_localhost() {
+        assert!(BrowserTool::check_url("http://localhost").await.is_err());
+        assert!(BrowserTool::check_url("http://localhost:8080")
+            .await
+            .is_err());
+        assert!(BrowserTool::check_url("http://127.0.0.1").await.is_err());
     }
 
-    #[test]
-    fn test_check_url_blocks_private_networks() {
-        assert!(BrowserTool::check_url("http://192.168.1.1").is_err());
-        assert!(BrowserTool::check_url("http://10.0.0.1").is_err());
-        assert!(BrowserTool::check_url("http://172.16.0.1").is_err());
+    #[tokio::test]
+    async fn test_check_url_blocks_private_networks() {
+        assert!(BrowserTool::check_url("http://192.168.1.1").await.is_err());
+        assert!(BrowserTool::check_url("http://10.0.0.1").await.is_err());
+        assert!(BrowserTool::check_url("http://172.16.0.1").await.is_err());
     }
 
-    #[test]
-    fn test_check_url_allows_public() {
-        assert!(BrowserTool::check_url("https://example.com").is_ok());
-        assert!(BrowserTool::check_url("https://google.com").is_ok());
+    #[tokio::test]
+    async fn test_check_url_allows_public() {
+        assert!(BrowserTool::check_url("https://example.com").await.is_ok());
+        assert!(BrowserTool::check_url("https://google.com").await.is_ok());
     }
 
-    #[test]
-    fn test_check_url_rejects_non_http() {
-        assert!(BrowserTool::check_url("ftp://example.com").is_err());
-        assert!(BrowserTool::check_url("file:///etc/passwd").is_err());
+    #[tokio::test]
+    async fn test_check_url_rejects_non_http() {
+        assert!(BrowserTool::check_url("ftp://example.com").await.is_err());
+        assert!(BrowserTool::check_url("file:///etc/passwd").await.is_err());
     }
 
-    #[test]
-    fn test_check_url_rejects_invalid() {
-        assert!(BrowserTool::check_url("not a url").is_err());
+    #[tokio::test]
+    async fn test_check_url_rejects_invalid() {
+        assert!(BrowserTool::check_url("not a url").await.is_err());
     }
 
     #[test]
