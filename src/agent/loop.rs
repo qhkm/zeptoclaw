@@ -1029,13 +1029,14 @@ impl AgentLoop {
         // so that the history slice passed to the provider already contains images
         // for the current turn.
         let user_message = inbound_to_message(msg, None).await;
+        let resolved_user_prompt = user_message.content.clone();
         session.add_message(user_message);
 
         // Build messages with history and per-message memory override.
         // Pass an empty user_input string: the current user message is already
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
-        let memory_override = self.build_memory_override(&msg.content).await;
+        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
         let messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
@@ -1073,7 +1074,7 @@ impl AgentLoop {
             ResponseCache::cache_key(
                 self.config.agents.defaults.model.as_str(),
                 system_prompt,
-                &msg.content,
+                &resolved_user_prompt,
             )
         });
 
@@ -1748,10 +1749,11 @@ impl AgentLoop {
         // Convert inbound message to a session Message with image content parts,
         // then add it to the session before building the provider message list.
         let user_message = inbound_to_message(msg, None).await;
+        let resolved_user_prompt = user_message.content.clone();
         session.add_message(user_message);
 
         // Pass an empty user_input: the current user message is already in session.
-        let memory_override = self.build_memory_override(&msg.content).await;
+        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
         let messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
