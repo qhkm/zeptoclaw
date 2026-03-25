@@ -235,7 +235,7 @@ impl Tool for BrowserTool {
     }
 
     fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
+        ToolCategory::NetworkRead
     }
 
     fn parameters(&self) -> Value {
