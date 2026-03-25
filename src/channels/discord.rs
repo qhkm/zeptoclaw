@@ -1096,8 +1096,13 @@ impl DiscordChannel {
                                                                             let fetch_result = tokio::time::timeout(
                                                                                 fetch_timeout,
                                                                                 async {
-                                                                                    let resp = client.get(&att.url).send().await?;
-                                                                                    let bytes = resp.bytes().await?;
+                                                                                    let bytes = client
+                                                                                        .get(&att.url)
+                                                                                        .send()
+                                                                                        .await?
+                                                                                        .error_for_status()?
+                                                                                        .bytes()
+                                                                                        .await?;
                                                                                     Ok::<_, reqwest::Error>(bytes)
                                                                                 }
                                                                             ).await;
