@@ -345,6 +345,7 @@ pub fn provider_name_for_model(model: &str) -> Option<&'static str> {
 
 /// Like [`provider_name_for_model`], but prefers configured gateway providers
 /// such as OpenRouter for vendor-prefixed model IDs.
+#[cfg(test)]
 pub fn provider_name_for_model_with_available(
     model: &str,
     available_providers: &[&str],
