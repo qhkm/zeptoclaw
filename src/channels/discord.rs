@@ -1102,16 +1102,14 @@ impl DiscordChannel {
 
                                                                             match fetch_result {
                                                                                 Ok(Ok(bytes)) => {
+                                                                                    // Successfully downloaded - add media attachment.
+                                                                                    // No metadata line needed: images display visually,
+                                                                                    // text docs get inlined with full content by inbound_to_message().
                                                                                     let mut media = MediaAttachment::new(mt.clone())
                                                                                         .with_data(bytes.to_vec())
                                                                                         .with_mime_type(content_type);
                                                                                     if let Some(ref name) = att.filename {
                                                                                         media = media.with_filename(name);
-                                                                                        // For non-image attachments, add info to message
-                                                                                        if mt != MediaType::Image {
-                                                                                            let size_kb = bytes.len() / 1024;
-                                                                                            attachment_info.push(format!("[Attachment: {} ({} KB, type: {})]", name, size_kb, content_type));
-                                                                                        }
                                                                                     }
                                                                                     inbound = inbound.with_media(media);
                                                                                 }
