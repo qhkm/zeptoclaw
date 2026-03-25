@@ -293,8 +293,7 @@ async fn inbound_to_message(
                 let size_mb = (data.len() as f64) / (1024.0 * 1024.0);
                 content.push_str(&format!(
                     "\n\n[Text file '{}' too large ({:.1} MB), skipped]",
-                    name,
-                    size_mb
+                    name, size_mb
                 ));
             }
             continue;

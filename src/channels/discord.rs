@@ -1064,13 +1064,13 @@ impl DiscordChannel {
                                                                     let mut attachment_info = Vec::new();
                                                                     for att in &msg_data.attachments {
                                                                         let filename = att.filename.as_deref().unwrap_or("unknown");
-                                                                        
+
                                                                         // Skip if no content type
                                                                         if att.content_type.is_none() {
                                                                             attachment_info.push(format!("[Attachment: {} (no content type, skipped)]", filename));
                                                                             continue;
                                                                         }
-                                                                        
+
                                                                         // Skip if size is too large (>20MB)
                                                                         if att.size.is_some_and(|s| s > MAX_ATTACHMENT_SIZE) {
                                                                             let size_mb = (att.size.unwrap_or(0) as f64) / (1024.0 * 1024.0);
@@ -1145,7 +1145,7 @@ impl DiscordChannel {
                                                                         inbound.content = content;
                                                                     }
                                                                 }
-                                                                
+
                                                                 // Only publish if message has content or media
                                                                 if !inbound.content.is_empty() || !inbound.media.is_empty() {
                                                                     if let Err(e) = bus.publish_inbound(inbound).await {
