@@ -1753,6 +1753,30 @@ pub struct WebToolsConfig {
     pub search: WebSearchConfig,
 }
 
+/// Browser engine selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserEngine {
+    #[default]
+    Lightpanda,
+    Chrome,
+}
+
+impl BrowserEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lightpanda => "lightpanda",
+            Self::Chrome => "chrome",
+        }
+    }
+}
+
+impl std::fmt::Display for BrowserEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Browser tool configuration (agent-browser + Lightpanda)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1760,7 +1784,7 @@ pub struct BrowserConfig {
     /// Enable the browser tool. When enabled, replaces web_fetch.
     pub enabled: bool,
     /// Browser engine: "lightpanda" or "chrome"
-    pub engine: String,
+    pub engine: BrowserEngine,
     /// Custom path to agent-browser binary
     #[serde(default)]
     pub executable_path: Option<String>,
@@ -1772,7 +1796,7 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            engine: "lightpanda".to_string(),
+            engine: BrowserEngine::default(),
             executable_path: None,
             timeout_secs: 30,
         }

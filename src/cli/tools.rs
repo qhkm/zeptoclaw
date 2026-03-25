@@ -74,10 +74,10 @@ const TOOLS: &[ToolInfo] = &[
     ToolInfo {
         name: "browser",
         description: "Headless browser via agent-browser + Lightpanda",
-        requires_config: false,
+        requires_config: true,
         config_hint:
             "Set tools.browser.enabled=true. Requires: agent-browser and lightpanda binaries",
-        opt_in: true,
+        opt_in: false,
     },
     ToolInfo {
         name: "memory_search",
@@ -328,6 +328,7 @@ fn is_tool_configured(config: &Config, name: &str) -> bool {
                 || config.channels.slack.as_ref().is_some_and(|c| c.enabled)
                 || config.channels.discord.as_ref().is_some_and(|c| c.enabled)
         }
+        "browser" => config.tools.browser.enabled,
         "r8r" => std::env::var("R8R_API_URL").is_ok(),
         _ => true,
     }
@@ -370,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_tools_list_count() {
-        assert_eq!(TOOLS.len(), 22);
+        assert_eq!(TOOLS.len(), 23);
     }
 
     #[test]

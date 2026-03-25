@@ -16,7 +16,7 @@ use crate::config::BrowserConfig;
 use crate::deps::{DepKind, Dependency, HasDependencies, HealthCheck};
 use crate::error::{Result, ZeptoError};
 
-use super::web::{is_blocked_host, validate_redirect_target_basic};
+use super::web::validate_redirect_target_basic;
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 const ENGINE_LIGHTPANDA: &str = "lightpanda";
@@ -31,7 +31,7 @@ pub struct BrowserTool {
 
 impl BrowserTool {
     pub fn new(config: &BrowserConfig) -> Self {
-        let engine = config.engine.clone();
+        let engine = config.engine.as_str().to_string();
         Self {
             active_engine: Mutex::new(engine.clone()),
             default_engine: engine,
@@ -101,12 +101,21 @@ impl BrowserTool {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn get_active_engine(&self) -> String {
-        self.active_engine.lock().unwrap().clone()
+    fn get_active_engine(&self) -> Result<String> {
+        Ok(self
+            .active_engine
+            .lock()
+            .map_err(|e| ZeptoError::Tool(format!("active_engine lock poisoned: {}", e)))?
+            .clone())
     }
 
-    fn set_active_engine(&self, engine: &str) {
-        *self.active_engine.lock().unwrap() = engine.to_string();
+    fn set_active_engine(&self, engine: &str) -> Result<()> {
+        *self
+            .active_engine
+            .lock()
+            .map_err(|e| ZeptoError::Tool(format!("active_engine lock poisoned: {}", e)))? =
+            engine.to_string();
+        Ok(())
     }
 
     /// Validate a URL against SSRF blocklist (scheme + host check).
@@ -141,13 +150,13 @@ impl BrowserTool {
             }
         };
 
-        if is_blocked_host(&parsed) {
+        if let Err(err) = validate_redirect_target_basic(&parsed) {
             if let Err(e) = self.run_command_with_engine("close", &[], engine).await {
                 tracing::warn!("Failed to close browser after SSRF block: {}", e);
             }
             return Err(ZeptoError::SecurityViolation(format!(
-                "Navigation redirected to blocked host: {}",
-                final_url
+                "Navigation redirected to blocked URL '{}': {}",
+                final_url, err
             )));
         }
 
@@ -274,18 +283,22 @@ impl Tool for BrowserTool {
         }
 
         if command == "close" {
-            let engine = self.get_active_engine();
+            let engine = self.get_active_engine()?;
             let output = self.run_command_with_engine(command, &[], &engine).await?;
-            self.set_active_engine(&self.default_engine);
+            self.set_active_engine(&self.default_engine)?;
             return Ok(ToolOutput::llm_only(output));
         }
 
-        // Resolve engine: explicit override > active session engine
+        // Resolve engine: explicit override > active session engine.
+        // Only persist engine switches on navigation (open) to avoid
+        // changing session state from non-navigation commands.
         let engine = if let Some(ov) = engine_override {
-            self.set_active_engine(ov);
+            if is_navigation {
+                self.set_active_engine(ov)?;
+            }
             ov.to_string()
         } else {
-            self.get_active_engine()
+            self.get_active_engine()?
         };
 
         let cmd_args: Vec<&str> = if args_str.is_empty() {
@@ -310,7 +323,7 @@ impl Tool for BrowserTool {
                     .await
                 {
                     Ok(output) => {
-                        self.set_active_engine(ENGINE_CHROME);
+                        self.set_active_engine(ENGINE_CHROME)?;
                         tracing::info!("Chrome fallback succeeded, session switched to Chrome");
                         (output, ENGINE_CHROME.to_string())
                     }
@@ -340,12 +353,16 @@ impl Tool for BrowserTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BrowserConfig;
+    use crate::config::{BrowserConfig, BrowserEngine};
 
     fn make_tool(engine: &str) -> BrowserTool {
+        let engine_enum = match engine {
+            ENGINE_CHROME => BrowserEngine::Chrome,
+            _ => BrowserEngine::Lightpanda,
+        };
         BrowserTool::new(&BrowserConfig {
             enabled: true,
-            engine: engine.to_string(),
+            engine: engine_enum,
             executable_path: None,
             timeout_secs: 30,
         })
@@ -391,22 +408,22 @@ mod tests {
     #[test]
     fn test_engine_override_sets_active_engine() {
         let tool = make_tool(ENGINE_LIGHTPANDA);
-        assert_eq!(tool.get_active_engine(), ENGINE_LIGHTPANDA);
+        assert_eq!(tool.get_active_engine().unwrap(), ENGINE_LIGHTPANDA);
 
-        tool.set_active_engine(ENGINE_CHROME);
-        assert_eq!(tool.get_active_engine(), ENGINE_CHROME);
+        tool.set_active_engine(ENGINE_CHROME).unwrap();
+        assert_eq!(tool.get_active_engine().unwrap(), ENGINE_CHROME);
     }
 
     #[test]
     fn test_close_resets_active_engine() {
         let tool = make_tool(ENGINE_LIGHTPANDA);
 
-        tool.set_active_engine(ENGINE_CHROME);
-        assert_eq!(tool.get_active_engine(), ENGINE_CHROME);
+        tool.set_active_engine(ENGINE_CHROME).unwrap();
+        assert_eq!(tool.get_active_engine().unwrap(), ENGINE_CHROME);
 
         // Simulate what close does
-        tool.set_active_engine(&tool.default_engine);
-        assert_eq!(tool.get_active_engine(), ENGINE_LIGHTPANDA);
+        tool.set_active_engine(&tool.default_engine).unwrap();
+        assert_eq!(tool.get_active_engine().unwrap(), ENGINE_LIGHTPANDA);
     }
 
     #[test]
