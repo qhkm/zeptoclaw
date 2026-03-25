@@ -29,7 +29,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::config::{AcpChannelConfig, AcpHttpConfig};
@@ -344,6 +344,9 @@ impl AcpHttpChannel {
         if !cwd.starts_with('/') {
             return Self::json_rpc_error(id, -32602, "session/new: cwd must be an absolute path");
         }
+        if cwd.len() > 4096 {
+            return Self::json_rpc_error(id, -32602, "session/new: cwd exceeds 4096 bytes");
+        }
         let session_id = format!("acph_{}", super::acp_protocol::new_id());
         {
             let mut st = state.lock().await;
@@ -556,7 +559,11 @@ impl AcpHttpChannel {
             match tokio::time::timeout(Duration::from_secs(PROMPT_TIMEOUT_SECS), rx).await {
                 Ok(Ok(payload)) => payload,
                 Ok(Err(_)) => {
-                    // Sender was dropped (process shutting down).
+                    // Sender was dropped (process shutting down). Clean up
+                    // both maps so the session is not permanently stuck in
+                    // "prompt in flight" state.
+                    state.lock().await.pending.remove(session_id);
+                    pending_http.lock().await.remove(session_id);
                     let ev =
                         Self::sse_event(&Self::json_rpc_error(id, -32603, "agent session closed"));
                     let _ = stream.write_all(ev.as_bytes()).await;
@@ -950,10 +957,19 @@ impl Channel for AcpHttpChannel {
             .await;
         });
         self.accept_handle = Some(handle);
-        info!(
-            "ACP-HTTP channel started on {}:{}",
-            self.http_config.bind, self.http_config.port
-        );
+        if self.http_config.auth_token.is_none() {
+            warn!(
+                "ACP-HTTP channel started without an auth_token on {}:{}. \
+                 Combined with wildcard CORS, any webpage can reach this endpoint \
+                 (DNS rebinding risk). Set acp.http.auth_token in your config.",
+                self.http_config.bind, self.http_config.port
+            );
+        } else {
+            info!(
+                "ACP-HTTP channel started on {}:{}",
+                self.http_config.bind, self.http_config.port
+            );
+        }
         Ok(())
     }
 

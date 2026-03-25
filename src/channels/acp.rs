@@ -128,11 +128,6 @@ impl AcpChannel {
         let line = serde_json::to_string(&msg).map_err(|e| {
             ZeptoError::Channel(format!("ACP: failed to serialize notification: {}", e))
         })?;
-        if line.contains('\n') {
-            return Err(ZeptoError::Channel(
-                "ACP: notification must not contain newlines".into(),
-            ));
-        }
         let mut out = self.stdout.lock().await;
         out.write_all(line.as_bytes()).await?;
         out.write_all(b"\n").await?;
@@ -188,6 +183,19 @@ impl AcpChannel {
                 error: Some(super::acp_protocol::JsonRpcError {
                     code: -32602,
                     message: "session/new: cwd must be an absolute path".to_string(),
+                    data: None,
+                }),
+            };
+            return self.write_response(&response).await;
+        }
+        if cwd.len() > 4096 {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(super::acp_protocol::JsonRpcError {
+                    code: -32602,
+                    message: "session/new: cwd exceeds 4096 bytes".to_string(),
                     data: None,
                 }),
             };
@@ -665,7 +673,7 @@ impl AcpChannel {
         };
         for (session_id, pending) in orphans {
             let result = SessionPromptResult {
-                stop_reason: "error".to_string(),
+                stop_reason: "cancelled".to_string(),
             };
             if let Ok(result_val) = serde_json::to_value(result) {
                 let response = JsonRpcResponse {
