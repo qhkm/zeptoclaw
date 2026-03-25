@@ -27,6 +27,13 @@ done
 
 detect_engine() {
   if [ -n "${CONTAINER_ENGINE:-}" ]; then
+    case "$CONTAINER_ENGINE" in
+      docker|podman) ;;
+      *)
+        echo "Error: CONTAINER_ENGINE must be 'docker' or 'podman'" >&2
+        exit 1
+        ;;
+    esac
     if ! command -v "$CONTAINER_ENGINE" &>/dev/null; then
       echo "Error: CONTAINER_ENGINE=$CONTAINER_ENGINE not found" >&2
       exit 1
