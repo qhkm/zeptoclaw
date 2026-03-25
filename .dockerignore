@@ -18,6 +18,7 @@ docs/
 *.md
 
 # Development files
+!scripts/artifacts/
 .env
 .env.*
 *.log
@@ -42,7 +43,6 @@ assets/
 deploy/
 examples/
 panel/
-scripts/
 install.sh
 Makefile
 
