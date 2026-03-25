@@ -141,6 +141,22 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Escape a string for use inside an HTML attribute value (double-quoted).
+///
+/// The input may already be entity-escaped from Phase 3 (`escape_html`),
+/// so we reverse those entities first to avoid double-encoding
+/// (e.g. `&amp;` → `&amp;amp;`).
+fn escape_html_attr(s: &str) -> String {
+    // Undo Phase 3 escaping, then re-escape for attribute context.
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Validate that HTML tags are properly nested (no crossing tags).
 /// Returns `true` when the tag structure is well-formed.
 fn html_tags_valid(html: &str) -> bool {
@@ -238,7 +254,11 @@ fn render_telegram_html(content: &str) -> String {
         .into_owned();
     text = RE_LINK
         .replace_all(&text, |caps: &regex::Captures| {
-            format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
+            format!(
+                "<a href=\"{}\">{}</a>",
+                escape_html_attr(&caps[2]),
+                &caps[1]
+            )
         })
         .into_owned();
 
@@ -1896,6 +1916,23 @@ mod tests {
         assert_eq!(
             output,
             "<b>bold</b> and <i>italic</i> and <s>struck</s> and <code>code</code>"
+        );
+    }
+
+    #[test]
+    fn test_render_link_with_query_string() {
+        // URL ampersands must not be double-escaped (& → &amp; not &amp;amp;)
+        assert_eq!(
+            render_telegram_html("[search](https://example.com?a=1&b=2)"),
+            "<a href=\"https://example.com?a=1&amp;b=2\">search</a>"
+        );
+    }
+
+    #[test]
+    fn test_render_link_with_quotes_in_url() {
+        assert_eq!(
+            render_telegram_html("[q](https://example.com?q=\"hello\")"),
+            "<a href=\"https://example.com?q=&quot;hello&quot;\">q</a>"
         );
     }
 
