@@ -1546,6 +1546,54 @@ mod tests {
     }
 
     #[test]
+    fn test_escape_html_attr_double_quote() {
+        assert_eq!(escape_html_attr("\""), "&quot;");
+    }
+
+    #[test]
+    fn test_escape_html_attr_ampersand() {
+        assert_eq!(escape_html_attr("&"), "&amp;");
+    }
+
+    #[test]
+    fn test_escape_html_attr_angle_brackets() {
+        assert_eq!(escape_html_attr("<"), "&lt;");
+        assert_eq!(escape_html_attr(">"), "&gt;");
+    }
+
+    #[test]
+    fn test_escape_html_attr_no_double_encoding() {
+        // Input already entity-escaped from Phase 3 — should not double-encode
+        assert_eq!(escape_html_attr("&amp;"), "&amp;");
+        assert_eq!(escape_html_attr("&lt;"), "&lt;");
+        assert_eq!(escape_html_attr("&gt;"), "&gt;");
+    }
+
+    #[test]
+    fn test_escape_html_attr_mixed() {
+        assert_eq!(
+            escape_html_attr("&amp;<\"&lt;&amp;>"),
+            "&amp;&lt;&quot;&lt;&amp;&gt;"
+        );
+    }
+
+    #[test]
+    fn test_escape_html_attr_clean_url() {
+        assert_eq!(
+            escape_html_attr("https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn test_render_link_with_special_chars_in_url() {
+        assert_eq!(
+            render_telegram_html("See [docs](https://example.com?a=1&b=2)"),
+            "See <a href=\"https://example.com?a=1&amp;b=2\">docs</a>"
+        );
+    }
+
+    #[test]
     fn test_render_header() {
         assert_eq!(render_telegram_html("## Summary"), "<b>Summary</b>\n");
         assert_eq!(render_telegram_html("### Details"), "<b>Details</b>\n");
