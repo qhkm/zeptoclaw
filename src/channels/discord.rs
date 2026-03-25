@@ -1061,13 +1061,18 @@ impl DiscordChannel {
                                                                 if let Ok(msg_data) = serde_json::from_value::<MessageCreateData>(data.clone()) {
                                                                     let mut attachment_info = Vec::new();
                                                                     for att in &msg_data.attachments {
-                                                                        // Skip if no content type or size is too large (>20MB)
-                                                                        if att.content_type.is_none() || att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
-                                                                            if let Some(ref name) = att.filename {
-                                                                                if att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
-                                                                                    attachment_info.push(format!("[Attachment: {} (too large: {} MB)]", name, att.size.unwrap() / 1024 / 1024));
-                                                                                }
-                                                                            }
+                                                                        let filename = att.filename.as_deref().unwrap_or("unknown");
+                                                                        
+                                                                        // Skip if no content type
+                                                                        if att.content_type.is_none() {
+                                                                            attachment_info.push(format!("[Attachment: {} (no content type, skipped)]", filename));
+                                                                            continue;
+                                                                        }
+                                                                        
+                                                                        // Skip if size is too large (>20MB)
+                                                                        if att.size.is_some_and(|s| s > 20 * 1024 * 1024) {
+                                                                            let size_mb = att.size.unwrap() / 1024 / 1024;
+                                                                            attachment_info.push(format!("[Attachment: {} (too large: {} MB)]", filename, size_mb));
                                                                             continue;
                                                                         }
 
@@ -1110,15 +1115,18 @@ impl DiscordChannel {
                                                                                     }
                                                                                     inbound = inbound.with_media(media);
                                                                                 }
-                                                                                Ok(Err(e)) => warn!("Failed to download Discord attachment: {}", e),
+                                                                                Ok(Err(e)) => {
+                                                                                    warn!("Failed to download Discord attachment {}: {}", filename, e);
+                                                                                    attachment_info.push(format!("[Attachment: {} (download failed)]", filename));
+                                                                                }
                                                                                 Err(_) => {
-                                                                                    if let Some(ref name) = att.filename {
-                                                                                        warn!("Timeout downloading Discord attachment: {}", name);
-                                                                                    } else {
-                                                                                        warn!("Timeout downloading Discord attachment");
-                                                                                    }
+                                                                                    warn!("Timeout downloading Discord attachment: {}", filename);
+                                                                                    attachment_info.push(format!("[Attachment: {} (download timeout)]", filename));
                                                                                 }
                                                                             }
+                                                                        } else {
+                                                                            // Unsupported MIME type
+                                                                            attachment_info.push(format!("[Attachment: {} (unsupported type: {})]", filename, content_type));
                                                                         }
                                                                     }
 
@@ -1132,13 +1140,17 @@ impl DiscordChannel {
                                                                         inbound.content = content;
                                                                     }
                                                                 }
-                                                                if let Err(e) =
-                                                                    bus.publish_inbound(inbound).await
-                                                                {
-                                                                    error!(
-                                                                        "Failed to publish Discord inbound message: {}",
-                                                                        e
-                                                                    );
+                                                                
+                                                                // Only publish if message has content or media
+                                                                if !inbound.content.is_empty() || !inbound.media.is_empty() {
+                                                                    if let Err(e) = bus.publish_inbound(inbound).await {
+                                                                        error!(
+                                                                            "Failed to publish Discord inbound message: {}",
+                                                                            e
+                                                                        );
+                                                                    }
+                                                                } else {
+                                                                    debug!("Skipping empty Discord message after attachment processing");
                                                                 }
                                                             }
                                                         }
