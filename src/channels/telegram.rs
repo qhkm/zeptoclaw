@@ -786,25 +786,6 @@ impl Channel for TelegramChannel {
                                 .unwrap_or(false);
                             let has_image = has_photo || has_image_doc;
 
-                            // Debug: write media type detection to file for troubleshooting
-                            {
-                                let debug_msg = format!(
-                                    "[{}] photo={} doc={} animation={} video={} sticker={} text={} caption={:?}\n",
-                                    chrono::Utc::now().format("%H:%M:%S"),
-                                    msg.photo().is_some(),
-                                    msg.document().map(|d| format!("mime={:?}", d.mime_type)).unwrap_or_else(|| "none".into()),
-                                    msg.animation().is_some(),
-                                    msg.video().is_some(),
-                                    msg.sticker().is_some(),
-                                    msg.text().is_some(),
-                                    msg.caption().map(|c| crate::utils::string::preview(c, 50)),
-                                );
-                                let _ = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/home/ironbank/.zeptoclaw/sessions/telegram_debug.log")
-                                    .and_then(|mut f| std::io::Write::write_all(&mut f, debug_msg.as_bytes()));
-                            }
                             if let Some(text) = msg.text()
                                 .or_else(|| msg.caption())
                                 .or(if has_image { Some(BARE_PHOTO_PLACEHOLDER) } else { None })
