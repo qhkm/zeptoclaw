@@ -233,7 +233,7 @@ async fn configure_model_for_provider(config: &mut Config, provider: &str) -> Re
 
     println!();
     println!("Which model would you like to use?");
-    print!("{}", format_model_menu(&models, 30));
+    print!("{}", format_model_menu(&models, models.len()));
     println!();
     print!("Choice [1]: ");
     io::stdout().flush()?;
