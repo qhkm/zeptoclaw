@@ -494,7 +494,7 @@ fn resolve_credential(
     // Last-resort fallback: import from Claude CLI (Keychain / ~/.claude.json).
     // Disabled in test builds to avoid picking up real credentials from the host.
     #[cfg(not(test))]
-    if result.is_none() && spec.name == "anthropic" {
+    if result.is_none() && spec.name == "anthropic" && provider_config.is_some() {
         if let Some(token_set) = crate::auth::claude_import::read_claude_credentials() {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
             WARN_ONCE.call_once(|| {
