@@ -171,6 +171,55 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&gt;", ">")
 }
 
+/// Telegram's maximum message length in UTF-16 code units.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+
+/// Split a message into chunks that fit within `max_len` UTF-16 code units.
+/// Tries to break at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
+/// falling back to a hard split at `max_len`.
+fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.encode_utf16().count() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let utf16_len = remaining.encode_utf16().count();
+        if utf16_len <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find the byte offset corresponding to max_len UTF-16 code units.
+        let mut byte_offset = 0;
+        let mut u16_count = 0;
+        for ch in remaining.chars() {
+            let ch_u16_len = ch.len_utf16();
+            if u16_count + ch_u16_len > max_len {
+                break;
+            }
+            u16_count += ch_u16_len;
+            byte_offset += ch.len_utf8();
+        }
+
+        let window = &remaining[..byte_offset];
+
+        // Try paragraph break, then line break, then hard split.
+        let split_at = window
+            .rfind("\n\n")
+            .map(|p| p + 1) // keep one newline in current chunk
+            .or_else(|| window.rfind('\n').map(|p| p + 1))
+            .unwrap_or(byte_offset);
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start_matches('\n');
+    }
+
+    chunks
+}
+
 fn render_telegram_html(content: &str) -> String {
     // Phase 1: Extract fenced code blocks into placeholders.
     let mut code_blocks: Vec<String> = Vec::new();
@@ -1230,35 +1279,64 @@ impl Channel for TelegramChannel {
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
 
         let rendered = render_telegram_html(&msg.content);
-        let mut req = bot
-            .send_message(ChatId(chat_id), rendered)
-            .parse_mode(ParseMode::Html);
+        let chunks = chunk_message(&rendered, TELEGRAM_MAX_MESSAGE_LEN);
 
-        // Route reply to the correct forum topic when thread metadata is present.
-        if let Some(thread_id_str) = msg.metadata.get("telegram_thread_id") {
-            if let Ok(tid) = thread_id_str.parse::<i32>() {
+        let thread_id: Option<i32> = msg
+            .metadata
+            .get("telegram_thread_id")
+            .and_then(|s| s.parse().ok());
+
+        let reply_msg_id: Option<i32> = msg
+            .reply_to
+            .as_deref()
+            .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()))
+            .and_then(|s| s.parse().ok());
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut req = bot
+                .send_message(ChatId(chat_id), chunk.clone())
+                .parse_mode(ParseMode::Html);
+
+            if let Some(tid) = thread_id {
                 req = req
                     .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
             }
-        }
 
-        // Thread the reply back to the original inbound message.
-        {
-            let reply_id = msg
-                .reply_to
-                .as_deref()
-                .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()));
-            if let Some(id_str) = reply_id {
-                if let Ok(id) = id_str.parse::<i32>() {
+            // Only reply-thread the first chunk to the original message.
+            if i == 0 {
+                if let Some(id) = reply_msg_id {
                     req = req.reply_parameters(
                         ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
                     );
                 }
             }
-        }
 
-        req.await
-            .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
+            if let Err(e) = req.await {
+                error!(
+                    "Failed to send Telegram chunk {}/{}: {}",
+                    i + 1,
+                    chunks.len(),
+                    e
+                );
+                // Send a plain-text error fallback so the user knows something went wrong.
+                let fallback = format!(
+                    "[Error: message could not be delivered (part {}/{}). Try asking for a shorter response.]",
+                    i + 1,
+                    chunks.len()
+                );
+                let mut fallback_req = bot.send_message(ChatId(chat_id), fallback);
+                if let Some(tid) = thread_id {
+                    fallback_req = fallback_req.message_thread_id(teloxide::types::ThreadId(
+                        teloxide::types::MessageId(tid),
+                    ));
+                }
+                let _ = fallback_req.await;
+                return Err(ZeptoError::Channel(format!(
+                    "Failed to send Telegram message: {}",
+                    e
+                )));
+            }
+        }
 
         // Replace 👀 with ✅ now that the reply was sent successfully.
         if self.config.reactions {
@@ -1448,6 +1526,66 @@ mod tests {
             &allowlist, "123456", "alice", true
         ));
         assert!(telegram_allowlist_allows(&allowlist, "123456", "bob", true));
+    }
+
+    #[test]
+    fn test_chunk_message_short() {
+        let chunks = chunk_message("hello", 4096);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_message_exact_limit() {
+        let text = "a".repeat(4096);
+        let chunks = chunk_message(&text, 4096);
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_message_splits_at_paragraph() {
+        let para1 = "a".repeat(3000);
+        let para2 = "b".repeat(3000);
+        let text = format!("{}\n\n{}", para1, para2);
+        let chunks = chunk_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with('a'));
+        assert!(chunks[1].starts_with('b'));
+    }
+
+    #[test]
+    fn test_chunk_message_splits_at_newline() {
+        let line1 = "a".repeat(3000);
+        let line2 = "b".repeat(3000);
+        let text = format!("{}\n{}", line1, line2);
+        let chunks = chunk_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn test_chunk_message_hard_split() {
+        let text = "a".repeat(5000);
+        let chunks = chunk_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 4096);
+    }
+
+    #[test]
+    fn test_chunk_message_empty() {
+        let chunks = chunk_message("", 4096);
+        assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn test_chunk_message_multibyte() {
+        // Each emoji is 1 UTF-16 surrogate pair (2 code units)
+        let emoji = "\u{1F600}"; // 😀
+        let text = emoji.repeat(2500); // 5000 UTF-16 code units
+        let chunks = chunk_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        // Verify no chunk exceeds the limit in UTF-16
+        for chunk in &chunks {
+            assert!(chunk.encode_utf16().count() <= 4096);
+        }
     }
 
     #[test]
