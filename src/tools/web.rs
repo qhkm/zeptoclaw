@@ -198,7 +198,7 @@ impl Tool for WebSearchTool {
             .collect::<Vec<_>>();
 
         if results.is_empty() {
-            return Ok(ToolOutput::user_visible(format!(
+            return Ok(ToolOutput::llm_only(format!(
                 "No web search results found for '{}'.",
                 query
             )));
@@ -216,7 +216,10 @@ impl Tool for WebSearchTool {
             output.push('\n');
         }
 
-        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+        Ok(ToolOutput::split(
+            output.trim_end().to_string(),
+            "Searching (Brave)...",
+        ))
     }
 }
 
@@ -375,7 +378,7 @@ impl Tool for DdgSearchTool {
         let results = parse_ddg_html(&html, count);
 
         if results.is_empty() {
-            return Ok(ToolOutput::user_visible(format!(
+            return Ok(ToolOutput::llm_only(format!(
                 "No web search results found for '{}'.",
                 query
             )));
@@ -393,7 +396,10 @@ impl Tool for DdgSearchTool {
             output.push('\n');
         }
 
-        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+        Ok(ToolOutput::split(
+            output.trim_end().to_string(),
+            "Searching (DuckDuckGo)...",
+        ))
     }
 }
 
@@ -549,7 +555,7 @@ impl Tool for SearxngSearchTool {
         let results = parse_searxng_json(&body, count)?;
 
         if results.is_empty() {
-            return Ok(ToolOutput::user_visible(format!(
+            return Ok(ToolOutput::llm_only(format!(
                 "No web search results found for '{}'.",
                 query
             )));
@@ -567,7 +573,10 @@ impl Tool for SearxngSearchTool {
             output.push('\n');
         }
 
-        Ok(ToolOutput::user_visible(output.trim_end().to_string()))
+        Ok(ToolOutput::split(
+            output.trim_end().to_string(),
+            "Searching (SearXNG)...",
+        ))
     }
 }
 
