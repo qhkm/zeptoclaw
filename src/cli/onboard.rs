@@ -11,116 +11,168 @@ use zeptoclaw::providers::configured_provider_names;
 
 use super::common::{memory_backend_label, memory_citations_label, read_line, read_secret};
 
-/// Run the provider selection menu and configure chosen providers.
+/// Run the provider → API key → model selection flow.
 ///
-/// Shows a multi-select prompt where users can pick one or more providers.
-/// Returns Ok(()) after configuring all selected providers.
+/// Pick provider first, then configure API key, then pick model.
 async fn configure_providers(config: &mut Config) -> Result<()> {
     let config_path = Config::path();
 
-    println!("API Key Setup");
-    println!("=============");
+    println!("Provider Setup");
+    println!("==============");
     println!();
-    println!("Which AI providers would you like to configure?");
+    println!("Which AI provider would you like to use?");
     println!("  1. Anthropic (Claude) - Recommended");
-    println!("  2. OpenAI (GPT-4, etc.)");
+    println!("  2. OpenAI (GPT-4, o3, etc.)");
     println!("  3. OpenRouter (400+ models via single API key)");
-    println!("  4. All of the above");
-    println!("  5. Skip (configure later)");
+    println!("  4. Skip (configure later)");
     println!();
-    let (want_anthropic, want_openai, want_openrouter) = loop {
-        print!("Enter choices (comma-separated, e.g. 1,3 or 4) or 5 to skip: ");
+
+    let primary = loop {
+        print!("Choice [1]: ");
         io::stdout().flush()?;
 
         let input = read_line()?;
-        if input.trim().is_empty() {
-            println!("Skipping API key setup. You can configure later by:");
-            println!("  - Editing {:?}", config_path);
-            println!("  - Setting environment variables:");
-            println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
-            println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
-            println!("    ZEPTOCLAW_PROVIDERS_OPENROUTER_API_KEY=sk-or-...");
-            return Ok(());
-        }
+        let choice = input.trim();
 
-        let mut want_anthropic = false;
-        let mut want_openai = false;
-        let mut want_openrouter = false;
-        let mut want_all = false;
-        let mut want_skip = false;
-        let mut invalid_choices = Vec::new();
-
-        for raw_choice in input.split(',') {
-            let choice = raw_choice.trim().trim_end_matches('.');
-            if choice.is_empty() {
+        match choice {
+            "" | "1" => break "anthropic",
+            "2" => break "openai",
+            "3" => break "openrouter",
+            "4" => {
+                println!("Skipping provider setup. You can configure later by:");
+                println!("  - Editing {:?}", config_path);
+                println!("  - Setting environment variables:");
+                println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
+                println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
+                println!("    ZEPTOCLAW_PROVIDERS_OPENROUTER_API_KEY=sk-or-...");
+                return Ok(());
+            }
+            _ => {
+                println!("Invalid choice. Please enter 1, 2, 3, or 4.");
                 continue;
             }
-            match choice {
-                "1" => want_anthropic = true,
-                "2" => want_openai = true,
-                "3" => want_openrouter = true,
-                "4" => want_all = true,
-                "5" => want_skip = true,
-                _ => invalid_choices.push(choice.to_string()),
-            }
         }
-
-        if want_skip && (want_all || want_anthropic || want_openai || want_openrouter) {
-            println!("Invalid choice(s): 5 cannot be combined with other selections.");
-            continue;
-        }
-
-        if want_skip {
-            println!("Skipping API key setup. You can configure later by:");
-            println!("  - Editing {:?}", config_path);
-            println!("  - Setting environment variables:");
-            println!("    ZEPTOCLAW_PROVIDERS_ANTHROPIC_API_KEY=sk-ant-...");
-            println!("    ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...");
-            println!("    ZEPTOCLAW_PROVIDERS_OPENROUTER_API_KEY=sk-or-...");
-            return Ok(());
-        }
-
-        if !invalid_choices.is_empty() {
-            println!(
-                "Invalid choice(s): {}. Please use numbers 1, 2, 3, 4, and/or 5.",
-                invalid_choices.join(", ")
-            );
-            continue;
-        }
-
-        if want_all {
-            want_anthropic = true;
-            want_openai = true;
-            want_openrouter = true;
-        }
-
-        if !want_anthropic && !want_openai && !want_openrouter {
-            println!(
-                "No valid choices entered. Please try again, or press Enter / choose 5 to skip."
-            );
-            continue;
-        }
-
-        break (want_anthropic, want_openai, want_openrouter);
     };
 
-    if want_anthropic {
-        configure_anthropic(config).await?;
+    // Step 2: Configure API key for chosen provider
+    println!();
+    match primary {
+        "anthropic" => configure_anthropic(config).await?,
+        "openai" => configure_openai(config).await?,
+        "openrouter" => configure_openrouter(config).await?,
+        _ => {}
     }
-    if want_openai {
-        if want_anthropic {
-            println!();
+
+    // Step 3: Fetch models and let user pick
+    configure_model_for_provider(config, primary).await?;
+
+    // Offer to add more providers
+    println!();
+    print!("Add another provider? [y/N]: ");
+    io::stdout().flush()?;
+    let more = read_line()?.to_ascii_lowercase();
+    if matches!(more.trim(), "y" | "yes") {
+        println!();
+        println!("Which additional provider?");
+        let mut options = Vec::new();
+        if primary != "anthropic" {
+            options.push(("anthropic", "Anthropic (Claude)"));
         }
-        configure_openai(config).await?;
-    }
-    if want_openrouter {
-        if want_anthropic || want_openai {
-            println!();
+        if primary != "openai" {
+            options.push(("openai", "OpenAI (GPT-4, o3, etc.)"));
         }
-        configure_openrouter(config).await?;
+        if primary != "openrouter" {
+            options.push(("openrouter", "OpenRouter (400+ models)"));
+        }
+        for (i, (_, label)) in options.iter().enumerate() {
+            println!("  {}. {}", i + 1, label);
+        }
+        println!("  s. Skip");
+        println!();
+        print!("Choice: ");
+        io::stdout().flush()?;
+        let input = read_line()?;
+        let choice = input.trim();
+        if let Ok(idx) = choice.parse::<usize>() {
+            if idx >= 1 && idx <= options.len() {
+                let (provider, _) = options[idx - 1];
+                println!();
+                match provider {
+                    "anthropic" => configure_anthropic(config).await?,
+                    "openai" => configure_openai(config).await?,
+                    "openrouter" => configure_openrouter(config).await?,
+                    _ => {}
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Filter out non-chat models (embeddings, image gen, legacy completions, audio, TTS).
+fn filter_chat_models(models: Vec<String>) -> Vec<String> {
+    /// Prefixes/substrings that indicate non-chat models.
+    const EXCLUDE_PREFIXES: &[&str] = &[
+        "babbage",
+        "davinci",
+        "dall-e",
+        "tts-",
+        "whisper",
+        "text-embedding",
+        "text-moderation",
+        "text-search",
+        "text-similarity",
+        "code-search",
+        "code-davinci",
+        "code-cushman",
+        "ada",
+        "curie",
+        "chatgpt-image",
+        "computer-use",
+    ];
+    models
+        .into_iter()
+        .filter(|m| {
+            let lower = m.to_lowercase();
+            !EXCLUDE_PREFIXES.iter().any(|p| lower.starts_with(p))
+        })
+        .collect()
+}
+
+/// Sort models with popular/recommended ones first.
+fn sort_models_by_relevance(models: &mut [String]) {
+    /// Models in priority order — shown first if present.
+    const PREFERRED: &[&str] = &[
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o4-mini",
+        "o3",
+        "o3-mini",
+        "o1",
+        "o1-mini",
+        "claude-sonnet-4-5-20250514",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+    ];
+
+    models.sort_by(|a, b| {
+        let a_idx = PREFERRED.iter().position(|p| a.starts_with(p));
+        let b_idx = PREFERRED.iter().position(|p| b.starts_with(p));
+        match (a_idx, b_idx) {
+            (Some(ai), Some(bi)) => ai.cmp(&bi),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
+    });
 }
 
 /// Format a numbered model selection menu.
@@ -137,42 +189,19 @@ fn format_model_menu(models: &[String], max_display: usize) -> String {
     output
 }
 
-/// Model selection step for onboarding.
+/// Model selection for a specific provider.
 ///
-/// Shows available models for the configured provider(s) and lets the user pick one.
-/// Tries live fetch first, falls back to KNOWN_MODELS.
-async fn configure_model(config: &mut Config) -> Result<()> {
-    let providers = configured_provider_names(config);
-    if providers.is_empty() {
-        return Ok(());
-    }
-
+/// Fetches available models from the given provider, filters and sorts them,
+/// then lets the user pick one.
+async fn configure_model_for_provider(config: &mut Config, provider: &str) -> Result<()> {
     println!();
     println!("Model Selection");
     println!("===============");
-
-    // If multiple providers, ask which is primary
-    let primary = if providers.len() > 1 {
-        println!("Multiple providers configured. Which should be your default?");
-        for (i, p) in providers.iter().enumerate() {
-            println!("  {}. {}", i + 1, p);
-        }
-        println!();
-        print!("Choice [1]: ");
-        io::stdout().flush()?;
-        let input = read_line()?;
-        let idx = input.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
-        providers.get(idx).copied().unwrap_or(providers[0])
-    } else {
-        providers[0]
-    };
-
-    // Try live fetch, fall back to KNOWN_MODELS
     println!();
-    println!("Fetching available models from {}...", primary);
+    println!("Fetching available models from {}...", provider);
 
     let selections = zeptoclaw::providers::resolve_runtime_providers(config);
-    let selection = selections.iter().find(|s| s.name == primary);
+    let selection = selections.iter().find(|s| s.name == provider);
 
     let models: Vec<String> = if let Some(s) = selection {
         match super::common::fetch_provider_models(s).await {
@@ -181,7 +210,7 @@ async fn configure_model(config: &mut Config) -> Result<()> {
                 println!("  Could not fetch live models, showing known models.");
                 KNOWN_MODELS
                     .iter()
-                    .filter(|km| km.provider == primary)
+                    .filter(|km| km.provider == provider)
                     .map(|km| km.model.to_string())
                     .collect()
             }
@@ -189,19 +218,22 @@ async fn configure_model(config: &mut Config) -> Result<()> {
     } else {
         KNOWN_MODELS
             .iter()
-            .filter(|km| km.provider == primary)
+            .filter(|km| km.provider == provider)
             .map(|km| km.model.to_string())
             .collect()
     };
 
+    let mut models = filter_chat_models(models);
+    sort_models_by_relevance(&mut models);
+
     if models.is_empty() {
-        println!("  No models found for {}. Keeping default.", primary);
+        println!("  No models found for {}. Keeping default.", provider);
         return Ok(());
     }
 
     println!();
     println!("Which model would you like to use?");
-    print!("{}", format_model_menu(&models, 15));
+    print!("{}", format_model_menu(&models, 30));
     println!();
     print!("Choice [1]: ");
     io::stdout().flush()?;
@@ -211,7 +243,6 @@ async fn configure_model(config: &mut Config) -> Result<()> {
 
     match input {
         "" => {
-            // Enter = pick choice 1 (matches the "[1]" prompt hint)
             config.agents.defaults.model = models[0].clone();
             println!("  Set model to: {}", models[0]);
         }
@@ -237,7 +268,6 @@ async fn configure_model(config: &mut Config) -> Result<()> {
                     println!("  Invalid choice. Keeping default.");
                 }
             } else {
-                // Treat as a direct model ID
                 config.agents.defaults.model = choice.to_string();
                 println!("  Set model to: {}", choice);
             }
@@ -373,7 +403,6 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
 
         println!();
         configure_providers(&mut config).await?;
-        configure_model(&mut config).await?;
         configure_soul(&config)?;
 
         // Configure web search integration
@@ -435,8 +464,6 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         } else {
             configure_providers(&mut config).await?;
         }
-
-        configure_model(&mut config).await?;
 
         configure_soul(&config)?;
 
@@ -1292,5 +1319,52 @@ mod tests {
         assert!(menu.contains("5."));
         assert!(!menu.contains("6."));
         assert!(menu.contains("15 more"));
+    }
+
+    #[test]
+    fn test_filter_chat_models_removes_non_chat() {
+        let models = vec![
+            "gpt-4o".to_string(),
+            "gpt-4o-mini".to_string(),
+            "babbage-002".to_string(),
+            "dall-e-3".to_string(),
+            "davinci-002".to_string(),
+            "text-embedding-3-small".to_string(),
+            "tts-1".to_string(),
+            "whisper-1".to_string(),
+            "chatgpt-image-latest".to_string(),
+            "computer-use-preview".to_string(),
+            "o3-mini".to_string(),
+        ];
+        let filtered = filter_chat_models(models);
+        assert_eq!(filtered, vec!["gpt-4o", "gpt-4o-mini", "o3-mini"]);
+    }
+
+    #[test]
+    fn test_filter_chat_models_keeps_all_chat() {
+        let models = vec![
+            "gpt-4o".to_string(),
+            "claude-3-5-sonnet".to_string(),
+            "o1-mini".to_string(),
+        ];
+        let filtered = filter_chat_models(models);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn test_sort_models_preferred_first() {
+        let mut models = vec![
+            "gpt-3.5-turbo".to_string(),
+            "gpt-4o".to_string(),
+            "o3-mini".to_string(),
+            "gpt-4.1".to_string(),
+            "gpt-4o-mini".to_string(),
+        ];
+        sort_models_by_relevance(&mut models);
+        assert_eq!(models[0], "gpt-4.1");
+        assert_eq!(models[1], "gpt-4o");
+        assert_eq!(models[2], "gpt-4o-mini");
+        assert_eq!(models[3], "o3-mini");
+        assert_eq!(models[4], "gpt-3.5-turbo");
     }
 }
