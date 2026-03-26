@@ -124,6 +124,16 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         api_key_required: true,
     },
     ProviderSpec {
+        name: "vertex",
+        model_keywords: &["vertex"],
+        runtime_supported: true,
+        default_base_url: None, // constructed from project + location
+        backend: "vertex",
+        default_auth_header: None,
+        default_api_version: None,
+        api_key_required: false, // uses ADC or VERTEX_ACCESS_TOKEN; api_key holds project ID
+    },
+    ProviderSpec {
         name: "ollama",
         model_keywords: &["ollama"],
         runtime_supported: true,
@@ -224,6 +234,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "zhipu" => config.providers.zhipu.as_ref(),
         "vllm" => config.providers.vllm.as_ref(),
         "gemini" => config.providers.gemini.as_ref(),
+        "vertex" => config.providers.vertex.as_ref(),
         "ollama" => config.providers.ollama.as_ref(),
         "nvidia" => config.providers.nvidia.as_ref(),
         "deepseek" => config.providers.deepseek.as_ref(),

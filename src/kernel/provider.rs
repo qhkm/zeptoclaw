@@ -25,7 +25,7 @@ pub async fn build_provider_chain(
     config: &Config,
 ) -> Option<(Arc<dyn LLMProvider>, Vec<&'static str>)> {
     refresh_oauth_credentials_if_needed(config).await;
-    let (chain, names) = build_runtime_provider_chain(config)?;
+    let (chain, names) = build_runtime_provider_chain(config).await?;
     let chain = apply_retry_wrapper(chain, config);
     Some((Arc::from(chain), names))
 }
@@ -37,7 +37,7 @@ pub async fn build_provider_chain(
 /// presets.
 ///
 /// Moved from `cli/common.rs:139–199`.
-pub fn provider_from_runtime_selection(
+pub async fn provider_from_runtime_selection(
     selection: &RuntimeProviderSelection,
     configured_model: &str,
 ) -> Option<Box<dyn LLMProvider>> {
@@ -95,6 +95,23 @@ pub fn provider_from_runtime_selection(
             );
             Some(Box::new(provider))
         }
+        "vertex" => {
+            // For Vertex: api_key holds the GCP project ID, api_base holds the location.
+            // Auth: VERTEX_ACCESS_TOKEN (static) → ADC (auto-refresh via google-cloud-auth).
+            let api_key = if selection.api_key.is_empty() {
+                None
+            } else {
+                Some(selection.api_key.as_str())
+            };
+            let api_base = selection.api_base.as_deref().filter(|b| !b.is_empty());
+            crate::providers::vertex::VertexProvider::from_config(
+                api_key,
+                api_base,
+                configured_model,
+            )
+            .await
+            .map(|p| Box::new(p) as Box<dyn LLMProvider>)
+        }
         _ => None,
     }
 }
@@ -112,7 +129,7 @@ struct RuntimeProviderCandidate {
 /// chains them with `FallbackProvider` when `providers.fallback.enabled`.
 ///
 /// Moved from `cli/common.rs:251–315`.
-pub fn build_runtime_provider_chain(
+pub async fn build_runtime_provider_chain(
     config: &Config,
 ) -> Option<(Box<dyn LLMProvider>, Vec<&'static str>)> {
     let mut candidates: Vec<RuntimeProviderCandidate> = Vec::new();
@@ -122,7 +139,8 @@ pub fn build_runtime_provider_chain(
     let quota_store = Arc::new(crate::providers::QuotaStore::load_or_default());
 
     for selection in resolve_runtime_providers(config) {
-        if let Some(provider) = provider_from_runtime_selection(&selection, configured_model) {
+        if let Some(provider) = provider_from_runtime_selection(&selection, configured_model).await
+        {
             let quota =
                 provider_config_by_name(config, selection.name).and_then(|pc| pc.quota.clone());
             let provider =
@@ -408,28 +426,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_runtime_provider_chain_empty_when_no_provider() {
+    #[tokio::test]
+    async fn test_build_runtime_provider_chain_empty_when_no_provider() {
         let config = Config::default();
-        assert!(build_runtime_provider_chain(&config).is_none());
+        assert!(build_runtime_provider_chain(&config).await.is_none());
     }
 
-    #[test]
-    fn test_build_runtime_provider_chain_single_provider() {
+    #[tokio::test]
+    async fn test_build_runtime_provider_chain_single_provider() {
         let mut config = Config::default();
         config.providers.openai = Some(crate::config::ProviderConfig {
             api_key: Some("sk-openai".to_string()),
             ..Default::default()
         });
 
-        let (provider, names) =
-            build_runtime_provider_chain(&config).expect("provider chain should resolve");
+        let (provider, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("provider chain should resolve");
         assert_eq!(names, vec!["openai"]);
         assert_eq!(provider.name(), "openai");
     }
 
-    #[test]
-    fn test_build_runtime_provider_chain_preserves_registry_order() {
+    #[tokio::test]
+    async fn test_build_runtime_provider_chain_preserves_registry_order() {
         let mut config = Config::default();
         config.providers.fallback.enabled = true;
         config.providers.anthropic = Some(crate::config::ProviderConfig {
@@ -445,8 +464,9 @@ mod tests {
             ..Default::default()
         });
 
-        let (provider, names) =
-            build_runtime_provider_chain(&config).expect("provider chain should resolve");
+        let (provider, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("provider chain should resolve");
         assert_eq!(names, vec!["anthropic", "openai", "groq"]);
 
         let chain_name = provider.name();
@@ -454,8 +474,8 @@ mod tests {
         assert!(chain_name.contains("openai"));
     }
 
-    #[test]
-    fn test_build_runtime_provider_chain_honors_preferred_fallback_provider() {
+    #[tokio::test]
+    async fn test_build_runtime_provider_chain_honors_preferred_fallback_provider() {
         let mut config = Config::default();
         config.providers.fallback.enabled = true;
         config.providers.fallback.provider = Some("groq".to_string());
@@ -472,13 +492,14 @@ mod tests {
             ..Default::default()
         });
 
-        let (_provider, names) =
-            build_runtime_provider_chain(&config).expect("provider chain should resolve");
+        let (_provider, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("provider chain should resolve");
         assert_eq!(names, vec!["anthropic", "groq", "openai"]);
     }
 
-    #[test]
-    fn test_build_runtime_provider_chain_no_chain_when_fallback_disabled() {
+    #[tokio::test]
+    async fn test_build_runtime_provider_chain_no_chain_when_fallback_disabled() {
         let mut config = Config::default();
         config.providers.fallback.enabled = false;
         config.providers.anthropic = Some(crate::config::ProviderConfig {
@@ -490,8 +511,9 @@ mod tests {
             ..Default::default()
         });
 
-        let (provider, names) =
-            build_runtime_provider_chain(&config).expect("provider chain should resolve");
+        let (provider, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("provider chain should resolve");
         // Only the highest-priority provider is used
         assert_eq!(names, vec!["anthropic"]);
         assert_eq!(provider.name(), "claude");
@@ -556,8 +578,8 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn test_model_name_promotes_openai_over_anthropic() {
+    #[tokio::test]
+    async fn test_model_name_promotes_openai_over_anthropic() {
         let mut config = Config::default();
         config.agents.defaults.model = "gpt-4o".to_string();
         config.providers.anthropic = Some(crate::config::ProviderConfig {
@@ -568,16 +590,17 @@ mod tests {
             api_key: Some("sk-openai-test".to_string()),
             ..Default::default()
         });
-        let (_, names) =
-            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        let (_, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("should resolve with both keys present");
         assert_eq!(
             names[0], "openai",
             "gpt-4o model should promote openai to first"
         );
     }
 
-    #[test]
-    fn test_model_name_keeps_anthropic_when_claude() {
+    #[tokio::test]
+    async fn test_model_name_keeps_anthropic_when_claude() {
         let mut config = Config::default();
         config.agents.defaults.model = "claude-sonnet-4-5-20250929".to_string();
         config.providers.anthropic = Some(crate::config::ProviderConfig {
@@ -588,16 +611,17 @@ mod tests {
             api_key: Some("sk-openai-test".to_string()),
             ..Default::default()
         });
-        let (_, names) =
-            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        let (_, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("should resolve with both keys present");
         assert_eq!(
             names[0], "anthropic",
             "claude model should keep anthropic first"
         );
     }
 
-    #[test]
-    fn test_model_name_no_match_keeps_registry_order() {
+    #[tokio::test]
+    async fn test_model_name_no_match_keeps_registry_order() {
         let mut config = Config::default();
         config.agents.defaults.model = "some-unknown-model".to_string();
         config.providers.anthropic = Some(crate::config::ProviderConfig {
@@ -608,8 +632,9 @@ mod tests {
             api_key: Some("sk-openai-test".to_string()),
             ..Default::default()
         });
-        let (_, names) =
-            build_runtime_provider_chain(&config).expect("should resolve with both keys present");
+        let (_, names) = build_runtime_provider_chain(&config)
+            .await
+            .expect("should resolve with both keys present");
         assert_eq!(
             names[0], "anthropic",
             "unknown model should keep registry order"

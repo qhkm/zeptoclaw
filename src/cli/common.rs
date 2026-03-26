@@ -372,7 +372,7 @@ pub(crate) async fn create_agent_with_template(
     // so /model can switch between them at runtime.
     for selection in resolve_runtime_providers(&config) {
         if let Some(provider) =
-            provider_from_runtime_selection(&selection, &config.agents.defaults.model)
+            provider_from_runtime_selection(&selection, &config.agents.defaults.model).await
         {
             agent
                 .set_provider_in_registry(selection.name, provider)

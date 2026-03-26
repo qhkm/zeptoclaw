@@ -111,7 +111,9 @@ impl ZeptoKernel {
         // 5. Memory searcher + shared LTM
         let embedding_provider: Option<Arc<dyn LLMProvider>> =
             if matches!(config.memory.backend, MemoryBackend::Embedding) {
-                provider::build_runtime_provider_chain(&config).map(|(chain, _)| Arc::from(chain))
+                provider::build_runtime_provider_chain(&config)
+                    .await
+                    .map(|(chain, _)| Arc::from(chain))
             } else {
                 None
             };

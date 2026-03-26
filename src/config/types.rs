@@ -1438,6 +1438,10 @@ pub struct ProvidersConfig {
     pub vllm: Option<ProviderConfig>,
     /// Google Gemini configuration
     pub gemini: Option<ProviderConfig>,
+    /// Google Vertex AI configuration (Gemini models via Vertex AI regional endpoints).
+    /// `api_key` holds the GCP project ID, `api_base` holds the location (e.g. "us-central1").
+    #[serde(default)]
+    pub vertex: Option<ProviderConfig>,
     /// Ollama (local models) configuration
     pub ollama: Option<ProviderConfig>,
     /// Nvidia NIM configuration

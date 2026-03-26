@@ -420,6 +420,22 @@ impl Config {
             provider.api_base = Some(val);
         }
 
+        // Vertex AI (api_key = project ID, api_base = location)
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_API_KEY") {
+            let provider = self
+                .providers
+                .vertex
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_API_BASE") {
+            let provider = self
+                .providers
+                .vertex
+                .get_or_insert_with(ProviderConfig::default);
+            provider.api_base = Some(val);
+        }
+
         // vLLM
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VLLM_API_KEY") {
             let provider = self
@@ -616,6 +632,12 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_GEMINI_MODEL") {
             self.providers
                 .gemini
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_VERTEX_MODEL") {
+            self.providers
+                .vertex
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }

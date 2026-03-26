@@ -34,6 +34,7 @@ pub mod retry;
 pub mod rotation;
 pub mod structured;
 mod types;
+pub mod vertex;
 
 /// Provider IDs currently supported by the runtime.
 pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
@@ -44,6 +45,7 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "zhipu",
     "vllm",
     "gemini",
+    "vertex",
     "ollama",
     "nvidia",
     "deepseek",
@@ -79,6 +81,7 @@ pub use structured::{validate_json_response, OutputFormat};
 pub use types::{
     ChatOptions, LLMProvider, LLMResponse, LLMToolCall, StreamEvent, ToolDefinition, Usage,
 };
+pub use vertex::VertexProvider;
 
 /// Parse an HTTP status code and response body into a structured [`ProviderError`].
 ///

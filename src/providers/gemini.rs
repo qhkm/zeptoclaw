@@ -336,7 +336,7 @@ impl GeminiProvider {
     }
 
     /// Parse token usage from a Gemini response if available.
-    fn extract_usage(response: &Value) -> Option<Usage> {
+    pub fn extract_usage(response: &Value) -> Option<Usage> {
         let meta = response.get("usageMetadata")?;
         let prompt = meta["promptTokenCount"].as_u64()? as u32;
         let completion = meta["candidatesTokenCount"].as_u64()? as u32;
