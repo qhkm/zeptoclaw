@@ -380,7 +380,7 @@ fn safe_truncate_tail(s: &str, max_bytes: usize) -> &str {
 impl Default for ContextMonitor {
     fn default() -> Self {
         Self {
-            context_limit: 100_000,
+            context_limit: 180_000,
             threshold: 0.70,
             emergency_threshold: 0.90,
             critical_threshold: 0.95,
