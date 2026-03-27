@@ -476,7 +476,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            context_limit: 100_000,
+            context_limit: 180_000,
             threshold: 0.70,
             emergency_threshold: 0.90,
             critical_threshold: 0.95,
@@ -3113,7 +3113,7 @@ mod tests {
     fn test_compaction_config_defaults() {
         let config = CompactionConfig::default();
         assert!(config.enabled);
-        assert_eq!(config.context_limit, 100_000);
+        assert_eq!(config.context_limit, 180_000);
         assert!((config.threshold - 0.70).abs() < f64::EPSILON);
         assert!((config.emergency_threshold - 0.90).abs() < f64::EPSILON);
         assert!((config.critical_threshold - 0.95).abs() < f64::EPSILON);
@@ -3172,7 +3172,7 @@ mod tests {
     fn test_compaction_config_empty_json_uses_all_defaults() {
         let config: CompactionConfig = serde_json::from_str("{}").unwrap();
         assert!(config.enabled);
-        assert_eq!(config.context_limit, 100_000);
+        assert_eq!(config.context_limit, 180_000);
         assert!((config.input_headroom_ratio - 0.75).abs() < f64::EPSILON);
         assert_eq!(config.overflow_retries, 3);
     }
