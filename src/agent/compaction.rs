@@ -326,7 +326,7 @@ pub fn shrink_tool_results_progressive(
 /// use zeptoclaw::agent::compaction::try_recover_context;
 ///
 /// let msgs = vec![Message::user("Hello"), Message::assistant("Hi!")];
-/// let (result, tier) = try_recover_context(msgs, 100_000, 8, 5120);
+/// let (result, tier) = try_recover_context(msgs, 100_000, 8, 5120, 1.2);
 /// assert_eq!(tier, 0); // no recovery needed
 /// ```
 pub fn try_recover_context(
@@ -334,6 +334,7 @@ pub fn try_recover_context(
     context_limit: usize,
     keep_recent_tier1: usize,
     tool_result_budget: usize,
+    safety_margin: f64,
 ) -> (Vec<Message>, u8) {
     try_recover_context_with_urgency(
         messages,
@@ -341,6 +342,7 @@ pub fn try_recover_context(
         CompactionUrgency::Normal,
         keep_recent_tier1,
         tool_result_budget,
+        safety_margin,
     )
 }
 
@@ -351,13 +353,14 @@ pub fn try_recover_context_with_urgency(
     urgency: CompactionUrgency,
     keep_recent_tier1: usize,
     tool_result_budget: usize,
+    safety_margin: f64,
 ) -> (Vec<Message>, u8) {
     use super::context_monitor::ContextMonitor;
 
     let target = context_limit as f64 * 0.95;
 
     // Check if recovery is needed
-    let estimated = ContextMonitor::estimate_tokens(&messages);
+    let estimated = ContextMonitor::estimate_tokens_with_margin(&messages, safety_margin);
     if (estimated as f64) <= target {
         return (messages, 0);
     }
@@ -371,14 +374,14 @@ pub fn try_recover_context_with_urgency(
         CompactionUrgency::Emergency => {
             // Emergency path: prioritize fast truncation, avoid summarization.
             let recovered = truncate_messages(messages, keep_recent_tier1.min(5));
-            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            let estimated = ContextMonitor::estimate_tokens_with_margin(&recovered, safety_margin);
             if (estimated as f64) <= target {
                 return (recovered, 1);
             }
 
             let emergency_budget = (tool_result_budget / 2).max(1).min(tool_result_budget);
             let recovered = shrink_tool_results_progressive(recovered, emergency_budget, 2);
-            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            let estimated = ContextMonitor::estimate_tokens_with_margin(&recovered, safety_margin);
             if (estimated as f64) <= target {
                 return (recovered, 2);
             }
@@ -387,14 +390,14 @@ pub fn try_recover_context_with_urgency(
         CompactionUrgency::Normal => {
             // Tier 1: Truncate old messages
             let recovered = truncate_messages(messages, keep_recent_tier1);
-            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            let estimated = ContextMonitor::estimate_tokens_with_margin(&recovered, safety_margin);
             if (estimated as f64) <= target {
                 return (recovered, 1);
             }
 
             // Tier 2: Shrink tool results progressively
             let recovered = shrink_tool_results_progressive(recovered, tool_result_budget, 3);
-            let estimated = ContextMonitor::estimate_tokens(&recovered);
+            let estimated = ContextMonitor::estimate_tokens_with_margin(&recovered, safety_margin);
             if (estimated as f64) <= target {
                 return (recovered, 2);
             }
@@ -825,7 +828,7 @@ mod tests {
     #[test]
     fn test_try_recover_context_no_recovery_needed() {
         let msgs = vec![Message::user("Hello"), Message::assistant("Hi!")];
-        let (result, tier) = try_recover_context(msgs.clone(), 100_000, 8, 5120);
+        let (result, tier) = try_recover_context(msgs.clone(), 100_000, 8, 5120, 1.2);
         assert_eq!(tier, 0);
         assert_eq!(result.len(), 2);
     }
@@ -838,7 +841,7 @@ mod tests {
         let msgs: Vec<Message> = (0..6)
             .map(|_| Message::user("one two three four five six seven eight nine ten"))
             .collect();
-        let (result, tier) = try_recover_context(msgs, 100, 3, 5120);
+        let (result, tier) = try_recover_context(msgs, 100, 3, 5120, 1.2);
         assert_eq!(tier, 1);
         assert_eq!(result.len(), 3);
     }
@@ -881,7 +884,7 @@ mod tests {
         // Shrunk recent (3): (200/2+4)*1.2 ≈ 124 each = 373.
         // Total: 6 + 68 + 373 + 18 = 465 < 760. Should be tier 2.
 
-        let (result, tier) = try_recover_context(msgs, 800, 8, 200);
+        let (result, tier) = try_recover_context(msgs, 800, 8, 200, 1.2);
         assert!(
             tier == 2 || tier == 1,
             "Expected tier 1 or 2, got tier {}",
@@ -911,7 +914,7 @@ mod tests {
         let msgs: Vec<Message> = (0..10)
             .map(|_| Message::user("one two three four five six seven eight nine ten"))
             .collect();
-        let (result, tier) = try_recover_context(msgs, 100, 8, 5120);
+        let (result, tier) = try_recover_context(msgs, 100, 8, 5120, 1.2);
         assert_eq!(tier, 3);
         assert_eq!(result.len(), 3);
         let estimated = super::super::context_monitor::ContextMonitor::estimate_tokens(&result);
@@ -928,7 +931,7 @@ mod tests {
             .map(|_| Message::user("one two three four five six seven eight nine ten"))
             .collect();
         let (result, tier) =
-            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Emergency, 8, 5120);
+            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Emergency, 8, 5120, 1.2);
         assert!(tier >= 1);
         assert!(result.len() <= 6);
     }
@@ -939,7 +942,7 @@ mod tests {
             .map(|_| Message::user("one two three four five six seven eight nine ten"))
             .collect();
         let (result, tier) =
-            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Critical, 8, 5120);
+            try_recover_context_with_urgency(msgs, 100, CompactionUrgency::Critical, 8, 5120, 1.2);
         assert_eq!(tier, 3);
         assert!(result.len() <= 6);
     }
