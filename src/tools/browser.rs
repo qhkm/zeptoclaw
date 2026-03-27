@@ -313,11 +313,29 @@ impl Tool for BrowserTool {
             self.get_active_engine()
         };
 
-        // Split args into separate tokens for proper CLI argument passing.
+        // Build CLI args. Most commands take discrete tokens that can be split on
+        // whitespace. However, `fill`/`type` take `<selector> <text>` where the text
+        // portion may contain spaces, `keyboard` takes `<subcommand> <text>`, and
+        // `eval` takes a single JS expression. Handle these specially.
         let cmd_args: Vec<&str> = if args_str.is_empty() {
             vec![]
         } else {
-            args_str.split_whitespace().collect()
+            match command {
+                // <selector> <text> — split into exactly two args
+                "fill" | "type" => match args_str.split_once(char::is_whitespace) {
+                    Some((sel, text)) => vec![sel, text.trim_start()],
+                    None => vec![args_str],
+                },
+                // <subcommand> <text> — e.g. "type hello world" or "inserttext hello"
+                "keyboard" => match args_str.split_once(char::is_whitespace) {
+                    Some((sub, text)) => vec![sub, text.trim_start()],
+                    None => vec![args_str],
+                },
+                // Single expression/arg — don't split
+                "eval" => vec![args_str],
+                // All other commands: discrete tokens
+                _ => args_str.split_whitespace().collect(),
+            }
         };
 
         let (output, engine) = match self
