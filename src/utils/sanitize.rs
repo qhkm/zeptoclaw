@@ -94,11 +94,36 @@ pub fn compute_tool_result_budget(
     pending_result_count: usize,
     max_result_bytes: usize,
 ) -> usize {
+    compute_tool_result_budget_with_share(
+        context_limit,
+        current_usage_tokens,
+        pending_result_count,
+        max_result_bytes,
+        0.50,
+    )
+}
+
+/// Like [`compute_tool_result_budget`] but also enforces that no single result
+/// may exceed `single_result_share` of the context window (in bytes).
+pub fn compute_tool_result_budget_with_share(
+    context_limit: usize,
+    current_usage_tokens: usize,
+    pending_result_count: usize,
+    max_result_bytes: usize,
+    single_result_share: f64,
+) -> usize {
     let remaining_tokens = context_limit.saturating_sub(current_usage_tokens);
     let remaining_bytes = remaining_tokens * BYTES_PER_TOKEN;
     let count = pending_result_count.max(1);
     let per_result = remaining_bytes / count;
-    let max_budget = max_result_bytes.max(MIN_RESULT_BUDGET);
+
+    // Cap each result at single_result_share of the full context window
+    let share_cap_bytes = (context_limit as f64 * single_result_share) as usize * BYTES_PER_TOKEN;
+    let max_budget = max_result_bytes
+        .max(MIN_RESULT_BUDGET)
+        .min(share_cap_bytes)
+        .max(MIN_RESULT_BUDGET); // ensure max_budget >= MIN for clamp safety
+
     per_result.clamp(MIN_RESULT_BUDGET, max_budget)
 }
 
@@ -269,5 +294,51 @@ mod tests {
     fn test_compute_budget_respects_custom_max() {
         let budget = compute_tool_result_budget(100_000, 10_000, 1, 8_192);
         assert_eq!(budget, 8_192);
+    }
+
+    // --- compute_tool_result_budget_with_share tests ---
+
+    #[test]
+    fn test_budget_with_share_caps_at_share() {
+        // context_limit=10_000, share=0.10 → share_cap = 10_000 * 0.10 * 4 = 4_000 bytes
+        // max_result_bytes=20_480 would normally be the cap, but share is lower.
+        let budget = compute_tool_result_budget_with_share(10_000, 0, 1, 20_480, 0.10);
+        assert_eq!(budget, 4_000);
+    }
+
+    #[test]
+    fn test_budget_with_share_uses_max_when_share_is_large() {
+        // context_limit=100_000, share=0.50 → share_cap = 200_000 bytes
+        // max_result_bytes=20_480 is lower than share cap, so max_result_bytes wins.
+        let budget = compute_tool_result_budget_with_share(100_000, 0, 1, 20_480, 0.50);
+        assert_eq!(budget, 20_480);
+    }
+
+    #[test]
+    fn test_budget_with_share_respects_remaining_space() {
+        // context_limit=1_000, current_usage=900 → remaining=100 tokens → 400 bytes
+        // 1 result, share=0.50 → share_cap=2_000 bytes (not the limiting factor)
+        // max_result_bytes=20_480 (not the limiting factor)
+        // per_result = 400, clamped to min(400, min(20_480, 2_000)) = 400
+        let budget = compute_tool_result_budget_with_share(1_000, 900, 1, 20_480, 0.50);
+        assert_eq!(budget, MIN_RESULT_BUDGET.max(400));
+    }
+
+    #[test]
+    fn test_budget_with_share_never_below_min() {
+        // Tiny share: 0.01 → share_cap = 100*0.01*4 = 4 bytes, but MIN is 1024
+        let budget = compute_tool_result_budget_with_share(100, 0, 1, 20_480, 0.01);
+        assert_eq!(budget, MIN_RESULT_BUDGET);
+    }
+
+    #[test]
+    fn test_budget_with_share_multiple_results() {
+        // context_limit=10_000, 0 usage, 5 results, share=0.20
+        // remaining=10_000 tokens → 40_000 bytes, per_result=8_000
+        // share_cap = 10_000 * 0.20 * 4 = 8_000
+        // max_budget = min(20_480, 8_000) = 8_000
+        // clamped: min(8_000, 8_000) = 8_000
+        let budget = compute_tool_result_budget_with_share(10_000, 0, 5, 20_480, 0.20);
+        assert_eq!(budget, 8_000);
     }
 }

@@ -211,6 +211,12 @@ pub fn shrink_tool_results(
                     original_len,
                     msg.content.len()
                 ));
+                // Keep content_parts in sync so token estimation uses the shrunk size
+                if !msg.content_parts.is_empty() {
+                    msg.content_parts = vec![ContentPart::Text {
+                        text: msg.content.clone(),
+                    }];
+                }
                 shrunk_count += 1;
             }
             msg
@@ -285,6 +291,12 @@ pub fn shrink_tool_results_progressive(
                 original_len,
                 msg.content.len()
             ));
+            // Keep content_parts in sync so token estimation uses the shrunk size
+            if !msg.content_parts.is_empty() {
+                msg.content_parts = vec![ContentPart::Text {
+                    text: msg.content.clone(),
+                }];
+            }
         }
     }
     messages
@@ -745,6 +757,69 @@ mod tests {
         assert_eq!(result[1].content, "middle");
     }
 
+    // ── content_parts sync ──────────────────────────────────────────
+
+    #[test]
+    fn test_shrink_tool_results_syncs_content_parts() {
+        // Create a tool result with populated content_parts
+        let big = "x".repeat(500);
+        let mut msg = Message::tool_result("call_1", &big);
+        // content_parts is auto-populated by Message::tool_result
+        assert!(!msg.content_parts.is_empty());
+        assert_eq!(msg.content_parts.len(), 1);
+
+        let (result, count) = shrink_tool_results(vec![msg], 100);
+        assert_eq!(count, 1);
+        // content_parts should be updated to match shrunk content
+        assert_eq!(result[0].content_parts.len(), 1);
+        match &result[0].content_parts[0] {
+            ContentPart::Text { text } => {
+                assert_eq!(
+                    text, &result[0].content,
+                    "content_parts must match content after shrink"
+                );
+                assert!(text.contains("[shrunk from"));
+            }
+            _ => panic!("Expected Text content part"),
+        }
+    }
+
+    #[test]
+    fn test_shrink_progressive_syncs_content_parts() {
+        let big = "x".repeat(500);
+        let msgs = vec![
+            Message::tool_result("call_1", &big), // old, gets budget/4
+            Message::tool_result("call_2", &big), // recent
+        ];
+        // Verify content_parts are populated
+        assert!(!msgs[0].content_parts.is_empty());
+
+        let result = shrink_tool_results_progressive(msgs, 100, 1);
+        // Both should have been shrunk and content_parts synced
+        for msg in &result {
+            assert_eq!(msg.content_parts.len(), 1);
+            if let ContentPart::Text { text } = &msg.content_parts[0] {
+                assert_eq!(text, &msg.content, "content_parts must match content");
+            } else {
+                panic!("Expected Text content part");
+            }
+        }
+    }
+
+    #[test]
+    fn test_shrink_no_content_parts_leaves_empty() {
+        // If content_parts is empty, it should stay empty after shrink
+        let mut msg = Message::tool_result("call_1", &"x".repeat(500));
+        msg.content_parts.clear();
+
+        let (result, count) = shrink_tool_results(vec![msg], 100);
+        assert_eq!(count, 1);
+        assert!(
+            result[0].content_parts.is_empty(),
+            "Empty content_parts should remain empty"
+        );
+    }
+
     // ── try_recover_context ──────────────────────────────────────────
 
     #[test]
@@ -771,54 +846,42 @@ mod tests {
     #[test]
     fn test_try_recover_context_tier2_needed() {
         // Construct a case where tier 1 isn't enough but tier 2 is.
-        // Use a system message + a few user messages + large tool results.
-        // context_limit = 200, so target is 190 (95%).
+        // With chars-based estimation + 1.2 safety margin:
+        //   Tool result: (content.len()/2 + 4) * 1.2
+        //   User msg:    (content.len()/4 + 4) * 1.2
         //
-        // System message: "sys" = 1 word => 1*1.3+4 = 5.3 => 5 tokens
-        // We add 10 user messages of 10 words each = 10*17 = 170 tokens
-        // Plus 2 large tool results of 2000 bytes each.
-        // Total with 10 user + 2 tool results ~ 5 + 170 + (tool tokens) > 190.
-        //
-        // After tier 1 (keep 8): system + 8 recent messages.
-        // If the 8 recent include the tool results, they still have huge content
-        // pushing tokens high. After tier 2 shrinks them, tokens drop.
-        //
-        // For simplicity: use limit=500, lots of messages and big tool results.
-        let mut msgs = vec![Message::system("system prompt")];
-        // Add 20 user messages (each 10 words = 17 tokens)
-        for _ in 0..20 {
-            msgs.push(Message::user(
-                "one two three four five six seven eight nine ten",
-            ));
+        // Use large tool results that survive tier 1 but get shrunk in tier 2.
+        let mut msgs = vec![Message::system("sys")];
+        // Add 15 user messages (small, "short" = 5 chars → ~7 tokens each)
+        for _ in 0..15 {
+            msgs.push(Message::user("short"));
         }
-        // Add 5 large tool results (each ~3000 bytes, many words)
+        // Add 5 large tool results (400 chars each)
+        // Each: (400/2 + 4) * 1.2 = 204 * 1.2 ≈ 244 tokens. 5 of them = 1222 tokens.
         for i in 0..5 {
-            let big = "word ".repeat(600); // 600 words => 600*1.3+4 = 784 tokens
-            msgs.push(Message::tool_result(&format!("call_{}", i), &big));
+            let big = "x".repeat(400);
+            msgs.push(Message::tool_result(&format!("call_{i}"), &big));
         }
         // Add 3 more user messages at the end
         for _ in 0..3 {
-            msgs.push(Message::user(
-                "one two three four five six seven eight nine ten",
-            ));
+            msgs.push(Message::user("short"));
         }
 
-        // Total: system(5) + 20*17(340) + 5*784(3920) + 3*17(51) = ~4316 tokens
-        // context_limit = 4500, target = 4275
-        // After tier 1 (keep 8): system + last 8 msgs.
-        // Last 8 = 5 tool results + 3 user msgs = 5*784 + 3*17 = 3920+51 = 3971
-        // Plus system = 3976. Still > 4275? No, 3976 < 4275. Hmm.
-        //
-        // Let's use a tighter limit to force tier 2.
-        // context_limit = 2000, target = 1900
-        // After tier 1 (keep 8): system(5) + 5 tool results(3920) + 3 user(51) = 3976 > 1900
-        // After tier 2: shrink tool results. Recent 3 tool results get 5120 budget,
-        // older 2 get 1280 budget. But word count matters for token estimation.
-        // With budget=100 bytes, "word " * 600 = 3000 bytes truncated to 100 bytes
-        // = ~20 words => 20*1.3+4 = 30 tokens.
-        // 5 tool results at ~30 tokens = 150, + system(5) + 3 user(51) = 206 < 1900.
+        // After tier 1 (keep 8): system + last 8 = 5 tool results + 3 user msgs
+        // Tool results: 400 chars each, tool_result_chars_per_token=2, margin=1.2
+        // Each: (400/2+4)*1.2 ≈ 244 tokens. 5 of them = 1222.
+        // User: "short" = 5 chars, (5/4+4)*1.2 ≈ 6 each. 3*6 = 18.
+        // System: "sys" = 3 chars, (3/4+4)*1.2 ≈ 6.
+        // After tier 1: ~1246 tokens.
+        // Use context_limit = 2000, target = 1900. After tier 1: 1246 < 1900 → tier 1!
+        // We need context_limit < 1246/0.95 ≈ 1312 to force tier 2.
+        // Use context_limit = 800, target = 760. After tier 1: 1246 > 760 → tier 2.
+        // After tier 2 with budget=200: older results get 50 bytes, recent 3 get 200.
+        // Shrunk older (2): (50/2+4)*1.2 ≈ 34 each = 68.
+        // Shrunk recent (3): (200/2+4)*1.2 ≈ 124 each = 373.
+        // Total: 6 + 68 + 373 + 18 = 465 < 760. Should be tier 2.
 
-        let (result, tier) = try_recover_context(msgs, 2000, 8, 100);
+        let (result, tier) = try_recover_context(msgs, 800, 8, 200);
         assert!(
             tier == 2 || tier == 1,
             "Expected tier 1 or 2, got tier {}",
@@ -827,10 +890,10 @@ mod tests {
         // Verify context was actually reduced
         let estimated = super::super::context_monitor::ContextMonitor::estimate_tokens(&result);
         assert!(
-            (estimated as f64) <= 2000.0 * 0.95,
+            (estimated as f64) <= 800.0 * 0.95,
             "Estimated {} should be <= {}",
             estimated,
-            (2000.0 * 0.95) as usize
+            (800.0 * 0.95) as usize
         );
     }
 
