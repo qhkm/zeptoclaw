@@ -104,7 +104,6 @@ pub fn classify_error_message(msg: &str) -> ProviderError {
             "too many tokens",
             "request too large",
             "token limit",
-            "max_tokens",
             "input is too long",
             "exceeds the model",
         ],
@@ -264,8 +263,12 @@ mod tests {
     }
 
     #[test]
-    fn test_context_overflow_max_tokens_pattern() {
-        let e = classify_error_message("max_tokens limit reached for prompt");
-        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    fn test_max_tokens_validation_not_misclassified_as_overflow() {
+        // "max_tokens must be at least 1" is a config error, not context overflow
+        let e = classify_error_message("max_tokens must be at least 1");
+        assert!(
+            !matches!(e, ProviderError::ContextOverflow(_)),
+            "max_tokens validation errors should not be classified as ContextOverflow"
+        );
     }
 }

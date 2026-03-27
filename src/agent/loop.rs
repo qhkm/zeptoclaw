@@ -1040,6 +1040,7 @@ impl AgentLoop {
                     urgency,
                     8,               // keep_recent for tier 1
                     tool_result_cap, // tool result budget for tier 2
+                    self.config.compaction.safety_margin,
                 );
                 if tier > 0 {
                     debug!(
@@ -1085,6 +1086,7 @@ impl AgentLoop {
                             CompactionUrgency::Emergency,
                             5,
                             tool_result_cap,
+                            self.config.compaction.safety_margin,
                         );
                     session.messages = recovered;
                     messages = self
@@ -1182,6 +1184,7 @@ impl AgentLoop {
                     urgency,
                     8,
                     cap,
+                    self.config.compaction.safety_margin,
                 );
                 session.messages = recovered;
                 last_messages = self
@@ -1617,6 +1620,7 @@ impl AgentLoop {
                             urgency,
                             8,
                             cap,
+                            self.config.compaction.safety_margin,
                         );
                     if tier > 0 {
                         debug!(tier = tier, "In-loop context recovered via tier {}", tier);
@@ -1665,6 +1669,7 @@ impl AgentLoop {
                                 CompactionUrgency::Emergency,
                                 5,
                                 cap,
+                                self.config.compaction.safety_margin,
                             );
                         session.messages = recovered;
                         messages = self
@@ -1749,6 +1754,7 @@ impl AgentLoop {
                                 CompactionUrgency::Emergency,
                                 5,
                                 cap,
+                                self.config.compaction.safety_margin,
                             );
                         session.messages = recovered;
                         messages = self
@@ -1918,6 +1924,7 @@ impl AgentLoop {
                     urgency,
                     8,               // keep_recent for tier 1
                     tool_result_cap, // tool result budget for tier 2
+                    self.config.compaction.safety_margin,
                 );
                 if tier > 0 {
                     debug!(
@@ -1959,6 +1966,7 @@ impl AgentLoop {
                             CompactionUrgency::Emergency,
                             5,
                             tool_result_cap,
+                            self.config.compaction.safety_margin,
                         );
                     session.messages = recovered;
                     messages = self
@@ -2023,6 +2031,7 @@ impl AgentLoop {
                     urgency,
                     8,
                     cap,
+                    self.config.compaction.safety_margin,
                 );
                 session.messages = recovered;
                 last_messages = self
@@ -2424,6 +2433,7 @@ impl AgentLoop {
                             urgency,
                             8,
                             cap,
+                            self.config.compaction.safety_margin,
                         );
                     if tier > 0 {
                         debug!(
@@ -2514,6 +2524,7 @@ impl AgentLoop {
                                 CompactionUrgency::Emergency,
                                 5,
                                 cap,
+                                self.config.compaction.safety_margin,
                             );
                         session.messages = recovered;
                         messages = self
