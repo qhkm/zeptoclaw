@@ -156,6 +156,14 @@ const TOOLS: &[ToolInfo] = &[
         opt_in: false,
     },
     ToolInfo {
+        name: "browser",
+        description: "Headless browser via agent-browser (Lightpanda + Chrome fallback)",
+        requires_config: true,
+        config_hint:
+            "Set tools.browser.enabled=true. Requires: agent-browser + Chrome; Lightpanda optional",
+        opt_in: false,
+    },
+    ToolInfo {
         name: "grep",
         description: "Search file contents by regex pattern",
         requires_config: false,
@@ -321,6 +329,7 @@ fn is_tool_configured(config: &Config, name: &str) -> bool {
                 || config.channels.discord.as_ref().is_some_and(|c| c.enabled)
         }
         "r8r" => std::env::var("R8R_API_URL").is_ok(),
+        "browser" => config.tools.browser.enabled,
         _ => true,
     }
 }
@@ -362,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_tools_list_count() {
-        assert_eq!(TOOLS.len(), 22);
+        assert_eq!(TOOLS.len(), 23);
     }
 
     #[test]

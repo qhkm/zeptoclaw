@@ -88,9 +88,10 @@ struct ConfiguredProviders {
     models: Vec<(String, String)>,
 }
 /// Shared map of active typing indicator tasks, keyed by chat_id (or
-/// "chat_id:thread_id" for forum topics). The CancellationToken lets
-/// `send()` stop the typing loop when the response is ready.
-type TypingMap = Arc<DashMap<String, CancellationToken>>;
+/// "chat_id:thread_id" for forum topics). Each entry stores a generation
+/// counter alongside the CancellationToken so that an old task's cleanup
+/// cannot accidentally remove a newer task's entry.
+type TypingMap = Arc<DashMap<String, (u64, CancellationToken)>>;
 
 /// Bundles override stores and shared state into one DI dependency so that
 /// dptree's 9-parameter arity limit is not exceeded.
@@ -99,6 +100,7 @@ struct OverridesDep {
     model: ModelOverrideStore,
     persona: PersonaOverrideStore,
     typing: TypingMap,
+    typing_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +409,8 @@ pub struct TelegramChannel {
     longterm_memory: Option<Arc<Mutex<LongTermMemory>>>,
     /// Active typing indicator tasks per chat (or chat:thread for forums).
     typing_indicators: TypingMap,
+    /// Monotonic counter for typing indicator generations (prevents race conditions).
+    typing_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Shared HTTP client for downloading media (connection pool reuse).
     http_client: reqwest::Client,
 }
@@ -494,6 +498,7 @@ impl TelegramChannel {
             configured_models,
             longterm_memory,
             typing_indicators: Arc::new(DashMap::new()),
+            typing_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -588,6 +593,7 @@ impl Channel for TelegramChannel {
             model: self.model_overrides.clone(),
             persona: self.persona_overrides.clone(),
             typing: self.typing_indicators.clone(),
+            typing_gen: self.typing_generation.clone(),
         };
         let default_model = DefaultModel(self.default_model.clone());
         let configured_providers = ConfiguredProviders {
@@ -693,6 +699,7 @@ impl Channel for TelegramChannel {
                             let model_overrides = overrides_dep.model;
                             let persona_overrides = overrides_dep.persona;
                             let typing_indicators = overrides_dep.typing;
+                            let typing_gen = overrides_dep.typing_gen;
                             let configured_providers = configured_providers_dep.names;
                             let configured_models = configured_providers_dep.models;
                             // Extract user ID and optional username
@@ -738,18 +745,22 @@ impl Channel for TelegramChannel {
                             {
                                 use teloxide::types::ChatAction;
 
-                                // Key includes message ID so concurrent messages
-                                // in the same chat each get their own indicator.
                                 let typing_key = match msg.thread_id {
-                                    Some(tid) => {
-                                        format!("{}:{}:{}", msg.chat.id.0, tid.0 .0, msg.id.0)
-                                    }
-                                    None => format!("{}:{}", msg.chat.id.0, msg.id.0),
+                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
+                                    None => msg.chat.id.0.to_string(),
                                 };
 
+                                // Cancel any stale typing task for this chat
+                                // (e.g. rapid successive messages).
+                                if let Some((_, (_, old_token))) = typing_indicators.remove(&typing_key)
+                                {
+                                    old_token.cancel();
+                                }
+
+                                let gen = typing_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let cancel_token = CancellationToken::new();
                                 typing_indicators
-                                    .insert(typing_key.clone(), cancel_token.clone());
+                                    .insert(typing_key.clone(), (gen, cancel_token.clone()));
 
                                 let typing_bot = bot.clone();
                                 let typing_chat_id = msg.chat.id;
@@ -758,27 +769,35 @@ impl Channel for TelegramChannel {
                                 let typing_map_key = typing_key;
 
                                 tokio::spawn(async move {
-                                    loop {
-                                        let mut action = typing_bot.send_chat_action(
-                                            typing_chat_id,
-                                            ChatAction::Typing,
-                                        );
-                                        if let Some(tid) = typing_thread_id {
-                                            action = action.message_thread_id(tid);
-                                        }
-                                        if let Err(e) = action.await {
-                                            debug!(
-                                                "Typing indicator send failed for {}: {}",
-                                                typing_map_key, e
-                                            );
-                                        }
+                                    tokio::select! {
+                                        _ = async {
+                                            loop {
+                                                let mut action = typing_bot.send_chat_action(
+                                                    typing_chat_id,
+                                                    ChatAction::Typing,
+                                                );
+                                                if let Some(tid) = typing_thread_id {
+                                                    action = action.message_thread_id(tid);
+                                                }
+                                                if let Err(e) = action.await {
+                                                    debug!(
+                                                        "Typing indicator send failed for {}: {}",
+                                                        typing_map_key, e
+                                                    );
+                                                }
 
-                                        tokio::select! {
-                                            _ = cancel_token.cancelled() => break,
-                                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
-                                        }
+                                                tokio::select! {
+                                                    _ = cancel_token.cancelled() => break,
+                                                    _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                                                }
+                                            }
+                                        } => {},
+                                        _ = tokio::time::sleep(Duration::from_secs(300)) => {
+                                            debug!("Typing indicator timed out for {}", typing_map_key);
+                                        },
                                     }
-                                    typing_map.remove(&typing_map_key);
+                                    // Only remove if this task's generation still owns the entry.
+                                    typing_map.remove_if(&typing_map_key, |_, (stored_gen, _)| *stored_gen == gen);
                                 });
                             }
 
@@ -920,6 +939,10 @@ impl Channel for TelegramChannel {
                                             let _ = apply_thread_id(req, &thread_id).await;
                                         }
                                     }
+                                    // Cancel typing indicator before returning
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
+                                    }
                                     return Ok(());
                                 }
 
@@ -1002,6 +1025,10 @@ impl Channel for TelegramChannel {
                                                 );
                                             let _ = apply_thread_id(req, &thread_id).await;
                                         }
+                                    }
+                                    // Cancel typing indicator before returning
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
                                     }
                                     return Ok(());
                                 }
@@ -1098,7 +1125,20 @@ impl Channel for TelegramChannel {
                                 // Skip publishing if image failed and text is the synthetic placeholder
                                 if !image_ok && text == BARE_PHOTO_PLACEHOLDER {
                                 } else if let Err(e) = bus.publish_inbound(inbound).await {
+                                    // Cancel typing indicator on publish failure
+                                    if let Some((_, (_, token))) = typing_indicators.remove(&override_key) {
+                                        token.cancel();
+                                    }
                                     error!("Failed to publish inbound message to bus: {}", e);
+                                }
+                            } else {
+                                // Non-text message — cancel typing indicator
+                                let typing_key = match msg.thread_id {
+                                    Some(tid) => format!("{}:{}", msg.chat.id.0, tid.0 .0),
+                                    None => msg.chat.id.0.to_string(),
+                                };
+                                if let Some((_, (_, token))) = typing_indicators.remove(&typing_key) {
+                                    token.cancel();
                                 }
                             }
 
@@ -1173,7 +1213,7 @@ impl Channel for TelegramChannel {
 
         // Cancel all active typing indicators
         for entry in self.typing_indicators.iter() {
-            entry.value().cancel();
+            entry.value().1.cancel();
         }
         self.typing_indicators.clear();
 
@@ -1208,15 +1248,13 @@ impl Channel for TelegramChannel {
             ZeptoError::Channel(format!("Invalid Telegram chat ID: {}", msg.chat_id))
         })?;
 
-        // Cancel the typing indicator for this specific message before sending.
-        // The key includes the inbound message ID so concurrent messages in the
-        // same chat each have their own indicator (fixes race condition).
-        if let Some(msg_id) = msg.metadata.get("telegram_message_id") {
-            let typing_key = match msg.metadata.get("telegram_thread_id") {
-                Some(tid) => format!("{}:{}:{}", chat_id, tid, msg_id),
-                None => format!("{}:{}", chat_id, msg_id),
-            };
-            if let Some((_, token)) = self.typing_indicators.remove(&typing_key) {
+        let typing_key = match msg.metadata.get("telegram_thread_id") {
+            Some(tid) => format!("{}:{}", chat_id, tid),
+            None => chat_id.to_string(),
+        };
+        let keep_typing = msg.metadata.get("keep_typing").is_some_and(|v| v == "true");
+        if !keep_typing {
+            if let Some((_, (_, token))) = self.typing_indicators.remove(&typing_key) {
                 token.cancel();
             }
         }
@@ -1898,42 +1936,52 @@ mod tests {
     }
 
     #[test]
-    fn test_typing_key_format_consistency() {
-        // The inbound handler builds: format!("{}:{}:{}", chat_id, tid, msg_id)
-        // The send() path builds:     format!("{}:{}:{}", chat_id, tid, msg_id)
-        // Both must produce identical keys for cancellation to work.
-        let chat_id: i64 = 123456789;
-        let thread_id: i32 = 42;
-        let msg_id: i32 = 100;
+    fn test_typing_key_matches_override_key_with_thread() {
+        // Handler typing_key uses numeric values; override_key and send() use strings.
+        // Both must produce identical keys so send() cancels the right indicator.
+        let chat_id_num: i64 = 123456789;
+        let thread_id_num: i32 = 42;
 
-        // Simulate handler key (chat.id.0 is i64, tid.0.0 is i32, msg.id.0 is i32)
-        let handler_key_threaded = format!("{}:{}:{}", chat_id, thread_id, msg_id);
-        let handler_key_plain = format!("{}:{}", chat_id, msg_id);
+        // Handler path (msg.chat.id.0 and tid.0.0)
+        let typing_key = format!("{}:{}", chat_id_num, thread_id_num);
 
-        // Simulate send() key (chat_id is i64, tid and msg_id are &str from metadata)
-        let send_key_threaded = format!(
-            "{}:{}:{}",
-            chat_id,
-            thread_id.to_string(),
-            msg_id.to_string()
-        );
-        let send_key_plain = format!("{}:{}", chat_id, msg_id.to_string());
+        // send() path (parsed chat_id string and metadata string)
+        let chat_id_str = chat_id_num.to_string();
+        let thread_id_str = thread_id_num.to_string();
+        let send_key = format!("{}:{}", chat_id_str, thread_id_str);
 
-        assert_eq!(handler_key_threaded, send_key_threaded);
-        assert_eq!(handler_key_plain, send_key_plain);
+        assert_eq!(typing_key, send_key);
     }
 
     #[test]
-    fn test_typing_key_per_message_isolation() {
-        // Two messages in the same chat should have different typing keys
-        // so cancelling one doesn't affect the other.
+    fn test_typing_key_matches_override_key_no_thread() {
+        let chat_id_num: i64 = 123456789;
+
+        let typing_key = chat_id_num.to_string();
+
+        let chat_id_str = chat_id_num.to_string();
+        let send_key = chat_id_str.to_string();
+
+        assert_eq!(typing_key, send_key);
+    }
+
+    #[test]
+    fn test_typing_key_format_consistency() {
+        // The inbound handler builds: format!("{}:{}", msg.chat.id.0, tid.0.0)
+        // The send() path builds:     format!("{}:{}", chat_id, tid)
+        // Both must produce identical keys for cancellation to work.
         let chat_id: i64 = 123456789;
-        let msg_id_a: i32 = 100;
-        let msg_id_b: i32 = 101;
+        let thread_id: i32 = 42;
 
-        let key_a = format!("{}:{}", chat_id, msg_id_a);
-        let key_b = format!("{}:{}", chat_id, msg_id_b);
+        // Simulate handler key (chat.id.0 is i64, tid.0.0 is i32)
+        let handler_key_threaded = format!("{}:{}", chat_id, thread_id);
+        let handler_key_plain = chat_id.to_string();
 
-        assert_ne!(key_a, key_b);
+        // Simulate send() key (chat_id is i64, tid is &str from metadata)
+        let send_key_threaded = format!("{}:{}", chat_id, thread_id.to_string());
+        let send_key_plain = chat_id.to_string();
+
+        assert_eq!(handler_key_threaded, send_key_threaded);
+        assert_eq!(handler_key_plain, send_key_plain);
     }
 }
