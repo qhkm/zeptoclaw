@@ -1323,7 +1323,10 @@ impl AgentLoop {
             );
 
             // Compute dynamic tool result budget based on remaining context space
-            let current_tokens = ContextMonitor::estimate_tokens(&session.messages);
+            let current_tokens = ContextMonitor::estimate_tokens_with_margin(
+                &session.messages,
+                self.config.compaction.safety_margin,
+            );
             let context_limit = self.config.compaction.context_limit;
             let max_result_bytes = self.config.agents.defaults.max_tool_result_bytes;
             let result_budget = crate::utils::sanitize::compute_tool_result_budget_with_share(
@@ -1677,9 +1680,45 @@ impl AgentLoop {
                             .await;
                     }
                 }
-                response = provider
-                    .chat(messages, vec![], model, options.clone())
-                    .await?;
+                response = {
+                    let max_retries = self.config.compaction.overflow_retries;
+                    let mut last_messages = messages;
+                    let mut result = provider
+                        .chat(last_messages.clone(), vec![], model, options.clone())
+                        .await;
+                    let mut attempt = 0u32;
+                    while let Err(ref e) = result {
+                        if !Self::is_context_overflow(e) || attempt >= max_retries {
+                            break;
+                        }
+                        warn!(
+                            attempt = attempt + 1,
+                            max = max_retries,
+                            "Context overflow in synthesis call, compacting and retrying"
+                        );
+                        let urgency = Self::overflow_retry_urgency(attempt);
+                        let ctx_limit = self.config.compaction.context_limit;
+                        let cap = self.config.agents.defaults.max_tool_result_bytes;
+                        let (recovered, _) =
+                            crate::agent::compaction::try_recover_context_with_urgency(
+                                session.messages,
+                                ctx_limit,
+                                urgency,
+                                5,
+                                cap,
+                                self.config.compaction.safety_margin,
+                            );
+                        session.messages = recovered;
+                        last_messages = self
+                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .await;
+                        result = provider
+                            .chat(last_messages.clone(), vec![], model, options.clone())
+                            .await;
+                        attempt += 1;
+                    }
+                    result?
+                };
                 if let (Some(metrics), Some(usage)) =
                     (usage_metrics.as_ref(), response.usage.as_ref())
                 {
@@ -1773,9 +1812,59 @@ impl AgentLoop {
                 });
             }
 
-            response = provider
-                .chat(messages, tool_definitions, model, options.clone())
-                .await?;
+            response = {
+                let max_retries = self.config.compaction.overflow_retries;
+                let mut last_messages = messages;
+                let mut last_tool_defs = tool_definitions;
+                let mut result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                let mut attempt = 0u32;
+                while let Err(ref e) = result {
+                    if !Self::is_context_overflow(e) || attempt >= max_retries {
+                        break;
+                    }
+                    warn!(
+                        attempt = attempt + 1,
+                        max = max_retries,
+                        "Context overflow in tool loop, compacting and retrying"
+                    );
+                    let urgency = Self::overflow_retry_urgency(attempt);
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                        session.messages,
+                        ctx_limit,
+                        urgency,
+                        8,
+                        cap,
+                        self.config.compaction.safety_margin,
+                    );
+                    session.messages = recovered;
+                    last_messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                    last_tool_defs = {
+                        let tools = self.tools.read().await;
+                        tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                    };
+                    result = provider
+                        .chat(
+                            last_messages.clone(),
+                            last_tool_defs.clone(),
+                            model,
+                            options.clone(),
+                        )
+                        .await;
+                    attempt += 1;
+                }
+                result?
+            };
 
             // Send thinking done feedback
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -2148,7 +2237,10 @@ impl AgentLoop {
             );
 
             // Compute dynamic tool result budget based on remaining context space
-            let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
+            let current_tokens_stream = ContextMonitor::estimate_tokens_with_margin(
+                &session.messages,
+                self.config.compaction.safety_margin,
+            );
             let context_limit_stream = self.config.compaction.context_limit;
             let max_result_bytes_stream = self.config.agents.defaults.max_tool_result_bytes;
             let result_budget_stream =
@@ -2542,9 +2634,59 @@ impl AgentLoop {
                 });
             }
 
-            response = provider
-                .chat(messages, tool_definitions, model, options.clone())
-                .await?;
+            response = {
+                let max_retries = self.config.compaction.overflow_retries;
+                let mut last_messages = messages;
+                let mut last_tool_defs = tool_definitions;
+                let mut result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                let mut attempt = 0u32;
+                while let Err(ref e) = result {
+                    if !Self::is_context_overflow(e) || attempt >= max_retries {
+                        break;
+                    }
+                    warn!(
+                        attempt = attempt + 1,
+                        max = max_retries,
+                        "Context overflow in streaming tool loop, compacting and retrying"
+                    );
+                    let urgency = Self::overflow_retry_urgency(attempt);
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                        session.messages,
+                        ctx_limit,
+                        urgency,
+                        8,
+                        cap,
+                        self.config.compaction.safety_margin,
+                    );
+                    session.messages = recovered;
+                    last_messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                    last_tool_defs = {
+                        let tools = self.tools.read().await;
+                        tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                    };
+                    result = provider
+                        .chat(
+                            last_messages.clone(),
+                            last_tool_defs.clone(),
+                            model,
+                            options.clone(),
+                        )
+                        .await;
+                    attempt += 1;
+                }
+                result?
+            };
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
                     tool_name: String::new(),

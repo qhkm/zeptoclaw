@@ -338,10 +338,12 @@ impl ContextMonitor {
             }
         }
 
-        // Pass 3: check if still over 90% of context_limit
+        // Pass 3: check if still over the configured thresholds
         let final_total =
             Self::estimate_tokens_full(messages, tool_definitions, self.safety_margin);
-        if final_total > (self.context_limit as f64 * 0.90) as usize {
+        let hard_limit = (self.context_limit as f64 * self.emergency_threshold) as usize;
+        let compaction_limit = budget.min(hard_limit);
+        if final_total > compaction_limit {
             return PreflightAction::NeedsCompaction;
         }
 
