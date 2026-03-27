@@ -329,6 +329,7 @@ fn is_tool_configured(config: &Config, name: &str) -> bool {
                 || config.channels.discord.as_ref().is_some_and(|c| c.enabled)
         }
         "r8r" => std::env::var("R8R_API_URL").is_ok(),
+        "browser" => config.tools.browser.enabled,
         _ => true,
     }
 }
