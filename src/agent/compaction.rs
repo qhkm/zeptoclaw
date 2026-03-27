@@ -766,7 +766,7 @@ mod tests {
     fn test_shrink_tool_results_syncs_content_parts() {
         // Create a tool result with populated content_parts
         let big = "x".repeat(500);
-        let mut msg = Message::tool_result("call_1", &big);
+        let msg = Message::tool_result("call_1", &big);
         // content_parts is auto-populated by Message::tool_result
         assert!(!msg.content_parts.is_empty());
         assert_eq!(msg.content_parts.len(), 1);
