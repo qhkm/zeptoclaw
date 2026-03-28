@@ -21,6 +21,12 @@ use crate::utils::metrics::MetricsCollector;
 
 const FILE_BODY_IGNORED_POLICY_RULES: &[&str] = &["shell_injection"];
 
+/// Web-content tools return HTML/JS from external pages which routinely
+/// contain `$()`, backticks, and other shell metacharacters that trigger
+/// false-positive `shell_injection` blocks on output scanning.
+const WEB_OUTPUT_IGNORED_POLICY_RULES: &[&str] = &["shell_injection"];
+const WEB_CONTENT_TOOLS: &[&str] = &["web_fetch", "web_screenshot", "browser"];
+
 fn blocked_input_output(name: &str, result: SafetyResult) -> ToolOutput {
     ToolOutput::error(format!(
         "Tool '{}' input blocked by safety: {}",
@@ -149,8 +155,19 @@ pub async fn execute_tool(
     };
 
     // Step 4: Safety check on output
+    //
+    // Web-content tools (web_fetch, web_screenshot, browser) suppress the
+    // shell_injection rule on output — HTML/JS from external pages routinely
+    // contains `$()` and backticks that cause false-positive blocks.
     if let Some(safety_layer) = safety {
-        let result = safety_layer.scan(&output.for_llm, CheckDirection::Output);
+        let result = if WEB_CONTENT_TOOLS.contains(&name) {
+            let options = ScanOptions {
+                ignored_policy_rules: WEB_OUTPUT_IGNORED_POLICY_RULES,
+            };
+            safety_layer.scan_with_options(&output.for_llm, CheckDirection::Output, &options)
+        } else {
+            safety_layer.scan(&output.for_llm, CheckDirection::Output)
+        };
         if result.blocked {
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(ToolOutput::error(format!(
@@ -617,5 +634,40 @@ mod tests {
             2,
             "metrics should count exactly once even for error paths"
         );
+    }
+
+    /// Web-content tools suppress shell_injection on output scanning so that
+    /// HTML/JS with `$()` and backticks does not cause false-positive blocks.
+    #[test]
+    fn test_web_output_scan_allows_shell_like_content() {
+        let safety = SafetyLayer::new(SafetyConfig::default());
+        let payload = "JavaScript: var x = $(document).ready(); echo `date`";
+
+        // Without exemption: should be blocked
+        let result = safety.scan(payload, CheckDirection::Output);
+        assert!(
+            result.blocked,
+            "default output scan should block shell metacharacters"
+        );
+
+        // With WEB_OUTPUT_IGNORED_POLICY_RULES: should pass
+        let options = ScanOptions {
+            ignored_policy_rules: WEB_OUTPUT_IGNORED_POLICY_RULES,
+        };
+        let result = safety.scan_with_options(payload, CheckDirection::Output, &options);
+        assert!(
+            !result.blocked,
+            "web tool output with $() and backticks should not be blocked"
+        );
+    }
+
+    /// Verify the WEB_CONTENT_TOOLS list matches expected tool names.
+    #[test]
+    fn test_web_content_tools_list() {
+        assert!(WEB_CONTENT_TOOLS.contains(&"web_fetch"));
+        assert!(WEB_CONTENT_TOOLS.contains(&"web_screenshot"));
+        assert!(WEB_CONTENT_TOOLS.contains(&"browser"));
+        assert!(!WEB_CONTENT_TOOLS.contains(&"echo"));
+        assert!(!WEB_CONTENT_TOOLS.contains(&"shell"));
     }
 }
