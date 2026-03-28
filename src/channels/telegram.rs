@@ -187,12 +187,17 @@ fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
         }
 
         // Find the largest split point within max_len at a natural boundary.
-        let search = &remaining[..max_len];
+        // Floor to a char boundary so we never slice mid-codepoint.
+        let mut end = max_len.min(remaining.len());
+        while end > 0 && !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let search = &remaining[..end];
         let split_pos = search
             .rfind("\n\n")
             .map(|p| p + 2)
             .or_else(|| search.rfind('\n').map(|p| p + 1))
-            .unwrap_or(max_len);
+            .unwrap_or(end);
 
         let (chunk, rest) = remaining.split_at(split_pos);
         chunks.push(chunk.to_string());
@@ -2087,5 +2092,66 @@ mod tests {
         let chunks = chunk_message(text, 30);
         let reassembled: String = chunks.concat();
         assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_chunk_message_utf8_safe() {
+        // 4-byte emoji repeated — split_at must land on a char boundary.
+        // rfind('\n') returns char-aligned positions, so this should be safe.
+        let text = format!("{}\n{}", "🦀".repeat(20), "🦀".repeat(20));
+        let chunks = chunk_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
+    }
+
+    // ── plaintext fallback tests ─────────────────────────────────────
+
+    #[test]
+    fn test_plaintext_fallback_for_crossing_tags() {
+        // Markdown that could produce crossing <b>/<i> tags: bold wrapping
+        // italic that extends beyond it.
+        let inputs = [
+            "**bold *and italic** end*",
+            "***triple*** and **double** and *single*",
+            "## Header with **bold _and italic_**\n\nParagraph with `code`.",
+            "Check [this link](https://example.com) and **bold**",
+        ];
+        for input in &inputs {
+            let rendered = render_telegram_html(input);
+            let plain = strip_html_tags(&rendered);
+            // Plaintext must not contain any HTML tags.
+            assert!(
+                !plain.contains('<') && !plain.contains('>'),
+                "strip_html_tags left tags in output for input: {input}\nplaintext: {plain}"
+            );
+            // Must not be empty.
+            assert!(!plain.trim().is_empty(), "plaintext is empty for: {input}");
+        }
+    }
+
+    #[test]
+    fn test_chunked_render_stays_within_telegram_limit() {
+        // Simulate a long research response (~8KB of markdown).
+        let mut long_text = String::new();
+        for i in 0..80 {
+            long_text.push_str(&format!(
+                "## Developer {i}\n\n\
+                 **Ethos:** This developer is known for deeply technical blog posts \
+                 exploring language design tradeoffs and strong opinions on zero-cost \
+                 abstractions and the importance of ergonomics in systems programming.\n\n"
+            ));
+        }
+        let max_chunk = TELEGRAM_MAX_MESSAGE_LENGTH - CHUNK_HEADROOM;
+        let chunks = chunk_message(&long_text, max_chunk);
+        assert!(chunks.len() > 1, "should produce multiple chunks");
+        for (i, chunk) in chunks.iter().enumerate() {
+            let rendered = render_telegram_html(chunk);
+            assert!(
+                rendered.len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "chunk {i} rendered to {} chars, exceeds {TELEGRAM_MAX_MESSAGE_LENGTH}",
+                rendered.len()
+            );
+        }
     }
 }
