@@ -442,16 +442,48 @@ pub struct CompactionConfig {
     pub emergency_threshold: f64,
     /// Fraction (0.0-1.0) for critical hard-trim mode.
     pub critical_threshold: f64,
+    /// Fraction of context_limit usable for messages (reserves rest for tool
+    /// definitions, system prompt, and output tokens). Default: 0.75.
+    #[serde(default = "default_input_headroom_ratio")]
+    pub input_headroom_ratio: f64,
+    /// Maximum fraction of context window a single tool result may consume.
+    /// Default: 0.50.
+    #[serde(default = "default_single_tool_result_share")]
+    pub single_tool_result_share: f64,
+    /// Safety margin multiplier for token estimates (>1.0 = conservative).
+    /// Default: 1.2.
+    #[serde(default = "default_safety_margin")]
+    pub safety_margin: f64,
+    /// Maximum overflow retries before giving up. Default: 3.
+    #[serde(default = "default_overflow_retries")]
+    pub overflow_retries: u32,
+}
+
+fn default_input_headroom_ratio() -> f64 {
+    0.75
+}
+fn default_single_tool_result_share() -> f64 {
+    0.50
+}
+fn default_safety_margin() -> f64 {
+    1.2
+}
+fn default_overflow_retries() -> u32 {
+    3
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            context_limit: 100_000,
+            enabled: true,
+            context_limit: 180_000,
             threshold: 0.70,
             emergency_threshold: 0.90,
             critical_threshold: 0.95,
+            input_headroom_ratio: default_input_headroom_ratio(),
+            single_tool_result_share: default_single_tool_result_share(),
+            safety_margin: default_safety_margin(),
+            overflow_retries: default_overflow_retries(),
         }
     }
 }
@@ -3073,6 +3105,76 @@ mod tests {
         let cfg: WebSearchConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.provider.as_deref(), Some("searxng"));
         assert_eq!(cfg.api_url.as_deref(), Some("https://search.example.com"));
+    }
+
+    // ── CompactionConfig ─────────────────────────────────────────────
+
+    #[test]
+    fn test_compaction_config_defaults() {
+        let config = CompactionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.context_limit, 180_000);
+        assert!((config.threshold - 0.70).abs() < f64::EPSILON);
+        assert!((config.emergency_threshold - 0.90).abs() < f64::EPSILON);
+        assert!((config.critical_threshold - 0.95).abs() < f64::EPSILON);
+        assert!((config.input_headroom_ratio - 0.75).abs() < f64::EPSILON);
+        assert!((config.single_tool_result_share - 0.50).abs() < f64::EPSILON);
+        assert!((config.safety_margin - 1.2).abs() < f64::EPSILON);
+        assert_eq!(config.overflow_retries, 3);
+    }
+
+    #[test]
+    fn test_compaction_config_deserialize_all_fields() {
+        let json = r#"{
+            "enabled": true,
+            "context_limit": 50000,
+            "threshold": 0.60,
+            "emergency_threshold": 0.85,
+            "critical_threshold": 0.92,
+            "input_headroom_ratio": 0.70,
+            "single_tool_result_share": 0.40,
+            "safety_margin": 1.5,
+            "overflow_retries": 5
+        }"#;
+        let config: CompactionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.context_limit, 50_000);
+        assert!((config.threshold - 0.60).abs() < f64::EPSILON);
+        assert!((config.emergency_threshold - 0.85).abs() < f64::EPSILON);
+        assert!((config.critical_threshold - 0.92).abs() < f64::EPSILON);
+        assert!((config.input_headroom_ratio - 0.70).abs() < f64::EPSILON);
+        assert!((config.single_tool_result_share - 0.40).abs() < f64::EPSILON);
+        assert!((config.safety_margin - 1.5).abs() < f64::EPSILON);
+        assert_eq!(config.overflow_retries, 5);
+    }
+
+    #[test]
+    fn test_compaction_config_new_fields_default_when_absent() {
+        // Simulate an old config that only has the original fields.
+        let json = r#"{
+            "enabled": true,
+            "context_limit": 80000,
+            "threshold": 0.75,
+            "emergency_threshold": 0.88,
+            "critical_threshold": 0.93
+        }"#;
+        let config: CompactionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.context_limit, 80_000);
+        // New fields should have their defaults
+        assert!((config.input_headroom_ratio - 0.75).abs() < f64::EPSILON);
+        assert!((config.single_tool_result_share - 0.50).abs() < f64::EPSILON);
+        assert!((config.safety_margin - 1.2).abs() < f64::EPSILON);
+        assert_eq!(config.overflow_retries, 3);
+    }
+
+    #[test]
+    fn test_compaction_config_empty_json_uses_all_defaults() {
+        let config: CompactionConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.context_limit, 180_000);
+        assert!((config.input_headroom_ratio - 0.75).abs() < f64::EPSILON);
+        assert_eq!(config.overflow_retries, 3);
     }
 }
 

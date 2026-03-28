@@ -93,6 +93,24 @@ pub fn classify_error_message(msg: &str) -> ProviderError {
         return ProviderError::Timeout(msg.to_string());
     }
 
+    // Context overflow — prompt exceeds model's context window (retriable via compaction)
+    if contains_any(
+        &lower,
+        &[
+            "context_length_exceeded",
+            "context length exceeded",
+            "prompt is too long",
+            "maximum context length",
+            "too many tokens",
+            "request too large",
+            "token limit",
+            "input is too long",
+            "exceeds the model",
+        ],
+    ) {
+        return ProviderError::ContextOverflow(msg.to_string());
+    }
+
     // Format (non-retriable request structure errors)
     if contains_any(
         &lower,
@@ -192,5 +210,65 @@ mod tests {
     fn test_rate_limit_resource_exhausted() {
         let e = classify_error_message("resource has been exhausted");
         assert!(matches!(e, ProviderError::RateLimit(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_prompt_too_long() {
+        let e = classify_error_message("prompt is too long: 201530 tokens > 200000 maximum");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_context_length() {
+        let e = classify_error_message(
+            "This model's maximum context length is 200000 tokens. However, you requested 201530 tokens.",
+        );
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_request_too_large() {
+        let e = classify_error_message("request too large for model");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_context_length_exceeded() {
+        let e = classify_error_message("context_length_exceeded");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_too_many_tokens() {
+        let e = classify_error_message("too many tokens in the request");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_token_limit() {
+        let e = classify_error_message("Token limit: 200000, used: 201530");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_input_too_long() {
+        let e = classify_error_message("input is too long for this model");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_exceeds_model() {
+        let e = classify_error_message("Your input exceeds the model's context window");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_max_tokens_validation_not_misclassified_as_overflow() {
+        // "max_tokens must be at least 1" is a config error, not context overflow
+        let e = classify_error_message("max_tokens must be at least 1");
+        assert!(
+            !matches!(e, ProviderError::ContextOverflow(_)),
+            "max_tokens validation errors should not be classified as ContextOverflow"
+        );
     }
 }

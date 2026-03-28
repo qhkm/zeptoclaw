@@ -13,12 +13,12 @@ use futures::FutureExt;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor};
+use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor, PreflightAction};
 use crate::agent::loop_guard::{truncate_utf8, LoopGuard, LoopGuardAction, ToolCallSig};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::cache::ResponseCache;
 use crate::config::Config;
-use crate::error::{Result, ZeptoError};
+use crate::error::{ProviderError, Result, ZeptoError};
 use crate::health::UsageMetrics;
 use crate::providers::{ChatOptions, LLMProvider, LLMToolCall};
 use crate::safety::SafetyLayer;
@@ -241,6 +241,28 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
         outbound
             .metadata
             .insert("telegram_message_id".to_string(), mid.clone());
+    }
+}
+
+/// Sync trimmed tool-result messages from the resolved (preflight-mutated) buffer
+/// back into the session so that the trims persist across iterations and saves.
+/// Matches on `tool_call_id` since resolved messages include a system-prompt prefix.
+fn sync_trimmed_tool_results(session_messages: &mut [Message], resolved_messages: &[Message]) {
+    for resolved in resolved_messages {
+        if resolved.role != Role::Tool {
+            continue;
+        }
+        if let Some(session_msg) = session_messages
+            .iter_mut()
+            .find(|m| m.role == Role::Tool && m.tool_call_id == resolved.tool_call_id)
+        {
+            if session_msg.content != resolved.content {
+                session_msg.content.clone_from(&resolved.content);
+                session_msg
+                    .content_parts
+                    .clone_from(&resolved.content_parts);
+            }
+        }
     }
 }
 
@@ -611,12 +633,7 @@ impl AgentLoop {
             None
         };
         let context_monitor = if config.compaction.enabled {
-            Some(ContextMonitor::new_with_thresholds(
-                config.compaction.context_limit,
-                config.compaction.threshold,
-                config.compaction.emergency_threshold,
-                config.compaction.critical_threshold,
-            ))
+            Some(ContextMonitor::from_config(&config.compaction))
         } else {
             None
         };
@@ -681,12 +698,7 @@ impl AgentLoop {
             None
         };
         let context_monitor = if config.compaction.enabled {
-            Some(ContextMonitor::new_with_thresholds(
-                config.compaction.context_limit,
-                config.compaction.threshold,
-                config.compaction.emergency_threshold,
-                config.compaction.critical_threshold,
-            ))
+            Some(ContextMonitor::from_config(&config.compaction))
         } else {
             None
         };
@@ -1031,6 +1043,9 @@ impl AgentLoop {
         // Get or create session
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
 
+        // Add the user message BEFORE compaction so compaction sees the full context.
+        session.add_message(user_message);
+
         // Apply three-tier context overflow recovery if needed
         if let Some(ref monitor) = self.context_monitor {
             if let Some(urgency) = monitor.urgency(&session.messages) {
@@ -1047,6 +1062,7 @@ impl AgentLoop {
                     urgency,
                     8,               // keep_recent for tier 1
                     tool_result_cap, // tool result budget for tier 2
+                    self.config.compaction.safety_margin,
                 );
                 if tier > 0 {
                     debug!(
@@ -1059,15 +1075,12 @@ impl AgentLoop {
             }
         }
 
-        // Add the user message to the session after passing injection checks.
-        session.add_message(user_message);
-
         // Build messages with history and per-message memory override.
         // Pass an empty user_input string: the current user message is already
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
         let memory_override = self.build_memory_override(&resolved_user_prompt).await;
-        let messages = self
+        let mut messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
 
@@ -1076,6 +1089,35 @@ impl AgentLoop {
             let tools = self.tools.read().await;
             tools.definitions_with_options(self.config.agents.defaults.compact_tools)
         };
+
+        // Pre-flight context guard: trim oversized tool results and check budget
+        if let Some(ref monitor) = self.context_monitor {
+            match monitor.preflight_check(&mut messages, &tool_definitions) {
+                PreflightAction::Ok => {}
+                PreflightAction::Trimmed => {
+                    debug!("Pre-flight guard trimmed oversized tool results");
+                    sync_trimmed_tool_results(&mut session.messages, &messages);
+                }
+                PreflightAction::NeedsCompaction => {
+                    warn!("Pre-flight guard: context too large, triggering emergency compaction");
+                    let context_limit = self.config.compaction.context_limit;
+                    let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _tier) =
+                        crate::agent::compaction::try_recover_context_with_urgency(
+                            session.messages,
+                            context_limit,
+                            CompactionUrgency::Emergency,
+                            5,
+                            tool_result_cap,
+                            self.config.compaction.safety_margin,
+                        );
+                    session.messages = recovered;
+                    messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                }
+            }
+        }
 
         // Build chat options
         let options = ChatOptions::new()
@@ -1132,10 +1174,64 @@ impl AgentLoop {
             });
         }
 
-        // Call LLM -- provider lock is NOT held during this await
-        let mut response = provider
-            .chat(messages, tool_definitions, model, options.clone())
-            .await?;
+        // Call LLM with overflow retry -- provider lock is NOT held during this await
+        let mut response = {
+            let max_retries = self.config.compaction.overflow_retries;
+            let mut last_messages = messages;
+            let mut last_tool_defs = tool_definitions;
+            let mut result = provider
+                .chat(
+                    last_messages.clone(),
+                    last_tool_defs.clone(),
+                    model,
+                    options.clone(),
+                )
+                .await;
+
+            let mut attempt = 0u32;
+            while let Err(ref e) = result {
+                if !Self::is_context_overflow(e) || attempt >= max_retries {
+                    break;
+                }
+                if self.context_monitor.is_none() {
+                    break; // compaction disabled — don't rewrite history
+                }
+                warn!(
+                    attempt = attempt + 1,
+                    max = max_retries,
+                    "Context overflow, compacting and retrying"
+                );
+                let urgency = Self::overflow_retry_urgency(attempt);
+                let ctx_limit = self.config.compaction.context_limit;
+                let cap = self.config.agents.defaults.max_tool_result_bytes;
+                let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                    session.messages,
+                    ctx_limit,
+                    urgency,
+                    8,
+                    cap,
+                    self.config.compaction.safety_margin,
+                );
+                session.messages = recovered;
+                last_messages = self
+                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .await;
+                last_tool_defs = {
+                    let tools = self.tools.read().await;
+                    tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                };
+                result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                attempt += 1;
+            }
+            result?
+        };
 
         // Send thinking done feedback
         if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -1253,14 +1349,18 @@ impl AgentLoop {
             );
 
             // Compute dynamic tool result budget based on remaining context space
-            let current_tokens = ContextMonitor::estimate_tokens(&session.messages);
+            let current_tokens = ContextMonitor::estimate_tokens_with_margin(
+                &session.messages,
+                self.config.compaction.safety_margin,
+            );
             let context_limit = self.config.compaction.context_limit;
             let max_result_bytes = self.config.agents.defaults.max_tool_result_bytes;
-            let result_budget = crate::utils::sanitize::compute_tool_result_budget(
+            let result_budget = crate::utils::sanitize::compute_tool_result_budget_with_share(
                 context_limit,
                 current_tokens,
                 response.tool_calls.len(),
                 max_result_bytes,
+                self.config.compaction.single_tool_result_share,
             );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
@@ -1536,6 +1636,28 @@ impl AgentLoop {
                 session.add_message(Message::tool_result(id, result));
             }
 
+            // In-loop compaction: check if tool results pushed context over threshold
+            if let Some(ref monitor) = self.context_monitor {
+                if let Some(urgency) = monitor.urgency(&session.messages) {
+                    debug!(urgency = ?urgency, "In-loop compaction triggered after tool results");
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, tier) =
+                        crate::agent::compaction::try_recover_context_with_urgency(
+                            session.messages,
+                            ctx_limit,
+                            urgency,
+                            8,
+                            cap,
+                            self.config.compaction.safety_margin,
+                        );
+                    if tier > 0 {
+                        debug!(tier = tier, "In-loop context recovered via tier {}", tier);
+                    }
+                    session.messages = recovered;
+                }
+            }
+
             if should_pause {
                 break;
             }
@@ -1559,12 +1681,73 @@ impl AgentLoop {
                         "Tool call limit reached. Token budget exceeded.".to_string();
                     break;
                 }
-                let messages = self
+                let mut messages = self
                     .build_resolved_messages(&session, memory_override.as_deref())
                     .await;
-                response = provider
-                    .chat(messages, vec![], model, options.clone())
-                    .await?;
+                // Pre-flight guard for synthesis call
+                if let Some(ref monitor) = self.context_monitor {
+                    if let PreflightAction::NeedsCompaction =
+                        monitor.preflight_check(&mut messages, &[])
+                    {
+                        let ctx_limit = self.config.compaction.context_limit;
+                        let cap = self.config.agents.defaults.max_tool_result_bytes;
+                        let (recovered, _) =
+                            crate::agent::compaction::try_recover_context_with_urgency(
+                                session.messages,
+                                ctx_limit,
+                                CompactionUrgency::Emergency,
+                                5,
+                                cap,
+                                self.config.compaction.safety_margin,
+                            );
+                        session.messages = recovered;
+                        messages = self
+                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .await;
+                    }
+                }
+                response = {
+                    let max_retries = self.config.compaction.overflow_retries;
+                    let mut last_messages = messages;
+                    let mut result = provider
+                        .chat(last_messages.clone(), vec![], model, options.clone())
+                        .await;
+                    let mut attempt = 0u32;
+                    while let Err(ref e) = result {
+                        if !Self::is_context_overflow(e) || attempt >= max_retries {
+                            break;
+                        }
+                        if self.context_monitor.is_none() {
+                            break; // compaction disabled
+                        }
+                        warn!(
+                            attempt = attempt + 1,
+                            max = max_retries,
+                            "Context overflow in synthesis call, compacting and retrying"
+                        );
+                        let urgency = Self::overflow_retry_urgency(attempt);
+                        let ctx_limit = self.config.compaction.context_limit;
+                        let cap = self.config.agents.defaults.max_tool_result_bytes;
+                        let (recovered, _) =
+                            crate::agent::compaction::try_recover_context_with_urgency(
+                                session.messages,
+                                ctx_limit,
+                                urgency,
+                                5,
+                                cap,
+                                self.config.compaction.safety_margin,
+                            );
+                        session.messages = recovered;
+                        last_messages = self
+                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .await;
+                        result = provider
+                            .chat(last_messages.clone(), vec![], model, options.clone())
+                            .await;
+                        attempt += 1;
+                    }
+                    result?
+                };
                 if let (Some(metrics), Some(usage)) =
                     (usage_metrics.as_ref(), response.usage.as_ref())
                 {
@@ -1617,9 +1800,38 @@ impl AgentLoop {
             }
 
             // Call LLM again with tool results -- provider lock NOT held
-            let messages = self
+            let mut messages = self
                 .build_resolved_messages(&session, memory_override.as_deref())
                 .await;
+
+            // Pre-flight context guard (tool loop)
+            if let Some(ref monitor) = self.context_monitor {
+                match monitor.preflight_check(&mut messages, &tool_definitions) {
+                    PreflightAction::Ok => {}
+                    PreflightAction::Trimmed => {
+                        debug!("Pre-flight guard trimmed tool results (tool loop)");
+                        sync_trimmed_tool_results(&mut session.messages, &messages);
+                    }
+                    PreflightAction::NeedsCompaction => {
+                        warn!("Pre-flight: context too large in tool loop, emergency compaction");
+                        let ctx_limit = self.config.compaction.context_limit;
+                        let cap = self.config.agents.defaults.max_tool_result_bytes;
+                        let (recovered, _) =
+                            crate::agent::compaction::try_recover_context_with_urgency(
+                                session.messages,
+                                ctx_limit,
+                                CompactionUrgency::Emergency,
+                                5,
+                                cap,
+                                self.config.compaction.safety_margin,
+                            );
+                        session.messages = recovered;
+                        messages = self
+                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .await;
+                    }
+                }
+            }
 
             // Send thinking feedback for tool-loop LLM call
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -1630,9 +1842,62 @@ impl AgentLoop {
                 });
             }
 
-            response = provider
-                .chat(messages, tool_definitions, model, options.clone())
-                .await?;
+            response = {
+                let max_retries = self.config.compaction.overflow_retries;
+                let mut last_messages = messages;
+                let mut last_tool_defs = tool_definitions;
+                let mut result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                let mut attempt = 0u32;
+                while let Err(ref e) = result {
+                    if !Self::is_context_overflow(e) || attempt >= max_retries {
+                        break;
+                    }
+                    if self.context_monitor.is_none() {
+                        break; // compaction disabled
+                    }
+                    warn!(
+                        attempt = attempt + 1,
+                        max = max_retries,
+                        "Context overflow in tool loop, compacting and retrying"
+                    );
+                    let urgency = Self::overflow_retry_urgency(attempt);
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                        session.messages,
+                        ctx_limit,
+                        urgency,
+                        8,
+                        cap,
+                        self.config.compaction.safety_margin,
+                    );
+                    session.messages = recovered;
+                    last_messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                    last_tool_defs = {
+                        let tools = self.tools.read().await;
+                        tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                    };
+                    result = provider
+                        .chat(
+                            last_messages.clone(),
+                            last_tool_defs.clone(),
+                            model,
+                            options.clone(),
+                        )
+                        .await;
+                    attempt += 1;
+                }
+                result?
+            };
 
             // Send thinking done feedback
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
@@ -1763,6 +2028,9 @@ impl AgentLoop {
 
         let mut session = self.session_manager.get_or_create(&msg.session_key).await?;
 
+        // Add the user message BEFORE compaction so compaction sees the full context.
+        session.add_message(user_message);
+
         // Apply three-tier context overflow recovery if needed (streaming)
         if let Some(ref monitor) = self.context_monitor {
             if let Some(urgency) = monitor.urgency(&session.messages) {
@@ -1778,6 +2046,7 @@ impl AgentLoop {
                     urgency,
                     8,               // keep_recent for tier 1
                     tool_result_cap, // tool result budget for tier 2
+                    self.config.compaction.safety_margin,
                 );
                 if tier > 0 {
                     debug!(
@@ -1790,12 +2059,9 @@ impl AgentLoop {
             }
         }
 
-        // Add the user message to the session after passing injection checks.
-        session.add_message(user_message);
-
         // Pass an empty user_input: the current user message is already in session.
         let memory_override = self.build_memory_override(&resolved_user_prompt).await;
-        let messages = self
+        let mut messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
 
@@ -1803,6 +2069,35 @@ impl AgentLoop {
             let tools = self.tools.read().await;
             tools.definitions_with_options(self.config.agents.defaults.compact_tools)
         };
+
+        // Pre-flight context guard (streaming)
+        if let Some(ref monitor) = self.context_monitor {
+            match monitor.preflight_check(&mut messages, &tool_definitions) {
+                PreflightAction::Ok => {}
+                PreflightAction::Trimmed => {
+                    debug!("Pre-flight guard trimmed oversized tool results (streaming)");
+                    sync_trimmed_tool_results(&mut session.messages, &messages);
+                }
+                PreflightAction::NeedsCompaction => {
+                    warn!("Pre-flight guard: context too large, triggering emergency compaction (streaming)");
+                    let context_limit = self.config.compaction.context_limit;
+                    let tool_result_cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _tier) =
+                        crate::agent::compaction::try_recover_context_with_urgency(
+                            session.messages,
+                            context_limit,
+                            CompactionUrgency::Emergency,
+                            5,
+                            tool_result_cap,
+                            self.config.compaction.safety_margin,
+                        );
+                    session.messages = recovered;
+                    messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                }
+            }
+        }
 
         let options = ChatOptions::new()
             .with_max_tokens(self.config.agents.defaults.max_tokens)
@@ -1826,10 +2121,64 @@ impl AgentLoop {
             });
         }
 
-        // First call: non-streaming to see if there are tool calls
-        let mut response = provider
-            .chat(messages, tool_definitions, model, options.clone())
-            .await?;
+        // First call: non-streaming to see if there are tool calls, with overflow retry
+        let mut response = {
+            let max_retries = self.config.compaction.overflow_retries;
+            let mut last_messages = messages;
+            let mut last_tool_defs = tool_definitions;
+            let mut result = provider
+                .chat(
+                    last_messages.clone(),
+                    last_tool_defs.clone(),
+                    model,
+                    options.clone(),
+                )
+                .await;
+
+            let mut attempt = 0u32;
+            while let Err(ref e) = result {
+                if !Self::is_context_overflow(e) || attempt >= max_retries {
+                    break;
+                }
+                if self.context_monitor.is_none() {
+                    break; // compaction disabled
+                }
+                warn!(
+                    attempt = attempt + 1,
+                    max = max_retries,
+                    "Context overflow (streaming), compacting and retrying"
+                );
+                let urgency = Self::overflow_retry_urgency(attempt);
+                let ctx_limit = self.config.compaction.context_limit;
+                let cap = self.config.agents.defaults.max_tool_result_bytes;
+                let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                    session.messages,
+                    ctx_limit,
+                    urgency,
+                    8,
+                    cap,
+                    self.config.compaction.safety_margin,
+                );
+                session.messages = recovered;
+                last_messages = self
+                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .await;
+                last_tool_defs = {
+                    let tools = self.tools.read().await;
+                    tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                };
+                result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                attempt += 1;
+            }
+            result?
+        };
         if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
             let _ = tx.send(ToolFeedback {
                 tool_name: String::new(),
@@ -1925,15 +2274,20 @@ impl AgentLoop {
             );
 
             // Compute dynamic tool result budget based on remaining context space
-            let current_tokens_stream = ContextMonitor::estimate_tokens(&session.messages);
+            let current_tokens_stream = ContextMonitor::estimate_tokens_with_margin(
+                &session.messages,
+                self.config.compaction.safety_margin,
+            );
             let context_limit_stream = self.config.compaction.context_limit;
             let max_result_bytes_stream = self.config.agents.defaults.max_tool_result_bytes;
-            let result_budget_stream = crate::utils::sanitize::compute_tool_result_budget(
-                context_limit_stream,
-                current_tokens_stream,
-                response.tool_calls.len(),
-                max_result_bytes_stream,
-            );
+            let result_budget_stream =
+                crate::utils::sanitize::compute_tool_result_budget_with_share(
+                    context_limit_stream,
+                    current_tokens_stream,
+                    response.tool_calls.len(),
+                    max_result_bytes_stream,
+                    self.config.compaction.single_tool_result_share,
+                );
 
             let tool_feedback_tx = self.tool_feedback_tx.clone();
             #[cfg(feature = "panel")]
@@ -2195,6 +2549,31 @@ impl AgentLoop {
                 session.add_message(Message::tool_result(id, result));
             }
 
+            // In-loop compaction: check if tool results pushed context over threshold
+            if let Some(ref monitor) = self.context_monitor {
+                if let Some(urgency) = monitor.urgency(&session.messages) {
+                    debug!(urgency = ?urgency, "In-loop compaction triggered after tool results (streaming)");
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, tier) =
+                        crate::agent::compaction::try_recover_context_with_urgency(
+                            session.messages,
+                            ctx_limit,
+                            urgency,
+                            8,
+                            cap,
+                            self.config.compaction.safety_margin,
+                        );
+                    if tier > 0 {
+                        debug!(
+                            tier = tier,
+                            "In-loop context recovered via tier {} (streaming)", tier
+                        );
+                    }
+                    session.messages = recovered;
+                }
+            }
+
             if should_pause {
                 break;
             }
@@ -2252,9 +2631,38 @@ impl AgentLoop {
                 break;
             }
 
-            let messages = self
+            let mut messages = self
                 .build_resolved_messages(&session, memory_override.as_deref())
                 .await;
+
+            // Pre-flight context guard (streaming tool loop)
+            if let Some(ref monitor) = self.context_monitor {
+                match monitor.preflight_check(&mut messages, &tool_definitions) {
+                    PreflightAction::Ok => {}
+                    PreflightAction::Trimmed => {
+                        debug!("Pre-flight guard trimmed tool results (streaming tool loop)");
+                        sync_trimmed_tool_results(&mut session.messages, &messages);
+                    }
+                    PreflightAction::NeedsCompaction => {
+                        warn!("Pre-flight: context too large in streaming tool loop, emergency compaction");
+                        let ctx_limit = self.config.compaction.context_limit;
+                        let cap = self.config.agents.defaults.max_tool_result_bytes;
+                        let (recovered, _) =
+                            crate::agent::compaction::try_recover_context_with_urgency(
+                                session.messages,
+                                ctx_limit,
+                                CompactionUrgency::Emergency,
+                                5,
+                                cap,
+                                self.config.compaction.safety_margin,
+                            );
+                        session.messages = recovered;
+                        messages = self
+                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .await;
+                    }
+                }
+            }
 
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
@@ -2264,9 +2672,62 @@ impl AgentLoop {
                 });
             }
 
-            response = provider
-                .chat(messages, tool_definitions, model, options.clone())
-                .await?;
+            response = {
+                let max_retries = self.config.compaction.overflow_retries;
+                let mut last_messages = messages;
+                let mut last_tool_defs = tool_definitions;
+                let mut result = provider
+                    .chat(
+                        last_messages.clone(),
+                        last_tool_defs.clone(),
+                        model,
+                        options.clone(),
+                    )
+                    .await;
+                let mut attempt = 0u32;
+                while let Err(ref e) = result {
+                    if !Self::is_context_overflow(e) || attempt >= max_retries {
+                        break;
+                    }
+                    if self.context_monitor.is_none() {
+                        break; // compaction disabled
+                    }
+                    warn!(
+                        attempt = attempt + 1,
+                        max = max_retries,
+                        "Context overflow in streaming tool loop, compacting and retrying"
+                    );
+                    let urgency = Self::overflow_retry_urgency(attempt);
+                    let ctx_limit = self.config.compaction.context_limit;
+                    let cap = self.config.agents.defaults.max_tool_result_bytes;
+                    let (recovered, _) = crate::agent::compaction::try_recover_context_with_urgency(
+                        session.messages,
+                        ctx_limit,
+                        urgency,
+                        8,
+                        cap,
+                        self.config.compaction.safety_margin,
+                    );
+                    session.messages = recovered;
+                    last_messages = self
+                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .await;
+                    last_tool_defs = {
+                        let tools = self.tools.read().await;
+                        tools.definitions_with_options(self.config.agents.defaults.compact_tools)
+                    };
+                    result = provider
+                        .chat(
+                            last_messages.clone(),
+                            last_tool_defs.clone(),
+                            model,
+                            options.clone(),
+                        )
+                        .await;
+                    attempt += 1;
+                }
+                result?
+            };
             if let Some(tx) = self.tool_feedback_tx.read().await.as_ref() {
                 let _ = tx.send(ToolFeedback {
                     tool_name: String::new(),
@@ -2382,6 +2843,23 @@ impl AgentLoop {
                 })
                 .await;
             Ok(rx)
+        }
+    }
+
+    /// Check if a ZeptoError is a context overflow that can be retried via compaction.
+    fn is_context_overflow(err: &ZeptoError) -> bool {
+        matches!(
+            err,
+            ZeptoError::ProviderTyped(ProviderError::ContextOverflow(_))
+        )
+    }
+
+    /// Map a compaction retry attempt number to a progressively more aggressive urgency.
+    fn overflow_retry_urgency(attempt: u32) -> CompactionUrgency {
+        match attempt {
+            0 => CompactionUrgency::Normal,
+            1 => CompactionUrgency::Emergency,
+            _ => CompactionUrgency::Critical,
         }
     }
 
