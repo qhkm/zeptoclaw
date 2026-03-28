@@ -244,6 +244,28 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
     }
 }
 
+/// Sync trimmed tool-result messages from the resolved (preflight-mutated) buffer
+/// back into the session so that the trims persist across iterations and saves.
+/// Matches on `tool_call_id` since resolved messages include a system-prompt prefix.
+fn sync_trimmed_tool_results(session_messages: &mut [Message], resolved_messages: &[Message]) {
+    for resolved in resolved_messages {
+        if resolved.role != Role::Tool {
+            continue;
+        }
+        if let Some(session_msg) = session_messages
+            .iter_mut()
+            .find(|m| m.role == Role::Tool && m.tool_call_id == resolved.tool_call_id)
+        {
+            if session_msg.content != resolved.content {
+                session_msg.content.clone_from(&resolved.content);
+                session_msg
+                    .content_parts
+                    .clone_from(&resolved.content_parts);
+            }
+        }
+    }
+}
+
 /// Convert an inbound message with optional media attachments into a session Message.
 ///
 /// - Image media with inline binary data are base64-encoded and attached as `ContentPart::Image`.
@@ -1074,6 +1096,7 @@ impl AgentLoop {
                 PreflightAction::Ok => {}
                 PreflightAction::Trimmed => {
                     debug!("Pre-flight guard trimmed oversized tool results");
+                    sync_trimmed_tool_results(&mut session.messages, &messages);
                 }
                 PreflightAction::NeedsCompaction => {
                     warn!("Pre-flight guard: context too large, triggering emergency compaction");
@@ -1169,6 +1192,9 @@ impl AgentLoop {
             while let Err(ref e) = result {
                 if !Self::is_context_overflow(e) || attempt >= max_retries {
                     break;
+                }
+                if self.context_monitor.is_none() {
+                    break; // compaction disabled — don't rewrite history
                 }
                 warn!(
                     attempt = attempt + 1,
@@ -1691,6 +1717,9 @@ impl AgentLoop {
                         if !Self::is_context_overflow(e) || attempt >= max_retries {
                             break;
                         }
+                        if self.context_monitor.is_none() {
+                            break; // compaction disabled
+                        }
                         warn!(
                             attempt = attempt + 1,
                             max = max_retries,
@@ -1781,6 +1810,7 @@ impl AgentLoop {
                     PreflightAction::Ok => {}
                     PreflightAction::Trimmed => {
                         debug!("Pre-flight guard trimmed tool results (tool loop)");
+                        sync_trimmed_tool_results(&mut session.messages, &messages);
                     }
                     PreflightAction::NeedsCompaction => {
                         warn!("Pre-flight: context too large in tool loop, emergency compaction");
@@ -1828,6 +1858,9 @@ impl AgentLoop {
                 while let Err(ref e) = result {
                     if !Self::is_context_overflow(e) || attempt >= max_retries {
                         break;
+                    }
+                    if self.context_monitor.is_none() {
+                        break; // compaction disabled
                     }
                     warn!(
                         attempt = attempt + 1,
@@ -2043,6 +2076,7 @@ impl AgentLoop {
                 PreflightAction::Ok => {}
                 PreflightAction::Trimmed => {
                     debug!("Pre-flight guard trimmed oversized tool results (streaming)");
+                    sync_trimmed_tool_results(&mut session.messages, &messages);
                 }
                 PreflightAction::NeedsCompaction => {
                     warn!("Pre-flight guard: context too large, triggering emergency compaction (streaming)");
@@ -2105,6 +2139,9 @@ impl AgentLoop {
             while let Err(ref e) = result {
                 if !Self::is_context_overflow(e) || attempt >= max_retries {
                     break;
+                }
+                if self.context_monitor.is_none() {
+                    break; // compaction disabled
                 }
                 warn!(
                     attempt = attempt + 1,
@@ -2604,6 +2641,7 @@ impl AgentLoop {
                     PreflightAction::Ok => {}
                     PreflightAction::Trimmed => {
                         debug!("Pre-flight guard trimmed tool results (streaming tool loop)");
+                        sync_trimmed_tool_results(&mut session.messages, &messages);
                     }
                     PreflightAction::NeedsCompaction => {
                         warn!("Pre-flight: context too large in streaming tool loop, emergency compaction");
@@ -2650,6 +2688,9 @@ impl AgentLoop {
                 while let Err(ref e) = result {
                     if !Self::is_context_overflow(e) || attempt >= max_retries {
                         break;
+                    }
+                    if self.context_monitor.is_none() {
+                        break; // compaction disabled
                     }
                     warn!(
                         attempt = attempt + 1,
