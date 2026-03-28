@@ -310,8 +310,11 @@ impl ContextMonitor {
             }
         }
 
-        // Pass 2: if total still exceeds budget, replace oldest tool results
-        let total = Self::estimate_tokens_full(messages, tool_definitions, self.safety_margin);
+        // Pass 2: if message tokens alone exceed the message budget, replace
+        // oldest tool results.  We use message-only estimates here because
+        // `context_budget()` already reserves headroom for tool definitions,
+        // system prompt, and output tokens.
+        let total = Self::estimate_tokens_with_margin(messages, self.safety_margin);
         if total > budget {
             // Collect indices of tool result messages (oldest first)
             let tool_indices: Vec<usize> = messages
@@ -330,8 +333,7 @@ impl ContextMonitor {
                 }
                 trimmed = true;
 
-                let new_total =
-                    Self::estimate_tokens_full(messages, tool_definitions, self.safety_margin);
+                let new_total = Self::estimate_tokens_with_margin(messages, self.safety_margin);
                 if new_total <= budget {
                     break;
                 }
