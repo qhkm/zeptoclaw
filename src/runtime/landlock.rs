@@ -163,7 +163,7 @@ fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeE
 
     let abi = ABI::V3;
 
-    let mut ruleset = Ruleset::default()
+    let ruleset = Ruleset::default()
         .handle_access(AccessFs::from_read(abi))
         .map_err(|e| RuntimeError::ExecutionFailed(format!("Landlock ruleset read error: {e}")))?
         .handle_access(AccessFs::from_write(abi))
@@ -172,20 +172,33 @@ fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeE
         .map_err(|e| RuntimeError::ExecutionFailed(format!("Landlock create error: {e}")))?;
 
     // Grant read access to configured directories.
+    let mut ruleset = ruleset;
     for dir in &config.fs_read_dirs {
         if let Ok(fd) = PathFd::new(dir) {
-            if let Err(e) = ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi))) {
-                eprintln!("landlock: failed to add read rule for {dir:?}: {e}");
-            }
+            ruleset = match ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi))) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    eprintln!("landlock: failed to add read rule for {dir:?}: {e}");
+                    return Err(RuntimeError::ExecutionFailed(format!(
+                        "Landlock read rule for {dir:?}: {e}"
+                    )));
+                }
+            };
         }
     }
 
     // Grant full access (read + write) to configured write directories.
     for dir in &config.fs_write_dirs {
         if let Ok(fd) = PathFd::new(dir) {
-            if let Err(e) = ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi))) {
-                eprintln!("landlock: failed to add write rule for {dir:?}: {e}");
-            }
+            ruleset = match ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi))) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    eprintln!("landlock: failed to add write rule for {dir:?}: {e}");
+                    return Err(RuntimeError::ExecutionFailed(format!(
+                        "Landlock write rule for {dir:?}: {e}"
+                    )));
+                }
+            };
         }
     }
 
