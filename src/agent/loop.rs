@@ -252,8 +252,12 @@ fn sync_trimmed_tool_results(session_messages: &mut [Message], resolved_messages
         if resolved.role != Role::Tool {
             continue;
         }
+        // Search in reverse so that when providers reuse sequential IDs
+        // like `call_1` across turns, we match the most recent occurrence
+        // rather than an earlier historical one.
         if let Some(session_msg) = session_messages
             .iter_mut()
+            .rev()
             .find(|m| m.role == Role::Tool && m.tool_call_id == resolved.tool_call_id)
         {
             if session_msg.content != resolved.content {
