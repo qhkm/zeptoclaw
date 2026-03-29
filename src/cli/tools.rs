@@ -156,6 +156,83 @@ const TOOLS: &[ToolInfo] = &[
         opt_in: false,
     },
     ToolInfo {
+        name: "git",
+        description: "Git operations (status, log, diff, commit, branch)",
+        requires_config: false,
+        config_hint: "",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "pdf_read",
+        description: "Read and extract text from PDF files",
+        requires_config: false,
+        config_hint: "",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "docx_read",
+        description: "Read and extract text from DOCX files",
+        requires_config: false,
+        config_hint: "",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "http_request",
+        description: "HTTP GET/POST/PUT/DELETE to whitelisted domains",
+        requires_config: true,
+        config_hint: "Set tools.http_request.allowed_domains",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "ask_clarification",
+        description: "Ask the user a clarifying question",
+        requires_config: false,
+        config_hint: "",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "create_tool",
+        description: "Create composed tools at runtime",
+        requires_config: false,
+        config_hint: "",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "project",
+        description: "GitHub/Jira/Linear issue management",
+        requires_config: true,
+        config_hint: "Set project.github_token (or jira_token / linear_api_key)",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "transcribe",
+        description: "Audio transcription via Groq Whisper",
+        requires_config: true,
+        config_hint: "Set tools.transcribe.enabled + groq_api_key",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "find_skills",
+        description: "Browse ClawHub skills marketplace",
+        requires_config: true,
+        config_hint: "Set tools.skills.enabled: true",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "install_skill",
+        description: "Install skills from ClawHub",
+        requires_config: true,
+        config_hint: "Set tools.skills.enabled: true",
+        opt_in: false,
+    },
+    ToolInfo {
+        name: "stripe",
+        description: "Stripe payments (customers, charges, subscriptions)",
+        requires_config: true,
+        config_hint: "Set stripe.secret_key",
+        opt_in: false,
+    },
+    ToolInfo {
         name: "grep",
         description: "Search file contents by regex pattern",
         requires_config: false,
@@ -321,6 +398,45 @@ fn is_tool_configured(config: &Config, name: &str) -> bool {
                 || config.channels.discord.as_ref().is_some_and(|c| c.enabled)
         }
         "r8r" => std::env::var("R8R_API_URL").is_ok(),
+        "http_request" => config
+            .tools
+            .http_request
+            .as_ref()
+            .is_some_and(|c| !c.allowed_domains.is_empty()),
+        "project" => match config.project.backend {
+            zeptoclaw::config::ProjectBackend::Github => config
+                .project
+                .github_token
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
+            zeptoclaw::config::ProjectBackend::Jira => config
+                .project
+                .jira_token
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
+            zeptoclaw::config::ProjectBackend::Linear => config
+                .project
+                .linear_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+        },
+        "transcribe" => {
+            config.tools.transcribe.enabled
+                && config
+                    .tools
+                    .transcribe
+                    .groq_api_key
+                    .as_deref()
+                    .is_some_and(|k| !k.is_empty())
+        }
+        "find_skills" | "install_skill" => {
+            config.tools.skills.enabled && config.tools.skills.clawhub.enabled
+        }
+        "stripe" => config
+            .stripe
+            .secret_key
+            .as_deref()
+            .is_some_and(|k| !k.is_empty()),
         _ => true,
     }
 }
@@ -362,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_tools_list_count() {
-        assert_eq!(TOOLS.len(), 22);
+        assert_eq!(TOOLS.len(), 33);
     }
 
     #[test]
