@@ -480,12 +480,37 @@ impl OpenAIProvider {
         }
     }
 
+    /// Keys that must not be overridden by `extra_body` because they are
+    /// set by the typed request and control core API behaviour.
+    const RESERVED_KEYS: &[&str] = &[
+        "model",
+        "messages",
+        "stream",
+        "tools",
+        "tool_choice",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+    ];
+
     /// Serialize a request, merging any `extra_body` fields into the JSON.
+    ///
+    /// Reserved keys (model, messages, stream, etc.) are silently skipped
+    /// to prevent config from overriding core request parameters.
     fn serialize_request(&self, request: &OpenAIRequest) -> serde_json::Value {
         let mut body = serde_json::to_value(request).unwrap_or_default();
         if let Some(ref extra) = self.extra_body {
             if let Some(obj) = body.as_object_mut() {
                 for (key, value) in extra {
+                    if Self::RESERVED_KEYS.contains(&key.as_str()) {
+                        tracing::warn!(
+                            key = %key,
+                            "Ignoring extra_body key that collides with built-in request field"
+                        );
+                        continue;
+                    }
                     obj.insert(key.clone(), value.clone());
                 }
             }
@@ -2052,5 +2077,69 @@ mod tests {
         let (name, value) = provider.auth_header_pair();
         assert_eq!(name, "Authorization");
         assert_eq!(value, "Bearer sk-real-key");
+    }
+
+    #[test]
+    fn test_serialize_request_extra_body_merges_custom_keys() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert(
+            "provider".to_string(),
+            serde_json::json!({"order": ["anthropic", "openai"]}),
+        );
+        let mut provider = OpenAIProvider::with_base_url("key", "https://openrouter.ai/api/v1");
+        provider.extra_body = Some(extra);
+        let request = OpenAIRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            tools: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            stream: None,
+            response_format: None,
+        };
+        let body = provider.serialize_request(&request);
+        assert!(
+            body.get("provider").is_some(),
+            "Custom key should be merged"
+        );
+        assert_eq!(body["model"], "test-model", "Model should be unchanged");
+    }
+
+    #[test]
+    fn test_serialize_request_extra_body_skips_reserved_keys() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("model".to_string(), serde_json::json!("hacked-model"));
+        extra.insert("messages".to_string(), serde_json::json!([]));
+        extra.insert("stream".to_string(), serde_json::json!(true));
+        extra.insert(
+            "provider".to_string(),
+            serde_json::json!({"order": ["anthropic"]}),
+        );
+        let mut provider = OpenAIProvider::with_base_url("key", "https://openrouter.ai/api/v1");
+        provider.extra_body = Some(extra);
+        let request = OpenAIRequest {
+            model: "real-model".to_string(),
+            messages: vec![],
+            tools: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            stream: None,
+            response_format: None,
+        };
+        let body = provider.serialize_request(&request);
+        assert_eq!(
+            body["model"], "real-model",
+            "Reserved key 'model' must not be overwritten"
+        );
+        assert!(
+            body.get("provider").is_some(),
+            "Non-reserved key should be merged"
+        );
     }
 }
