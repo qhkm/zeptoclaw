@@ -47,6 +47,8 @@ pub struct RuntimeProviderSelection {
     pub auth_header: Option<String>,
     /// Effective API version param for this provider.
     pub api_version: Option<String>,
+    /// Extra fields merged into the request body (e.g. OpenRouter provider.order).
+    pub extra_body: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Provider registry in priority order.
@@ -446,6 +448,7 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
             model: provider.and_then(|p| p.model.clone()),
             auth_header: effective_auth_header,
             api_version: effective_api_version,
+            extra_body: provider.and_then(|p| p.extra_body.clone()),
         });
     }
 

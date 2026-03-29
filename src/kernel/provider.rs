@@ -91,6 +91,7 @@ pub async fn provider_from_runtime_selection(
                 api_base,
                 selection.auth_header.clone(),
                 selection.api_version.clone(),
+                selection.extra_body.clone(),
             );
             Some(Box::new(provider))
         }
