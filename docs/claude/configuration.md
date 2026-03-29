@@ -106,14 +106,16 @@ Any provider using the OpenAI-compatible backend supports `extra_body` — a JSO
       "api_key": "sk-or-...",
       "extra_body": {
         "provider": {
-          "order": ["novitaai"],
-          "allow_fallbacks": true
+          "order": ["novita/fp8"],
+          "allow_fallbacks": false
         }
       }
     }
   }
 }
 ```
+
+Provider slugs use the format from the OpenRouter model page (e.g. `"novita/fp8"`, `"google-vertex/us-east5"`). Base slugs like `"novita"` match all endpoints for that provider; variant slugs like `"novita/fp8"` target a specific endpoint. Set `allow_fallbacks` to `false` to prevent routing to unlisted providers.
 
 Extra body keys override typed fields when they overlap (intentional for maximum flexibility). The field has no effect when omitted or set to `null`.
 
