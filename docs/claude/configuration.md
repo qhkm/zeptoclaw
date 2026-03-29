@@ -85,6 +85,40 @@ Environment variables override config with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 ### Tunnel
 - `ZEPTOCLAW_TUNNEL_PROVIDER` — cloudflare, ngrok, tailscale, auto
 
+## Provider Selection & Routing
+
+ZeptoClaw infers which provider to use from the model name:
+- `claude-*` → `anthropic`
+- `gpt-*` → `openai`
+- `gemini-*` → `gemini`
+- `vendor/model-name` (slash-prefixed) → routes to **OpenRouter** when configured, otherwise matches the vendor prefix against configured providers
+
+When multiple providers are configured, the model name determines priority. For example, `google/gemini-3-flash-preview` with both `anthropic` and `openrouter` configured routes to OpenRouter because it's the gateway provider for vendor-prefixed IDs.
+
+### Extra Body Fields
+
+Any provider using the OpenAI-compatible backend supports `extra_body` — a JSON object merged into every request body. This is useful for provider-specific parameters like OpenRouter's provider routing:
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "api_key": "sk-or-...",
+      "extra_body": {
+        "provider": {
+          "order": ["novita/fp8"],
+          "allow_fallbacks": false
+        }
+      }
+    }
+  }
+}
+```
+
+Provider slugs use the format from the OpenRouter model page (e.g. `"novita/fp8"`, `"google-vertex/us-east5"`). Base slugs like `"novita"` match all endpoints for that provider; variant slugs like `"novita/fp8"` target a specific endpoint. Set `allow_fallbacks` to `false` to prevent routing to unlisted providers.
+
+Extra body keys override typed fields when they overlap (intentional for maximum flexibility). The field has no effect when omitted or set to `null`.
+
 ## Keyless Providers
 
 Ollama and vLLM do not require an API key:

@@ -351,6 +351,8 @@ pub struct OpenAIProvider {
     auth_key_header: Option<String>,
     /// Optional API version query param, e.g. "2024-08-01-preview" for Azure.
     api_version: Option<String>,
+    /// Extra fields merged into the request body (e.g. OpenRouter provider.order).
+    extra_body: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl OpenAIProvider {
@@ -380,6 +382,7 @@ impl OpenAIProvider {
             model_token_fields: Mutex::new(HashMap::new()),
             auth_key_header: None,
             api_version: None,
+            extra_body: None,
         }
     }
 
@@ -408,6 +411,7 @@ impl OpenAIProvider {
             model_token_fields: Mutex::new(HashMap::new()),
             auth_key_header: None,
             api_version: None,
+            extra_body: None,
         }
     }
 
@@ -428,6 +432,7 @@ impl OpenAIProvider {
             model_token_fields: Mutex::new(HashMap::new()),
             auth_key_header: None,
             api_version: None,
+            extra_body: None,
         }
     }
 
@@ -451,6 +456,7 @@ impl OpenAIProvider {
     ///     "https://myco.openai.azure.com/openai/deployments/gpt-4o",
     ///     Some("api-key".to_string()),
     ///     Some("2024-08-01-preview".to_string()),
+    ///     None,
     /// );
     /// ```
     pub fn with_config(
@@ -458,6 +464,7 @@ impl OpenAIProvider {
         api_base: &str,
         auth_key_header: Option<String>,
         api_version: Option<String>,
+        extra_body: Option<std::collections::HashMap<String, serde_json::Value>>,
     ) -> Self {
         Self {
             api_key: api_key.to_string(),
@@ -469,7 +476,21 @@ impl OpenAIProvider {
             model_token_fields: Mutex::new(HashMap::new()),
             auth_key_header,
             api_version,
+            extra_body,
         }
+    }
+
+    /// Serialize a request, merging any `extra_body` fields into the JSON.
+    fn serialize_request(&self, request: &OpenAIRequest) -> serde_json::Value {
+        let mut body = serde_json::to_value(request).unwrap_or_default();
+        if let Some(ref extra) = self.extra_body {
+            if let Some(obj) = body.as_object_mut() {
+                for (key, value) in extra {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        body
     }
 
     /// Get the preferred token field for a model, defaulting to `max_tokens`.
@@ -783,7 +804,7 @@ impl LLMProvider for OpenAIProvider {
                 .client
                 .post(self.versioned_url("chat/completions"))
                 .header("Content-Type", "application/json")
-                .json(&request);
+                .json(&self.serialize_request(&request));
             if !auth_header_name.is_empty() {
                 req = req.header(auth_header_name, auth_header_value);
             }
@@ -870,7 +891,7 @@ impl LLMProvider for OpenAIProvider {
                 .client
                 .post(self.versioned_url("chat/completions"))
                 .header("Content-Type", "application/json")
-                .json(&request);
+                .json(&self.serialize_request(&request));
             if !auth_header_name.is_empty() {
                 req = req.header(auth_header_name, auth_header_value);
             }
@@ -1965,6 +1986,7 @@ mod tests {
             "https://myco.openai.azure.com/openai/deployments/gpt-4o",
             Some("api-key".to_string()),
             None,
+            None,
         );
         let (name, val) = p.auth_header_pair();
         assert_eq!(name, "api-key");
@@ -1973,7 +1995,7 @@ mod tests {
 
     #[test]
     fn test_with_config_default_auth_header() {
-        let p = OpenAIProvider::with_config("sk-x", "https://api.openai.com/v1", None, None);
+        let p = OpenAIProvider::with_config("sk-x", "https://api.openai.com/v1", None, None, None);
         let (name, val) = p.auth_header_pair();
         assert_eq!(name, "Authorization");
         assert_eq!(val, "Bearer sk-x");
@@ -1985,6 +2007,7 @@ mod tests {
             "mykey",
             "https://api.example.com/v1",
             Some("x-api-key".to_string()),
+            None,
             None,
         );
         let (name, val) = p.auth_header_pair();
@@ -1999,6 +2022,7 @@ mod tests {
             "https://myco.openai.azure.com/openai/deployments/gpt-4o",
             None,
             Some("2024-08-01-preview".to_string()),
+            None,
         );
         let url = p.versioned_url("chat/completions");
         assert_eq!(
