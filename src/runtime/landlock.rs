@@ -56,8 +56,9 @@ impl ContainerRuntime for LandlockRuntime {
         let ll_config = self.config.clone();
         let command = command.to_string();
 
+        let workspace = config.workdir.clone();
         tokio::task::spawn_blocking(move || {
-            execute_with_landlock(&command, &config_clone, &ll_config)
+            execute_with_landlock(&command, &config_clone, &ll_config, workspace.as_deref())
         })
         .await
         .map_err(|e| RuntimeError::ExecutionFailed(format!("spawn_blocking join error: {e}")))?
@@ -74,6 +75,7 @@ fn execute_with_landlock(
     _command: &str,
     _config: &ContainerConfig,
     _ll_config: &LandlockConfig,
+    _workspace: Option<&std::path::Path>,
 ) -> RuntimeResult<CommandOutput> {
     Err(RuntimeError::NotAvailable(
         "Recompile with --features sandbox-landlock to use the Landlock runtime.".to_string(),
@@ -85,8 +87,9 @@ fn execute_with_landlock(
     command: &str,
     config: &ContainerConfig,
     ll_config: &LandlockConfig,
+    workspace: Option<&std::path::Path>,
 ) -> RuntimeResult<CommandOutput> {
-    execute_with_landlock_inner(command, config, ll_config)
+    execute_with_landlock_inner(command, config, ll_config, workspace)
 }
 
 /// Inner implementation, only compiled when the feature is enabled.
@@ -95,6 +98,7 @@ fn execute_with_landlock_inner(
     command: &str,
     config: &ContainerConfig,
     ll_config: &LandlockConfig,
+    workspace: Option<&std::path::Path>,
 ) -> RuntimeResult<CommandOutput> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -114,15 +118,16 @@ fn execute_with_landlock_inner(
     // Apply Landlock in the child process (after fork, before exec).
     // This ensures the parent ZeptoClaw process is never restricted.
     let ll_config_clone = ll_config.clone();
+    let workspace_clone = workspace.map(|p| p.to_path_buf());
     // SAFETY: We only call async-signal-safe operations in the pre_exec closure.
     // `landlock::Ruleset` operations use only synchronous syscalls (landlock_create_ruleset,
     // landlock_add_rule, landlock_restrict_self, prctl) which are async-signal-safe.
     // PathFd::new calls open() which is also async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
-            apply_landlock_rules_in_child(&ll_config_clone).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
-            })
+            apply_landlock_rules_in_child(&ll_config_clone, workspace_clone.as_deref()).map_err(
+                |e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()),
+            )
         });
     }
 
@@ -153,9 +158,14 @@ fn execute_with_landlock_inner(
 /// Apply Landlock filesystem rules to the current process.
 ///
 /// Called inside the child process via `pre_exec`. Restricts filesystem access
-/// based on the configured read/write directory allowlists.
+/// based on the configured read/write directory allowlists. When a workspace
+/// path is provided, it is added to the read/write allowlists according to
+/// `allow_read_workspace` / `allow_write_workspace`.
 #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
-fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeError> {
+fn apply_landlock_rules_in_child(
+    config: &LandlockConfig,
+    workspace: Option<&std::path::Path>,
+) -> Result<(), RuntimeError> {
     use landlock::{
         Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
         RulesetStatus, ABI,
@@ -163,7 +173,7 @@ fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeE
 
     let abi = ABI::V3;
 
-    let mut ruleset = Ruleset::default()
+    let ruleset = Ruleset::default()
         .handle_access(AccessFs::from_read(abi))
         .map_err(|e| RuntimeError::ExecutionFailed(format!("Landlock ruleset read error: {e}")))?
         .handle_access(AccessFs::from_write(abi))
@@ -171,21 +181,47 @@ fn apply_landlock_rules_in_child(config: &LandlockConfig) -> Result<(), RuntimeE
         .create()
         .map_err(|e| RuntimeError::ExecutionFailed(format!("Landlock create error: {e}")))?;
 
+    // Build effective directory lists, adding workspace when configured.
+    let mut read_dirs: Vec<String> = config.fs_read_dirs.clone();
+    let mut write_dirs: Vec<String> = config.fs_write_dirs.clone();
+    if let Some(ws) = workspace {
+        let ws_str = ws.to_string_lossy().to_string();
+        if config.allow_read_workspace && !read_dirs.contains(&ws_str) {
+            read_dirs.push(ws_str.clone());
+        }
+        if config.allow_write_workspace && !write_dirs.contains(&ws_str) {
+            write_dirs.push(ws_str);
+        }
+    }
+
     // Grant read access to configured directories.
-    for dir in &config.fs_read_dirs {
+    let mut ruleset = ruleset;
+    for dir in &read_dirs {
         if let Ok(fd) = PathFd::new(dir) {
-            if let Err(e) = ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi))) {
-                eprintln!("landlock: failed to add read rule for {dir:?}: {e}");
-            }
+            ruleset = match ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi))) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    eprintln!("landlock: failed to add read rule for {dir:?}: {e}");
+                    return Err(RuntimeError::ExecutionFailed(format!(
+                        "Landlock read rule for {dir:?}: {e}"
+                    )));
+                }
+            };
         }
     }
 
     // Grant full access (read + write) to configured write directories.
-    for dir in &config.fs_write_dirs {
+    for dir in &write_dirs {
         if let Ok(fd) = PathFd::new(dir) {
-            if let Err(e) = ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi))) {
-                eprintln!("landlock: failed to add write rule for {dir:?}: {e}");
-            }
+            ruleset = match ruleset.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi))) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    eprintln!("landlock: failed to add write rule for {dir:?}: {e}");
+                    return Err(RuntimeError::ExecutionFailed(format!(
+                        "Landlock write rule for {dir:?}: {e}"
+                    )));
+                }
+            };
         }
     }
 
