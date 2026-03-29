@@ -396,8 +396,16 @@ pub fn validate_model_provider_compat(config: &crate::config::Config) -> Vec<Dia
         return diags;
     }
 
-    // Check default model against primary (first resolved) provider.
-    let primary = &selections[0];
+    // Check default model against the provider that will actually serve it.
+    // Use provider_name_for_model_with_available so vendor-prefixed models
+    // (e.g. "google/gemini-...") route to OpenRouter when it's configured,
+    // matching the runtime routing logic in build_provider_chain.
+    let available_names: Vec<&str> = selections.iter().map(|s| s.name).collect();
+    let effective_primary =
+        crate::providers::provider_name_for_model_with_available(default_model, &available_names)
+            .and_then(|name| selections.iter().find(|s| s.name == name))
+            .unwrap_or(&selections[0]);
+    let primary = effective_primary;
     if let Some(msg) = check_model_backend_compat(default_model, primary.name, primary.backend) {
         // If the provider has a per-provider model override, the default
         // model mismatch is just a warning (per-provider model takes
