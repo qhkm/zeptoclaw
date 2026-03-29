@@ -11,9 +11,8 @@ use tracing::warn;
 use crate::auth::{self, AuthMethod};
 use crate::config::Config;
 use crate::providers::{
-    provider_config_by_name, provider_name_for_model, resolve_runtime_providers, ClaudeProvider,
-    FallbackProvider, GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider,
-    RuntimeProviderSelection,
+    provider_config_by_name, resolve_runtime_providers, ClaudeProvider, FallbackProvider,
+    GeminiProvider, LLMProvider, OpenAIProvider, RetryProvider, RuntimeProviderSelection,
 };
 
 /// Build the complete provider chain from config.
@@ -162,7 +161,12 @@ pub async fn build_runtime_provider_chain(
     // Reorder candidates so the provider matching the configured model name
     // comes first.  E.g. model "gpt-4o" promotes the "openai" candidate to
     // the front, even though "anthropic" is first in the registry.
-    if let Some(preferred) = provider_name_for_model(configured_model) {
+    // Pass available provider names so vendor-prefixed models (e.g.
+    // "google/gemini-...") route to OpenRouter when it's configured.
+    let available: Vec<&str> = candidates.iter().map(|c| c.name).collect();
+    if let Some(preferred) =
+        crate::providers::provider_name_for_model_with_available(configured_model, &available)
+    {
         if let Some(idx) = candidates.iter().position(|c| c.name == preferred) {
             if idx > 0 {
                 let promoted = candidates.remove(idx);
