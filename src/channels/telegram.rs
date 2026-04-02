@@ -171,7 +171,7 @@ fn html_tags_valid(html: &str) -> bool {
 /// line boundaries (`\n`), then hard-splitting at the limit.
 fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
     if text.is_empty() {
-        return vec![String::new()];
+        return vec![];
     }
     if text.len() <= max_len {
         return vec![text.to_string()];
@@ -1292,8 +1292,14 @@ impl Channel for TelegramChannel {
         let max_chunk = TELEGRAM_MAX_MESSAGE_LENGTH - CHUNK_HEADROOM;
         let chunks = chunk_message(&msg.content, max_chunk);
 
+        let mut first_sent = false;
         for (i, chunk_content) in chunks.iter().enumerate() {
             let rendered = render_telegram_html(chunk_content);
+
+            if rendered.trim().is_empty() {
+                warn!("Skipping empty rendered chunk for chat {}", chat_id);
+                continue;
+            }
 
             let mut req = bot
                 .send_message(ChatId(chat_id), rendered.clone())
@@ -1305,8 +1311,8 @@ impl Channel for TelegramChannel {
                     .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
             }
 
-            // Reply-thread only on the first chunk.
-            if i == 0 {
+            // Reply-thread only on the first delivered chunk.
+            if !first_sent {
                 if let Some(id) = reply_msg_id {
                     req = req.reply_parameters(
                         ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
@@ -1316,7 +1322,9 @@ impl Channel for TelegramChannel {
 
             let send_result = req.await;
             match send_result {
-                Ok(_) => {}
+                Ok(_) => {
+                    first_sent = true;
+                }
                 Err(e) => {
                     let err_str = e.to_string();
                     if err_str.contains("can't parse entities") {
@@ -1332,7 +1340,7 @@ impl Channel for TelegramChannel {
                                 teloxide::types::MessageId(tid),
                             ));
                         }
-                        if i == 0 {
+                        if !first_sent {
                             if let Some(id) = reply_msg_id {
                                 retry = retry.reply_parameters(
                                     ReplyParameters::new(MessageId(id))
@@ -1346,6 +1354,7 @@ impl Channel for TelegramChannel {
                                 e2
                             ))
                         })?;
+                        first_sent = true;
                     } else {
                         return Err(ZeptoError::Channel(format!(
                             "Failed to send Telegram message: {}",
@@ -2083,7 +2092,19 @@ mod tests {
     #[test]
     fn test_chunk_message_empty() {
         let chunks = chunk_message("", 100);
-        assert_eq!(chunks, vec![""]);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_render_hr_only_produces_empty() {
+        let rendered = render_telegram_html("---");
+        assert!(rendered.trim().is_empty());
+    }
+
+    #[test]
+    fn test_render_hr_with_content_preserves_content() {
+        let rendered = render_telegram_html("---\nHello");
+        assert!(rendered.contains("Hello"));
     }
 
     #[test]
