@@ -191,6 +191,14 @@ impl MessageBus {
     /// }
     /// ```
     pub async fn publish_outbound(&self, msg: OutboundMessage) -> Result<()> {
+        if msg.content.trim().is_empty() {
+            tracing::warn!(
+                channel = %msg.channel,
+                chat_id = %msg.chat_id,
+                "Dropping empty outbound message"
+            );
+            return Ok(());
+        }
         self.outbound_tx
             .send(msg)
             .await
@@ -455,6 +463,31 @@ mod tests {
         let msg3 = OutboundMessage::new("test", "chat", "Msg 3");
         let result = bus.try_publish_outbound(msg3);
         assert!(matches!(result, Err(ZeptoError::Channel(_))));
+    }
+
+    #[tokio::test]
+    async fn test_publish_outbound_drops_empty() {
+        let bus = MessageBus::new();
+        let msg = OutboundMessage::new("telegram", "123", "");
+        bus.publish_outbound(msg).await.unwrap();
+
+        // Nothing should be on the channel — verify by trying a non-blocking receive
+        let valid = OutboundMessage::new("telegram", "123", "Hello");
+        bus.publish_outbound(valid).await.unwrap();
+        let received = bus.consume_outbound().await.unwrap();
+        assert_eq!(received.content, "Hello"); // empty message was dropped
+    }
+
+    #[tokio::test]
+    async fn test_publish_outbound_drops_whitespace() {
+        let bus = MessageBus::new();
+        let msg = OutboundMessage::new("telegram", "123", "   \n  ");
+        bus.publish_outbound(msg).await.unwrap();
+
+        let valid = OutboundMessage::new("telegram", "123", "Real content");
+        bus.publish_outbound(valid).await.unwrap();
+        let received = bus.consume_outbound().await.unwrap();
+        assert_eq!(received.content, "Real content"); // whitespace message was dropped
     }
 
     #[tokio::test]

@@ -63,6 +63,11 @@ const MAX_STARTUP_RETRIES: u32 = 10;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum delay (in seconds) for exponential backoff on startup retries.
 const MAX_RETRY_DELAY_SECS: u64 = 120;
+/// Telegram's maximum message length in characters.
+const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
+/// Headroom reserved for HTML tag overhead when chunking markdown before
+/// rendering, so that the rendered output stays within the Telegram limit.
+const CHUNK_HEADROOM: usize = 300;
 
 use super::model_switch::{
     format_current_model, format_model_list, hydrate_overrides, new_override_store,
@@ -159,6 +164,47 @@ fn html_tags_valid(html: &str) -> bool {
         }
     }
     stack.is_empty()
+}
+
+/// Split a message into chunks that fit within the given character limit.
+/// Splits at paragraph boundaries (`\n\n`) when possible, falling back to
+/// line boundaries (`\n`), then hard-splitting at the limit.
+fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![];
+    }
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find the largest split point within max_len at a natural boundary.
+        // Floor to a char boundary so we never slice mid-codepoint.
+        let mut end = max_len.min(remaining.len());
+        while end > 0 && !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let search = &remaining[..end];
+        let split_pos = search
+            .rfind("\n\n")
+            .map(|p| p + 2)
+            .or_else(|| search.rfind('\n').map(|p| p + 1))
+            .unwrap_or(end);
+
+        let (chunk, rest) = remaining.split_at(split_pos);
+        chunks.push(chunk.to_string());
+        remaining = rest;
+    }
+
+    chunks
 }
 
 /// Strip all HTML tags, restoring a plain-text representation.
@@ -1229,36 +1275,100 @@ impl Channel for TelegramChannel {
             .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
 
-        let rendered = render_telegram_html(&msg.content);
-        let mut req = bot
-            .send_message(ChatId(chat_id), rendered)
-            .parse_mode(ParseMode::Html);
+        // Pre-parse thread and reply metadata so we can reuse them across
+        // multiple chunks and on plaintext retry.
+        let thread_id: Option<i32> = msg
+            .metadata
+            .get("telegram_thread_id")
+            .and_then(|s| s.parse().ok());
+        let reply_msg_id: Option<i32> = msg
+            .reply_to
+            .as_deref()
+            .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()))
+            .and_then(|s| s.parse().ok());
 
-        // Route reply to the correct forum topic when thread metadata is present.
-        if let Some(thread_id_str) = msg.metadata.get("telegram_thread_id") {
-            if let Ok(tid) = thread_id_str.parse::<i32>() {
+        // Chunk the markdown content first, then render each chunk to HTML
+        // separately. This avoids splitting mid-HTML-tag.
+        let max_chunk = TELEGRAM_MAX_MESSAGE_LENGTH - CHUNK_HEADROOM;
+        let chunks = chunk_message(&msg.content, max_chunk);
+
+        let mut first_sent = false;
+        for (i, chunk_content) in chunks.iter().enumerate() {
+            let rendered = render_telegram_html(chunk_content);
+
+            if rendered.trim().is_empty() {
+                warn!("Skipping empty rendered chunk for chat {}", chat_id);
+                continue;
+            }
+
+            let mut req = bot
+                .send_message(ChatId(chat_id), rendered.clone())
+                .parse_mode(ParseMode::Html);
+
+            // Route to forum topic on every chunk.
+            if let Some(tid) = thread_id {
                 req = req
                     .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
             }
-        }
 
-        // Thread the reply back to the original inbound message.
-        {
-            let reply_id = msg
-                .reply_to
-                .as_deref()
-                .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()));
-            if let Some(id_str) = reply_id {
-                if let Ok(id) = id_str.parse::<i32>() {
+            // Reply-thread only on the first delivered chunk.
+            if !first_sent {
+                if let Some(id) = reply_msg_id {
                     req = req.reply_parameters(
                         ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
                     );
                 }
             }
-        }
 
-        req.await
-            .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
+            let send_result = req.await;
+            match send_result {
+                Ok(_) => {
+                    first_sent = true;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("can't parse entities") {
+                        // HTML was malformed — retry this chunk as plaintext.
+                        warn!(
+                            "Telegram HTML parse failed, retrying chunk as plaintext: {}",
+                            err_str
+                        );
+                        let plaintext = strip_html_tags(&rendered);
+                        let mut retry = bot.send_message(ChatId(chat_id), plaintext);
+                        if let Some(tid) = thread_id {
+                            retry = retry.message_thread_id(teloxide::types::ThreadId(
+                                teloxide::types::MessageId(tid),
+                            ));
+                        }
+                        if !first_sent {
+                            if let Some(id) = reply_msg_id {
+                                retry = retry.reply_parameters(
+                                    ReplyParameters::new(MessageId(id))
+                                        .allow_sending_without_reply(),
+                                );
+                            }
+                        }
+                        retry.await.map_err(|e2| {
+                            ZeptoError::Channel(format!(
+                                "Failed to send Telegram message (plaintext retry): {}",
+                                e2
+                            ))
+                        })?;
+                        first_sent = true;
+                    } else {
+                        return Err(ZeptoError::Channel(format!(
+                            "Failed to send Telegram message: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            // Small delay between chunks to avoid Telegram rate limits.
+            if chunks.len() > 1 && i < chunks.len() - 1 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
 
         // Replace 👀 with ✅ now that the reply was sent successfully.
         if self.config.reactions {
@@ -1935,5 +2045,134 @@ mod tests {
         let key_b = format!("{}:{}", chat_id, msg_id_b);
 
         assert_ne!(key_a, key_b);
+    }
+
+    // ── chunk_message tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_chunk_message_short() {
+        let chunks = chunk_message("hello", 100);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_message_at_limit() {
+        let text = "a".repeat(100);
+        let chunks = chunk_message(&text, 100);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 100);
+    }
+
+    #[test]
+    fn test_chunk_message_splits_at_paragraph() {
+        let text = format!("{}\n\n{}", "a".repeat(50), "b".repeat(50));
+        let chunks = chunk_message(&text, 60);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].ends_with("\n\n"));
+        assert!(chunks[1].starts_with("bbb"));
+    }
+
+    #[test]
+    fn test_chunk_message_splits_at_newline() {
+        let text = format!("{}\n{}", "a".repeat(50), "b".repeat(50));
+        let chunks = chunk_message(&text, 60);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].ends_with('\n'));
+    }
+
+    #[test]
+    fn test_chunk_message_hard_split() {
+        let text = "a".repeat(200);
+        let chunks = chunk_message(&text, 100);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 100);
+        assert_eq!(chunks[1].len(), 100);
+    }
+
+    #[test]
+    fn test_chunk_message_empty() {
+        let chunks = chunk_message("", 100);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_render_hr_only_produces_empty() {
+        let rendered = render_telegram_html("---");
+        assert!(rendered.trim().is_empty());
+    }
+
+    #[test]
+    fn test_render_hr_with_content_preserves_content() {
+        let rendered = render_telegram_html("---\nHello");
+        assert!(rendered.contains("Hello"));
+    }
+
+    #[test]
+    fn test_chunk_message_preserves_all_content() {
+        let text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph with more text.";
+        let chunks = chunk_message(text, 30);
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn test_chunk_message_utf8_safe() {
+        // 4-byte emoji repeated — split_at must land on a char boundary.
+        // rfind('\n') returns char-aligned positions, so this should be safe.
+        let text = format!("{}\n{}", "🦀".repeat(20), "🦀".repeat(20));
+        let chunks = chunk_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
+    }
+
+    // ── plaintext fallback tests ─────────────────────────────────────
+
+    #[test]
+    fn test_plaintext_fallback_for_crossing_tags() {
+        // Markdown that could produce crossing <b>/<i> tags: bold wrapping
+        // italic that extends beyond it.
+        let inputs = [
+            "**bold *and italic** end*",
+            "***triple*** and **double** and *single*",
+            "## Header with **bold _and italic_**\n\nParagraph with `code`.",
+            "Check [this link](https://example.com) and **bold**",
+        ];
+        for input in &inputs {
+            let rendered = render_telegram_html(input);
+            let plain = strip_html_tags(&rendered);
+            // Plaintext must not contain any HTML tags.
+            assert!(
+                !plain.contains('<') && !plain.contains('>'),
+                "strip_html_tags left tags in output for input: {input}\nplaintext: {plain}"
+            );
+            // Must not be empty.
+            assert!(!plain.trim().is_empty(), "plaintext is empty for: {input}");
+        }
+    }
+
+    #[test]
+    fn test_chunked_render_stays_within_telegram_limit() {
+        // Simulate a long research response (~8KB of markdown).
+        let mut long_text = String::new();
+        for i in 0..80 {
+            long_text.push_str(&format!(
+                "## Developer {i}\n\n\
+                 **Ethos:** This developer is known for deeply technical blog posts \
+                 exploring language design tradeoffs and strong opinions on zero-cost \
+                 abstractions and the importance of ergonomics in systems programming.\n\n"
+            ));
+        }
+        let max_chunk = TELEGRAM_MAX_MESSAGE_LENGTH - CHUNK_HEADROOM;
+        let chunks = chunk_message(&long_text, max_chunk);
+        assert!(chunks.len() > 1, "should produce multiple chunks");
+        for (i, chunk) in chunks.iter().enumerate() {
+            let rendered = render_telegram_html(chunk);
+            assert!(
+                rendered.len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "chunk {i} rendered to {} chars, exceeds {TELEGRAM_MAX_MESSAGE_LENGTH}",
+                rendered.len()
+            );
+        }
     }
 }

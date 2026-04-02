@@ -2639,12 +2639,20 @@ impl AgentLoop {
                     "Request completed"
                 );
 
-                let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
-                propagate_routing_metadata(&mut outbound, msg);
-                if let Err(e) = self.bus.publish_outbound(outbound).await {
-                    error!("Failed to publish outbound message: {}", e);
-                    if let Some(metrics) = usage_metrics.as_ref() {
-                        metrics.record_error();
+                if response.trim().is_empty() {
+                    warn!(
+                        channel = %msg.channel,
+                        chat_id = %msg.chat_id,
+                        "Suppressing empty response — nothing to send"
+                    );
+                } else {
+                    let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
+                    propagate_routing_metadata(&mut outbound, msg);
+                    if let Err(e) = self.bus.publish_outbound(outbound).await {
+                        error!("Failed to publish outbound message: {}", e);
+                        if let Some(metrics) = usage_metrics.as_ref() {
+                            metrics.record_error();
+                        }
                     }
                 }
                 true
