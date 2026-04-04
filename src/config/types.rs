@@ -1502,6 +1502,10 @@ pub struct ProviderConfig {
     /// API version query param, e.g. "2024-08-01-preview" for Azure.
     #[serde(default)]
     pub api_version: Option<String>,
+    /// Extra fields merged into the request body. Useful for provider-specific
+    /// parameters like OpenRouter's `provider.order`.
+    #[serde(default)]
+    pub extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl ProviderConfig {
