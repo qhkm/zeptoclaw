@@ -355,7 +355,19 @@ pub async fn register_all_tools(
             }
         }
     }
-    if filter.is_enabled("web_fetch") {
+    // Browser tool (opt-in): when enabled, replaces web_fetch
+    if filter.is_enabled("browser") && config.tools.browser.enabled {
+        registry.register(Box::new(crate::tools::BrowserTool::new(
+            &config.tools.browser,
+        )));
+        info!(
+            "Registered browser tool (engine: {})",
+            config.tools.browser.engine
+        );
+    }
+    if filter.is_enabled("web_fetch")
+        && !(config.tools.browser.enabled && filter.is_enabled("browser"))
+    {
         registry.register(Box::new(crate::tools::WebFetchTool::new()));
         info!("Registered web_fetch tool");
     }
