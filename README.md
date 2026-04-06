@@ -95,6 +95,9 @@ docker pull ghcr.io/qhkm/zeptoclaw:latest
 cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw
 ```
 
+The control panel is an optional compile-time feature. To use `zeptoclaw panel` or
+`zeptoclaw serve`, build/install with `--features panel`.
+
 ## Uninstall
 
 ```bash

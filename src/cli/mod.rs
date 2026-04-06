@@ -196,12 +196,15 @@ enum Commands {
         #[command(subcommand)]
         action: ProviderSubcommand,
     },
-    #[cfg(feature = "panel")]
     /// Start the control panel (API server + dashboard)
     Panel {
         /// Panel subcommand (install, auth, uninstall). Omit to start.
+        #[cfg(feature = "panel")]
         #[command(subcommand)]
         action: Option<panel::PanelAction>,
+        #[cfg(not(feature = "panel"))]
+        #[command(subcommand)]
+        action: Option<PanelDisabledAction>,
         /// Dev mode (API only, run pnpm dev separately)
         #[arg(long)]
         dev: bool,
@@ -282,6 +285,41 @@ enum Commands {
     },
     /// Start ACP agent on stdio (for use with acpx or any ACP client)
     Acp,
+}
+
+#[cfg(not(feature = "panel"))]
+#[derive(Subcommand, Debug)]
+pub enum PanelDisabledAction {
+    /// Install panel (build from source or download pre-built)
+    Install {
+        /// Download pre-built assets from GitHub releases instead of building
+        #[arg(long)]
+        download: bool,
+        /// Force rebuild even if already installed
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Manage panel authentication
+    Auth {
+        #[command(subcommand)]
+        action: PanelDisabledAuthAction,
+    },
+    /// Uninstall panel (remove dist, node_modules, token)
+    Uninstall,
+}
+
+#[cfg(not(feature = "panel"))]
+#[derive(Subcommand, Debug)]
+pub enum PanelDisabledAuthAction {
+    /// Set auth mode (token, password, none)
+    Mode {
+        /// Auth mode to set
+        mode: String,
+    },
+    /// Reset password
+    ResetPassword,
+    /// Show current auth status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -670,7 +708,6 @@ pub async fn run() -> Result<()> {
         Some(Commands::Provider { action }) => {
             provider::cmd_provider(action)?;
         }
-        #[cfg(feature = "panel")]
         Some(Commands::Panel {
             action,
             dev,
@@ -679,9 +716,17 @@ pub async fn run() -> Result<()> {
             api_port,
             rotate_token,
         }) => {
-            let config = zeptoclaw::config::Config::load()
-                .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
-            panel::cmd_panel(config, action, dev, api_only, port, api_port, rotate_token).await?;
+            #[cfg(feature = "panel")]
+            {
+                let config = zeptoclaw::config::Config::load()
+                    .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
+                panel::cmd_panel(config, action, dev, api_only, port, api_port, rotate_token)
+                    .await?;
+            }
+            #[cfg(not(feature = "panel"))]
+            {
+                cmd_panel_unavailable(action, dev, api_only, port, api_port, rotate_token)?;
+            }
         }
         Some(Commands::Doctor { online }) => {
             doctor::cmd_doctor(online).await?;
@@ -860,6 +905,32 @@ fn cmd_hardware(action: HardwareAction) {
     }
 }
 
+#[cfg(not(feature = "panel"))]
+fn cmd_panel_unavailable(
+    action: Option<PanelDisabledAction>,
+    dev: bool,
+    api_only: bool,
+    port: Option<u16>,
+    api_port: Option<u16>,
+    rotate_token: bool,
+) -> Result<()> {
+    let _ = (dev, api_only, port, api_port, rotate_token);
+    let requested = match action {
+        Some(PanelDisabledAction::Install { .. }) => "zeptoclaw panel install",
+        Some(PanelDisabledAction::Auth { .. }) => "zeptoclaw panel auth",
+        Some(PanelDisabledAction::Uninstall) => "zeptoclaw panel uninstall",
+        None => "zeptoclaw panel",
+    };
+
+    anyhow::bail!(
+        "This zeptoclaw binary was built without the optional 'panel' feature, so `{requested}` is unavailable.\n\
+         Build from source with: cargo build --release --features panel\n\
+         Run from source with: cargo run --features panel -- panel install\n\
+         Install with cargo using panel support:\n\
+           cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw --features panel"
+    );
+}
+
 /// Start MCP server, exposing registered tools via JSON-RPC 2.0.
 async fn cmd_mcp_server(http: Option<String>) -> Result<()> {
     use std::sync::Arc;
@@ -902,4 +973,45 @@ async fn cmd_mcp_server(http: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(feature = "panel"))]
+    #[test]
+    fn panel_subcommand_is_recognized_without_panel_feature() {
+        let cli =
+            Cli::try_parse_from(["zeptoclaw", "panel", "install"]).expect("parse panel install");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Panel {
+                action: Some(PanelDisabledAction::Install {
+                    download: false,
+                    rebuild: false,
+                }),
+                dev: false,
+                api_only: false,
+                port: None,
+                api_port: None,
+                rotate_token: false,
+            })
+        ));
+    }
+
+    #[cfg(not(feature = "panel"))]
+    #[test]
+    fn panel_helpful_error_mentions_feature_flag() {
+        let err = cmd_panel_unavailable(None, false, false, None, None, false)
+            .expect_err("panel should be unavailable without feature");
+        let message = err.to_string();
+
+        assert!(message.contains("without the optional 'panel' feature"));
+        assert!(message.contains("cargo build --release --features panel"));
+        assert!(message.contains(
+            "cargo install zeptoclaw --git https://github.com/qhkm/zeptoclaw --features panel"
+        ));
+    }
 }

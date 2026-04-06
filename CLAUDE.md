@@ -88,6 +88,7 @@ For detailed module docs see `docs/claude/architecture.md`.
 
 - Embedded `ZeptoAgent` tool calls use the same `kernel::execute_tool()` path as the main agent loop and MCP server, so safety scanning, taint checks, and tool metrics stay aligned across entry points.
 - Embedded `ZeptoAgent` also supports per-tool timeout, panic capture, and configurable approval gating via the builder for safer embedded coding-agent execution.
+- The `panel` CLI namespace is always parsed, but panel-backed behavior still requires the optional Cargo `panel` feature; feature-disabled builds now fail with explicit build/install guidance instead of a Clap unknown-subcommand error.
 - Model-driven provider inference treats vendor-prefixed gateway IDs like `anthropic/...` as OpenRouter models only when OpenRouter is actually available, and live provider model discovery now carries `api-version` while normalizing Azure deployment bases to `/openai/models`.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".
