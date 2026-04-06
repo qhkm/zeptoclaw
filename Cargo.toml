@@ -243,7 +243,7 @@ axum = { version = "0.8", features = ["ws"], optional = true }
 # Tower HTTP middleware (CORS, static file serving, tracing)
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = true }
 # JWT token generation/validation for panel auth
-jsonwebtoken = { version = "10", optional = true }
+jsonwebtoken = { version = "10", optional = true, features = ["aws_lc_rs"] }
 # Password hashing for panel password auth mode
 bcrypt = { version = "0.19", optional = true }
 unicode-normalization = "0.1.25"
