@@ -114,7 +114,9 @@ pub trait LLMProvider: Send + Sync {
     /// Send a streaming chat completion request.
     ///
     /// Returns an `mpsc::Receiver` that yields `StreamEvent`s.
-    /// The default implementation wraps `chat()` and emits a single `Done` event.
+    /// The default implementation wraps `chat()` and emits the final text as a
+    /// single `Delta`, followed by any tool calls and the terminal `Done`
+    /// event.
     /// Providers that support SSE streaming should override this.
     async fn chat_stream(
         &self,
@@ -124,13 +126,18 @@ pub trait LLMProvider: Send + Sync {
         options: ChatOptions,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
         let response = self.chat(messages, tools, model, options).await?;
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let _ = tx
-            .send(StreamEvent::Done {
-                content: response.content,
-                usage: response.usage,
-            })
-            .await;
+        let (tx, rx) = tokio::sync::mpsc::channel(3);
+        let tool_calls = response.tool_calls;
+        let content = response.content;
+        let usage = response.usage;
+
+        if !content.is_empty() {
+            let _ = tx.send(StreamEvent::Delta(content.clone())).await;
+        }
+        if !tool_calls.is_empty() {
+            let _ = tx.send(StreamEvent::ToolCalls(tool_calls)).await;
+        }
+        let _ = tx.send(StreamEvent::Done { content, usage }).await;
         Ok(rx)
     }
 
@@ -677,12 +684,65 @@ mod tests {
             .await
             .unwrap();
 
-        let event = rx.recv().await.unwrap();
-        match event {
+        match rx.recv().await.unwrap() {
+            StreamEvent::Delta(text) => assert_eq!(text, "hello from fake"),
+            other => panic!("Expected Delta event from default chat_stream, got: {other:?}"),
+        }
+
+        match rx.recv().await.unwrap() {
             StreamEvent::Done { content, .. } => {
                 assert_eq!(content, "hello from fake");
             }
-            _ => panic!("Expected Done event from default chat_stream"),
+            other => panic!("Expected Done event from default chat_stream, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_default_impl_preserves_tool_calls() {
+        struct FakeProvider;
+
+        #[async_trait]
+        impl LLMProvider for FakeProvider {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+                _model: Option<&str>,
+                _options: ChatOptions,
+            ) -> Result<LLMResponse> {
+                Ok(LLMResponse::with_tools(
+                    "",
+                    vec![LLMToolCall::new("call_1", "search", r#"{"q":"rust"}"#)],
+                ))
+            }
+
+            fn default_model(&self) -> &str {
+                "fake"
+            }
+
+            fn name(&self) -> &str {
+                "fake"
+            }
+        }
+
+        let provider = FakeProvider;
+        let mut rx = provider
+            .chat_stream(vec![], vec![], None, ChatOptions::default())
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            StreamEvent::ToolCalls(tool_calls) => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, "call_1");
+                assert_eq!(tool_calls[0].name, "search");
+            }
+            other => panic!("Expected ToolCalls event, got: {other:?}"),
+        }
+
+        match rx.recv().await.unwrap() {
+            StreamEvent::Done { content, .. } => assert!(content.is_empty()),
+            other => panic!("Expected Done event, got: {other:?}"),
         }
     }
 

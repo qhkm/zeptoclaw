@@ -55,7 +55,7 @@ cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo tes
 ```
 src/
 ├── agent/       # Agent loop, context builder, token budget, compaction
-├── api/         # Panel API server (axum)
+├── api/         # Panel API server + OpenAI-compatible serve routes (axum)
 ├── auth/        # OAuth (PKCE), token refresh, Claude CLI import
 ├── bus/         # Async message bus
 ├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp, Lark, Email, MQTT, Serial
@@ -89,6 +89,8 @@ For detailed module docs see `docs/claude/architecture.md`.
 - Embedded `ZeptoAgent` tool calls use the same `kernel::execute_tool()` path as the main agent loop and MCP server, so safety scanning, taint checks, and tool metrics stay aligned across entry points.
 - Embedded `ZeptoAgent` also supports per-tool timeout, panic capture, and configurable approval gating via the builder for safer embedded coding-agent execution.
 - Model-driven provider inference treats vendor-prefixed gateway IDs like `anthropic/...` as OpenRouter models only when OpenRouter is actually available, and live provider model discovery now carries `api-version` while normalizing Azure deployment bases to `/openai/models`.
+- The OpenAI-compatible `/v1/chat/completions` serve path forwards request tools, returns OpenAI-style tool-call payloads for assistant/tool messages, and the default provider streaming adapter now emits a text delta plus tool-call events before `Done` so non-native streaming providers are not silently flattened.
+- The serve API only accepts omitted, `null`, or `"auto"` for `tool_choice`; unsupported values are rejected with `400` instead of being ignored.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".
 - `edit_file` rejects empty `old_text` and accepts optional `expected_replacements` to guard exact-match edits.
@@ -120,5 +122,7 @@ cargo nextest run --lib                    # Unit tests
 cargo nextest run --test cli_smoke | e2e | integration
 cargo nextest run test_name                # Specific test
 ```
+
+Current validation: `cargo fmt -- --check`, `cargo clippy -- -D warnings`, and `cargo test --doc` pass. `cargo nextest run --lib` is currently blocked by `auth::oauth::tests::test_callback_server_timeout` under nextest, though the same test passes when rerun with `cargo test`.
 
 For smoke checklist and benchmarks see `docs/claude/testing.md`.
