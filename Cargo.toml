@@ -142,7 +142,7 @@ instant-distance = { version = "0.6.1", optional = true }
 # PDF (optional — feature-gated behind "tool-pdf")
 # =============================================================================
 # Pure-Rust PDF parser for text extraction
-lopdf = { version = "0.39", optional = true }
+lopdf = { version = "0.40", optional = true }
 
 # =============================================================================
 # CHANNELS
