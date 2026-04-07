@@ -303,14 +303,16 @@ fn infer_provider_name_for_model(
     let model_lower = model.to_ascii_lowercase();
 
     if let Some((prefix, suffix)) = model_lower.split_once('/') {
-        // Gateway-style IDs like "anthropic/claude-..." should resolve to
-        // OpenRouter when it is actually available, not to the vendor prefix.
-        if prefix == "openrouter" || available_providers.contains(&"openrouter") {
+        // Explicit `openrouter/...` always routes to OpenRouter.
+        if prefix == "openrouter" {
             return Some("openrouter");
         }
 
-        // If the prefix matches a configured provider, use it directly.
-        // E.g. "anthropic/claude-sonnet-4-6" with ["anthropic"] → "anthropic".
+        // If the prefix matches a directly configured provider, prefer it
+        // over OpenRouter. E.g. "anthropic/claude-sonnet-4-6" with both
+        // `anthropic` and `openrouter` configured → "anthropic" (direct).
+        // This respects user intent: vendor-prefixed model IDs should hit
+        // the vendor's API when that vendor is configured.
         if let Some(spec) = PROVIDER_REGISTRY
             .iter()
             .filter(|spec| spec.runtime_supported)
@@ -321,7 +323,14 @@ fn infer_provider_name_for_model(
             }
         }
 
-        // Fall through to keyword matching on the model suffix so that
+        // Fall back to OpenRouter for vendor-prefixed IDs whose prefix is
+        // not a directly configured provider (e.g. "google/gemini-3-flash"
+        // when only `anthropic` and `openrouter` are configured).
+        if available_providers.contains(&"openrouter") {
+            return Some("openrouter");
+        }
+
+        // Final fallback: keyword matching on the model suffix so that
         // "anthropic/claude-sonnet-4-6" can still resolve via "claude" keyword
         // when the prefix itself isn't a configured provider.
         return PROVIDER_REGISTRY
@@ -1213,18 +1222,70 @@ mod tests {
 
     #[test]
     fn test_provider_name_for_model_prefers_openrouter_when_available() {
+        // OpenRouter is the only configured provider — vendor-prefixed IDs route through it.
         assert_eq!(
             provider_name_for_model_with_available("anthropic/claude-sonnet-4-6", &["openrouter"]),
             Some("openrouter")
         );
+        // openai/ prefix doesn't match the configured "anthropic" directly,
+        // so it falls back to the available "openrouter".
         assert_eq!(
             provider_name_for_model_with_available("openai/gpt-5.4", &["anthropic", "openrouter"]),
             Some("openrouter")
         );
-        // Prefix matches available provider directly.
+        // Prefix matches the only available provider directly.
         assert_eq!(
             provider_name_for_model_with_available("anthropic/claude-sonnet-4-6", &["anthropic"]),
             Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn test_provider_name_for_model_prefers_direct_provider_over_openrouter() {
+        // CRITICAL: when both `anthropic` and `openrouter` are configured AND
+        // the user passes a vendor-prefixed model whose prefix matches a direct
+        // provider, the direct provider must win — otherwise users can't ever
+        // hit a vendor's native API once OpenRouter is in the mix.
+        assert_eq!(
+            provider_name_for_model_with_available(
+                "anthropic/claude-sonnet-4-6",
+                &["anthropic", "openrouter"]
+            ),
+            Some("anthropic")
+        );
+        assert_eq!(
+            provider_name_for_model_with_available("openai/gpt-5.4", &["openai", "openrouter"]),
+            Some("openai")
+        );
+        // Prefix order in the available list shouldn't matter.
+        assert_eq!(
+            provider_name_for_model_with_available(
+                "anthropic/claude-sonnet-4-6",
+                &["openrouter", "anthropic"]
+            ),
+            Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn test_provider_name_for_model_falls_back_to_openrouter_for_unknown_prefix() {
+        // "google/" isn't configured directly, but OpenRouter is — should route there.
+        assert_eq!(
+            provider_name_for_model_with_available(
+                "google/gemini-3-flash-preview",
+                &["anthropic", "openrouter"]
+            ),
+            Some("openrouter")
+        );
+    }
+
+    #[test]
+    fn test_provider_name_for_model_explicit_openrouter_prefix_always_wins() {
+        // openrouter/... prefix always routes to openrouter, even if other
+        // providers are configured.
+        assert_eq!(
+            provider_name_for_model_with_available("openrouter/auto", &["anthropic"]),
+            Some("openrouter")
         );
     }
 
