@@ -51,7 +51,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multi
 # HTML PARSING
 # =============================================================================
 # DOM parser built on Servo's html5ever — CSS selectors for web_fetch extraction
-scraper = "0.25"
+scraper = "0.26"
 
 # =============================================================================
 # CLI
