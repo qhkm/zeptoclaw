@@ -165,8 +165,11 @@ base64 = "0.22"
 tempfile = "3.10"
 # Secure password input (hidden terminal echo)
 rpassword = "7.3"
-# Zip archive extraction for ClawHub skill installs
-zip = { version = "8", default-features = false, features = ["deflate"] }
+# Zip archive extraction for ClawHub skill installs.
+# Pick the flate2+zlib-rs backend explicitly — the umbrella "deflate" feature also
+# pulls zopfli (a high-ratio compression *encoder*) which we never use (read-only
+# zip consumption). Dropping zopfli saves ~100 KiB of code + tables.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # =============================================================================
 # EMAIL CHANNEL (optional — feature-gated behind "channel-email")
@@ -247,7 +250,16 @@ jsonwebtoken = { version = "10", optional = true, features = ["aws_lc_rs"] }
 # Password hashing for panel password auth mode
 bcrypt = { version = "0.19", optional = true }
 unicode-normalization = "0.1.25"
-google-cloud-auth = { version = "1.7.0", default-features = false }
+
+# =============================================================================
+# VERTEX PROVIDER (optional — feature-gated behind "provider-vertex")
+# =============================================================================
+# Google Cloud ADC / access-token credentials for Vertex AI Gemini.
+# Only pulled in when the `provider-vertex` feature is enabled; otherwise the
+# VertexProvider module is cfg'd out entirely and every config entry referencing
+# `providers.vertex` will surface a clear runtime error asking users to rebuild
+# with `--features provider-vertex`.
+google-cloud-auth = { version = "1.7.0", default-features = false, optional = true }
 
 # USB device enumeration — only on platforms nusb supports (Linux, macOS, Windows)
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
@@ -297,6 +309,9 @@ android = []
 sandbox-landlock   = ["dep:landlock"]
 sandbox-firejail   = []
 sandbox-bubblewrap = []
+# Vertex AI provider (Google Cloud Gemini via ADC / access token)
+# Pulls in google-cloud-auth and its transitive google-cloud-gax / google-cloud-rpc stack.
+provider-vertex = ["dep:google-cloud-auth"]
 # Google Workspace tools (Gmail + Calendar) via gogcli-rs
 google = ["dep:gog-gmail", "dep:gog-calendar", "dep:gog-auth", "dep:gog-core"]
 # Control panel API server + dashboard (axum, JWT, bcrypt)

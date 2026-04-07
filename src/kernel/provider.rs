@@ -95,21 +95,35 @@ pub async fn provider_from_runtime_selection(
             Some(Box::new(provider))
         }
         "vertex" => {
-            // For Vertex: api_key holds the GCP project ID, api_base holds the location.
-            // Auth: VERTEX_ACCESS_TOKEN (static) → ADC (auto-refresh via google-cloud-auth).
-            let api_key = if selection.api_key.is_empty() {
+            #[cfg(feature = "provider-vertex")]
+            {
+                // For Vertex: api_key holds the GCP project ID, api_base holds the location.
+                // Auth: VERTEX_ACCESS_TOKEN (static) → ADC (auto-refresh via google-cloud-auth).
+                let api_key = if selection.api_key.is_empty() {
+                    None
+                } else {
+                    Some(selection.api_key.as_str())
+                };
+                let api_base = selection.api_base.as_deref().filter(|b| !b.is_empty());
+                crate::providers::vertex::VertexProvider::from_config(
+                    api_key,
+                    api_base,
+                    configured_model,
+                )
+                .await
+                .map(|p| Box::new(p) as Box<dyn LLMProvider>)
+            }
+            #[cfg(not(feature = "provider-vertex"))]
+            {
+                let _ = configured_model; // silence unused-var warning
+                tracing::warn!(
+                    "Vertex provider is configured but this build was compiled without the \
+                     `provider-vertex` feature. Rebuild with `cargo build --release --features \
+                     provider-vertex` (or `cargo install zeptoclaw --features provider-vertex`) \
+                     to enable Vertex AI."
+                );
                 None
-            } else {
-                Some(selection.api_key.as_str())
-            };
-            let api_base = selection.api_base.as_deref().filter(|b| !b.is_empty());
-            crate::providers::vertex::VertexProvider::from_config(
-                api_key,
-                api_base,
-                configured_model,
-            )
-            .await
-            .map(|p| Box::new(p) as Box<dyn LLMProvider>)
+            }
         }
         _ => None,
     }
