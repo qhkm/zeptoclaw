@@ -271,6 +271,20 @@ impl Tool for BrowserTool {
 
         let args_str = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
         let engine_override = args.get("engine").and_then(|v| v.as_str());
+
+        // The JSON schema declares an enum for `engine`, but schemas are
+        // advisory — the LLM can produce arbitrary values. Enforce an
+        // allowlist so the engine string can never reach the
+        // AGENT_BROWSER_ENGINE env var as something unexpected.
+        if let Some(ov) = engine_override {
+            if ov != ENGINE_LIGHTPANDA && ov != ENGINE_CHROME {
+                return Err(ZeptoError::Tool(format!(
+                    "Invalid engine '{}': must be '{}' or '{}'",
+                    ov, ENGINE_LIGHTPANDA, ENGINE_CHROME
+                )));
+            }
+        }
+
         let is_navigation = command == "open";
 
         // SSRF check: validate URLs in all commands that accept them.
@@ -369,8 +383,16 @@ impl Tool for BrowserTool {
             Err(e) => return Err(e),
         };
 
-        // Post-navigation SSRF check (catches redirects)
-        if url_to_check.is_some() {
+        // Post-navigation SSRF check (catches redirects).
+        //
+        // Run the check whenever the command may have caused a navigation,
+        // not only when the request body explicitly carried a URL. Commands
+        // like `click`, `back`, `forward`, `submit`, and `follow` can land
+        // the active page on an internal IP via a redirect chain (e.g.
+        // `http://attacker.example/redirect?to=http://169.254.169.254/...`)
+        // without ever passing through the pre-flight URL allowlist.
+        let may_navigate = matches!(command, "click" | "back" | "forward" | "submit" | "follow");
+        if url_to_check.is_some() || may_navigate {
             self.check_final_url(&engine).await?;
         }
 
@@ -486,5 +508,63 @@ mod tests {
         assert_eq!(enum_values.len(), 2);
         assert!(enum_values.iter().any(|v| v == ENGINE_LIGHTPANDA));
         assert!(enum_values.iter().any(|v| v == ENGINE_CHROME));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_invalid_engine_override() {
+        let tool = make_tool(ENGINE_LIGHTPANDA);
+        let ctx = crate::tools::types::ToolContext::new();
+        // The JSON schema enum is advisory — execute() must enforce the
+        // allowlist itself so the LLM cannot inject arbitrary engine strings
+        // into the AGENT_BROWSER_ENGINE env var.
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "command": "open",
+                    "args": "https://example.com",
+                    "engine": "../../bin/sh"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("invalid engine must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid engine") && msg.contains("../../bin/sh"),
+            "Expected invalid engine error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_arbitrary_engine_value() {
+        let tool = make_tool(ENGINE_LIGHTPANDA);
+        let ctx = crate::tools::types::ToolContext::new();
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "command": "open",
+                    "args": "https://example.com",
+                    "engine": "firefox"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("non-allowlisted engine must be rejected");
+        assert!(err.to_string().contains("Invalid engine"));
+    }
+
+    #[test]
+    fn test_navigation_commands_trigger_post_nav_check() {
+        // Document the allowlist of commands that require post-navigation
+        // SSRF re-checks. If a new navigation-causing command is added to
+        // the browser, it must also be added here so redirects can't reach
+        // internal IPs (e.g. 169.254.169.254 cloud metadata endpoints).
+        for cmd in &["click", "back", "forward", "submit", "follow"] {
+            let may_navigate = matches!(*cmd, "click" | "back" | "forward" | "submit" | "follow");
+            assert!(
+                may_navigate,
+                "{cmd} should be in the post-navigation SSRF check allowlist"
+            );
+        }
     }
 }
