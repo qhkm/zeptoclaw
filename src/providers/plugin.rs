@@ -676,8 +676,12 @@ echo '{"jsonrpc":"2.0","id":1,"result":{"content":"streamed response","tool_call
             )
             .await
             .unwrap();
-        let event = rx.recv().await.unwrap();
-        match event {
+        // Default chat_stream emits Delta (text) then Done.
+        match rx.recv().await.unwrap() {
+            StreamEvent::Delta(text) => assert_eq!(text, "streamed response"),
+            other => panic!("Expected Delta, got {:?}", other),
+        }
+        match rx.recv().await.unwrap() {
             StreamEvent::Done { content, .. } => {
                 assert_eq!(content, "streamed response");
             }

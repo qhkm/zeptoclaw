@@ -2,11 +2,13 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::Arc;
 use zeptoclaw::api::auth::generate_api_token;
 use zeptoclaw::api::config::PanelConfig;
 use zeptoclaw::api::events::EventBus;
 use zeptoclaw::api::server::{start_server, AppState};
 use zeptoclaw::config::Config;
+use zeptoclaw::providers::openai::OpenAIProvider;
 
 /// Panel subcommands.
 #[derive(clap::Subcommand, Debug)]
@@ -182,6 +184,21 @@ async fn cmd_start(
 
     let event_bus = EventBus::new(256);
     let mut state = AppState::new(api_token.clone(), event_bus);
+
+    // Wire in the LLM provider so /v1/chat/completions works.
+    if let Some(ref openai_cfg) = config.providers.openai {
+        let api_key = openai_cfg.api_key.as_deref().unwrap_or("");
+        let api_base = openai_cfg
+            .api_base
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1");
+        if !api_key.is_empty() {
+            let provider = OpenAIProvider::with_base_url(api_key, api_base);
+            state.provider = Some(Arc::new(provider));
+            state.config = Some(Arc::new(config.clone()));
+            println!("LLM provider:   openai ({})", api_base);
+        }
+    }
 
     // Wire in the TaskStore so kanban endpoints return real data.
     let task_store_path = Config::dir().join("tasks.json");

@@ -22,6 +22,7 @@ Project-level guidance for coding agents working in this repository.
 - Provider introspection CLI: `zeptoclaw provider status` prints resolved providers, wrapper config (retry/fallback), and quota usage snapshot
 - Provider onboarding validation: Anthropic uses `GET /v1/models`; OpenAI-compatible presets validate keys with read-only endpoint checks, including Zhipu/GLM via `GET /models`
 - Model discoverability hardening: gateway-style slash IDs (for example `anthropic/...`) only infer OpenRouter when that provider is actually available, and live `/model fetch` now honors `api_version` while normalizing Azure deployment bases to `/openai/models`
+- OpenAI-compatible serve tool calling: `/v1/chat/completions` forwards request tools to providers, returns assistant/tool messages plus tool-call payloads in OpenAI format, streams tool-call deltas even for providers using the default `chat_stream()` adapter, and rejects unsupported `tool_choice` values instead of silently ignoring them
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
 - Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
@@ -53,7 +54,7 @@ Project-level guidance for coding agents working in this repository.
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local build runs 3163 lib (3157 passed, 0 failed, 6 ignored) + 92 main + 24 cli_smoke + 13 e2e + 70 integration + 127 doc (27 ignored); optional features such as `whatsapp-web` add feature-gated coverage
+- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, and `cargo test --doc` (128 passed, 27 ignored); `cargo nextest run --lib` is currently blocked by `auth::oauth::tests::test_callback_server_timeout` under nextest even though the same test passes when rerun with `cargo test`
 
 ## Task Tracking Protocol
 

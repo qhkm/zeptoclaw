@@ -652,12 +652,16 @@ mod tests {
 
         assert!(result.is_ok());
         let mut rx = result.unwrap();
-        let event = rx.recv().await.unwrap();
-        match event {
+        // Default chat_stream emits Delta (text) then Done.
+        match rx.recv().await.unwrap() {
+            StreamEvent::Delta(text) => assert_eq!(text, "mock response"),
+            other => panic!("Expected Delta event, got {:?}", other),
+        }
+        match rx.recv().await.unwrap() {
             StreamEvent::Done { content, .. } => {
                 assert_eq!(content, "mock response");
             }
-            _ => panic!("Expected Done event"),
+            other => panic!("Expected Done event, got {:?}", other),
         }
     }
 
