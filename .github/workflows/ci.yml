@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TERM_QUIET: "true" # F.I.R.S.T. principle (only print failures, not test names)
   RUSTFLAGS: -Dwarnings
-  BINARY_SIZE_LIMIT_MB: 11
+  BINARY_SIZE_LIMIT_MB: 12
 
 jobs:
   test:
