@@ -60,9 +60,17 @@ impl fmt::Display for ProviderError {
 }
 
 impl ProviderError {
-    /// Returns `true` if this error is transient and the request should be retried.
+    /// Returns `true` if this error is transient and the request should be
+    /// retried by a generic retry layer (e.g. [`crate::providers::RetryProvider`])
+    /// with exponential backoff.
     ///
-    /// Retryable errors: RateLimit, ServerError, Timeout.
+    /// Retryable errors: RateLimit, ServerError, Timeout, Overloaded.
+    ///
+    /// `ContextOverflow` is intentionally NOT retryable here. The agent loop
+    /// owns its own context-aware overflow recovery (compaction + targeted
+    /// retry); blind backoff would just resend the same oversized request and
+    /// guarantee another failure. The agent loop's `try_recover_context_*`
+    /// path is the only place that should react to a `ContextOverflow`.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -70,7 +78,6 @@ impl ProviderError {
                 | ProviderError::ServerError(_)
                 | ProviderError::Timeout(_)
                 | ProviderError::Overloaded(_)
-                | ProviderError::ContextOverflow(_)
         )
     }
 
@@ -289,22 +296,26 @@ mod tests {
 
     #[test]
     fn test_provider_error_is_retryable() {
-        // Retryable
+        // Retryable: transient errors that benefit from exponential backoff.
         assert!(ProviderError::RateLimit("429".into()).is_retryable());
         assert!(ProviderError::ServerError("500".into()).is_retryable());
         assert!(ProviderError::Timeout("timeout".into()).is_retryable());
-
-        // Also retryable
         assert!(ProviderError::Overloaded("busy".into()).is_retryable());
-        assert!(ProviderError::ContextOverflow("too long".into()).is_retryable());
 
-        // Not retryable
+        // NOT retryable by RetryProvider — these need targeted handling.
         assert!(!ProviderError::Auth("401".into()).is_retryable());
         assert!(!ProviderError::Billing("402".into()).is_retryable());
         assert!(!ProviderError::InvalidRequest("400".into()).is_retryable());
         assert!(!ProviderError::ModelNotFound("404".into()).is_retryable());
         assert!(!ProviderError::Unknown("???".into()).is_retryable());
         assert!(!ProviderError::Format("bad id".into()).is_retryable());
+        // ContextOverflow is owned by the agent loop's compaction retry,
+        // not by RetryProvider. Backoff alone resends the same oversized
+        // request and guarantees another failure.
+        assert!(
+            !ProviderError::ContextOverflow("too long".into()).is_retryable(),
+            "ContextOverflow must NOT be is_retryable — RetryProvider would loop on the same oversized request"
+        );
     }
 
     #[test]

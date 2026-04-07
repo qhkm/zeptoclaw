@@ -93,17 +93,24 @@ pub fn classify_error_message(msg: &str) -> ProviderError {
         return ProviderError::Timeout(msg.to_string());
     }
 
-    // Context overflow — prompt exceeds model's context window (retriable via compaction)
+    // Context overflow — prompt exceeds model's context window (retriable via compaction).
+    //
+    // Patterns must be specific enough not to collide with rate-limit messages
+    // like "you've hit the token limit for your plan tier", which is a quota
+    // event, not an oversized prompt. A bare "token limit" substring is too
+    // broad and would loop the compaction retry on rate-limit responses, so
+    // we require a stronger qualifier.
     if contains_any(
         &lower,
         &[
             "context_length_exceeded",
             "context length exceeded",
+            "context window exceeded",
             "prompt is too long",
             "maximum context length",
             "too many tokens",
             "request too large",
-            "token limit",
+            "token limit exceeded",
             "input is too long",
             "exceeds the model",
         ],
@@ -245,9 +252,37 @@ mod tests {
     }
 
     #[test]
-    fn test_context_overflow_token_limit() {
-        let e = classify_error_message("Token limit: 200000, used: 201530");
+    fn test_context_overflow_token_limit_exceeded() {
+        let e = classify_error_message("token limit exceeded: 201530 > 200000");
         assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_context_overflow_window_exceeded() {
+        let e = classify_error_message("context window exceeded for this model");
+        assert!(matches!(e, ProviderError::ContextOverflow(_)));
+    }
+
+    #[test]
+    fn test_rate_limit_token_phrasing_not_misclassified() {
+        // Rate-limit messages can mention "token limit" too. The classifier
+        // must not treat plan-tier token quotas as a context overflow,
+        // otherwise the agent loop's compaction retry would loop on a quota
+        // event that compaction can't fix.
+        let e =
+            classify_error_message("You've hit the token limit for your plan tier (rate limit)");
+        assert!(
+            matches!(e, ProviderError::RateLimit(_)),
+            "plan-tier token limit must classify as RateLimit, not ContextOverflow"
+        );
+
+        // Even without the explicit "rate limit" qualifier, a bare
+        // "token limit" string must not be treated as ContextOverflow.
+        let e = classify_error_message("You've hit the token limit for your plan tier");
+        assert!(
+            !matches!(e, ProviderError::ContextOverflow(_)),
+            "bare 'token limit' must not be classified as ContextOverflow"
+        );
     }
 
     #[test]
