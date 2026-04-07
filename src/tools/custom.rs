@@ -31,7 +31,12 @@ fn shell_escape(value: &str) -> String {
 ///
 /// `raw_string` is intended for multi-arg CLI input (e.g. `gmail +triage --max 5`),
 /// not for arbitrary shell expansion. This strips characters that enable injection
-/// (`;`, `|`, `$()`, backticks, etc.) while preserving normal flag/argument characters.
+/// (`;`, `|`, `$()`, backticks, control characters, etc.) while preserving normal
+/// flag/argument characters.
+///
+/// Control characters (`\n`, `\r`, `\0`, ESC) are stripped because a newline
+/// inside a `raw_string` value would terminate the current shell statement and
+/// allow a second arbitrary command to be appended.
 fn sanitize_raw_string(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -54,7 +59,11 @@ fn sanitize_raw_string(value: &str) -> String {
                     | '\''
                     | '#'
                     | '~'
-            )
+                    | '\n'
+                    | '\r'
+                    | '\0'
+                    | '\x1b'
+            ) && !c.is_control()
         })
         .collect();
     if sanitized.len() != value.len() {
@@ -368,6 +377,27 @@ mod tests {
             sanitize_raw_string("echo pwned > /etc/cron"),
             "echo pwned  /etc/cron"
         );
+    }
+
+    #[test]
+    fn test_sanitize_raw_string_strips_control_chars() {
+        // Newline injection: a \n inside a raw_string would terminate the
+        // first command and start a new one under `sh -c`. (Tilde is also
+        // stripped by the existing metachar filter.)
+        assert_eq!(
+            sanitize_raw_string("gmail\nrm -rf /tmp"),
+            "gmailrm -rf /tmp"
+        );
+        // Carriage return
+        assert_eq!(sanitize_raw_string("foo\rbar"), "foobar");
+        // Null byte
+        assert_eq!(sanitize_raw_string("x\0y"), "xy");
+        // ANSI escape
+        assert_eq!(sanitize_raw_string("a\x1b[31mb"), "a[31mb");
+        // Tab is also a control char and is stripped (use space-separated args).
+        assert_eq!(sanitize_raw_string("a\tb"), "ab");
+        // BEL, vertical tab, form feed (other C0 controls)
+        assert_eq!(sanitize_raw_string("x\x07y\x0bz\x0cw"), "xyzw");
     }
 
     #[test]
