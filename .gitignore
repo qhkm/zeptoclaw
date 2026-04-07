@@ -21,8 +21,9 @@ target/
 # OS
 .DS_Store
 
-# AI tools
-.claude/
+# AI tools — track shared settings, ignore the rest
+.claude/*
+!.claude/settings.json
 .kimi/
 .cursor/
 .aider*

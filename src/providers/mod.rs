@@ -94,9 +94,12 @@ pub fn parse_provider_error(status: u16, body: &str) -> ProviderError {
         404 => ProviderError::ModelNotFound(body.to_string()),
         429 => ProviderError::RateLimit(body.to_string()),
         400 => {
-            // 400 can be a format error — check body patterns
+            // 400 can be a format error or context overflow — check body patterns
             let classified = error_classifier::classify_error_message(body);
-            if matches!(classified, ProviderError::Format(_)) {
+            if matches!(
+                classified,
+                ProviderError::Format(_) | ProviderError::ContextOverflow(_)
+            ) {
                 classified
             } else {
                 ProviderError::InvalidRequest(body.to_string())

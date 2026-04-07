@@ -37,6 +37,8 @@ pub enum ProviderError {
     Overloaded(String),
     /// Request format error (e.g. malformed tool_use.id) — do not retry
     Format(String),
+    /// Request exceeds the model's context window — compact and retry
+    ContextOverflow(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -52,14 +54,23 @@ impl fmt::Display for ProviderError {
             ProviderError::Unknown(msg) => write!(f, "Unknown provider error: {}", msg),
             ProviderError::Overloaded(msg) => write!(f, "Overloaded error: {}", msg),
             ProviderError::Format(msg) => write!(f, "Format error: {}", msg),
+            ProviderError::ContextOverflow(msg) => write!(f, "Context overflow: {}", msg),
         }
     }
 }
 
 impl ProviderError {
-    /// Returns `true` if this error is transient and the request should be retried.
+    /// Returns `true` if this error is transient and the request should be
+    /// retried by a generic retry layer (e.g. [`crate::providers::RetryProvider`])
+    /// with exponential backoff.
     ///
-    /// Retryable errors: RateLimit, ServerError, Timeout.
+    /// Retryable errors: RateLimit, ServerError, Timeout, Overloaded.
+    ///
+    /// `ContextOverflow` is intentionally NOT retryable here. The agent loop
+    /// owns its own context-aware overflow recovery (compaction + targeted
+    /// retry); blind backoff would just resend the same oversized request and
+    /// guarantee another failure. The agent loop's `try_recover_context_*`
+    /// path is the only place that should react to a `ContextOverflow`.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -81,6 +92,7 @@ impl ProviderError {
                 | ProviderError::InvalidRequest(_)
                 | ProviderError::Billing(_)
                 | ProviderError::Format(_)
+                | ProviderError::ContextOverflow(_)
         )
     }
 
@@ -96,6 +108,7 @@ impl ProviderError {
             ProviderError::Timeout(_) => None,
             ProviderError::Overloaded(_) => Some(503),
             ProviderError::Format(_) => Some(400),
+            ProviderError::ContextOverflow(_) => Some(400),
             ProviderError::Unknown(_) => None,
         }
     }
@@ -276,25 +289,33 @@ mod tests {
         assert!(ProviderError::Format("bad id".into())
             .to_string()
             .contains("Format error"));
+        assert!(ProviderError::ContextOverflow("too long".into())
+            .to_string()
+            .contains("Context overflow"));
     }
 
     #[test]
     fn test_provider_error_is_retryable() {
-        // Retryable
+        // Retryable: transient errors that benefit from exponential backoff.
         assert!(ProviderError::RateLimit("429".into()).is_retryable());
         assert!(ProviderError::ServerError("500".into()).is_retryable());
         assert!(ProviderError::Timeout("timeout".into()).is_retryable());
-
-        // Also retryable
         assert!(ProviderError::Overloaded("busy".into()).is_retryable());
 
-        // Not retryable
+        // NOT retryable by RetryProvider — these need targeted handling.
         assert!(!ProviderError::Auth("401".into()).is_retryable());
         assert!(!ProviderError::Billing("402".into()).is_retryable());
         assert!(!ProviderError::InvalidRequest("400".into()).is_retryable());
         assert!(!ProviderError::ModelNotFound("404".into()).is_retryable());
         assert!(!ProviderError::Unknown("???".into()).is_retryable());
         assert!(!ProviderError::Format("bad id".into()).is_retryable());
+        // ContextOverflow is owned by the agent loop's compaction retry,
+        // not by RetryProvider. Backoff alone resends the same oversized
+        // request and guarantees another failure.
+        assert!(
+            !ProviderError::ContextOverflow("too long".into()).is_retryable(),
+            "ContextOverflow must NOT be is_retryable — RetryProvider would loop on the same oversized request"
+        );
     }
 
     #[test]
@@ -314,6 +335,10 @@ mod tests {
         assert!(!ProviderError::InvalidRequest("400".into()).should_fallback());
         assert!(!ProviderError::Billing("402".into()).should_fallback());
         assert!(!ProviderError::Format("bad id".into()).should_fallback());
+        assert!(
+            !ProviderError::ContextOverflow("too long".into()).should_fallback(),
+            "ContextOverflow should not fallback — compaction, not a different provider, is the fix"
+        );
     }
 
     #[test]
@@ -342,6 +367,10 @@ mod tests {
             Some(503)
         );
         assert_eq!(ProviderError::Format("x".into()).status_code(), Some(400));
+        assert_eq!(
+            ProviderError::ContextOverflow("x".into()).status_code(),
+            Some(400)
+        );
         assert_eq!(ProviderError::Unknown("x".into()).status_code(), None);
     }
 

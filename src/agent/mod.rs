@@ -66,7 +66,7 @@ pub mod tool_call_limit;
 
 pub use budget::TokenBudget;
 pub use context::{format_message_envelope, ContextBuilder, RuntimeContext};
-pub use context_monitor::{CompactionStrategy, ContextMonitor};
+pub use context_monitor::{CompactionStrategy, ContextMonitor, PreflightAction};
 pub use facade::{ZeptoAgent, ZeptoAgentBuilder};
 pub use r#loop::AgentLoop;
 pub use r#loop::{ToolFeedback, ToolFeedbackPhase};
