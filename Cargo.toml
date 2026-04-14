@@ -120,7 +120,7 @@ dirs = "6.0"
 # SESSION MANAGEMENT
 # =============================================================================
 # UUID v4 for unique session identifiers (API, cron, security, etc.)
-uuid = { version = "1.6", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 # ULID for ACP session and client IDs (time-ordered, URL-safe, 26 chars)
 ulid = "1.2"
 # Timestamps for message history and local time formatting
