@@ -2085,9 +2085,12 @@ mod tests {
 
     #[test]
     fn test_load_from_path_rejects_invalid_provider_endpoint() {
-        let env_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
-        let original = env::var(env_key).ok();
-        env::remove_var(env_key);
+        let allow_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
+        let base_key = "ZEPTOCLAW_PROVIDERS_OPENAI_API_BASE";
+        let original_allow = env::var(allow_key).ok();
+        let original_base = env::var(base_key).ok();
+        env::remove_var(allow_key);
+        env::remove_var(base_key);
 
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.json");
@@ -2106,10 +2109,16 @@ mod tests {
         let err = Config::load_from_path(&config_path).unwrap_err();
         assert!(err.to_string().contains("Invalid endpoint configuration"));
 
-        if let Some(value) = original {
-            env::set_var(env_key, value);
+        if let Some(value) = original_allow {
+            env::set_var(allow_key, value);
         } else {
-            env::remove_var(env_key);
+            env::remove_var(allow_key);
+        }
+
+        if let Some(value) = original_base {
+            env::set_var(base_key, value);
+        } else {
+            env::remove_var(base_key);
         }
     }
 
