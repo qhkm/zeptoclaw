@@ -33,7 +33,7 @@ fn audit_actor_id(ctx: &ToolContext) -> String {
 
 fn audit_specific_action(name: &str) -> Option<AuditAction> {
     match name {
-        "shell" => Some(AuditAction::ShellExec),
+        "shell" | "shell_execute" => Some(AuditAction::ShellExec),
         "web_fetch" | "web_search" => Some(AuditAction::NetworkAccess),
         "spawn" | "delegate" => Some(AuditAction::AgentSpawn),
         _ => None,
@@ -245,11 +245,23 @@ mod tests {
     fn test_audit_specific_action_classification() {
         assert_eq!(audit_specific_action("shell"), Some(AuditAction::ShellExec));
         assert_eq!(
+            audit_specific_action("shell_execute"),
+            Some(AuditAction::ShellExec)
+        );
+        assert_eq!(
             audit_specific_action("web_fetch"),
             Some(AuditAction::NetworkAccess)
         );
         assert_eq!(
+            audit_specific_action("web_search"),
+            Some(AuditAction::NetworkAccess)
+        );
+        assert_eq!(
             audit_specific_action("spawn"),
+            Some(AuditAction::AgentSpawn)
+        );
+        assert_eq!(
+            audit_specific_action("delegate"),
             Some(AuditAction::AgentSpawn)
         );
         assert_eq!(audit_specific_action("echo"), None);
