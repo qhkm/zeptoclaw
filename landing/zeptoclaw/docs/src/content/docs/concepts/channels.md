@@ -47,7 +47,7 @@ The Telegram channel uses the Bot API with long polling. Configure it with:
   "channels": {
     "telegram": {
       "enabled": true,
-      "bot_token": "123456:ABC..."
+      "token": "123456:ABC..."
     }
   }
 }
@@ -55,7 +55,7 @@ The Telegram channel uses the Bot API with long polling. Configure it with:
 
 Or via environment variable:
 ```bash
-export ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN=123456:ABC...
+export ZEPTOCLAW_CHANNELS_TELEGRAM_TOKEN=123456:ABC...
 ```
 
 ## Slack
@@ -176,9 +176,9 @@ All channels support the `deny_by_default` config option for sender allowlists. 
   "channels": {
     "telegram": {
       "enabled": true,
-      "bot_token": "123456:ABC...",
+      "token": "123456:ABC...",
       "deny_by_default": true,
-      "allowed_senders": ["user_id_1", "user_id_2"]
+      "allow_from": ["123456789", "987654321"]
     }
   }
 }
