@@ -36,7 +36,7 @@ fn sanitize_endpoint_for_logging(endpoint: &str) -> String {
 
 fn sanitize_endpoint_diagnostic_message(message: &str) -> String {
     if let Some(rest) = message.strip_prefix("Invalid URL '") {
-        if let Some((endpoint, tail)) = rest.split_once("': ") {
+        if let Some((endpoint, tail)) = rest.rsplit_once("': ") {
             return format!(
                 "Invalid URL '{}': {}",
                 sanitize_endpoint_for_logging(endpoint),
@@ -1775,6 +1775,14 @@ mod tests {
         let sanitized = sanitize_endpoint_diagnostic_message(message);
         assert!(sanitized.contains("[redacted endpoint]"));
         assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("token=abcd"));
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_diagnostic_message_handles_embedded_delimiter() {
+        let message = "Invalid URL 'http://[::1': token=abcd': invalid IPv6 address";
+        let sanitized = sanitize_endpoint_diagnostic_message(message);
+        assert!(sanitized.contains("[redacted endpoint]"));
         assert!(!sanitized.contains("token=abcd"));
     }
 
