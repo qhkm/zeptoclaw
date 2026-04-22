@@ -1248,10 +1248,11 @@ impl<'de> Deserialize<'de> for TelegramConfig {
         }
 
         let raw = RawTelegramConfig::deserialize(deserializer)?;
-        let enabled = raw.enabled.unwrap_or(!raw.token.is_empty());
+        let token = raw.token.trim().to_string();
+        let enabled = raw.enabled.unwrap_or(!token.is_empty());
         Ok(Self {
             enabled,
-            token: raw.token,
+            token,
             allow_from: raw.allow_from,
             deny_by_default: raw.deny_by_default,
             allow_usernames: raw.allow_usernames,

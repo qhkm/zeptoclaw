@@ -1846,6 +1846,21 @@ mod tests {
     }
 
     #[test]
+    fn test_telegram_channel_config_does_not_enable_whitespace_token() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "token": "   "
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(!telegram.enabled);
+        assert_eq!(telegram.token, "");
+    }
+
+    #[test]
     fn test_provider_configs() {
         let json = r#"{
             "providers": {
