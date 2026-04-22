@@ -1143,6 +1143,11 @@ fn default_telegram_reactions() -> bool {
     true
 }
 
+/// Deserialize a Telegram allowlist from either a single string or a string array.
+///
+/// This keeps compatibility with legacy config examples that used a single
+/// `allowed_chats` value while normalizing the stored representation to
+/// `Vec<String>`.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1212,6 +1217,11 @@ impl Default for TelegramConfig {
 }
 
 impl<'de> Deserialize<'de> for TelegramConfig {
+    /// Deserialize Telegram config with legacy field aliases and inferred enablement.
+    ///
+    /// Supports `bot_token`, `allowed_senders`, and `allowed_chats` for backward
+    /// compatibility. When `enabled` is omitted, the channel auto-enables if a
+    /// Telegram token is present.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
