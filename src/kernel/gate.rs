@@ -26,7 +26,8 @@ fn audit_actor_id(ctx: &ToolContext) -> String {
     match (&ctx.channel, &ctx.chat_id) {
         (Some(channel), Some(chat_id)) => format!("{channel}:{chat_id}"),
         (Some(channel), None) => channel.clone(),
-        _ => "system".to_string(),
+        (None, Some(chat_id)) => format!("chat:{chat_id}"),
+        (None, None) => "system".to_string(),
     }
 }
 
@@ -41,10 +42,8 @@ fn audit_specific_action(name: &str) -> Option<AuditAction> {
 
 fn record_tool_execution_audit(actor_id: &str, name: &str, outcome: &str) {
     let detail = format!("tool={name}");
-    record_audit_chain_event(actor_id, AuditAction::ToolInvoke, &detail, outcome);
-    if let Some(action) = audit_specific_action(name) {
-        record_audit_chain_event(actor_id, action, &detail, outcome);
-    }
+    let action = audit_specific_action(name).unwrap_or(AuditAction::ToolInvoke);
+    record_audit_chain_event(actor_id, action, &detail, outcome);
 }
 
 fn blocked_input_output(name: &str, result: SafetyResult) -> ToolOutput {
@@ -233,6 +232,27 @@ mod tests {
         registry.register(Box::new(WriteFileTool));
         registry.register(Box::new(EditFileTool));
         registry
+    }
+
+    #[test]
+    fn test_audit_actor_id_preserves_chat_only_context() {
+        let mut ctx = ToolContext::default();
+        ctx.chat_id = Some("chat-42".to_string());
+        assert_eq!(audit_actor_id(&ctx), "chat:chat-42");
+    }
+
+    #[test]
+    fn test_audit_specific_action_classification() {
+        assert_eq!(audit_specific_action("shell"), Some(AuditAction::ShellExec));
+        assert_eq!(
+            audit_specific_action("web_fetch"),
+            Some(AuditAction::NetworkAccess)
+        );
+        assert_eq!(
+            audit_specific_action("spawn"),
+            Some(AuditAction::AgentSpawn)
+        );
+        assert_eq!(audit_specific_action("echo"), None);
     }
 
     #[tokio::test]

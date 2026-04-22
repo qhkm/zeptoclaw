@@ -7,6 +7,7 @@
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -113,23 +114,30 @@ pub struct AuditEntry {
     pub hash: String,
 }
 
+const MAX_AUDIT_ENTRIES: usize = 10_000;
+
 #[derive(Debug)]
 struct AuditHashChain {
     state: Mutex<AuditChainState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AuditChainState {
-    entries: Vec<AuditEntry>,
+    entries: VecDeque<AuditEntry>,
     tip: String,
+    window_base_hash: String,
+    next_seq: u64,
 }
 
 impl Default for AuditHashChain {
     fn default() -> Self {
+        let genesis = genesis_hash();
         Self {
             state: Mutex::new(AuditChainState {
-                entries: Vec::new(),
-                tip: genesis_hash(),
+                entries: VecDeque::new(),
+                tip: genesis.clone(),
+                window_base_hash: genesis,
+                next_seq: 1,
             }),
         }
     }
@@ -144,7 +152,7 @@ impl AuditHashChain {
         outcome: &str,
     ) -> AuditEntry {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = state.entries.len() as u64 + 1;
+        let seq = state.next_seq;
         let timestamp = Utc::now().to_rfc3339();
         let agent_id = sanitize_text(agent_id, 120);
         let detail = sanitize_text(detail, 512);
@@ -166,15 +174,32 @@ impl AuditHashChain {
         };
 
         state.tip = hash;
-        state.entries.push(entry.clone());
+        state.next_seq = state.next_seq.saturating_add(1);
+        state.entries.push_back(entry.clone());
+        if state.entries.len() > MAX_AUDIT_ENTRIES {
+            if let Some(evicted) = state.entries.pop_front() {
+                state.window_base_hash = evicted.hash;
+            }
+        }
         entry
     }
 
     fn verify_integrity(&self) -> std::result::Result<(), String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut expected_prev = genesis_hash();
+        let mut expected_prev = state.window_base_hash.clone();
+        let mut expected_seq = state
+            .entries
+            .front()
+            .map(|e| e.seq)
+            .unwrap_or(state.next_seq);
 
         for entry in &state.entries {
+            if entry.seq != expected_seq {
+                return Err(format!(
+                    "chain broken at seq {}: sequence mismatch",
+                    entry.seq
+                ));
+            }
             if entry.prev_hash != expected_prev {
                 return Err(format!(
                     "chain broken at seq {}: prev hash mismatch",
@@ -197,10 +222,14 @@ impl AuditHashChain {
             }
 
             expected_prev = entry.hash.clone();
+            expected_seq = expected_seq.saturating_add(1);
         }
 
         if state.tip != expected_prev {
             return Err("chain broken: tip does not match final entry hash".to_string());
+        }
+        if state.next_seq != expected_seq {
+            return Err("chain broken: next sequence mismatch".to_string());
         }
 
         Ok(())
@@ -212,7 +241,7 @@ impl AuditHashChain {
             return Vec::new();
         }
         let start = state.entries.len().saturating_sub(n);
-        state.entries[start..].to_vec()
+        state.entries.iter().skip(start).cloned().collect()
     }
 
     fn tip_hash(&self) -> String {
@@ -235,12 +264,20 @@ fn compute_entry_hash(
     outcome: &str,
     prev_hash: &str,
 ) -> String {
-    let payload = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        seq, timestamp, agent_id, action, detail, outcome, prev_hash
-    );
-    let digest = Sha256::digest(payload.as_bytes());
-    hex::encode(digest)
+    let mut hasher = Sha256::new();
+    hasher.update(seq.to_le_bytes());
+    hash_string_field(&mut hasher, timestamp);
+    hash_string_field(&mut hasher, agent_id);
+    hash_string_field(&mut hasher, &action.to_string());
+    hash_string_field(&mut hasher, detail);
+    hash_string_field(&mut hasher, outcome);
+    hash_string_field(&mut hasher, prev_hash);
+    hex::encode(hasher.finalize())
+}
+
+fn hash_string_field(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn genesis_hash() -> String {
@@ -411,11 +448,54 @@ mod tests {
 
         {
             let mut state = chain.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.entries[1].detail = "tampered".to_string();
+            state.entries.get_mut(1).unwrap().detail = "tampered".to_string();
         }
 
         let err = chain.verify_integrity().unwrap_err();
         assert!(err.contains("hash mismatch"));
+    }
+
+    #[test]
+    fn test_hash_chain_is_bounded() {
+        let chain = AuditHashChain::default();
+        for idx in 0..(MAX_AUDIT_ENTRIES + 3) {
+            chain.record(
+                "agent-b",
+                AuditAction::ToolInvoke,
+                &format!("tool={idx}"),
+                "ok",
+            );
+        }
+
+        let recent = chain.recent(MAX_AUDIT_ENTRIES + 50);
+        assert_eq!(recent.len(), MAX_AUDIT_ENTRIES);
+        assert_eq!(recent.first().unwrap().seq, 4);
+        assert_eq!(recent.last().unwrap().seq, (MAX_AUDIT_ENTRIES + 3) as u64);
+        assert_eq!(chain.verify_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn test_hash_payload_is_unambiguous() {
+        let prev = genesis_hash();
+        let hash_a = compute_entry_hash(
+            1,
+            "2026-04-22T00:00:00Z",
+            "agent",
+            AuditAction::ToolInvoke,
+            "a|b",
+            "c",
+            &prev,
+        );
+        let hash_b = compute_entry_hash(
+            1,
+            "2026-04-22T00:00:00Z",
+            "agent",
+            AuditAction::ToolInvoke,
+            "a",
+            "b|c",
+            &prev,
+        );
+        assert_ne!(hash_a, hash_b);
     }
 
     #[test]
