@@ -156,6 +156,24 @@ fn normalize_sha256(digest: &str) -> crate::error::Result<String> {
     Ok(normalized)
 }
 
+fn resolve_verified_sha256(
+    requested_sha256: Option<String>,
+    response_sha256: Option<String>,
+) -> crate::error::Result<Option<String>> {
+    match (requested_sha256, response_sha256) {
+        (Some(requested), Some(response)) if requested != response => {
+            Err(crate::error::ZeptoError::SecurityViolation(format!(
+                "Skill archive SHA-256 digest conflict: provided {}, response header {}",
+                requested, response
+            )))
+        }
+        (Some(requested), Some(_)) => Ok(Some(requested)),
+        (Some(requested), None) => Ok(Some(requested)),
+        (None, Some(response)) => Ok(Some(response)),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Check whether `host` is in the allowed-hosts bypass list (case-insensitive).
 fn is_allowed_host(host: &str, allowed_hosts: &[String]) -> bool {
     let host_lower = host.to_ascii_lowercase();
@@ -397,7 +415,7 @@ impl ClawHubRegistry {
             .map(normalize_sha256)
             .transpose()?;
 
-        let verified_sha256 = requested_sha256.or(response_sha256);
+        let verified_sha256 = resolve_verified_sha256(requested_sha256, response_sha256)?;
 
         // Reject archives that are larger than 50 MB before buffering.
         if let Some(content_length) = resp.content_length() {
@@ -674,6 +692,26 @@ mod tests {
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_resolve_verified_sha256_accepts_matching_sources() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let resolved = resolve_verified_sha256(Some(digest.to_string()), Some(digest.to_string()))
+            .expect("matching digests should be accepted");
+        assert_eq!(resolved.as_deref(), Some(digest));
+    }
+
+    #[test]
+    fn test_resolve_verified_sha256_rejects_conflicting_sources() {
+        let requested = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let response = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let err = resolve_verified_sha256(Some(requested.to_string()), Some(response.to_string()))
+            .expect_err("conflicting digests must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("digest conflict"));
+        assert!(msg.contains(requested));
+        assert!(msg.contains(response));
     }
 
     // -------------------------------------------------------------------------

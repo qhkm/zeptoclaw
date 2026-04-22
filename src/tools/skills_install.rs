@@ -72,11 +72,18 @@ impl Tool for InstallSkillTool {
             )));
         }
 
-        let sha256 = args
-            .get("sha256")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let sha256 = match args.get("sha256") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => {
+                let digest = value.trim();
+                (!digest.is_empty()).then_some(digest)
+            }
+            Some(_) => {
+                return Ok(ToolOutput::error(
+                    "sha256 must be a string containing a 64-character hex digest",
+                ));
+            }
+        };
 
         match self
             .registry
@@ -213,5 +220,22 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.for_llm.contains("Invalid SHA-256 digest"));
+    }
+
+    #[tokio::test]
+    async fn test_install_non_string_sha256_returns_error() {
+        let tool = make_tool();
+        let ctx = ToolContext::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"slug": "web-scraper", "sha256": 123}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result
+            .for_llm
+            .contains("sha256 must be a string containing a 64-character hex digest"));
     }
 }
