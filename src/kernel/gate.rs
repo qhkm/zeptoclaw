@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::sync::RwLock;
 use std::time::Instant;
 
+use crate::audit::{record_audit_chain_event, AuditAction};
 use crate::error::Result;
 use crate::safety::taint::TaintEngine;
 use crate::safety::{CheckDirection, SafetyLayer, SafetyResult, ScanOptions};
@@ -20,6 +21,31 @@ use crate::tools::{ToolContext, ToolOutput, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
 
 const FILE_BODY_IGNORED_POLICY_RULES: &[&str] = &["shell_injection"];
+
+fn audit_actor_id(ctx: &ToolContext) -> String {
+    match (&ctx.channel, &ctx.chat_id) {
+        (Some(channel), Some(chat_id)) => format!("{channel}:{chat_id}"),
+        (Some(channel), None) => channel.clone(),
+        _ => "system".to_string(),
+    }
+}
+
+fn audit_specific_action(name: &str) -> Option<AuditAction> {
+    match name {
+        "shell" => Some(AuditAction::ShellExec),
+        "web_fetch" | "web_search" => Some(AuditAction::NetworkAccess),
+        "spawn" | "delegate" => Some(AuditAction::AgentSpawn),
+        _ => None,
+    }
+}
+
+fn record_tool_execution_audit(actor_id: &str, name: &str, outcome: &str) {
+    let detail = format!("tool={name}");
+    record_audit_chain_event(actor_id, AuditAction::ToolInvoke, &detail, outcome);
+    if let Some(action) = audit_specific_action(name) {
+        record_audit_chain_event(actor_id, action, &detail, outcome);
+    }
+}
 
 fn blocked_input_output(name: &str, result: SafetyResult) -> ToolOutput {
     ToolOutput::error(format!(
@@ -113,6 +139,7 @@ pub async fn execute_tool(
     taint: Option<&RwLock<TaintEngine>>,
 ) -> Result<ToolOutput> {
     let start = Instant::now();
+    let actor_id = audit_actor_id(ctx);
 
     // Step 1: Safety check on input
     //
@@ -121,6 +148,7 @@ pub async fn execute_tool(
     // rule that false-positives on legitimate code snippets.
     if let Some(safety_layer) = safety {
         if let Some(result) = scan_tool_input(safety_layer, name, &input) {
+            record_tool_execution_audit(&actor_id, name, "blocked_input_safety");
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(blocked_input_output(name, result));
         }
@@ -130,6 +158,7 @@ pub async fn execute_tool(
     if let Some(taint_mutex) = taint {
         if let Ok(engine) = taint_mutex.read() {
             if let Err(violation) = engine.check_sink(name, &input) {
+                record_tool_execution_audit(&actor_id, name, "blocked_taint");
                 metrics.record_tool_call(name, start.elapsed(), false);
                 return Ok(ToolOutput::error(format!(
                     "Tool '{}' blocked by taint tracking: {}",
@@ -143,6 +172,7 @@ pub async fn execute_tool(
     let output = match registry.execute_with_context(name, input, ctx).await {
         Ok(output) => output,
         Err(e) => {
+            record_tool_execution_audit(&actor_id, name, "execution_error");
             metrics.record_tool_call(name, start.elapsed(), false);
             return Err(e);
         }
@@ -152,6 +182,7 @@ pub async fn execute_tool(
     if let Some(safety_layer) = safety {
         let result = safety_layer.scan(&output.for_llm, CheckDirection::Output);
         if result.blocked {
+            record_tool_execution_audit(&actor_id, name, "blocked_output_safety");
             metrics.record_tool_call(name, start.elapsed(), false);
             return Ok(ToolOutput::error(format!(
                 "Tool '{}' output blocked by safety: {}",
@@ -169,6 +200,12 @@ pub async fn execute_tool(
     }
 
     // Step 6: Record metrics
+    let outcome = if output.is_error {
+        "tool_error"
+    } else {
+        "success"
+    };
+    record_tool_execution_audit(&actor_id, name, outcome);
     metrics.record_tool_call(name, start.elapsed(), !output.is_error);
 
     Ok(output)
