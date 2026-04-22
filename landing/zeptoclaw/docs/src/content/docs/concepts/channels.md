@@ -56,6 +56,7 @@ The Telegram channel uses the Bot API with long polling. Configure it with:
 Or via environment variable:
 ```bash
 export ZEPTOCLAW_CHANNELS_TELEGRAM_TOKEN=123456:ABC...
+export ZEPTOCLAW_CHANNELS_TELEGRAM_ENABLED=true
 ```
 
 ## Slack
