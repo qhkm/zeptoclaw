@@ -43,6 +43,10 @@ impl Tool for InstallSkillTool {
                 "slug": {
                     "type": "string",
                     "description": "Skill slug from find_skills results (e.g. 'web-scraper')"
+                },
+                "sha256": {
+                    "type": "string",
+                    "description": "Optional published SHA-256 digest for archive verification"
                 }
             },
             "required": ["slug"]
@@ -68,15 +72,28 @@ impl Tool for InstallSkillTool {
             )));
         }
 
+        let sha256 = args
+            .get("sha256")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
         match self
             .registry
-            .download_and_install(slug, &self.skills_dir)
+            .download_and_install(slug, &self.skills_dir, sha256)
             .await
         {
-            Ok(path) => Ok(ToolOutput::user_visible(format!(
-                "Skill '{}' installed to {}. Restart the agent to use it.",
-                slug, path
-            ))),
+            Ok(result) => {
+                let integrity_note = if result.digest_verified {
+                    "SHA-256 verified."
+                } else {
+                    "WARNING: archive digest not provided; integrity is unverified."
+                };
+                Ok(ToolOutput::user_visible(format!(
+                    "Skill '{}' installed to {}. {} Restart the agent to use it.",
+                    slug, result.path, integrity_note
+                )))
+            }
             Err(e) => Ok(ToolOutput::error(format!("Install failed: {}", e))),
         }
     }
@@ -109,6 +126,7 @@ mod tests {
     fn test_install_skill_tool_parameters() {
         let params = make_tool().parameters();
         assert!(params["properties"]["slug"].is_object());
+        assert!(params["properties"]["sha256"].is_object());
         let required = params["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("slug")));
     }
@@ -180,5 +198,20 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.for_llm.contains("Invalid skill slug"));
+    }
+
+    #[tokio::test]
+    async fn test_install_invalid_sha256_returns_error() {
+        let tool = make_tool();
+        let ctx = ToolContext::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"slug": "web-scraper", "sha256": "not-a-valid-digest"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.for_llm.contains("Invalid SHA-256 digest"));
     }
 }
