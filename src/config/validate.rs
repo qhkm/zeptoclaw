@@ -274,12 +274,16 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
     }
 
     // Security warnings
-    let allow_private_endpoints = obj
-        .get("safety")
-        .and_then(|v| v.as_object())
-        .and_then(|s| s.get("allow_private_endpoints"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let allow_private_endpoints = std::env::var("ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or_else(|| {
+            obj.get("safety")
+                .and_then(|v| v.as_object())
+                .and_then(|s| s.get("allow_private_endpoints"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
 
     if let Some(providers) = obj.get("providers").and_then(|v| v.as_object()) {
         for (provider_name, provider_val) in providers {
@@ -972,6 +976,34 @@ mod tests {
         assert!(!diags
             .iter()
             .any(|d| d.path == "providers.openai.api_base" && d.level == DiagnosticLevel::Error));
+    }
+
+    #[test]
+    fn test_validate_provider_api_base_honors_env_override() {
+        let env_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
+        let original = std::env::var(env_key).ok();
+        std::env::set_var(env_key, "1");
+
+        let raw = json!({
+            "safety": {
+                "allow_private_endpoints": false
+            },
+            "providers": {
+                "openai": {
+                    "api_base": "http://127.0.0.1:11434/v1"
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags
+            .iter()
+            .any(|d| d.path == "providers.openai.api_base" && d.level == DiagnosticLevel::Error));
+
+        if let Some(value) = original {
+            std::env::set_var(env_key, value);
+        } else {
+            std::env::remove_var(env_key);
+        }
     }
 
     #[test]

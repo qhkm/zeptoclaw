@@ -1,6 +1,7 @@
 //! Config check and reset command handlers.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 
 use zeptoclaw::config::Config;
 
@@ -71,7 +72,16 @@ async fn cmd_config_check() -> Result<()> {
         .count();
 
     // Provider endpoint SSRF validation.
-    let endpoint_diags = zeptoclaw::config::validate::validate_provider_api_bases(&config);
+    let seen_from_raw: HashSet<(String, String)> = diagnostics
+        .iter()
+        .map(|d| (d.path.clone(), d.message.clone()))
+        .collect();
+
+    let endpoint_diags: Vec<_> = zeptoclaw::config::validate::validate_provider_api_bases(&config)
+        .into_iter()
+        .filter(|d| !seen_from_raw.contains(&(d.path.clone(), d.message.clone())))
+        .collect();
+
     for diag in &endpoint_diags {
         println!("{}", diag);
     }

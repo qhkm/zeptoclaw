@@ -15,7 +15,7 @@ use once_cell::sync::OnceCell;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Global configuration instance
 static CONFIG: OnceCell<RwLock<Config>> = OnceCell::new();
@@ -68,12 +68,28 @@ impl Config {
         // Apply environment variable overrides
         config.apply_env_overrides();
 
-        for diag in crate::config::validate::validate_provider_api_bases(&config) {
+        let endpoint_diags = crate::config::validate::validate_provider_api_bases(&config);
+        for diag in &endpoint_diags {
             warn!(
                 path = %diag.path,
                 message = %diag.message,
                 "Config endpoint validation warning"
             );
+        }
+
+        if let Some(diag) = endpoint_diags
+            .iter()
+            .find(|d| d.level == crate::config::validate::DiagnosticLevel::Error)
+        {
+            error!(
+                path = %diag.path,
+                message = %diag.message,
+                "Config endpoint validation failed"
+            );
+            return Err(ZeptoError::Config(format!(
+                "Invalid endpoint configuration at {}: {}",
+                diag.path, diag.message
+            )));
         }
 
         Ok(config)
@@ -2065,6 +2081,36 @@ mod tests {
 
         // Clean up
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_load_from_path_rejects_invalid_provider_endpoint() {
+        let env_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
+        let original = env::var(env_key).ok();
+        env::remove_var(env_key);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "providers": {
+                    "openai": {
+                        "api_base": "http://127.0.0.1:11434/v1"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let err = Config::load_from_path(&config_path).unwrap_err();
+        assert!(err.to_string().contains("Invalid endpoint configuration"));
+
+        if let Some(value) = original {
+            env::set_var(env_key, value);
+        } else {
+            env::remove_var(env_key);
+        }
     }
 
     #[test]
