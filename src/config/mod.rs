@@ -15,6 +15,7 @@ use once_cell::sync::OnceCell;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use tracing::warn;
 
 /// Global configuration instance
 static CONFIG: OnceCell<RwLock<Config>> = OnceCell::new();
@@ -66,6 +67,14 @@ impl Config {
 
         // Apply environment variable overrides
         config.apply_env_overrides();
+
+        for diag in crate::config::validate::validate_provider_api_bases(&config) {
+            warn!(
+                path = %diag.path,
+                message = %diag.message,
+                "Config endpoint validation warning"
+            );
+        }
 
         Ok(config)
     }
@@ -1303,6 +1312,9 @@ impl Config {
             if let Ok(v) = val.parse::<usize>() {
                 self.safety.max_output_length = v.clamp(1_000, 10_000_000);
             }
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS") {
+            self.safety.allow_private_endpoints = val.eq_ignore_ascii_case("true") || val == "1";
         }
         if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_ENABLED") {
             self.safety.taint.enabled = val.eq_ignore_ascii_case("true") || val == "1";

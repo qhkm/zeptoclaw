@@ -70,6 +70,20 @@ async fn cmd_config_check() -> Result<()> {
         .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Warn)
         .count();
 
+    // Provider endpoint SSRF validation.
+    let endpoint_diags = zeptoclaw::config::validate::validate_provider_api_bases(&config);
+    for diag in &endpoint_diags {
+        println!("{}", diag);
+    }
+    errors += endpoint_diags
+        .iter()
+        .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Error)
+        .count();
+    warnings += endpoint_diags
+        .iter()
+        .filter(|d| d.level == zeptoclaw::config::validate::DiagnosticLevel::Warn)
+        .count();
+
     // Hint: workspace configured but coding tools disabled
     let workspace = config.workspace_path();
     if workspace.exists() && !config.tools.coding_tools {
