@@ -252,14 +252,14 @@ impl LongTermMemory {
             .filter(|entry| entry.category.to_lowercase() == cat_lower)
             .collect();
 
-        results.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+        results.sort_by_key(|b| std::cmp::Reverse(b.last_accessed));
         results
     }
 
     /// List all entries, sorted by `last_accessed` descending.
     pub fn list_all(&self) -> Vec<&MemoryEntry> {
         let mut results: Vec<&MemoryEntry> = self.entries.values().collect();
-        results.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+        results.sort_by_key(|b| std::cmp::Reverse(b.last_accessed));
         results
     }
 
