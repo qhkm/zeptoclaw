@@ -204,7 +204,7 @@ impl ReminderStore {
                 true
             })
             .collect();
-        results.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        results.sort_by_key(|a| a.created_at);
         results
     }
 
@@ -252,7 +252,7 @@ impl ReminderStore {
                 e.status == ReminderStatus::Pending && e.due_at.is_some_and(|due| due < now)
             })
             .collect();
-        results.sort_by(|a, b| a.due_at.cmp(&b.due_at));
+        results.sort_by_key(|a| a.due_at);
         results
     }
 

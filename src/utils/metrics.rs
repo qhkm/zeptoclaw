@@ -193,7 +193,7 @@ impl MetricsCollector {
 
         // Sort tools by call_count descending.
         let mut entries: Vec<_> = tools.iter().collect();
-        entries.sort_by(|a, b| b.1.call_count.cmp(&a.1.call_count));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1.call_count));
 
         for (name, metrics) in entries {
             let avg = match metrics.average_duration() {
