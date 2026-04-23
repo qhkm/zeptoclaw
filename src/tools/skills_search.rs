@@ -69,9 +69,10 @@ impl Tool for FindSkillsTool {
                     } else {
                         ""
                     };
+                    let digest = r.sha256.as_deref().unwrap_or("(not published)");
                     out.push_str(&format!(
-                        "- **{}** (`{}`){}\n  Version: {}\n  {}\n\n",
-                        r.display_name, r.slug, warning, r.version, r.summary
+                        "- **{}** (`{}`){}\n  Version: {}\n  SHA-256: {}\n  {}\n\n",
+                        r.display_name, r.slug, warning, r.version, digest, r.summary
                     ));
                 }
                 Ok(ToolOutput::user_visible(out))
