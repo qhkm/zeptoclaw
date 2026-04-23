@@ -3,6 +3,7 @@
 //! This module defines all configuration structs used throughout the framework.
 //! All types implement serde traits for JSON serialization and have sensible defaults.
 
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -1142,12 +1143,45 @@ fn default_telegram_reactions() -> bool {
     true
 }
 
+/// Deserialize a Telegram allowlist from either a single string or a string array.
+///
+/// This keeps compatibility with legacy config examples that used a single
+/// `allowed_chats` value while normalizing the stored representation to
+/// `Vec<String>`.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    let value = Option::<StringOrVec>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(StringOrVec::One(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![trimmed.to_string()]
+            }
+        }
+        Some(StringOrVec::Many(values)) => values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+        None => Vec::new(),
+    })
+}
+
 /// Telegram channel configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TelegramConfig {
     /// Whether the channel is enabled
-    #[serde(default)]
     pub enabled: bool,
     /// Bot token from BotFather
     pub token: String,
@@ -1179,6 +1213,51 @@ impl Default for TelegramConfig {
             allow_usernames: default_telegram_allow_usernames(),
             reactions: default_telegram_reactions(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TelegramConfig {
+    /// Deserialize Telegram config with legacy field aliases and inferred enablement.
+    ///
+    /// Supports `bot_token`, `allowed_senders`, and `allowed_chats` for backward
+    /// compatibility. When `enabled` is omitted, the channel auto-enables if a
+    /// Telegram token is present.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct RawTelegramConfig {
+            enabled: Option<bool>,
+            #[serde(alias = "bot_token")]
+            token: String,
+            #[serde(
+                default,
+                alias = "allowed_senders",
+                alias = "allowed_chats",
+                deserialize_with = "deserialize_string_or_vec"
+            )]
+            allow_from: Vec<String>,
+            #[serde(default)]
+            deny_by_default: bool,
+            #[serde(default = "default_telegram_allow_usernames")]
+            allow_usernames: bool,
+            #[serde(default = "default_telegram_reactions")]
+            reactions: bool,
+        }
+
+        let raw = RawTelegramConfig::deserialize(deserializer)?;
+        let token = raw.token.trim().to_string();
+        let enabled = raw.enabled.unwrap_or(!token.is_empty());
+        Ok(Self {
+            enabled,
+            token,
+            allow_from: raw.allow_from,
+            deny_by_default: raw.deny_by_default,
+            allow_usernames: raw.allow_usernames,
+            reactions: raw.reactions,
+        })
     }
 }
 
