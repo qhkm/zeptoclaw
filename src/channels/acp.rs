@@ -1413,8 +1413,8 @@ mod tests {
         let state = channel.state.lock().await;
         let sessions: Vec<_> = state
             .sessions
-            .iter()
-            .map(|(sid, _)| (sid.clone(), state.pending.contains_key(sid)))
+            .keys()
+            .map(|sid| (sid.clone(), state.pending.contains_key(sid)))
             .collect();
         drop(state);
 

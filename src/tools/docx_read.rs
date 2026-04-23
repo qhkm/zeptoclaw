@@ -128,11 +128,10 @@ impl DocxReadTool {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) => {
-                    if e.local_name().as_ref() == b"t" {
+                Ok(Event::Start(ref e))
+                    if e.local_name().as_ref() == b"t" => {
                         in_t = true;
                     }
-                }
                 Ok(Event::Empty(ref e)) => match e.local_name().as_ref() {
                     b"tab" => output.push('\t'),
                     b"br" => output.push('\n'),
@@ -145,21 +144,19 @@ impl DocxReadTool {
                         output.push('\n');
                     }
                 }
-                Ok(Event::Text(ref e)) => {
-                    if in_t {
+                Ok(Event::Text(ref e))
+                    if in_t => {
                         e.xml_content()
                             .map(|d| output.push_str(&d))
                             .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
                     }
-                }
-                Ok(Event::GeneralRef(ref e)) => {
+                Ok(Event::GeneralRef(ref e))
                     // Remove escaped entities if they can't be resolved
-                    if in_t {
+                    if in_t => {
                         e.xml_content()
                             .map(|d| resolve_xml_entity(d.as_ref()).map(|r| output.push_str(r)))
                             .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
                     }
-                }
                 Ok(Event::Eof) => break,
                 Err(e) => {
                     return Err(ZeptoError::Tool(format!("XML parse error: {e}")));
