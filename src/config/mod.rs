@@ -15,9 +15,37 @@ use once_cell::sync::OnceCell;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use tracing::{error, warn};
+use url::Url;
 
 /// Global configuration instance
 static CONFIG: OnceCell<RwLock<Config>> = OnceCell::new();
+
+fn sanitize_endpoint_for_logging(endpoint: &str) -> String {
+    Url::parse(endpoint)
+        .ok()
+        .map(|mut parsed| {
+            let _ = parsed.set_password(None);
+            let _ = parsed.set_username("");
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        })
+        .unwrap_or_else(|| "[redacted endpoint]".to_string())
+}
+
+fn sanitize_endpoint_diagnostic_message(message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("Invalid URL '") {
+        if let Some((endpoint, tail)) = rest.rsplit_once("': ") {
+            return format!(
+                "Invalid URL '{}': {}",
+                sanitize_endpoint_for_logging(endpoint),
+                tail
+            );
+        }
+    }
+    message.to_string()
+}
 
 impl Config {
     /// Returns the ZeptoClaw configuration directory path (~/.zeptoclaw)
@@ -66,6 +94,32 @@ impl Config {
 
         // Apply environment variable overrides
         config.apply_env_overrides();
+
+        let endpoint_diags = crate::config::validate::validate_provider_api_bases(&config);
+        for diag in &endpoint_diags {
+            let sanitized_message = sanitize_endpoint_diagnostic_message(&diag.message);
+            warn!(
+                path = %diag.path,
+                message = %sanitized_message,
+                "Config endpoint validation warning"
+            );
+        }
+
+        if let Some(diag) = endpoint_diags
+            .iter()
+            .find(|d| d.level == crate::config::validate::DiagnosticLevel::Error)
+        {
+            let sanitized_message = sanitize_endpoint_diagnostic_message(&diag.message);
+            error!(
+                path = %diag.path,
+                message = %sanitized_message,
+                "Config endpoint validation failed"
+            );
+            return Err(ZeptoError::Config(format!(
+                "Invalid endpoint configuration at {}: {}",
+                diag.path, sanitized_message
+            )));
+        }
 
         Ok(config)
     }
@@ -1304,6 +1358,9 @@ impl Config {
                 self.safety.max_output_length = v.clamp(1_000, 10_000_000);
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS") {
+            self.safety.allow_private_endpoints = val.eq_ignore_ascii_case("true") || val == "1";
+        }
         if let Ok(val) = std::env::var("ZEPTOCLAW_SAFETY_TAINT_ENABLED") {
             self.safety.taint.enabled = val.eq_ignore_ascii_case("true") || val == "1";
         }
@@ -1698,6 +1755,35 @@ mod tests {
         // Defaults should apply to unspecified fields
         assert_eq!(config.agents.defaults.temperature, 0.7);
         assert_eq!(config.gateway.port, 8080);
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_diagnostic_message_redacts_credentials() {
+        let message =
+            "Invalid URL 'https://user:secret@example.com/v1?api_key=abcd#frag': parse failure";
+        let sanitized = sanitize_endpoint_diagnostic_message(message);
+        assert!(sanitized.contains("https://example.com/v1"));
+        assert!(!sanitized.contains("user"));
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("api_key=abcd"));
+        assert!(!sanitized.contains("#frag"));
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_diagnostic_message_handles_unparseable_url() {
+        let message = "Invalid URL 'https://user:secret@exa mple.com/?token=abcd': bad host";
+        let sanitized = sanitize_endpoint_diagnostic_message(message);
+        assert!(sanitized.contains("[redacted endpoint]"));
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("token=abcd"));
+    }
+
+    #[test]
+    fn test_sanitize_endpoint_diagnostic_message_handles_embedded_delimiter() {
+        let message = "Invalid URL 'http://[::1': token=abcd': invalid IPv6 address";
+        let sanitized = sanitize_endpoint_diagnostic_message(message);
+        assert!(sanitized.contains("[redacted endpoint]"));
+        assert!(!sanitized.contains("token=abcd"));
     }
 
     #[test]
@@ -2103,6 +2189,45 @@ mod tests {
 
         // Clean up
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_load_from_path_rejects_invalid_provider_endpoint() {
+        let allow_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
+        let base_key = "ZEPTOCLAW_PROVIDERS_OPENAI_API_BASE";
+        let original_allow = env::var(allow_key).ok();
+        let original_base = env::var(base_key).ok();
+        env::remove_var(allow_key);
+        env::remove_var(base_key);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "providers": {
+                    "openai": {
+                        "api_base": "http://127.0.0.1:11434/v1"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let err = Config::load_from_path(&config_path).unwrap_err();
+        assert!(err.to_string().contains("Invalid endpoint configuration"));
+
+        if let Some(value) = original_allow {
+            env::set_var(allow_key, value);
+        } else {
+            env::remove_var(allow_key);
+        }
+
+        if let Some(value) = original_base {
+            env::set_var(base_key, value);
+        } else {
+            env::remove_var(base_key);
+        }
     }
 
     #[test]

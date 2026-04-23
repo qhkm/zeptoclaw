@@ -14,7 +14,7 @@ use super::common::{memory_backend_label, memory_citations_label, read_line, rea
 /// Run the provider → API key → model selection flow.
 ///
 /// Pick provider first, then configure API key, then pick model.
-async fn configure_providers(config: &mut Config) -> Result<()> {
+async fn configure_providers(config: &mut Config, allow_private_endpoints: bool) -> Result<()> {
     let config_path = Config::path();
 
     println!("Provider Setup");
@@ -58,7 +58,7 @@ async fn configure_providers(config: &mut Config) -> Result<()> {
     println!();
     match primary {
         "anthropic" => configure_anthropic(config).await?,
-        "openai" => configure_openai(config).await?,
+        "openai" => configure_openai(config, allow_private_endpoints).await?,
         "openrouter" => configure_openrouter(config).await?,
         _ => {}
     }
@@ -99,7 +99,7 @@ async fn configure_providers(config: &mut Config) -> Result<()> {
                 println!();
                 match provider {
                     "anthropic" => configure_anthropic(config).await?,
-                    "openai" => configure_openai(config).await?,
+                    "openai" => configure_openai(config, allow_private_endpoints).await?,
                     "openrouter" => configure_openrouter(config).await?,
                     _ => {}
                 }
@@ -358,7 +358,7 @@ fn configure_soul(config: &Config) -> Result<()> {
 /// When `full` is false (default), runs express mode: creates directories
 /// silently, configures the LLM provider, saves, and prints guided next
 /// steps.  When `full` is true, runs the full 10-step interactive wizard.
-pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
+pub(crate) async fn cmd_onboard(full: bool, allow_private_endpoints: bool) -> Result<()> {
     // Check for existing OpenClaw installation
     if let Some(oc_dir) = zeptoclaw::migrate::detect_openclaw_dir() {
         println!("Detected OpenClaw installation at: {}", oc_dir.display());
@@ -388,6 +388,10 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         Config::default()
     };
 
+    if allow_private_endpoints {
+        config.safety.allow_private_endpoints = true;
+    }
+
     if full {
         // ---------- full 10-step wizard ----------
         println!("Initializing ZeptoClaw (full wizard)...");
@@ -402,7 +406,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
         }
 
         println!();
-        configure_providers(&mut config).await?;
+        configure_providers(&mut config, allow_private_endpoints).await?;
         configure_soul(&config)?;
 
         // Configure web search integration
@@ -462,7 +466,7 @@ pub(crate) async fn cmd_onboard(full: bool) -> Result<()> {
             println!("  You can still add an API key later for official access.");
             println!();
         } else {
-            configure_providers(&mut config).await?;
+            configure_providers(&mut config, allow_private_endpoints).await?;
         }
 
         configure_soul(&config)?;
@@ -898,7 +902,7 @@ fn configure_anthropic_subscription_token(config: &mut Config) -> Result<()> {
 }
 
 /// Configure OpenAI provider.
-async fn configure_openai(config: &mut Config) -> Result<()> {
+async fn configure_openai(config: &mut Config, allow_private_endpoints: bool) -> Result<()> {
     println!();
     println!("OpenAI Setup");
     println!("------------");
@@ -954,8 +958,22 @@ async fn configure_openai(config: &mut Config) -> Result<()> {
 
         let base_url = read_line()?;
         if !base_url.is_empty() {
-            provider_config.api_base = Some(base_url);
-            println!("  Custom base URL configured.");
+            match zeptoclaw::config::validate::validate_network_endpoint(
+                &base_url,
+                allow_private_endpoints,
+            ) {
+                Ok(_) => {
+                    provider_config.api_base = Some(base_url);
+                    println!("  Custom base URL configured.");
+                }
+                Err(err) => {
+                    println!("  Invalid custom base URL: {}", err);
+                    println!("  Skipping custom base URL.");
+                    println!(
+                        "  Tip: use --allow-private-endpoints for trusted local development endpoints."
+                    );
+                }
+            }
         }
     } else {
         println!("  Skipped OpenAI configuration.");

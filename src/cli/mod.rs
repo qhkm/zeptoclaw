@@ -53,6 +53,9 @@ enum Commands {
         /// Run full 10-step wizard (express mode by default)
         #[arg(long)]
         full: bool,
+        /// Allow private/local provider endpoints during onboarding validation.
+        #[arg(long)]
+        allow_private_endpoints: bool,
     },
     /// Start interactive agent mode
     #[command(
@@ -625,8 +628,11 @@ pub async fn run() -> Result<()> {
         Some(Commands::Version) => {
             cmd_version();
         }
-        Some(Commands::Onboard { full }) => {
-            onboard::cmd_onboard(full).await?;
+        Some(Commands::Onboard {
+            full,
+            allow_private_endpoints,
+        }) => {
+            onboard::cmd_onboard(full, allow_private_endpoints).await?;
         }
         Some(Commands::Agent {
             message,
