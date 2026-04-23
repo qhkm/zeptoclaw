@@ -223,6 +223,16 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_api_version: None,
         api_key_required: true,
     },
+    ProviderSpec {
+        name: "liquid",
+        model_keywords: &["liquid", "lfm", "lfm2"],
+        runtime_supported: true,
+        default_base_url: Some("https://labs.liquid.ai/api/v1"),
+        backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+        api_key_required: true,
+    },
 ];
 
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -244,6 +254,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "xai" => config.providers.xai.as_ref(),
         "qianfan" => config.providers.qianfan.as_ref(),
         "novita" => config.providers.novita.as_ref(),
+        "liquid" => config.providers.liquid.as_ref(),
         _ => None,
     }
 }
@@ -1052,6 +1063,38 @@ mod tests {
         assert_eq!(
             selected.api_base.as_deref(),
             Some("https://api.novita.ai/openai")
+        );
+    }
+
+    #[test]
+    fn test_liquid_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.liquid = Some(ProviderConfig {
+            api_key: Some("liquid-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "liquid");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://labs.liquid.ai/api/v1")
+        );
+    }
+
+    #[test]
+    fn test_liquid_model_inference() {
+        // LFM family keywords should infer the Liquid provider.
+        assert_eq!(provider_name_for_model("lfm2-24b-a2b"), Some("liquid"));
+        assert_eq!(
+            provider_name_for_model("lfm2.5-1.2b-instruct"),
+            Some("liquid")
+        );
+        assert_eq!(provider_name_for_model("lfm-7b"), Some("liquid"));
+        assert_eq!(
+            provider_name_for_model("liquid/lfm2-8b-a1b"),
+            Some("liquid")
         );
     }
 
