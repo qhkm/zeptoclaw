@@ -1,0 +1,10 @@
+ZeptoClaw coding benchmark fixture
+=================================
+
+Goal:
+- Fix the bugs in `buggy_data.py`.
+- Do not modify `verify.py`.
+- Run: `python verify.py`
+
+This fixture is intentionally small and self-contained so different agents can
+be compared on exactly the same task and verification flow.
