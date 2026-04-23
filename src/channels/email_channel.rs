@@ -421,19 +421,20 @@ impl Channel for EmailChannel {
             let this_running = Arc::clone(&self.running);
 
             tokio::spawn(async move {
+                let loop_running = Arc::clone(&this_running);
                 let task_result = std::panic::AssertUnwindSafe(async move {
                     let channel = EmailChannel {
                         config,
                         base_config: BaseChannelConfig::new("email"),
                         bus,
-                        running: Arc::clone(&this_running),
+                        running: Arc::clone(&loop_running),
                         seen_ids,
                     };
 
                     let mut backoff = std::time::Duration::from_secs(1);
                     let max_backoff = std::time::Duration::from_secs(60);
 
-                    while this_running.load(Ordering::SeqCst) {
+                    while loop_running.load(Ordering::SeqCst) {
                         match channel.run_idle_session().await {
                             Ok(()) => break,
                             Err(e) => {
