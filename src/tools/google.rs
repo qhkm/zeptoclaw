@@ -1,7 +1,7 @@
 //! Google Workspace tool for Gmail and Calendar operations.
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest013::Client;
 use serde_json::{json, Value};
 
 use gog_calendar::create::{create_event, CreateParams};
