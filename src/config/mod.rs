@@ -1811,6 +1811,56 @@ mod tests {
     }
 
     #[test]
+    fn test_telegram_channel_config_accepts_legacy_keys_and_infers_enabled() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "bot_token": "bot123:ABC",
+                    "allowed_chats": "123456789"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(telegram.enabled);
+        assert_eq!(telegram.token, "bot123:ABC");
+        assert_eq!(telegram.allow_from, vec!["123456789"]);
+    }
+
+    #[test]
+    fn test_telegram_channel_config_respects_explicit_disabled_flag() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "enabled": false,
+                    "bot_token": "bot123:ABC",
+                    "allowed_senders": ["123456789", "987654321"]
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(!telegram.enabled);
+        assert_eq!(telegram.token, "bot123:ABC");
+        assert_eq!(telegram.allow_from, vec!["123456789", "987654321"]);
+    }
+
+    #[test]
+    fn test_telegram_channel_config_does_not_enable_whitespace_token() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "token": "   "
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(!telegram.enabled);
+        assert_eq!(telegram.token, "");
+    }
+
+    #[test]
     fn test_provider_configs() {
         let json = r#"{
             "providers": {

@@ -173,7 +173,7 @@ All channels support deny-by-default sender allowlists:
   "channels": {
     "telegram": {
       "enabled": true,
-      "bot_token": "...",
+      "token": "...",
       "deny_by_default": true,
       "allow_from": ["123456789"]
     }
