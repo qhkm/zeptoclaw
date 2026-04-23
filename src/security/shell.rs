@@ -524,12 +524,10 @@ fn check_structured_policy(seg: &CommandSegment) -> Result<()> {
                     ));
                 }
             }
-            "reset" => {
-                if seg.args.iter().any(|a| a == "--hard") {
-                    return Err(ZeptoError::SecurityViolation(
-                        "Blocked: git reset --hard (destructive reset)".to_string(),
-                    ));
-                }
+            "reset" if seg.args.iter().any(|a| a == "--hard") => {
+                return Err(ZeptoError::SecurityViolation(
+                    "Blocked: git reset --hard (destructive reset)".to_string(),
+                ));
             }
             "clean" => {
                 let has_force = seg.args.iter().any(|a| {
@@ -542,16 +540,15 @@ fn check_structured_policy(seg: &CommandSegment) -> Result<()> {
                     ));
                 }
             }
-            "branch" => {
+            "branch"
                 if seg
                     .args
                     .iter()
-                    .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('D'))
-                {
-                    return Err(ZeptoError::SecurityViolation(
-                        "Blocked: git branch -D (force delete)".to_string(),
-                    ));
-                }
+                    .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('D')) =>
+            {
+                return Err(ZeptoError::SecurityViolation(
+                    "Blocked: git branch -D (force delete)".to_string(),
+                ));
             }
             _ => {}
         }

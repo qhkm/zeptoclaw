@@ -406,7 +406,7 @@ mod tests {
 
     /// Helper: estimate a single message with no safety margin.
     fn raw_estimate(msg: &Message) -> usize {
-        ContextMonitor::estimate_tokens_with_margin(&[msg.clone()], 1.0)
+        ContextMonitor::estimate_tokens_with_margin(std::slice::from_ref(msg), 1.0)
     }
 
     // --- Token estimation tests ---
