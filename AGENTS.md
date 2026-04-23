@@ -28,6 +28,7 @@ Project-level guidance for coding agents working in this repository.
 - Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
 - Webhook auth hardening: generic webhook supports optional HMAC-SHA256 body signatures plus fixed server-side sender/chat identity by default (`trust_payload_identity` is an explicit legacy escape hatch); WhatsApp Cloud verifies `X-Hub-Signature-256` when `app_secret` is configured
 - Telegram allowlist hardening: numeric user IDs are the safe default for new setups; legacy username matching remains available only through `channels.telegram.allow_usernames` for compatibility and emits warnings when non-numeric allowlist entries are present
+- Telegram config compatibility: `channels.telegram` accepts legacy `bot_token`, `allowed_senders`, and `allowed_chats` keys, and auto-enables when `enabled` is omitted but a Telegram token is present
 - Email allowlist limitation surfaced: `channels.email.allowed_senders` matches the parsed `From` header only and now emits config/runtime warnings so authenticated-mail enforcement is pushed upstream
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
@@ -43,6 +44,7 @@ Project-level guidance for coding agents working in this repository.
 - Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
+- In-memory audit hash-chain: `src/audit.rs` appends SHA-256-linked entries (`record_audit_chain_event`, `verify_audit_chain_integrity`, `recent_audit_entries`, `audit_tip_hash`), and `kernel::execute_tool()` now emits tool execution chain events with shell/network/spawn classification
 - Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
 - Streaming tool parity: `process_message_streaming()` now mirrors non-streaming hook callbacks, usage-metric accounting, success/failure logging, thinking/response feedback, and malformed tool-argument parse preservation
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)

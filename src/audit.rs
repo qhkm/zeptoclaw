@@ -4,6 +4,11 @@
 //! downstream log aggregators (Loki, Datadog, etc.) can filter on
 //! `audit=true` and query by `category`, `event_type`, `severity`, etc.
 
+use chrono::Utc;
+use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Broad category of audit event.
@@ -64,6 +69,246 @@ impl std::fmt::Display for AuditSeverity {
             Self::Critical => write!(f, "critical"),
         }
     }
+}
+
+/// Action type in the execution hash chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditAction {
+    ToolInvoke,
+    ShellExec,
+    NetworkAccess,
+    AgentSpawn,
+    AgentMessage,
+    MemoryAccess,
+    FileAccess,
+    AuthAttempt,
+    ConfigChange,
+}
+
+impl std::fmt::Display for AuditAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolInvoke => write!(f, "tool_invoke"),
+            Self::ShellExec => write!(f, "shell_exec"),
+            Self::NetworkAccess => write!(f, "network_access"),
+            Self::AgentSpawn => write!(f, "agent_spawn"),
+            Self::AgentMessage => write!(f, "agent_message"),
+            Self::MemoryAccess => write!(f, "memory_access"),
+            Self::FileAccess => write!(f, "file_access"),
+            Self::AuthAttempt => write!(f, "auth_attempt"),
+            Self::ConfigChange => write!(f, "config_change"),
+        }
+    }
+}
+
+/// One immutable chain entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub seq: u64,
+    pub timestamp: String,
+    pub agent_id: String,
+    pub action: AuditAction,
+    pub detail: String,
+    pub outcome: String,
+    pub prev_hash: String,
+    pub hash: String,
+}
+
+const MAX_AUDIT_ENTRIES: usize = 10_000;
+
+#[derive(Debug)]
+struct AuditHashChain {
+    state: Mutex<AuditChainState>,
+}
+
+#[derive(Debug)]
+struct AuditChainState {
+    entries: VecDeque<AuditEntry>,
+    tip: String,
+    window_base_hash: String,
+    next_seq: u64,
+}
+
+impl Default for AuditHashChain {
+    fn default() -> Self {
+        let genesis = genesis_hash();
+        Self {
+            state: Mutex::new(AuditChainState {
+                entries: VecDeque::new(),
+                tip: genesis.clone(),
+                window_base_hash: genesis,
+                next_seq: 1,
+            }),
+        }
+    }
+}
+
+impl AuditHashChain {
+    fn record(
+        &self,
+        agent_id: &str,
+        action: AuditAction,
+        detail: &str,
+        outcome: &str,
+    ) -> AuditEntry {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = state.next_seq;
+        let timestamp = Utc::now().to_rfc3339();
+        let agent_id = sanitize_text(agent_id, 120);
+        let detail = sanitize_text(detail, 512);
+        let outcome = sanitize_text(outcome, 120);
+        let prev_hash = state.tip.clone();
+        let hash = compute_entry_hash(
+            seq, &timestamp, &agent_id, action, &detail, &outcome, &prev_hash,
+        );
+
+        let entry = AuditEntry {
+            seq,
+            timestamp,
+            agent_id,
+            action,
+            detail,
+            outcome,
+            prev_hash,
+            hash: hash.clone(),
+        };
+
+        state.tip = hash;
+        state.next_seq = state.next_seq.saturating_add(1);
+        state.entries.push_back(entry.clone());
+        if state.entries.len() > MAX_AUDIT_ENTRIES {
+            if let Some(evicted) = state.entries.pop_front() {
+                state.window_base_hash = evicted.hash;
+            }
+        }
+        entry
+    }
+
+    fn verify_integrity(&self) -> std::result::Result<(), String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut expected_prev = state.window_base_hash.clone();
+        let mut expected_seq = state
+            .entries
+            .front()
+            .map(|e| e.seq)
+            .unwrap_or(state.next_seq);
+
+        for entry in &state.entries {
+            if entry.seq != expected_seq {
+                return Err(format!(
+                    "chain broken at seq {}: sequence mismatch",
+                    entry.seq
+                ));
+            }
+            if entry.prev_hash != expected_prev {
+                return Err(format!(
+                    "chain broken at seq {}: prev hash mismatch",
+                    entry.seq
+                ));
+            }
+
+            let expected_hash = compute_entry_hash(
+                entry.seq,
+                &entry.timestamp,
+                &entry.agent_id,
+                entry.action,
+                &entry.detail,
+                &entry.outcome,
+                &expected_prev,
+            );
+
+            if entry.hash != expected_hash {
+                return Err(format!("chain broken at seq {}: hash mismatch", entry.seq));
+            }
+
+            expected_prev = entry.hash.clone();
+            expected_seq = expected_seq.saturating_add(1);
+        }
+
+        if state.tip != expected_prev {
+            return Err("chain broken: tip does not match final entry hash".to_string());
+        }
+        if state.next_seq != expected_seq {
+            return Err("chain broken: next sequence mismatch".to_string());
+        }
+
+        Ok(())
+    }
+
+    fn recent(&self, n: usize) -> Vec<AuditEntry> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if n == 0 || state.entries.is_empty() {
+            return Vec::new();
+        }
+        let start = state.entries.len().saturating_sub(n);
+        state.entries.iter().skip(start).cloned().collect()
+    }
+
+    fn tip_hash(&self) -> String {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.tip.clone()
+    }
+}
+
+fn sanitize_text(value: &str, max_len: usize) -> String {
+    let normalized = value.trim().replace(['\n', '\r'], " ");
+    normalized.chars().take(max_len).collect()
+}
+
+fn compute_entry_hash(
+    seq: u64,
+    timestamp: &str,
+    agent_id: &str,
+    action: AuditAction,
+    detail: &str,
+    outcome: &str,
+    prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seq.to_le_bytes());
+    hash_string_field(&mut hasher, timestamp);
+    hash_string_field(&mut hasher, agent_id);
+    hash_string_field(&mut hasher, &action.to_string());
+    hash_string_field(&mut hasher, detail);
+    hash_string_field(&mut hasher, outcome);
+    hash_string_field(&mut hasher, prev_hash);
+    hex::encode(hasher.finalize())
+}
+
+fn hash_string_field(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn genesis_hash() -> String {
+    "0".repeat(64)
+}
+
+static AUDIT_CHAIN: Lazy<AuditHashChain> = Lazy::new(AuditHashChain::default);
+
+/// Append a new event to the in-memory audit hash chain.
+pub fn record_audit_chain_event(
+    agent_id: &str,
+    action: AuditAction,
+    detail: &str,
+    outcome: &str,
+) -> AuditEntry {
+    AUDIT_CHAIN.record(agent_id, action, detail, outcome)
+}
+
+/// Verify integrity of all in-memory audit chain entries.
+pub fn verify_audit_chain_integrity() -> std::result::Result<(), String> {
+    AUDIT_CHAIN.verify_integrity()
+}
+
+/// Return the `n` most recent chain entries.
+pub fn recent_audit_entries(n: usize) -> Vec<AuditEntry> {
+    AUDIT_CHAIN.recent(n)
+}
+
+/// Return current chain tip hash.
+pub fn audit_tip_hash() -> String {
+    AUDIT_CHAIN.tip_hash()
 }
 
 /// Emit a structured audit event via `tracing`.
@@ -150,6 +395,110 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_action_display() {
+        assert_eq!(AuditAction::ToolInvoke.to_string(), "tool_invoke");
+        assert_eq!(AuditAction::ShellExec.to_string(), "shell_exec");
+        assert_eq!(AuditAction::NetworkAccess.to_string(), "network_access");
+        assert_eq!(AuditAction::AgentSpawn.to_string(), "agent_spawn");
+        assert_eq!(AuditAction::AgentMessage.to_string(), "agent_message");
+        assert_eq!(AuditAction::MemoryAccess.to_string(), "memory_access");
+        assert_eq!(AuditAction::FileAccess.to_string(), "file_access");
+        assert_eq!(AuditAction::AuthAttempt.to_string(), "auth_attempt");
+        assert_eq!(AuditAction::ConfigChange.to_string(), "config_change");
+    }
+
+    #[test]
+    fn test_hash_chain_record_and_verify() {
+        let chain = AuditHashChain::default();
+
+        let first = chain.record("agent-a", AuditAction::ToolInvoke, "tool=echo", "success");
+        let second = chain.record("agent-a", AuditAction::ShellExec, "tool=shell", "success");
+
+        assert_eq!(first.seq, 1);
+        assert_eq!(second.seq, 2);
+        assert_eq!(second.prev_hash, first.hash);
+        assert_eq!(chain.verify_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn test_hash_chain_recent_and_tip() {
+        let chain = AuditHashChain::default();
+        assert_eq!(chain.tip_hash(), genesis_hash());
+
+        let first = chain.record("agent-x", AuditAction::ToolInvoke, "tool=echo", "ok");
+        let second = chain.record(
+            "agent-x",
+            AuditAction::NetworkAccess,
+            "tool=web_fetch",
+            "ok",
+        );
+        assert_ne!(first.hash, chain.tip_hash());
+        assert_eq!(second.hash, chain.tip_hash());
+
+        let recent = chain.recent(1);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].seq, 2);
+    }
+
+    #[test]
+    fn test_hash_chain_detects_tampering() {
+        let chain = AuditHashChain::default();
+        chain.record("agent-t", AuditAction::ToolInvoke, "tool=echo", "success");
+        chain.record("agent-t", AuditAction::ToolInvoke, "tool=shell", "success");
+
+        {
+            let mut state = chain.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.entries.get_mut(1).unwrap().detail = "tampered".to_string();
+        }
+
+        let err = chain.verify_integrity().unwrap_err();
+        assert!(err.contains("hash mismatch"));
+    }
+
+    #[test]
+    fn test_hash_chain_is_bounded() {
+        let chain = AuditHashChain::default();
+        for idx in 0..(MAX_AUDIT_ENTRIES + 3) {
+            chain.record(
+                "agent-b",
+                AuditAction::ToolInvoke,
+                &format!("tool={idx}"),
+                "ok",
+            );
+        }
+
+        let recent = chain.recent(MAX_AUDIT_ENTRIES + 50);
+        assert_eq!(recent.len(), MAX_AUDIT_ENTRIES);
+        assert_eq!(recent.first().unwrap().seq, 4);
+        assert_eq!(recent.last().unwrap().seq, (MAX_AUDIT_ENTRIES + 3) as u64);
+        assert_eq!(chain.verify_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn test_hash_payload_is_unambiguous() {
+        let prev = genesis_hash();
+        let hash_a = compute_entry_hash(
+            1,
+            "2026-04-22T00:00:00Z",
+            "agent",
+            AuditAction::ToolInvoke,
+            "a|b",
+            "c",
+            &prev,
+        );
+        let hash_b = compute_entry_hash(
+            1,
+            "2026-04-22T00:00:00Z",
+            "agent",
+            AuditAction::ToolInvoke,
+            "a",
+            "b|c",
+            &prev,
+        );
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
     fn test_log_audit_event_info() {
         // Should not panic — emits a tracing event at info level.
         log_audit_event(
@@ -190,11 +539,15 @@ mod tests {
         assert_ne!(AuditCategory::ShellSecurity, AuditCategory::PathSecurity);
         assert_eq!(AuditSeverity::Critical, AuditSeverity::Critical);
         assert_ne!(AuditSeverity::Info, AuditSeverity::Warning);
+        assert_eq!(AuditAction::AuthAttempt, AuditAction::AuthAttempt);
+        assert_ne!(AuditAction::AuthAttempt, AuditAction::ConfigChange);
 
         // Debug formatting.
         let dbg = format!("{:?}", AuditCategory::MountSecurity);
         assert!(dbg.contains("MountSecurity"));
         let dbg = format!("{:?}", AuditSeverity::Warning);
         assert!(dbg.contains("Warning"));
+        let dbg = format!("{:?}", AuditAction::ShellExec);
+        assert!(dbg.contains("ShellExec"));
     }
 }

@@ -1,0 +1,8 @@
+ZeptoClaw coding benchmark fixture (pristine)
+=============================================
+
+This directory preserves the original failing state of the benchmark task.
+Copy it before each run if you need deterministic head-to-head comparisons.
+
+Run verification with:
+- `python verify.py`

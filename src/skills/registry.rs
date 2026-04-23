@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::tools::web::{is_blocked_host, resolve_and_check_host};
 
@@ -25,9 +26,21 @@ pub struct SkillSearchResult {
     pub summary: String,
     /// Published version string (e.g. "1.0.0").
     pub version: String,
+    /// Optional published SHA-256 digest for the downloadable skill archive.
+    #[serde(default)]
+    pub sha256: Option<String>,
     /// Set to `true` when the registry flags this skill as suspicious.
     #[serde(default)]
     pub is_suspicious: bool,
+}
+
+/// Result returned after installing a skill archive.
+#[derive(Debug, Clone)]
+pub struct SkillInstallResult {
+    /// Path to the installed skill directory.
+    pub path: String,
+    /// Whether archive digest verification was performed successfully.
+    pub digest_verified: bool,
 }
 
 struct CacheEntry {
@@ -129,6 +142,36 @@ fn validate_slug(slug: &str) -> crate::error::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Validate and normalize a SHA-256 digest string.
+fn normalize_sha256(digest: &str) -> crate::error::Result<String> {
+    let normalized = digest.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(crate::error::ZeptoError::Tool(format!(
+            "Invalid SHA-256 digest '{}': expected 64 hex characters",
+            digest
+        )));
+    }
+    Ok(normalized)
+}
+
+fn resolve_verified_sha256(
+    requested_sha256: Option<String>,
+    response_sha256: Option<String>,
+) -> crate::error::Result<Option<String>> {
+    match (requested_sha256, response_sha256) {
+        (Some(requested), Some(response)) if requested != response => {
+            Err(crate::error::ZeptoError::SecurityViolation(format!(
+                "Skill archive SHA-256 digest conflict: provided {}, response header {}",
+                requested, response
+            )))
+        }
+        (Some(requested), Some(_)) => Ok(Some(requested)),
+        (Some(requested), None) => Ok(Some(requested)),
+        (None, Some(response)) => Ok(Some(response)),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Check whether `host` is in the allowed-hosts bypass list (case-insensitive).
@@ -330,9 +373,11 @@ impl ClawHubRegistry {
         &self,
         slug: &str,
         skills_dir: &str,
-    ) -> crate::error::Result<String> {
+        expected_sha256: Option<&str>,
+    ) -> crate::error::Result<SkillInstallResult> {
         // Validate slug before using it in a URL or filesystem path.
         validate_slug(slug)?;
+        let requested_sha256 = expected_sha256.map(normalize_sha256).transpose()?;
 
         let url = format!("{}/api/v1/download/{}", self.base_url, slug);
 
@@ -361,6 +406,17 @@ impl ClawHubRegistry {
             )));
         }
 
+        let response_sha256 = resp
+            .headers()
+            .get("x-skill-sha256")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(normalize_sha256)
+            .transpose()?;
+
+        let verified_sha256 = resolve_verified_sha256(requested_sha256, response_sha256)?;
+
         // Reject archives that are larger than 50 MB before buffering.
         if let Some(content_length) = resp.content_length() {
             if content_length > 50 * 1024 * 1024 {
@@ -376,6 +432,16 @@ impl ClawHubRegistry {
             .await
             .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?;
 
+        if let Some(expected) = verified_sha256.as_deref() {
+            let actual = hex::encode(Sha256::digest(&bytes));
+            if actual != expected {
+                return Err(crate::error::ZeptoError::SecurityViolation(format!(
+                    "Skill archive SHA-256 mismatch: expected {}, got {}",
+                    expected, actual
+                )));
+            }
+        }
+
         let target_dir = format!("{}/{}", skills_dir, slug);
         tokio::fs::create_dir_all(&target_dir)
             .await
@@ -385,7 +451,7 @@ impl ClawHubRegistry {
         // holding non-Send ZipFile across await points.
         let bytes_vec = bytes.to_vec();
         let target_dir_clone = target_dir.clone();
-        tokio::task::spawn_blocking(move || {
+        let path = tokio::task::spawn_blocking(move || {
             let cursor = std::io::Cursor::new(bytes_vec);
             let mut archive = zip::ZipArchive::new(cursor)
                 .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?;
@@ -422,7 +488,12 @@ impl ClawHubRegistry {
             Ok(target_dir_clone)
         })
         .await
-        .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))?
+        .map_err(|e| crate::error::ZeptoError::Tool(e.to_string()))??;
+
+        Ok(SkillInstallResult {
+            path,
+            digest_verified: verified_sha256.is_some(),
+        })
     }
 }
 
@@ -444,6 +515,7 @@ mod tests {
             display_name: "Test".into(),
             summary: "A test skill".into(),
             version: "1.0.0".into(),
+            sha256: None,
             is_suspicious: false,
         }];
         cache.set("test query:10", results.clone());
@@ -481,6 +553,7 @@ mod tests {
         let json = r#"{"slug":"x","display_name":"X","summary":"s","version":"1.0"}"#;
         let r: SkillSearchResult = serde_json::from_str(json).unwrap();
         assert!(!r.is_suspicious);
+        assert!(r.sha256.is_none());
     }
 
     #[test]
@@ -491,6 +564,7 @@ mod tests {
             display_name: "A".into(),
             summary: "".into(),
             version: "1.0".into(),
+            sha256: None,
             is_suspicious: false,
         }];
         let r2 = vec![SkillSearchResult {
@@ -498,6 +572,7 @@ mod tests {
             display_name: "B".into(),
             summary: "".into(),
             version: "2.0".into(),
+            sha256: None,
             is_suspicious: false,
         }];
         cache.set("query1:10", r1);
@@ -515,6 +590,7 @@ mod tests {
             display_name: "New".into(),
             summary: "updated".into(),
             version: "2.0".into(),
+            sha256: None,
             is_suspicious: false,
         }];
         cache.set("q:10", results);
@@ -593,6 +669,49 @@ mod tests {
         assert!(validate_slug("skill;rm -rf").is_err());
         assert!(validate_slug("skill<script>").is_err());
         assert!(validate_slug("skill%20encoded").is_err());
+    }
+
+    #[test]
+    fn test_normalize_sha256_accepts_valid_hex() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789ABCDEF0123456789abcdef";
+        let normalized = normalize_sha256(digest).unwrap();
+        assert_eq!(
+            normalized,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn test_normalize_sha256_rejects_invalid_length() {
+        assert!(normalize_sha256("abcd").is_err());
+    }
+
+    #[test]
+    fn test_normalize_sha256_rejects_non_hex() {
+        assert!(normalize_sha256(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_resolve_verified_sha256_accepts_matching_sources() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let resolved = resolve_verified_sha256(Some(digest.to_string()), Some(digest.to_string()))
+            .expect("matching digests should be accepted");
+        assert_eq!(resolved.as_deref(), Some(digest));
+    }
+
+    #[test]
+    fn test_resolve_verified_sha256_rejects_conflicting_sources() {
+        let requested = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let response = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let err = resolve_verified_sha256(Some(requested.to_string()), Some(response.to_string()))
+            .expect_err("conflicting digests must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("digest conflict"));
+        assert!(msg.contains(requested));
+        assert!(msg.contains(response));
     }
 
     // -------------------------------------------------------------------------
