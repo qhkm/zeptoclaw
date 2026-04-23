@@ -1625,10 +1625,10 @@ fn decrypt_config_values(
     enc: &crate::security::encryption::SecretEncryption,
 ) -> Result<()> {
     match value {
-        serde_json::Value::String(s) => {
-            if crate::security::encryption::SecretEncryption::is_encrypted(s) {
-                *s = enc.decrypt(s)?;
-            }
+        serde_json::Value::String(s)
+            if crate::security::encryption::SecretEncryption::is_encrypted(s) =>
+        {
+            *s = enc.decrypt(s)?;
         }
         serde_json::Value::Object(map) => {
             for val in map.values_mut() {

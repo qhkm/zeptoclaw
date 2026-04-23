@@ -2116,7 +2116,7 @@ mod tests {
         let handler_key_plain = chat_id.to_string();
 
         // Simulate send() key (chat_id is i64, tid is &str from metadata)
-        let send_key_threaded = format!("{}:{}", chat_id, thread_id.to_string());
+        let send_key_threaded = format!("{}:{}", chat_id, thread_id);
         let send_key_plain = chat_id.to_string();
 
         assert_eq!(handler_key_threaded, send_key_threaded);

@@ -1150,6 +1150,7 @@ fn test_acpx_sessions_list_returns_valid_json() {
 /// no --session-id flag to target an existing or fake session):
 ///   - converse via the exact ACP session ID from sessions new
 ///   - converse with a non-existent ACP session ID → expect error
+///
 /// Both are covered by the raw wire test `test_session_lifecycle_full`.
 #[test]
 fn test_acpx_session_lifecycle() {
