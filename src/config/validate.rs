@@ -3,6 +3,10 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
+use reqwest::Url;
+
+use crate::tools::web::is_blocked_host;
+
 /// Known top-level config field names.
 const KNOWN_TOP_LEVEL: &[&str] = &[
     "agents",
@@ -145,6 +149,35 @@ pub fn suggest_field(unknown: &str, known: &[&str]) -> Option<String> {
         .map(|(k, _)| format!("did you mean '{}'?", k))
 }
 
+/// Validate an external HTTP(S) endpoint for SSRF-safe config usage.
+///
+/// Uses the same blocked-host logic as `web_fetch` for local/private endpoints.
+pub fn validate_network_endpoint(
+    endpoint: &str,
+    allow_private_endpoints: bool,
+) -> std::result::Result<(), String> {
+    let parsed = Url::parse(endpoint).map_err(|e| format!("Invalid URL '{}': {}", endpoint, e))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "Unsupported URL scheme '{}' (expected http/https)",
+                other
+            ));
+        }
+    }
+
+    if !allow_private_endpoints && is_blocked_host(&parsed) {
+        return Err(
+            "Endpoint targets local/private network. Set safety.allow_private_endpoints=true (or ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS=1) only for trusted local development."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Validate a raw JSON config value against known field names.
 pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -241,6 +274,40 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
     }
 
     // Security warnings
+    let allow_private_endpoints = std::env::var("ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or_else(|| {
+            obj.get("safety")
+                .and_then(|v| v.as_object())
+                .and_then(|s| s.get("allow_private_endpoints"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
+
+    if let Some(providers) = obj.get("providers").and_then(|v| v.as_object()) {
+        for (provider_name, provider_val) in providers {
+            // Vertex uses api_base as region/location, not a URL endpoint.
+            if provider_name == "vertex" {
+                continue;
+            }
+
+            if let Some(api_base) = provider_val
+                .as_object()
+                .and_then(|p| p.get("api_base"))
+                .and_then(|v| v.as_str())
+            {
+                if let Err(message) = validate_network_endpoint(api_base, allow_private_endpoints) {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Error,
+                        path: format!("providers.{}.api_base", provider_name),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+
     if let Some(channels) = obj.get("channels").and_then(|v| v.as_object()) {
         for (name, channel_val) in channels {
             if let Some(channel_obj) = channel_val.as_object() {
@@ -329,6 +396,41 @@ pub fn validate_config(raw: &Value) -> Vec<Diagnostic> {
                         level: DiagnosticLevel::Warn,
                         path: "r8r_bridge.endpoint".to_string(),
                         message: "Plaintext ws:// on non-loopback address \u{2014} bearer token will be sent in cleartext; use wss://".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
+/// Validate configured provider API base endpoints from a typed config.
+pub fn validate_provider_api_bases(config: &crate::config::Config) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let allow_private_endpoints = config.safety.allow_private_endpoints;
+    let providers_value = match serde_json::to_value(&config.providers) {
+        Ok(v) => v,
+        Err(_) => return diagnostics,
+    };
+
+    if let Some(providers) = providers_value.as_object() {
+        for (provider_name, provider_val) in providers {
+            // Vertex uses api_base as region/location, not a URL endpoint.
+            if provider_name == "vertex" {
+                continue;
+            }
+
+            if let Some(api_base) = provider_val
+                .as_object()
+                .and_then(|p| p.get("api_base"))
+                .and_then(|v| v.as_str())
+            {
+                if let Err(message) = validate_network_endpoint(api_base, allow_private_endpoints) {
+                    diagnostics.push(Diagnostic {
+                        level: DiagnosticLevel::Error,
+                        path: format!("providers.{}.api_base", provider_name),
+                        message,
                     });
                 }
             }
@@ -841,6 +943,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_validate_provider_api_base_blocks_private_by_default() {
+        let raw = json!({
+            "providers": {
+                "openai": {
+                    "api_base": "http://127.0.0.1:11434/v1"
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Error
+                && d.path == "providers.openai.api_base"
+                && d.message.contains("private")
+        }));
+    }
+
+    #[test]
+    fn test_validate_provider_api_base_allows_private_when_configured() {
+        let raw = json!({
+            "safety": {
+                "allow_private_endpoints": true
+            },
+            "providers": {
+                "openai": {
+                    "api_base": "http://127.0.0.1:11434/v1"
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags
+            .iter()
+            .any(|d| d.path == "providers.openai.api_base" && d.level == DiagnosticLevel::Error));
+    }
+
+    #[test]
+    fn test_validate_provider_api_base_honors_env_override() {
+        let env_key = "ZEPTOCLAW_SAFETY_ALLOW_PRIVATE_ENDPOINTS";
+        let original = std::env::var(env_key).ok();
+        std::env::set_var(env_key, "1");
+
+        let raw = json!({
+            "safety": {
+                "allow_private_endpoints": false
+            },
+            "providers": {
+                "openai": {
+                    "api_base": "http://127.0.0.1:11434/v1"
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(!diags
+            .iter()
+            .any(|d| d.path == "providers.openai.api_base" && d.level == DiagnosticLevel::Error));
+
+        if let Some(value) = original {
+            std::env::set_var(env_key, value);
+        } else {
+            std::env::remove_var(env_key);
+        }
+    }
+
+    #[test]
+    fn test_validate_provider_api_base_rejects_unsupported_scheme() {
+        let raw = json!({
+            "providers": {
+                "openai": {
+                    "api_base": "file:///etc/passwd"
+                }
+            }
+        });
+        let diags = validate_config(&raw);
+        assert!(diags.iter().any(|d| {
+            d.level == DiagnosticLevel::Error
+                && d.path == "providers.openai.api_base"
+                && d.message.contains("Unsupported URL scheme")
+        }));
+    }
+
     // --- Model-provider compatibility unit tests ---
 
     #[test]
@@ -949,5 +1131,30 @@ mod tests {
         });
         let diags = validate_config(&raw);
         assert!(!diags.iter().any(|d| d.path == "r8r_bridge.endpoint"));
+    }
+
+    #[test]
+    fn test_validate_provider_api_bases_typed_config_blocks_private() {
+        let mut config = Config::default();
+        config.providers.openai = Some(crate::config::ProviderConfig {
+            api_base: Some("http://127.0.0.1:11434/v1".to_string()),
+            ..Default::default()
+        });
+        let diags = validate_provider_api_bases(&config);
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "providers.openai.api_base" && d.level == DiagnosticLevel::Error));
+    }
+
+    #[test]
+    fn test_validate_provider_api_bases_typed_config_allows_private_with_override() {
+        let mut config = Config::default();
+        config.safety.allow_private_endpoints = true;
+        config.providers.openai = Some(crate::config::ProviderConfig {
+            api_base: Some("http://127.0.0.1:11434/v1".to_string()),
+            ..Default::default()
+        });
+        let diags = validate_provider_api_bases(&config);
+        assert!(diags.is_empty());
     }
 }

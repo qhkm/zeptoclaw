@@ -35,6 +35,11 @@ pub struct SafetyConfig {
     pub leak_detection_enabled: bool,
     /// Maximum tool output length in bytes before truncation.
     pub max_output_length: usize,
+    /// Allow private/local endpoints in provider `api_base` validation checks.
+    ///
+    /// Keep this disabled in production. Enable only for trusted local
+    /// development endpoints such as Ollama/vLLM on LAN/loopback.
+    pub allow_private_endpoints: bool,
     /// Taint tracking configuration.
     pub taint: taint::TaintConfig,
 }
@@ -46,6 +51,7 @@ impl Default for SafetyConfig {
             injection_check_enabled: true,
             leak_detection_enabled: true,
             max_output_length: 100_000,
+            allow_private_endpoints: false,
             taint: taint::TaintConfig::default(),
         }
     }
@@ -323,6 +329,7 @@ mod tests {
         assert!(config.injection_check_enabled);
         assert!(config.leak_detection_enabled);
         assert_eq!(config.max_output_length, 100_000);
+        assert!(!config.allow_private_endpoints);
     }
 
     #[test]

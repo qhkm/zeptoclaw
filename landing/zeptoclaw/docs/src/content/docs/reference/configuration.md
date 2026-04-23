@@ -48,7 +48,7 @@ ZeptoClaw is configured via `~/.zeptoclaw/config.json`. All fields have sensible
   "channels": {
     "telegram": {
       "enabled": true,
-      "bot_token": "123456:ABC..."
+      "token": "123456:ABC..."
     },
     "slack": {
       "enabled": false,
