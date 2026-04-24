@@ -42,6 +42,27 @@ pub use traits::Peripheral;
 
 use crate::tools::Tool;
 
+#[cfg(any(
+    feature = "hardware",
+    all(feature = "peripheral-rpi", target_os = "linux")
+))]
+/// Validate that `hex` is a non-empty, even-length string of ASCII hex digits.
+pub(crate) fn validate_hex(hex: &str) -> std::result::Result<(), String> {
+    if hex.is_empty() {
+        return Err("Hex data must not be empty".into());
+    }
+    if !hex.len().is_multiple_of(2) {
+        return Err(format!(
+            "Hex data must have even length (got {} chars)",
+            hex.len()
+        ));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Hex data must contain only hex digits (0-9, a-f, A-F)".into());
+    }
+    Ok(())
+}
+
 /// Create peripheral tools based on enabled features.
 ///
 /// When the `hardware` feature is disabled, returns an empty vec.

@@ -160,6 +160,7 @@ impl SerialPeripheral {
         })
     }
 
+    #[cfg(feature = "peripheral-esp32")]
     /// Get a clone of the shared transport for tool construction.
     pub(crate) fn transport(&self) -> Arc<SerialTransport> {
         self.transport.clone()

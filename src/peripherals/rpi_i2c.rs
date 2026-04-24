@@ -13,7 +13,7 @@
 
 use crate::error::{Result, ZeptoError};
 use crate::peripherals::board_profile::RPI_PROFILE;
-use crate::peripherals::i2c::validate_hex;
+use crate::peripherals::validate_hex;
 use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
