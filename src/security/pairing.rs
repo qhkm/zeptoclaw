@@ -348,7 +348,7 @@ impl PairingManager {
     fn hash_token(raw_token: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(raw_token.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Generate a random 6-digit code using CSPRNG bytes from UUID v4.

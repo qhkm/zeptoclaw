@@ -169,7 +169,7 @@ async fn download_and_verify(asset_url: &str, checksum_url: &str, dest: &Path) -
     // Compute SHA256
     let mut hasher = Sha256::new();
     hasher.update(&binary_bytes);
-    let actual_hex = format!("{:x}", hasher.finalize());
+    let actual_hex = hex::encode(hasher.finalize());
 
     if actual_hex != expected_hex {
         bail!(

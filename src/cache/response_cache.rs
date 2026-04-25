@@ -72,7 +72,7 @@ impl ResponseCache {
         hasher.update(system_prompt.as_bytes());
         hasher.update((user_prompt.len() as u64).to_le_bytes());
         hasher.update(user_prompt.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Look up a cached response. Returns `None` if the key is absent or expired.
