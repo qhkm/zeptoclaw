@@ -93,6 +93,7 @@ For detailed module docs see `docs/claude/architecture.md`.
 - The OpenAI-compatible `/v1/chat/completions` serve path forwards request tools, returns OpenAI-style tool-call payloads for assistant/tool messages, and the default provider streaming adapter now emits a text delta plus tool-call events before `Done` so non-native streaming providers are not silently flattened.
 - The serve API only accepts omitted, `null`, or `"auto"` for `tool_choice`; unsupported values are rejected with `400` instead of being ignored.
 - `src/audit.rs` now includes an in-memory SHA-256 hash chain (`record_audit_chain_event`, `verify_audit_chain_integrity`, `recent_audit_entries`, `audit_tip_hash`), and `kernel::execute_tool()` records per-call audit entries including shell/network/spawn classifications.
+- The CI feature-matrix job now checks `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap`, while `memory-bm25` and `peripheral-esp32` remain covered by dedicated test/clippy jobs; optional feature paths now fail fast before merge instead of drifting behind the default build.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".
 - `edit_file` rejects empty `old_text` and accepts optional `expected_replacements` to guard exact-match edits.

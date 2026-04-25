@@ -81,9 +81,22 @@ jobs:
       matrix:
         features:
           - "--no-default-features"
+          - "--features memory-embedding"
+          - "--features screenshot"
           - "--features panel"
           - "--features tool-pdf"
           - "--features memory-hnsw"
+          - "--features channel-email"
+          - "--features google"
+          - "--features provider-vertex"
+          - "--features whatsapp-web"
+          - "--features hardware"
+          - "--features peripheral-rpi"
+          - "--features probe"
+          - "--features android"
+          - "--features sandbox-landlock"
+          - "--features sandbox-firejail"
+          - "--features sandbox-bubblewrap"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable

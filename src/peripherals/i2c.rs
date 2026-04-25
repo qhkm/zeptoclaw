@@ -16,32 +16,12 @@
 
 use super::board_profile::BoardProfile;
 use super::serial::SerialTransport;
+use super::validate_hex;
 use crate::error::{Result, ZeptoError};
 use crate::tools::{Tool, ToolCategory, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Validate that `hex` is a non-empty, even-length string of ASCII hex digits.
-pub(crate) fn validate_hex(hex: &str) -> std::result::Result<(), String> {
-    if hex.is_empty() {
-        return Err("Hex data must not be empty".into());
-    }
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!(
-            "Hex data must have even length (got {} chars)",
-            hex.len()
-        ));
-    }
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Hex data must contain only hex digits (0-9, a-f, A-F)".into());
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // I2cScanTool
