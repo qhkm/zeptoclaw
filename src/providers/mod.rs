@@ -56,6 +56,7 @@ pub const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &[
     "xai",
     "qianfan",
     "novita",
+    "liquid",
 ];
 
 use crate::error::ProviderError;
