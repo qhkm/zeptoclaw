@@ -25,7 +25,7 @@ check-cfg = ['cfg(feature, values("mqtt"))']
 # Tokio async runtime - using "full" features because teloxide/reqwest
 # transitively pull in most features anyway (fs, net, etc.)
 # Minimal features don't reduce binary size due to transitive deps.
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 
 # =============================================================================
 # SERIALIZATION
