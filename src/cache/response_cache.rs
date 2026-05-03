@@ -60,6 +60,21 @@ impl ResponseCache {
         }
     }
 
+    /// Create a cache backed by an explicit on-disk path.
+    ///
+    /// Bypasses the default `~/.zeptoclaw/cache/responses.json` so tests can
+    /// use isolated per-process paths and avoid cross-test interference.
+    pub fn with_path<P: Into<PathBuf>>(path: P, ttl_secs: u64, max_entries: usize) -> Self {
+        let path = path.into();
+        let store = Self::load_from_disk(&path);
+        Self {
+            store,
+            path,
+            ttl_secs,
+            max_entries: max_entries.max(1),
+        }
+    }
+
     /// Build a deterministic cache key: SHA-256 of `(model, system_prompt, user_prompt)`.
     ///
     /// Uses length-prefixed encoding to prevent separator collision attacks
