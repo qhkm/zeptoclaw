@@ -58,10 +58,10 @@ Use when:\n\
 - A multi-step approach worked and the user is likely to want it repeated\n\
 \n\
 Do NOT use when:\n\
-- The fact is already in CLAUDE.md, README, or repo code/comments — read those first\n\
+- The fact is already in AGENTS.md, CLAUDE.md, README, or repo code/comments - read those first\n\
 - The information is conversation-scoped (current task, ephemeral debugging context)\n\
 - The user has not signaled it should be persisted\n\
-- You are unsure whether it generalizes — ask first, save second\n\
+- You are unsure whether it generalizes - ask first, save second\n\
 \n\
 Tip: call 'categories' before 'set' to reuse an existing category instead of creating a near-duplicate."
     }
@@ -404,7 +404,7 @@ mod tests {
 
     /// The description must include explicit trigger-phrase guidance so the
     /// model knows *when* to call this tool, not just *how*. Removing this
-    /// block silently regresses memory-persistence behavior — guard it.
+    /// block silently regresses memory-persistence behavior - guard it.
     #[test]
     fn test_tool_description_has_trigger_phrases() {
         let (tool, _dir) = temp_tool();
@@ -422,7 +422,7 @@ mod tests {
             "description should reference the canonical user-correction phrases",
         );
         assert!(
-            desc.contains("CLAUDE.md") || desc.contains("README"),
+            desc.contains("AGENTS.md") || desc.contains("CLAUDE.md") || desc.contains("README"),
             "description should warn against duplicating repo-level docs",
         );
     }
