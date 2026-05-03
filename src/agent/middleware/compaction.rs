@@ -69,12 +69,14 @@ impl Middleware for CompactionMiddleware {
 
             let context_limit = ctx.config.compaction.context_limit;
             let tool_result_cap = ctx.config.agents.defaults.max_tool_result_bytes;
+            let safety_margin = ctx.config.compaction.safety_margin;
             let (recovered, tier) = crate::agent::compaction::try_recover_context_with_urgency(
                 std::mem::take(&mut session.messages),
                 context_limit,
                 urgency,
                 8,               // keep_recent for tier 1
                 tool_result_cap, // tool result budget for tier 2
+                safety_margin,
             );
             if tier > 0 {
                 debug!(
