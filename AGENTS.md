@@ -25,7 +25,7 @@ Project-level guidance for coding agents working in this repository.
 - OpenAI-compatible serve tool calling: `/v1/chat/completions` forwards request tools to providers, returns assistant/tool messages plus tool-call payloads in OpenAI format, streams tool-call deltas even for providers using the default `chat_stream()` adapter, and rejects unsupported `tool_choice` values instead of silently ignoring them
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
-- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
+- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/Serial spawned tasks are wrapped with `catch_unwind` and panic logging; MQTT code remains present while its Cargo feature is parked
 - Webhook auth hardening: generic webhook supports optional HMAC-SHA256 body signatures plus fixed server-side sender/chat identity by default (`trust_payload_identity` is an explicit legacy escape hatch); WhatsApp Cloud verifies `X-Hub-Signature-256` when `app_secret` is configured
 - Telegram allowlist hardening: numeric user IDs are the safe default for new setups; legacy username matching remains available only through `channels.telegram.allow_usernames` for compatibility and emits warnings when non-numeric allowlist entries are present
 - Telegram config compatibility: `channels.telegram` accepts legacy `bot_token`, `allowed_senders`, and `allowed_chats` keys, and auto-enables when `enabled` is omitted but a Telegram token is present

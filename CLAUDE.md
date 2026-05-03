@@ -58,7 +58,7 @@ src/
 ├── api/         # Panel API server + OpenAI-compatible serve routes (axum)
 ├── auth/        # OAuth (PKCE), token refresh, Claude CLI import
 ├── bus/         # Async message bus
-├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp Web/Cloud, Lark, Email, MQTT, Serial, ACP
+├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp Web/Cloud, Lark, Email, Serial, ACP; MQTT parked
 ├── cli/         # Clap commands + handlers
 ├── config/      # Config types/loading + hot-reload
 ├── cron/        # Persistent cron scheduler
