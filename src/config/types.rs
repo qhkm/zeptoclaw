@@ -1576,6 +1576,9 @@ pub struct ProvidersConfig {
     /// Novita AI configuration (OpenAI-compatible endpoint).
     #[serde(default)]
     pub novita: Option<ProviderConfig>,
+    /// Liquid AI configuration (OpenAI-compatible, LFM2 model family — edge-optimized).
+    #[serde(default)]
+    pub liquid: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
