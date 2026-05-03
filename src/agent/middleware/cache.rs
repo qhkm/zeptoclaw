@@ -116,10 +116,22 @@ mod tests {
     use crate::cache::ResponseCache;
     use std::sync::{Arc, Mutex};
 
-    /// Build subsystems with a real (in-memory) response cache.
+    /// Build subsystems with a per-test response cache backed by a unique
+    /// temp file path so parallel tests do not collide on the default
+    /// `~/.zeptoclaw/cache/responses.json`.
     fn subsystems_with_cache() -> Arc<super::super::Subsystems> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!(
+            "zeptoclaw-test-cache-mw-{pid}-{id}-{:?}.json",
+            std::thread::current().id()
+        ));
         let mut inner = test_subsystems_inner();
-        inner.cache = Some(Arc::new(Mutex::new(ResponseCache::new(60, 100))));
+        inner.cache = Some(Arc::new(Mutex::new(ResponseCache::with_path(
+            path, 60, 100,
+        ))));
         Arc::new(inner)
     }
 
