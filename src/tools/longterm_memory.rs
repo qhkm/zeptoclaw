@@ -46,7 +46,24 @@ impl Tool for LongTermMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Store and retrieve long-term memories (facts, preferences, learnings) that persist across sessions. Use 'set' to remember something, 'get' to recall by key, 'search' to find memories by keyword."
+        "Store and retrieve long-term memories (facts, preferences, learnings) that persist across sessions. \
+Actions: 'set' to remember, 'get' to recall by key, 'search' to find by keyword, 'list' to enumerate, \
+'categories' to inspect groupings, 'delete' to remove, 'pin' to mark as never-forget.\n\
+\n\
+Use when:\n\
+- User corrects you (\"don't do that again\", \"remember this\", \"next time...\")\n\
+- User shares a non-obvious preference (\"I always want X\", \"never run Y here\")\n\
+- You discover an environment quirk worth recording (path, tool version, OS-specific gotcha)\n\
+- You learn a project-specific convention (commit format, branch naming, test runner choice)\n\
+- A multi-step approach worked and the user is likely to want it repeated\n\
+\n\
+Do NOT use when:\n\
+- The fact is already in CLAUDE.md, README, or repo code/comments — read those first\n\
+- The information is conversation-scoped (current task, ephemeral debugging context)\n\
+- The user has not signaled it should be persisted\n\
+- You are unsure whether it generalizes — ask first, save second\n\
+\n\
+Tip: call 'categories' before 'set' to reuse an existing category instead of creating a near-duplicate."
     }
 
     fn compact_description(&self) -> &str {
@@ -380,8 +397,34 @@ mod tests {
     #[test]
     fn test_tool_description() {
         let (tool, _dir) = temp_tool();
-        assert!(tool.description().contains("long-term memories"));
-        assert!(tool.description().contains("persist across sessions"));
+        let desc = tool.description();
+        assert!(desc.contains("long-term memories"));
+        assert!(desc.contains("persist across sessions"));
+    }
+
+    /// The description must include explicit trigger-phrase guidance so the
+    /// model knows *when* to call this tool, not just *how*. Removing this
+    /// block silently regresses memory-persistence behavior — guard it.
+    #[test]
+    fn test_tool_description_has_trigger_phrases() {
+        let (tool, _dir) = temp_tool();
+        let desc = tool.description();
+        assert!(
+            desc.contains("Use when:"),
+            "description must enumerate triggers"
+        );
+        assert!(
+            desc.contains("Do NOT use when:"),
+            "description must enumerate counter-triggers"
+        );
+        assert!(
+            desc.contains("remember this") || desc.contains("don't do that again"),
+            "description should reference the canonical user-correction phrases",
+        );
+        assert!(
+            desc.contains("CLAUDE.md") || desc.contains("README"),
+            "description should warn against duplicating repo-level docs",
+        );
     }
 
     #[test]
