@@ -11,8 +11,8 @@ Project-level guidance for coding agents working in this repository.
 - Integration tests: `tests/integration.rs`
 - Agent coding benchmark fixture: `test-coding/` with intentionally buggy Python code and stdlib verification tests
 - Pristine agent comparison fixture: `test-coding-pristine/` preserves the original failing state for repeatable head-to-head runs
-- Codebase: ~106,000+ lines of Rust
-- Channels: 10 (Telegram, Slack, Discord, WhatsApp, WhatsApp Web, WhatsApp Cloud, Lark, Email, Webhook, Serial)
+- Codebase: ~154,000 lines of Rust under `src/`
+- Channels: 10 active built-ins (Telegram, Slack, Discord, WhatsApp Web, WhatsApp Cloud, Lark, Email, Webhook, Serial, ACP); MQTT code is present but the Cargo feature is parked until `rumqttc` no longer pins the vulnerable `rustls-webpki`
 - Runtimes: 6 (Native, Docker, Apple Container, Landlock, Firejail, Bubblewrap)
 - Peripherals: 4 boards (ESP32, RPi, Arduino, Nucleo) with GPIO, I2C, NVS, Serial
 - Skills: OpenClaw-compatible (reads `metadata.zeptoclaw` > `metadata.openclaw` > raw)
@@ -25,7 +25,7 @@ Project-level guidance for coding agents working in this repository.
 - OpenAI-compatible serve tool calling: `/v1/chat/completions` forwards request tools to providers, returns assistant/tool messages plus tool-call payloads in OpenAI format, streams tool-call deltas even for providers using the default `chat_stream()` adapter, and rejects unsupported `tool_choice` values instead of silently ignoring them
 - Channel dispatch: avoids holding the channels map `RwLock` across async `send()` awaits
 - Channel supervisor: polling (15s) detects dead channels, restarts with 60s cooldown, max 5 restarts
-- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/MQTT/Serial spawned tasks are wrapped with `catch_unwind` and panic logging
+- Channel panic isolation: Slack/Discord/Webhook/WhatsApp/WhatsApp Web/WhatsApp Cloud/Lark/Email/Serial spawned tasks are wrapped with `catch_unwind` and panic logging; MQTT code remains present while its Cargo feature is parked
 - Webhook auth hardening: generic webhook supports optional HMAC-SHA256 body signatures plus fixed server-side sender/chat identity by default (`trust_payload_identity` is an explicit legacy escape hatch); WhatsApp Cloud verifies `X-Hub-Signature-256` when `app_secret` is configured
 - Telegram allowlist hardening: numeric user IDs are the safe default for new setups; legacy username matching remains available only through `channels.telegram.allow_usernames` for compatibility and emits warnings when non-numeric allowlist entries are present
 - Telegram config compatibility: `channels.telegram` accepts legacy `bot_token`, `allowed_senders`, and `allowed_chats` keys, and auto-enables when `enabled` is omitted but a Telegram token is present
@@ -58,7 +58,7 @@ Project-level guidance for coding agents working in this repository.
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, and `cargo test --doc` (128 passed, 27 ignored); `cargo nextest run --lib` is currently blocked by `auth::oauth::tests::test_callback_server_timeout` under nextest even though the same test passes when rerun with `cargo test`
+- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3438 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
 
 ## Task Tracking Protocol
 
