@@ -417,13 +417,28 @@ mod tests {
             desc.contains("Do NOT use when:"),
             "description must enumerate counter-triggers"
         );
+        // One assertion per canonical phrase: `||` would let any all-but-one
+        // phrase be silently deleted while the test still passed, defeating
+        // the point of guarding the trigger block.
         assert!(
-            desc.contains("remember this") || desc.contains("don't do that again"),
-            "description should reference the canonical user-correction phrases",
+            desc.contains("remember this"),
+            "description must contain 'remember this' trigger phrase",
         );
         assert!(
-            desc.contains("AGENTS.md") || desc.contains("CLAUDE.md") || desc.contains("README"),
-            "description should warn against duplicating repo-level docs",
+            desc.contains("don't do that again"),
+            "description must contain \"don't do that again\" trigger phrase",
+        );
+        assert!(
+            desc.contains("AGENTS.md"),
+            "description must reference AGENTS.md as a counter-trigger",
+        );
+        assert!(
+            desc.contains("CLAUDE.md"),
+            "description must reference CLAUDE.md as a counter-trigger",
+        );
+        assert!(
+            desc.contains("README"),
+            "description must reference README as a counter-trigger",
         );
     }
 
