@@ -220,6 +220,7 @@ pub enum ApprovalResponse {
 /// assert!(gate.requires_approval("shell"));
 /// assert!(!gate.requires_approval("echo"));
 /// ```
+#[derive(Clone)]
 pub struct ApprovalGate {
     /// Whether approval checking is enabled.
     enabled: bool,

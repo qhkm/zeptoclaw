@@ -3453,6 +3453,159 @@ impl AgentLoop {
     pub fn token_budget(&self) -> &TokenBudget {
         &self.token_budget
     }
+
+    // -----------------------------------------------------------------------
+    // Pipeline wiring scaffolding (Phase 2 of #399)
+    // -----------------------------------------------------------------------
+    //
+    // The helpers below construct the middleware [`Pipeline`], its terminal
+    // executor, and the [`PipelineContext`]/[`Subsystems`] state it operates
+    // on. They are NOT yet on the production hot path — `process_message`
+    // still uses the inline body until parity with the Phase 1 middleware
+    // implementations is reached (Phase 2b). See `src/agent/core_loop.rs`
+    // for the phase plan and gap analysis.
+
+    /// Build an [`Arc<Subsystems>`] snapshot from the current agent state.
+    ///
+    /// # Drift handling
+    ///
+    /// Several `AgentLoop` fields don't have matching shapes in
+    /// [`Subsystems`] yet (the Phase 1 framework deliberately landed
+    /// simplified types). Where types differ, this builder uses the
+    /// following adapters:
+    ///
+    /// - `metrics_collector`: `AgentLoop` holds `Arc<MetricsCollector>` but
+    ///   `Subsystems` expects a value, and `MetricsCollector` cannot
+    ///   implement `Clone` (it owns `Mutex`es). The snapshot constructs
+    ///   a fresh, *shadow* collector. Writes through the pipeline do
+    ///   **not** propagate back to `AgentLoop::metrics_collector`. Phase 2b
+    ///   will align both sides on `Arc<MetricsCollector>`.
+    /// - `tool_call_limit`: same story as `metrics_collector` —
+    ///   `AtomicU32` is not `Clone`. The snapshot builds a fresh tracker
+    ///   from the configured `max_tool_calls`.
+    /// - `usage_metrics`: `AgentLoop` holds
+    ///   `Arc<RwLock<Option<Arc<UsageMetrics>>>>` (set late by the gateway)
+    ///   while `Subsystems` expects `Arc<RwLock<UsageMetrics>>`. The snapshot
+    ///   defaults to a fresh `UsageMetrics` if none is installed.
+    /// - `session_manager`, `bus`, `approval_gate`: cloned from their
+    ///   `Arc`-wrapped originals (the underlying types share state via
+    ///   internal `Arc`, so clones see the same data).
+    ///
+    /// These shadow-state gaps are why the Pipeline is not yet live in
+    /// `process_message`; Phase 2b fixes the type drift before flipping
+    /// the production path.
+    pub async fn build_subsystems(&self) -> Arc<crate::agent::middleware::Subsystems> {
+        let approval_handler = self.approval_handler.read().await.clone();
+
+        // usage_metrics: shadow state for now — we can't transplant the
+        // installed `Arc<UsageMetrics>` into a `UsageMetrics` value without
+        // breaking sharing semantics, so the pipeline gets a fresh
+        // collector. Documented in the function doc above. Read the slot
+        // anyway so future drift surfaces here, not at a downstream site.
+        let _installed_usage_metrics = self.usage_metrics.read().await.clone();
+        let usage_metrics_snapshot = UsageMetrics::new();
+
+        Arc::new(crate::agent::middleware::Subsystems {
+            session_manager: (*self.session_manager).clone(),
+            tools: Arc::clone(&self.tools),
+            context_builder: self.context_builder.clone(),
+            context_monitor: self.context_monitor.clone(),
+            ltm: self.ltm.clone(),
+            safety_layer: self.safety_layer.clone(),
+            taint: self.taint.clone(),
+            approval_gate: Some((*self.approval_gate).clone()),
+            approval_handler,
+            metrics_collector: MetricsCollector::new(),
+            usage_metrics: Arc::new(tokio::sync::RwLock::new(usage_metrics_snapshot)),
+            token_budget: Arc::clone(&self.token_budget),
+            tool_call_limit: ToolCallLimitTracker::new(self.config.agents.defaults.max_tool_calls),
+            cache: self.cache.clone(),
+            bus: (*self.bus).clone(),
+            agent_mode: self.agent_mode,
+            provider_registry: Arc::clone(&self.provider_registry),
+            tool_feedback_tx: Arc::clone(&self.tool_feedback_tx),
+            #[cfg(feature = "panel")]
+            event_bus: self.event_bus.clone(),
+        })
+    }
+
+    /// Build a [`PipelineContext`] for the given inbound message.
+    ///
+    /// The context carries the inbound message, a config snapshot, and a
+    /// fresh [`Subsystems`] handle. Middlewares populate the remaining
+    /// fields (`session`, `provider`, `messages`, …) during execution.
+    pub async fn build_pipeline_context(
+        &self,
+        msg: InboundMessage,
+        output_mode: crate::agent::middleware::OutputMode,
+    ) -> crate::agent::middleware::PipelineContext {
+        let session_key = msg.session_key.clone();
+        crate::agent::middleware::PipelineContext {
+            inbound: msg,
+            config: Arc::new(self.config.clone()),
+            session: None,
+            session_key,
+            provider: None,
+            model: None,
+            chat_options: None,
+            messages: None,
+            tool_definitions: None,
+            memory_override: None,
+            output_mode,
+            dry_run: self.dry_run.load(Ordering::SeqCst),
+            subsystems: self.build_subsystems().await,
+        }
+    }
+
+    /// Build the agent middleware [`Pipeline`].
+    ///
+    /// Order matches the Phase 1 design and follows the documented
+    /// outermost-to-innermost convention:
+    ///
+    /// 1. `MetricsMiddleware` — wall-clock + error rate around the chain
+    /// 2. `InjectionScanMiddleware` — tiered prompt-injection scanning
+    /// 3. `SessionMiddleware` — load/create session, append user message
+    /// 4. `ProviderResolutionMiddleware` — pick provider + model
+    /// 5. `TokenBudgetMiddleware` — reset + enforce per-run budget
+    /// 6. `MemoryInjectionMiddleware` — build per-message memory override
+    /// 7. `CompactionMiddleware` — pre-flight context overflow recovery
+    /// 8. `ContextBuildMiddleware` — assemble final message list
+    /// 9. `CacheMiddleware` — response cache lookup + store
+    /// 10. `FeedbackMiddleware` — `Thinking`/`ResponseReady` UI events
+    /// 11. `SessionSaveMiddleware` — persist session after terminal
+    ///
+    /// The terminal is currently a [`LegacyTerminal`] stub (see
+    /// `core_loop.rs`); calling [`Pipeline::execute`] short-circuits
+    /// with a clear scaffolding error. Phase 2b replaces it with the
+    /// real LLM + tool-loop executor.
+    ///
+    /// [`Pipeline`]: crate::agent::pipeline::Pipeline
+    /// [`Pipeline::execute`]: crate::agent::pipeline::Pipeline::execute
+    /// [`LegacyTerminal`]: crate::agent::core_loop::LegacyTerminal
+    pub fn build_pipeline(&self) -> crate::agent::pipeline::Pipeline {
+        use crate::agent::middleware::{
+            cache::CacheMiddleware, compaction::CompactionMiddleware,
+            context_build::ContextBuildMiddleware, feedback::FeedbackMiddleware,
+            injection_scan::InjectionScanMiddleware, memory_injection::MemoryInjectionMiddleware,
+            metrics::MetricsMiddleware, provider_resolution::ProviderResolutionMiddleware,
+            session::SessionMiddleware, session_save::SessionSaveMiddleware,
+            token_budget::TokenBudgetMiddleware,
+        };
+
+        crate::agent::pipeline::Pipeline::builder()
+            .add(MetricsMiddleware::new())
+            .add(InjectionScanMiddleware::from_config(&self.config))
+            .add(SessionMiddleware::new())
+            .add(ProviderResolutionMiddleware::new())
+            .add(TokenBudgetMiddleware::new())
+            .add(MemoryInjectionMiddleware::new())
+            .add(CompactionMiddleware::new())
+            .add(ContextBuildMiddleware::new())
+            .add(CacheMiddleware::new())
+            .add(FeedbackMiddleware::new())
+            .add(SessionSaveMiddleware::new())
+            .build(crate::agent::core_loop::LegacyTerminal::new())
+    }
 }
 
 #[cfg(test)]
@@ -4967,5 +5120,93 @@ mod tests {
             }
             _ => panic!("expected ToolDone"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline wiring scaffolding tests (Phase 2 of #399)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_build_subsystems_snapshot() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let subsystems = agent.build_subsystems().await;
+        // Strong-count is 1 because we only just constructed the Arc.
+        assert_eq!(Arc::strong_count(&subsystems), 1);
+        // The provider registry comes through as a shared Arc, so it should
+        // match the agent's own registry handle.
+        assert!(Arc::ptr_eq(
+            &subsystems.provider_registry,
+            &agent.provider_registry
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_build_pipeline_contains_all_phase1_middlewares() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let pipeline = agent.build_pipeline();
+        assert!(!pipeline.is_empty());
+        // 11 Phase 1 middlewares: metrics, injection_scan, session,
+        // provider_resolution, token_budget, memory_injection, compaction,
+        // context_build, cache, feedback, session_save.
+        assert_eq!(pipeline.len(), 11);
+    }
+
+    #[tokio::test]
+    async fn test_build_pipeline_context_carries_inbound() {
+        let config = Config::default();
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let mut msg = InboundMessage::new("cli", "user", "chat", "hello pipeline");
+        msg.session_key = "scaffold-1".to_string();
+        let ctx = agent
+            .build_pipeline_context(msg, crate::agent::middleware::OutputMode::Sync)
+            .await;
+
+        assert_eq!(ctx.session_key, "scaffold-1");
+        assert_eq!(ctx.inbound.content, "hello pipeline");
+        assert!(ctx.provider.is_none(), "provider populated by middleware");
+        assert!(ctx.session.is_none(), "session populated by middleware");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_execute_runs_end_to_end() {
+        // Smoke test: the Phase 2 wiring scaffolding must construct a
+        // PipelineContext and Pipeline that successfully drive the
+        // middleware chain at runtime. The result will be an error —
+        // either `No provider configured` from ProviderResolutionMiddleware
+        // (no provider has been registered) or `scaffolding stub` from
+        // LegacyTerminal — but it must be a structured `Err`, not a panic.
+        let mut config = Config::default();
+        // Disable injection scanning so InjectionScanMiddleware doesn't
+        // gate the pipeline before later middlewares execute.
+        config.safety.enabled = false;
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, bus);
+
+        let mut msg = InboundMessage::new("cli", "user", "chat", "hi");
+        msg.session_key = "scaffold-end-to-end".to_string();
+        let mut ctx = agent
+            .build_pipeline_context(msg, crate::agent::middleware::OutputMode::Sync)
+            .await;
+
+        let pipeline = agent.build_pipeline();
+        let result = pipeline.execute(&mut ctx).await;
+        let err = result.expect_err("pipeline.execute should return Err during Phase 2");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("scaffolding stub") || msg.contains("No provider"),
+            "expected scaffolding/provider error, got: {msg}"
+        );
     }
 }

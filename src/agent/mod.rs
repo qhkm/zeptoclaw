@@ -58,6 +58,7 @@ pub mod budget;
 pub mod compaction;
 mod context;
 pub mod context_monitor;
+pub mod core_loop;
 pub mod facade;
 mod r#loop;
 pub mod loop_guard;
