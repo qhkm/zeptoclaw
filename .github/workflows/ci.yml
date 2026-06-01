@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TERM_QUIET: "true" # F.I.R.S.T. principle (only print failures, not test names)
   RUSTFLAGS: -Dwarnings
+  # Stripped release binary ceiling on linux-x86_64. The strategic 6MB "fits
+  # on a robot" moat is the aarch64 target — see the follow-up issue to add
+  # an aarch64 CI build with a tighter 7MB gate. Linux x86_64 reality has
+  # always run ~10MB even with `profile.release.strip = true`. Escape valve
+  # for genuine new heavy deps is feature-gating, not bumping this number.
   BINARY_SIZE_LIMIT_MB: 11
 
 jobs:
@@ -159,7 +164,6 @@ jobs:
 
   binary-size:
     name: Binary size
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -173,11 +177,11 @@ jobs:
       - name: Check binary size
         run: |
           size_bytes=$(stat --format=%s target/release/zeptoclaw)
-          size_mb=$(awk "BEGIN {printf \"%.1f\", ${size_bytes}/1048576}")
+          size_mb=$(awk "BEGIN {printf \"%.2f\", ${size_bytes}/1048576}")
+          limit_bytes=$(awk "BEGIN {printf \"%d\", ${BINARY_SIZE_LIMIT_MB}*1048576}")
           echo "Binary size: ${size_mb} MB (limit: ${BINARY_SIZE_LIMIT_MB} MB)"
-          echo "### Binary size: ${size_mb} MB" >> "$GITHUB_STEP_SUMMARY"
-          limit_bytes=$((BINARY_SIZE_LIMIT_MB * 1048576))
+          echo "### Binary size: ${size_mb} MB (limit ${BINARY_SIZE_LIMIT_MB} MB)" >> "$GITHUB_STEP_SUMMARY"
           if [ "${size_bytes}" -gt "${limit_bytes}" ]; then
-            echo "Binary exceeds ${BINARY_SIZE_LIMIT_MB} MB limit!" >&2
+            echo "::error::Binary exceeds ${BINARY_SIZE_LIMIT_MB} MB limit (${size_mb} MB > ${BINARY_SIZE_LIMIT_MB} MB). Either gate the offending dep behind a Cargo feature or reduce footprint — do not bump the budget without team sign-off." >&2
             exit 1
           fi
