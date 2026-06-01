@@ -344,16 +344,36 @@ fn infer_provider_name_for_model(
         // Final fallback: keyword matching on the model suffix so that
         // "anthropic/claude-sonnet-4-6" can still resolve via "claude" keyword
         // when the prefix itself isn't a configured provider.
+        //
+        // IMPORTANT: when an availability context is supplied, only match
+        // providers the user has actually configured. Without this guard, a
+        // model id like "openai/gpt-oss-120b" routed through a non-OpenAI
+        // vendor (e.g. NVIDIA NIM's OpenAI-compatible catalog) incorrectly
+        // resolves to "openai" because the suffix contains the keyword
+        // "gpt". Runtime then tries to use the unconfigured OpenAI provider,
+        // yielding "Invalid API Key" loops.
+        //
+        // When `available_providers` is empty, callers explicitly opted out
+        // of availability checks (e.g. the legacy `provider_name_for_model`
+        // entry point), and the historical keyword-only behaviour is kept.
         return PROVIDER_REGISTRY
             .iter()
             .filter(|spec| spec.runtime_supported)
+            .filter(|spec| {
+                available_providers.is_empty() || available_providers.contains(&spec.name)
+            })
             .find(|spec| spec.model_keywords.iter().any(|kw| suffix.contains(kw)))
             .map(|spec| spec.name);
     }
 
+    // Same guard for unprefixed model ids: never claim a provider the user
+    // hasn't configured. When available_providers is empty (callers using
+    // provider_name_for_model without availability context), the historical
+    // keyword-only behaviour is preserved.
     PROVIDER_REGISTRY
         .iter()
         .filter(|spec| spec.runtime_supported)
+        .filter(|spec| available_providers.is_empty() || available_providers.contains(&spec.name))
         .find(|spec| {
             spec.model_keywords
                 .iter()
@@ -1345,5 +1365,53 @@ mod tests {
     fn test_provider_name_for_model_no_match() {
         assert_eq!(provider_name_for_model("some-unknown-model"), None);
         assert_eq!(provider_name_for_model(""), None);
+    }
+
+    #[test]
+    fn test_with_available_does_not_claim_unconfigured_provider_from_suffix_keyword() {
+        // Regression: "openai/gpt-oss-120b" served by NVIDIA NIM previously
+        // resolved to "openai" via the suffix-keyword fallback ("gpt-oss-120b"
+        // contains the "gpt" keyword) even when the OpenAI provider was not
+        // configured. Runtime then attempted to use the unconfigured OpenAI
+        // provider, producing "Invalid API Key" loops.
+        //
+        // Only the explicitly configured "nvidia" provider is available.
+        let configured = vec!["nvidia"];
+        assert_eq!(
+            provider_name_for_model_with_available("openai/gpt-oss-120b", &configured),
+            None,
+            "must not claim openai when only nvidia is configured"
+        );
+    }
+
+    #[test]
+    fn test_with_available_unprefixed_keyword_respects_availability() {
+        // Same guard for unprefixed ids: "gpt-4o" must not resolve to "openai"
+        // when the user has not configured OpenAI.
+        let configured = vec!["anthropic"];
+        assert_eq!(
+            provider_name_for_model_with_available("gpt-4o", &configured),
+            None,
+        );
+
+        // But it still resolves when openai IS configured.
+        let configured = vec!["openai"];
+        assert_eq!(
+            provider_name_for_model_with_available("gpt-4o", &configured),
+            Some("openai"),
+        );
+    }
+
+    #[test]
+    fn test_without_available_preserves_keyword_only_behaviour() {
+        // The legacy  (which passes an empty
+        // available-providers list) must keep working for callers that
+        // don't have availability context. Keyword-only matching still
+        // applies in that case.
+        assert_eq!(provider_name_for_model("gpt-4o"), Some("openai"));
+        assert_eq!(
+            provider_name_for_model("claude-sonnet-4-5"),
+            Some("anthropic")
+        );
     }
 }
