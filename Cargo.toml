@@ -53,7 +53,7 @@ reqwest013 = { package = "reqwest", version = "0.13", features = ["json", "rustl
 # HTML PARSING
 # =============================================================================
 # DOM parser built on Servo's html5ever — CSS selectors for web_fetch extraction
-scraper = "0.26"
+scraper = "0.27"
 
 # =============================================================================
 # CLI
