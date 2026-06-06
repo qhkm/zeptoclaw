@@ -5,7 +5,7 @@ Project-level guidance for coding agents working in this repository.
 ## Project Snapshot
 
 - Language: Rust (edition 2021)
-- Core binary: `zeptoclaw` (`src/main.rs` thin entrypoint; CLI handlers in `src/cli/`)
+- Core binary: `zeptoclaw` (`src/main.rs` thin entrypoint; CLI handlers in `src/cli/`); stripped release size is gated at **11MB on linux-x86_64** by the `binary-size` CI job (runs on every PR); the "fits on a robot" 6MB moat is the **aarch64** target where the binary is ~7MB — follow-up issue adds aarch64 to CI with a 7MB gate; escape valve for genuine new heavy deps is feature-gating, not bumping the budget
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
