@@ -6,9 +6,11 @@
 use async_trait::async_trait;
 
 use crate::config::FirejailConfig;
-use crate::runtime::types::{
-    CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult,
-};
+#[cfg(feature = "sandbox-firejail")]
+use crate::runtime::process::{configure_environment, run_command};
+#[cfg(not(feature = "sandbox-firejail"))]
+use crate::runtime::types::RuntimeError;
+use crate::runtime::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeResult};
 
 /// Firejail sandbox runtime.
 ///
@@ -18,12 +20,22 @@ use crate::runtime::types::{
 /// returns `Err(RuntimeError::NotAvailable(...))` with a clear recompilation message.
 pub struct FirejailRuntime {
     config: FirejailConfig,
+    env_passthrough: Vec<String>,
 }
 
 impl FirejailRuntime {
     /// Create a new Firejail runtime with the given configuration.
     pub fn new(config: FirejailConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            env_passthrough: Vec::new(),
+        }
+    }
+
+    /// Allow named parent environment variables into sandbox commands.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
+        self
     }
 
     /// Build the argument list for the `firejail` invocation.
@@ -69,16 +81,14 @@ impl ContainerRuntime for FirejailRuntime {
     async fn is_available(&self) -> bool {
         #[cfg(feature = "sandbox-firejail")]
         {
-            use std::process::Stdio;
             use tokio::process::Command;
 
-            Command::new("which")
-                .arg("firejail")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
+            let mut command = Command::new("which");
+            command.arg("firejail");
+            configure_environment(&mut command, &[], &self.env_passthrough);
+            run_command(command, 10)
                 .await
-                .map(|s| s.success())
+                .map(|output| output.success())
                 .unwrap_or(false)
         }
         #[cfg(not(feature = "sandbox-firejail"))]
@@ -101,34 +111,17 @@ impl ContainerRuntime for FirejailRuntime {
 
         #[cfg(feature = "sandbox-firejail")]
         {
-            use std::process::Stdio;
-            use std::time::Duration;
             use tokio::process::Command;
 
             let args = self.build_args(command);
             let mut cmd = Command::new("firejail");
-            cmd.args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            cmd.args(&args);
 
             if let Some(ref workdir) = config.workdir {
                 cmd.current_dir(workdir);
             }
-            for (k, v) in &config.env {
-                cmd.env(k, v);
-            }
-
-            let output =
-                tokio::time::timeout(Duration::from_secs(config.timeout_secs), cmd.output())
-                    .await
-                    .map_err(|_| RuntimeError::Timeout(config.timeout_secs))?
-                    .map_err(|e| RuntimeError::ExecutionFailed(e.to_string()))?;
-
-            Ok(CommandOutput::new(
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-                output.status.code(),
-            ))
+            configure_environment(&mut cmd, &config.env, &self.env_passthrough);
+            run_command(cmd, config.timeout_secs).await
         }
     }
 }

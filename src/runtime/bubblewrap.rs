@@ -7,18 +7,30 @@
 use async_trait::async_trait;
 
 use crate::config::BubblewrapConfig;
-use crate::runtime::types::{
-    CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult,
-};
+#[cfg(feature = "sandbox-bubblewrap")]
+use crate::runtime::process::{configure_environment, run_command};
+#[cfg(not(feature = "sandbox-bubblewrap"))]
+use crate::runtime::types::RuntimeError;
+use crate::runtime::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeResult};
 
 /// Bubblewrap (bwrap) sandbox runtime.
 pub struct BubblewrapRuntime {
     config: BubblewrapConfig,
+    env_passthrough: Vec<String>,
 }
 
 impl BubblewrapRuntime {
     pub fn new(config: BubblewrapConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            env_passthrough: Vec::new(),
+        }
+    }
+
+    /// Allow named parent environment variables into sandbox commands.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
+        self
     }
 
     /// Build the argument list for the `bwrap` invocation.
@@ -75,15 +87,13 @@ impl ContainerRuntime for BubblewrapRuntime {
     async fn is_available(&self) -> bool {
         #[cfg(feature = "sandbox-bubblewrap")]
         {
-            use std::process::Stdio;
             use tokio::process::Command;
-            Command::new("which")
-                .arg("bwrap")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
+            let mut command = Command::new("which");
+            command.arg("bwrap");
+            configure_environment(&mut command, &[], &self.env_passthrough);
+            run_command(command, 10)
                 .await
-                .map(|o| o.status.success())
+                .map(|output| output.success())
                 .unwrap_or(false)
         }
         #[cfg(not(feature = "sandbox-bubblewrap"))]
@@ -106,8 +116,6 @@ impl ContainerRuntime for BubblewrapRuntime {
 
         #[cfg(feature = "sandbox-bubblewrap")]
         {
-            use std::process::Stdio;
-            use std::time::Duration;
             use tokio::process::Command;
 
             let workspace = config.workdir.as_ref().and_then(|p| p.to_str());
@@ -117,25 +125,11 @@ impl ContainerRuntime for BubblewrapRuntime {
             for arg in &args {
                 cmd.arg(arg);
             }
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             if let Some(ref workdir) = config.workdir {
                 cmd.current_dir(workdir);
             }
-            for (k, v) in &config.env {
-                cmd.env(k, v);
-            }
-
-            let output =
-                tokio::time::timeout(Duration::from_secs(config.timeout_secs), cmd.output())
-                    .await
-                    .map_err(|_| RuntimeError::Timeout(config.timeout_secs))?
-                    .map_err(|e| RuntimeError::ExecutionFailed(e.to_string()))?;
-
-            Ok(CommandOutput::new(
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-                output.status.code(),
-            ))
+            configure_environment(&mut cmd, &config.env, &self.env_passthrough);
+            run_command(cmd, config.timeout_secs).await
         }
     }
 }

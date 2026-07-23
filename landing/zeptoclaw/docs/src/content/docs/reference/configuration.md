@@ -147,6 +147,16 @@ ZeptoClaw is configured via `~/.zeptoclaw/config.json`. All fields have sensible
 | `safety.enabled` | bool | `true` | Enable safety layer |
 | `safety.leak_detection_enabled` | bool | `true` | Enable secret leak detection |
 
+## Runtime section
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `runtime.runtime_type` | string | `"native"` | Shell runtime: native, Docker, Apple Container, Landlock, Firejail, or Bubblewrap |
+| `runtime.allow_fallback_to_native` | bool | `false` | Fall back to native execution when the configured runtime is unavailable |
+| `runtime.env_passthrough` | array | `[]` | Parent environment variable names explicitly allowed into runtime commands |
+
+Runtime subprocesses scrub secret-like inherited environment variables by default. Add only variables required by trusted workflows to `env_passthrough`, or set the comma-separated `ZEPTOCLAW_RUNTIME_ENV_PASSTHROUGH` override.
+
 ## Compaction section
 
 | Field | Type | Default | Description |

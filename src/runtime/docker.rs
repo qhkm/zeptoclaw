@@ -3,11 +3,15 @@
 //! Executes commands inside Docker containers for secure isolation.
 
 use async_trait::async_trait;
-use std::process::Stdio;
-use std::time::Duration;
 use tokio::process::Command;
+use tracing::warn;
+use uuid::Uuid;
 
+use super::process::{configure_environment, passthrough_values, run_command};
 use super::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult};
+
+const DOCKER_PROBE_TIMEOUT_SECS: u64 = 10;
+const DOCKER_CLEANUP_TIMEOUT_SECS: u64 = 10;
 
 /// Docker runtime that executes commands in isolated containers
 #[derive(Debug, Clone)]
@@ -26,6 +30,8 @@ pub struct DockerRuntime {
     pids_limit: Option<u32>,
     /// Stop timeout in seconds (--stop-timeout flag)
     stop_timeout_secs: u64,
+    /// Parent environment variables explicitly allowed into the container.
+    env_passthrough: Vec<String>,
 }
 
 impl DockerRuntime {
@@ -39,6 +45,7 @@ impl DockerRuntime {
             extra_mounts: Vec::new(),
             pids_limit: Some(100),
             stop_timeout_secs: 300,
+            env_passthrough: Vec::new(),
         }
     }
 
@@ -78,12 +85,28 @@ impl DockerRuntime {
         self
     }
 
+    /// Allow named parent environment variables into Docker commands and containers.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
+        self
+    }
+
     /// Disable resource limits
     pub fn without_limits(mut self) -> Self {
         self.memory_limit = None;
         self.cpu_limit = None;
         self.pids_limit = None;
         self
+    }
+
+    async fn remove_timed_out_container(&self, name: &str) {
+        let mut command = Command::new("docker");
+        command.args(["rm", "--force", name]);
+        configure_environment(&mut command, &[], &self.env_passthrough);
+
+        if let Err(error) = run_command(command, DOCKER_CLEANUP_TIMEOUT_SECS).await {
+            warn!(container = name, %error, "failed to remove timed-out Docker container");
+        }
     }
 }
 
@@ -101,13 +124,12 @@ impl ContainerRuntime for DockerRuntime {
 
     async fn is_available(&self) -> bool {
         // Check if docker is installed and running
-        Command::new("docker")
-            .args(["info"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        let mut command = Command::new("docker");
+        command.args(["info"]);
+        configure_environment(&mut command, &[], &self.env_passthrough);
+        run_command(command, DOCKER_PROBE_TIMEOUT_SECS)
             .await
-            .map(|s| s.success())
+            .map(|output| output.success())
             .unwrap_or(false)
     }
 
@@ -116,9 +138,12 @@ impl ContainerRuntime for DockerRuntime {
         command: &str,
         config: &ContainerConfig,
     ) -> RuntimeResult<CommandOutput> {
+        let container_name = format!("zeptoclaw-{}", Uuid::new_v4().simple());
         let mut args = vec![
             "run".to_string(),
             "--rm".to_string(),
+            "--name".to_string(),
+            container_name.clone(),
             "--network".to_string(),
             self.network.clone(),
         ];
@@ -166,7 +191,12 @@ impl ContainerRuntime for DockerRuntime {
             args.push(mount.clone());
         }
 
-        // Add environment variables
+        // Add explicitly allowed inherited environment variables first, then
+        // command-scoped values so the latter take precedence.
+        for (key, value) in passthrough_values(&self.env_passthrough) {
+            args.push("-e".to_string());
+            args.push(format!("{}={}", key, value));
+        }
         for (key, value) in &config.env {
             args.push("-e".to_string());
             args.push(format!("{}={}", key, value));
@@ -179,21 +209,14 @@ impl ContainerRuntime for DockerRuntime {
         args.push(command.to_string());
 
         let mut cmd = Command::new("docker");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(&args);
+        configure_environment(&mut cmd, &[], &self.env_passthrough);
 
-        // Execute with timeout
-        let output = tokio::time::timeout(Duration::from_secs(config.timeout_secs), cmd.output())
-            .await
-            .map_err(|_| RuntimeError::Timeout(config.timeout_secs))?
-            .map_err(|e| RuntimeError::ExecutionFailed(e.to_string()))?;
-
-        Ok(CommandOutput::new(
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-            output.status.code(),
-        ))
+        let result = run_command(cmd, config.timeout_secs).await;
+        if matches!(result, Err(RuntimeError::Timeout(_))) {
+            self.remove_timed_out_container(&container_name).await;
+        }
+        result
     }
 }
 

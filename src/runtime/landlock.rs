@@ -16,6 +16,8 @@
 use async_trait::async_trait;
 
 use crate::config::LandlockConfig;
+#[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
+use crate::runtime::process::{configure_environment, run_command};
 use crate::runtime::types::{
     CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult,
 };
@@ -26,12 +28,22 @@ use crate::runtime::types::{
 /// Requires Linux 5.13+; gracefully degrades on older kernels.
 pub struct LandlockRuntime {
     config: LandlockConfig,
+    env_passthrough: Vec<String>,
 }
 
 impl LandlockRuntime {
     /// Create a new Landlock runtime with the given configuration.
     pub fn new(config: LandlockConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            env_passthrough: Vec::new(),
+        }
+    }
+
+    /// Allow named parent environment variables into sandbox commands.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
+        self
     }
 }
 
@@ -52,16 +64,15 @@ impl ContainerRuntime for LandlockRuntime {
         command: &str,
         config: &ContainerConfig,
     ) -> RuntimeResult<CommandOutput> {
-        let config_clone = config.clone();
-        let ll_config = self.config.clone();
-        let command = command.to_string();
-
         let workspace = config.workdir.clone();
-        tokio::task::spawn_blocking(move || {
-            execute_with_landlock(&command, &config_clone, &ll_config, workspace.as_deref())
-        })
+        execute_with_landlock(
+            command,
+            config,
+            &self.config,
+            workspace.as_deref(),
+            &self.env_passthrough,
+        )
         .await
-        .map_err(|e| RuntimeError::ExecutionFailed(format!("spawn_blocking join error: {e}")))?
     }
 }
 
@@ -71,11 +82,12 @@ impl ContainerRuntime for LandlockRuntime {
 /// When enabled, applies Landlock rules in the child via `pre_exec` so the
 /// parent process is never restricted.
 #[cfg(not(all(target_os = "linux", feature = "sandbox-landlock")))]
-fn execute_with_landlock(
+async fn execute_with_landlock(
     _command: &str,
     _config: &ContainerConfig,
     _ll_config: &LandlockConfig,
     _workspace: Option<&std::path::Path>,
+    _env_passthrough: &[String],
 ) -> RuntimeResult<CommandOutput> {
     Err(RuntimeError::NotAvailable(
         "Recompile with --features sandbox-landlock to use the Landlock runtime.".to_string(),
@@ -83,37 +95,35 @@ fn execute_with_landlock(
 }
 
 #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
-fn execute_with_landlock(
+async fn execute_with_landlock(
     command: &str,
     config: &ContainerConfig,
     ll_config: &LandlockConfig,
     workspace: Option<&std::path::Path>,
+    env_passthrough: &[String],
 ) -> RuntimeResult<CommandOutput> {
-    execute_with_landlock_inner(command, config, ll_config, workspace)
+    execute_with_landlock_inner(command, config, ll_config, workspace, env_passthrough).await
 }
 
 /// Inner implementation, only compiled when the feature is enabled.
 #[cfg(all(target_os = "linux", feature = "sandbox-landlock"))]
-fn execute_with_landlock_inner(
+async fn execute_with_landlock_inner(
     command: &str,
     config: &ContainerConfig,
     ll_config: &LandlockConfig,
     workspace: Option<&std::path::Path>,
+    env_passthrough: &[String],
 ) -> RuntimeResult<CommandOutput> {
     use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    use std::time::Duration;
+    use tokio::process::Command;
 
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     if let Some(ref workdir) = config.workdir {
         cmd.current_dir(workdir);
     }
-    for (k, v) in &config.env {
-        cmd.env(k, v);
-    }
+    configure_environment(&mut cmd, &config.env, env_passthrough);
 
     // Apply Landlock in the child process (after fork, before exec).
     // This ensures the parent ZeptoClaw process is never restricted.
@@ -124,35 +134,14 @@ fn execute_with_landlock_inner(
     // landlock_add_rule, landlock_restrict_self, prctl) which are async-signal-safe.
     // PathFd::new calls open() which is also async-signal-safe.
     unsafe {
-        cmd.pre_exec(move || {
+        cmd.as_std_mut().pre_exec(move || {
             apply_landlock_rules_in_child(&ll_config_clone, workspace_clone.as_deref()).map_err(
                 |e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()),
             )
         });
     }
 
-    // Spawn and wait with timeout via thread + channel.
-    let timeout = Duration::from_secs(config.timeout_secs);
-    let child = cmd
-        .spawn()
-        .map_err(|e| RuntimeError::ExecutionFailed(format!("Failed to spawn command: {e}")))?;
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(CommandOutput::new(
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-            output.status.code(),
-        )),
-        Ok(Err(e)) => Err(RuntimeError::ExecutionFailed(format!(
-            "Command wait failed: {e}"
-        ))),
-        Err(_) => Err(RuntimeError::Timeout(config.timeout_secs)),
-    }
+    run_command(cmd, config.timeout_secs).await
 }
 
 /// Apply Landlock filesystem rules to the current process.

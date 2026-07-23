@@ -68,7 +68,7 @@ src/
 ├── memory/      # Workspace + long-term memory (pluggable search)
 ├── peripherals/ # Hardware: GPIO, I2C, NVS (ESP32, RPi, Arduino)
 ├── providers/   # Claude, OpenAI, Retry, Fallback, Quota
-├── runtime/     # Native, Docker, Apple, Landlock, Firejail, Bubblewrap
+├── runtime/     # Six runtimes + shared scrubbed-env/process-tree executor
 ├── routines/    # Event/webhook/cron automations
 ├── r8r_bridge/  # WebSocket bridge for r8r workflow approvals
 ├── safety/      # Injection detection, leak scanning, policy engine
@@ -96,6 +96,7 @@ For detailed module docs see `docs/claude/architecture.md`.
 - The CI feature-matrix job now checks `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap`, while `memory-bm25` and `peripheral-esp32` remain covered by dedicated test/clippy jobs; optional feature paths now fail fast before merge instead of drifting behind the default build.
 - **Binary size budget: 11MB linux-x86_64 ceiling (PR gate), 7MB aarch64 strategic target (follow-up)** — the `binary-size` CI job now runs on every PR (not just main pushes) and fails if stripped `target/release/zeptoclaw` exceeds 11MB on linux-x86_64. The "fits on a robot" 6MB moat is the aarch64 target (Pi/Jetson/Apple silicon), where the binary is ~7MB; Linux x86_64 reality has always been ~10MB even with `profile.release.strip = true` due to encoding/linker differences. Follow-up issue adds an aarch64 CI build gated at 7MB. Escape valve if a feature genuinely earns the bytes: gate its heavy deps behind a Cargo feature flag — do not bump either ceiling without team sign-off.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
+- Runtime subprocesses scrub secret-like inherited environment variables by default and terminate/reap their process group on Unix timeouts; `runtime.env_passthrough` is the explicit compatibility escape hatch.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".
 - `edit_file` rejects empty `old_text` and accepts optional `expected_replacements` to guard exact-match edits.
 - `longterm_memory` includes explicit use/counter-use trigger phrases so durable user corrections, preferences, and project conventions are persisted only when they generalize beyond the current task.

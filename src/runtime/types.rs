@@ -210,4 +210,17 @@ mod tests {
         let err = RuntimeError::Timeout(30);
         assert_eq!(err.to_string(), "Command timed out after 30 seconds");
     }
+
+    #[test]
+    fn test_runtime_config_env_passthrough_defaults_empty() {
+        let config = crate::config::RuntimeConfig::default();
+        assert!(config.env_passthrough.is_empty());
+    }
+
+    #[test]
+    fn test_runtime_config_env_passthrough_deserializes() {
+        let config: crate::config::RuntimeConfig =
+            serde_json::from_str(r#"{"env_passthrough":["GH_TOKEN"]}"#).unwrap();
+        assert_eq!(config.env_passthrough, vec!["GH_TOKEN"]);
+    }
 }

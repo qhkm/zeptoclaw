@@ -2337,6 +2337,9 @@ pub struct RuntimeConfig {
     pub runtime_type: RuntimeType,
     /// Whether to fall back to native runtime if configured runtime is unavailable
     pub allow_fallback_to_native: bool,
+    /// Parent environment variables that subprocesses may inherit explicitly.
+    /// Sensitive-looking names are scrubbed by default.
+    pub env_passthrough: Vec<String>,
     /// Path to JSON allowlist used to validate runtime extra mounts
     #[serde(default = "default_mount_allowlist_path")]
     pub mount_allowlist_path: String,
@@ -2361,6 +2364,7 @@ impl Default for RuntimeConfig {
         Self {
             runtime_type: RuntimeType::Native,
             allow_fallback_to_native: false,
+            env_passthrough: Vec::new(),
             mount_allowlist_path: default_mount_allowlist_path(),
             docker: DockerConfig::default(),
             apple: AppleContainerConfig::default(),

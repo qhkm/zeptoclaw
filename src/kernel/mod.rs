@@ -145,7 +145,10 @@ impl ZeptoKernel {
                         "Failed to create configured runtime: {}. Falling back to native.",
                         e
                     );
-                    Arc::new(NativeRuntime::new())
+                    Arc::new(
+                        NativeRuntime::new()
+                            .with_env_passthrough(config.runtime.env_passthrough.clone()),
+                    )
                 } else {
                     return Err(anyhow::anyhow!(
                         "Configured runtime '{:?}' unavailable: {}. \

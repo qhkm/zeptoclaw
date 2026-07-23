@@ -16,12 +16,13 @@
 //! not that the `container run` syntax matches this implementation.
 
 use async_trait::async_trait;
-use std::process::Stdio;
-use std::time::Duration;
 use tokio::process::Command;
 use tracing::warn;
 
-use super::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult};
+use super::process::{configure_environment, passthrough_values, run_command};
+use super::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeResult};
+
+const CONTAINER_PROBE_TIMEOUT_SECS: u64 = 10;
 
 /// Apple Container runtime for macOS
 ///
@@ -38,6 +39,8 @@ pub struct AppleContainerRuntime {
     image: Option<String>,
     /// Extra directory mounts from config
     extra_mounts: Vec<String>,
+    /// Parent environment variables explicitly allowed into the container.
+    env_passthrough: Vec<String>,
 }
 
 impl AppleContainerRuntime {
@@ -51,12 +54,19 @@ impl AppleContainerRuntime {
         Self {
             image: Some(image.to_string()),
             extra_mounts: Vec::new(),
+            env_passthrough: Vec::new(),
         }
     }
 
     /// Add extra mounts from configuration
     pub fn with_extra_mounts(mut self, mounts: Vec<String>) -> Self {
         self.extra_mounts = mounts;
+        self
+    }
+
+    /// Allow named parent environment variables into container commands.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
         self
     }
 }
@@ -74,13 +84,12 @@ impl ContainerRuntime for AppleContainerRuntime {
         }
 
         // Step 1: Check if container tool exists
-        let version_check = Command::new("container")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        let mut version_command = Command::new("container");
+        version_command.arg("--version");
+        configure_environment(&mut version_command, &[], &self.env_passthrough);
+        let version_check = run_command(version_command, CONTAINER_PROBE_TIMEOUT_SECS)
             .await
-            .map(|s| s.success())
+            .map(|output| output.success())
             .unwrap_or(false);
 
         if !version_check {
@@ -90,13 +99,12 @@ impl ContainerRuntime for AppleContainerRuntime {
         // Step 2: Validate CLI syntax compatibility by attempting a simple command
         // This catches cases where the tool exists but uses different syntax
         // We use --help on the run subcommand to validate syntax without executing
-        let syntax_check = Command::new("container")
-            .args(["run", "--help"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        let mut syntax_command = Command::new("container");
+        syntax_command.args(["run", "--help"]);
+        configure_environment(&mut syntax_command, &[], &self.env_passthrough);
+        let syntax_check = run_command(syntax_command, CONTAINER_PROBE_TIMEOUT_SECS)
             .await
-            .map(|s| s.success())
+            .map(|output| output.success())
             .unwrap_or(false);
 
         if !syntax_check {
@@ -174,7 +182,12 @@ impl ContainerRuntime for AppleContainerRuntime {
             args.push(mount_spec);
         }
 
-        // Add environment variables
+        // Add explicitly allowed inherited environment variables first, then
+        // command-scoped values so the latter take precedence.
+        for (key, value) in passthrough_values(&self.env_passthrough) {
+            args.push("--env".to_string());
+            args.push(format!("{}={}", key, value));
+        }
         for (key, value) in &config.env {
             args.push("--env".to_string());
             args.push(format!("{}={}", key, value));
@@ -187,21 +200,9 @@ impl ContainerRuntime for AppleContainerRuntime {
         args.push(command.to_string());
 
         let mut cmd = Command::new("container");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Execute with timeout
-        let output = tokio::time::timeout(Duration::from_secs(config.timeout_secs), cmd.output())
-            .await
-            .map_err(|_| RuntimeError::Timeout(config.timeout_secs))?
-            .map_err(|e| RuntimeError::ExecutionFailed(e.to_string()))?;
-
-        Ok(CommandOutput::new(
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-            output.status.code(),
-        ))
+        cmd.args(&args);
+        configure_environment(&mut cmd, &[], &self.env_passthrough);
+        run_command(cmd, config.timeout_secs).await
     }
 }
 

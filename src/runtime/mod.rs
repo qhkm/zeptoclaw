@@ -17,6 +17,7 @@ pub mod factory;
 pub mod firejail;
 pub mod landlock;
 pub mod native;
+mod process;
 pub mod types;
 
 #[cfg(target_os = "macos")]
