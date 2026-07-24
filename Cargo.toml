@@ -144,7 +144,7 @@ instant-distance = { version = "0.6.1", optional = true }
 # PDF (optional — feature-gated behind "tool-pdf")
 # =============================================================================
 # Pure-Rust PDF parser for text extraction
-lopdf = { version = "0.40", optional = true }
+lopdf = { version = "0.42", optional = true }
 
 # =============================================================================
 # CHANNELS
@@ -224,7 +224,7 @@ probe-rs = { version = "0.31", optional = true }
 # XML PARSING
 # =============================================================================
 # Fast XML parser for DOCX extraction and Android uiautomator dump parsing
-quick-xml = "0.39"
+quick-xml = "0.41"
 
 # =============================================================================
 # GLOB MATCHING

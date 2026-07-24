@@ -268,7 +268,7 @@ impl Tool for BinaryPluginTool {
                 "Binary plugin '{}' returned invalid JSON-RPC: {} (raw: {})",
                 self.plugin_name,
                 e,
-                &crate::utils::string::preview(response_line, 200)
+                crate::utils::string::preview(response_line, 200)
             ))
         })?;
 
