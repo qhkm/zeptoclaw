@@ -42,7 +42,9 @@
 
 pub mod message;
 
-pub use message::{InboundMessage, MediaAttachment, MediaType, OutboundMessage};
+pub use message::{
+    InboundMessage, MediaAttachment, MediaType, OutboundMessage, OutboundStreamPhase,
+};
 
 use crate::error::{Result, ZeptoError};
 use std::sync::Arc;

@@ -24,7 +24,7 @@ Provider stack assembly in `create_agent()`: base providers → optional Fallbac
 ## Channels (`src/channels/`)
 
 `Channel` trait implementations:
-- `TelegramChannel` — numeric-ID allowlist default, legacy username behind `allow_usernames`
+- `TelegramChannel` — numeric-ID allowlist default, legacy username behind `allow_usernames`; opt-in cumulative response streaming with preview edit/final-send fallback
 - `SlackChannel` — outbound messaging
 - `DiscordChannel` — Gateway WebSocket + REST (reply + thread create)
 - `WebhookChannel` — HTTP POST inbound with Bearer + HMAC-SHA256 auth, fixed server-side identity
@@ -35,7 +35,7 @@ Provider stack assembly in `create_agent()`: base providers → optional Fallbac
 - `MqttChannel` — rumqttc async (feature: `mqtt`)
 - `SerialChannel` — UART line-delimited JSON (feature: `hardware`)
 
-`ChannelManager`: `Arc<Mutex<_>>` handles, polling supervisor (15s detect dead, 60s cooldown, max 5 restarts). Per-chat persona via `/persona` + `PersonaOverrideStore` (LTM persistence). All channels support `deny_by_default`.
+`ChannelManager`: `Arc<Mutex<_>>` handles, polling supervisor (15s detect dead, 60s cooldown, max 5 restarts). The outbound bus carries typed stream phases in reserved metadata without changing the public message shape; supporting adapters retain their platform message IDs between cumulative updates. Per-chat persona via `/persona` + `PersonaOverrideStore` (LTM persistence). All channels support `deny_by_default`.
 
 ## Agent (`src/agent/`)
 

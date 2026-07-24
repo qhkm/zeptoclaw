@@ -38,6 +38,7 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::FutureExt;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +49,9 @@ use tracing::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::bus::{InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage};
+use crate::bus::{
+    InboundMessage, MediaAttachment, MediaType, MessageBus, OutboundMessage, OutboundStreamPhase,
+};
 use crate::config::Config;
 use crate::config::TelegramConfig;
 use crate::error::{Result, ZeptoError};
@@ -63,6 +66,8 @@ const MAX_STARTUP_RETRIES: u32 = 10;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum delay (in seconds) for exponential backoff on startup retries.
 const MAX_RETRY_DELAY_SECS: u64 = 120;
+/// Cursor shown while a streamed response is still being generated.
+const STREAMING_CURSOR: &str = " ▉";
 
 use super::model_switch::{
     format_current_model, format_model_list, hydrate_overrides, new_override_store,
@@ -92,6 +97,15 @@ struct ConfiguredProviders {
 /// counter alongside the CancellationToken so that an old task's cleanup
 /// cannot accidentally remove a newer task's entry.
 type TypingMap = Arc<DashMap<String, (u64, CancellationToken)>>;
+
+#[derive(Debug, Default)]
+struct TelegramStreamState {
+    message_ids: Vec<i32>,
+    message_contents: Vec<String>,
+    preview_disabled: bool,
+}
+
+type TelegramStreamMap = Arc<Mutex<HashMap<String, TelegramStreamState>>>;
 
 /// Bundles override stores and shared state into one DI dependency so that
 /// dptree's 9-parameter arity limit is not exceeded.
@@ -220,6 +234,16 @@ fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+fn stream_preview_content(content: &str) -> String {
+    let cursor_len = STREAMING_CURSOR.encode_utf16().count();
+    let mut preview = chunk_message(content, TELEGRAM_MAX_MESSAGE_LEN.saturating_sub(cursor_len))
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    preview.push_str(STREAMING_CURSOR);
+    preview
 }
 
 fn render_telegram_html(content: &str) -> String {
@@ -460,6 +484,8 @@ pub struct TelegramChannel {
     typing_indicators: TypingMap,
     /// Monotonic counter for typing indicator generations (prevents race conditions).
     typing_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Telegram message IDs currently used as progressive response previews.
+    stream_states: TelegramStreamMap,
     /// Shared HTTP client for downloading media (connection pool reuse).
     http_client: reqwest::Client,
 }
@@ -548,6 +574,7 @@ impl TelegramChannel {
             longterm_memory,
             typing_indicators: Arc::new(DashMap::new()),
             typing_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stream_states: Arc::new(Mutex::new(HashMap::new())),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -571,6 +598,302 @@ impl TelegramChannel {
             .saturating_mul(2u64.saturating_pow(attempt))
             .min(MAX_RETRY_DELAY_SECS);
         Duration::from_secs(delay_secs)
+    }
+
+    fn stream_state_key(msg: &OutboundMessage, stream_id: &str) -> String {
+        match msg.metadata.get("telegram_thread_id") {
+            Some(thread_id) => format!("{}:{}:{}", msg.chat_id, thread_id, stream_id),
+            None => format!("{}:{}", msg.chat_id, stream_id),
+        }
+    }
+
+    fn outbound_thread_id(msg: &OutboundMessage) -> Option<i32> {
+        msg.metadata
+            .get("telegram_thread_id")
+            .and_then(|value| value.parse().ok())
+    }
+
+    fn outbound_reply_id(msg: &OutboundMessage) -> Option<i32> {
+        msg.reply_to
+            .as_deref()
+            .or(msg.metadata.get("telegram_message_id").map(String::as_str))
+            .and_then(|value| value.parse().ok())
+    }
+
+    async fn send_complete_message(
+        &self,
+        bot: &teloxide::Bot,
+        chat_id: i64,
+        msg: &OutboundMessage,
+    ) -> Result<()> {
+        use teloxide::prelude::*;
+        use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
+
+        let rendered = render_telegram_html(&msg.content);
+        let chunks = chunk_message(&rendered, TELEGRAM_MAX_MESSAGE_LEN);
+        let thread_id = Self::outbound_thread_id(msg);
+        let reply_msg_id = Self::outbound_reply_id(msg);
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let mut request = bot
+                .send_message(ChatId(chat_id), chunk.clone())
+                .parse_mode(ParseMode::Html);
+
+            if let Some(thread_id) = thread_id {
+                request =
+                    request.message_thread_id(teloxide::types::ThreadId(MessageId(thread_id)));
+            }
+            if index == 0 {
+                if let Some(reply_msg_id) = reply_msg_id {
+                    request = request.reply_parameters(
+                        ReplyParameters::new(MessageId(reply_msg_id)).allow_sending_without_reply(),
+                    );
+                }
+            }
+
+            if let Err(error) = request.await {
+                error!(
+                    "Failed to send Telegram chunk {}/{}: {}",
+                    index + 1,
+                    chunks.len(),
+                    error
+                );
+                let fallback = format!(
+                    "[Error: message could not be delivered (part {}/{}). Try asking for a shorter response.]",
+                    index + 1,
+                    chunks.len()
+                );
+                let mut fallback_request = bot.send_message(ChatId(chat_id), fallback);
+                if let Some(thread_id) = thread_id {
+                    fallback_request = fallback_request
+                        .message_thread_id(teloxide::types::ThreadId(MessageId(thread_id)));
+                }
+                let _ = fallback_request.await;
+                return Err(ZeptoError::Channel(format!(
+                    "Failed to send Telegram message: {}",
+                    error
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn update_stream_preview(
+        bot: &teloxide::Bot,
+        chat_id: i64,
+        msg: &OutboundMessage,
+        state: &mut TelegramStreamState,
+    ) -> Result<()> {
+        use teloxide::prelude::*;
+        use teloxide::types::{ChatId, MessageId, ReplyParameters};
+
+        let preview = stream_preview_content(&msg.content);
+        let thread_id = Self::outbound_thread_id(msg);
+        let reply_msg_id = Self::outbound_reply_id(msg);
+
+        if let Some(message_id) = state.message_ids.first().copied() {
+            if state.message_contents.first() == Some(&preview) {
+                return Ok(());
+            }
+            bot.edit_message_text(ChatId(chat_id), MessageId(message_id), preview.clone())
+                .await
+                .map_err(|error| {
+                    ZeptoError::Channel(format!(
+                        "Failed to edit Telegram streaming preview: {}",
+                        error
+                    ))
+                })?;
+            if let Some(previous) = state.message_contents.first_mut() {
+                previous.clone_from(&preview);
+            }
+            return Ok(());
+        }
+
+        let mut request = bot.send_message(ChatId(chat_id), preview.clone());
+        if let Some(thread_id) = thread_id {
+            request = request.message_thread_id(teloxide::types::ThreadId(MessageId(thread_id)));
+        }
+        if let Some(reply_msg_id) = reply_msg_id {
+            request = request.reply_parameters(
+                ReplyParameters::new(MessageId(reply_msg_id)).allow_sending_without_reply(),
+            );
+        }
+
+        let sent = request.await.map_err(|error| {
+            ZeptoError::Channel(format!(
+                "Failed to create Telegram streaming preview: {}",
+                error
+            ))
+        })?;
+        state.message_ids.push(sent.id.0);
+        state.message_contents.push(preview);
+
+        Ok(())
+    }
+
+    async fn finalize_stream_preview(
+        bot: &teloxide::Bot,
+        chat_id: i64,
+        msg: &OutboundMessage,
+        state: &mut TelegramStreamState,
+    ) -> Result<()> {
+        use teloxide::prelude::*;
+        use teloxide::types::{ChatId, MessageId, ParseMode};
+
+        let rendered = render_telegram_html(&msg.content);
+        let chunks = chunk_message(&rendered, TELEGRAM_MAX_MESSAGE_LEN);
+        let thread_id = Self::outbound_thread_id(msg);
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            if let Some(message_id) = state.message_ids.get(index).copied() {
+                if state.message_contents.get(index) == Some(chunk) {
+                    continue;
+                }
+                bot.edit_message_text(ChatId(chat_id), MessageId(message_id), chunk.clone())
+                    .parse_mode(ParseMode::Html)
+                    .await
+                    .map_err(|error| {
+                        ZeptoError::Channel(format!(
+                            "Failed to finalize Telegram streaming preview: {}",
+                            error
+                        ))
+                    })?;
+                if let Some(previous) = state.message_contents.get_mut(index) {
+                    previous.clone_from(chunk);
+                }
+            } else {
+                let mut request = bot
+                    .send_message(ChatId(chat_id), chunk.clone())
+                    .parse_mode(ParseMode::Html);
+                if let Some(thread_id) = thread_id {
+                    request =
+                        request.message_thread_id(teloxide::types::ThreadId(MessageId(thread_id)));
+                }
+                let sent = request.await.map_err(|error| {
+                    ZeptoError::Channel(format!(
+                        "Failed to send Telegram streaming continuation: {}",
+                        error
+                    ))
+                })?;
+                state.message_ids.push(sent.id.0);
+                state.message_contents.push(chunk.clone());
+            }
+        }
+
+        while state.message_ids.len() > chunks.len() {
+            if let Some(message_id) = state.message_ids.pop() {
+                let _ = bot
+                    .delete_message(ChatId(chat_id), MessageId(message_id))
+                    .await;
+            }
+            state.message_contents.pop();
+        }
+
+        Ok(())
+    }
+
+    async fn delete_stream_previews(bot: &teloxide::Bot, chat_id: i64, message_ids: &[i32]) {
+        use teloxide::prelude::*;
+        use teloxide::types::{ChatId, MessageId};
+
+        for message_id in message_ids {
+            if let Err(error) = bot
+                .delete_message(ChatId(chat_id), MessageId(*message_id))
+                .await
+            {
+                debug!(
+                    "Failed to delete stale Telegram streaming preview {}: {}",
+                    message_id, error
+                );
+            }
+        }
+    }
+
+    async fn handle_stream_message(
+        &self,
+        bot: &teloxide::Bot,
+        chat_id: i64,
+        msg: &OutboundMessage,
+        stream_id: &str,
+        phase: OutboundStreamPhase,
+    ) -> Result<()> {
+        let state_key = Self::stream_state_key(msg, stream_id);
+        let mut state = self
+            .stream_states
+            .lock()
+            .await
+            .remove(&state_key)
+            .unwrap_or_default();
+
+        match phase {
+            OutboundStreamPhase::Update => {
+                if !state.preview_disabled {
+                    if let Err(error) =
+                        Self::update_stream_preview(bot, chat_id, msg, &mut state).await
+                    {
+                        warn!(
+                            stream_id,
+                            error = %error,
+                            "Telegram streaming preview disabled; final response will use a fresh message"
+                        );
+                        state.preview_disabled = true;
+                    }
+                }
+                self.stream_states.lock().await.insert(state_key, state);
+                Ok(())
+            }
+            OutboundStreamPhase::Final => {
+                if !state.preview_disabled && !state.message_ids.is_empty() {
+                    match Self::finalize_stream_preview(bot, chat_id, msg, &mut state).await {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            warn!(
+                                stream_id,
+                                error = %error,
+                                "Telegram streaming final edit failed; sending a fresh final response"
+                            );
+                        }
+                    }
+                }
+
+                let preview_ids = state.message_ids.clone();
+                self.send_complete_message(bot, chat_id, msg).await?;
+                Self::delete_stream_previews(bot, chat_id, &preview_ids).await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn mark_message_completed(
+        &self,
+        bot: &teloxide::Bot,
+        chat_id: i64,
+        msg: &OutboundMessage,
+    ) {
+        use teloxide::prelude::*;
+        use teloxide::types::{ChatId, MessageId, ReactionType};
+
+        if !self.config.reactions {
+            return;
+        }
+        let Some(message_id) = msg
+            .metadata
+            .get("telegram_message_id")
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            return;
+        };
+
+        if let Err(error) = bot
+            .set_message_reaction(ChatId(chat_id), MessageId(message_id))
+            .reaction(vec![ReactionType::Emoji {
+                emoji: "\u{2705}".to_string(),
+            }])
+            .await
+        {
+            debug!("Failed to set ✅ reaction: {}", error);
+        }
     }
 
     /// Build a Telegram bot client with explicit proxy behavior.
@@ -1265,6 +1588,7 @@ impl Channel for TelegramChannel {
             entry.value().1.cancel();
         }
         self.typing_indicators.clear();
+        self.stream_states.lock().await.clear();
 
         info!("Telegram channel stopped");
         Ok(())
@@ -1282,9 +1606,6 @@ impl Channel for TelegramChannel {
     /// - The chat_id cannot be parsed as an integer
     /// - The Telegram API request fails
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        use teloxide::prelude::*;
-        use teloxide::types::{ChatId, MessageId, ParseMode, ReactionType, ReplyParameters};
-
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
             return Err(ZeptoError::Channel(
@@ -1301,7 +1622,9 @@ impl Channel for TelegramChannel {
             Some(tid) => format!("{}:{}", chat_id, tid),
             None => chat_id.to_string(),
         };
-        let keep_typing = msg.metadata.get("keep_typing").is_some_and(|v| v == "true");
+        let stream_phase = msg.stream_phase();
+        let keep_typing = stream_phase == Some(OutboundStreamPhase::Update)
+            || msg.metadata.get("keep_typing").is_some_and(|v| v == "true");
         if !keep_typing {
             if let Some((_, (_, token))) = self.typing_indicators.remove(&typing_key) {
                 token.cancel();
@@ -1316,81 +1639,16 @@ impl Channel for TelegramChannel {
             .as_ref()
             .ok_or_else(|| ZeptoError::Channel("Telegram bot not initialized".to_string()))?;
 
-        let rendered = render_telegram_html(&msg.content);
-        let chunks = chunk_message(&rendered, TELEGRAM_MAX_MESSAGE_LEN);
-
-        let thread_id: Option<i32> = msg
-            .metadata
-            .get("telegram_thread_id")
-            .and_then(|s| s.parse().ok());
-
-        let reply_msg_id: Option<i32> = msg
-            .reply_to
-            .as_deref()
-            .or(msg.metadata.get("telegram_message_id").map(|s| s.as_str()))
-            .and_then(|s| s.parse().ok());
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            let mut req = bot
-                .send_message(ChatId(chat_id), chunk.clone())
-                .parse_mode(ParseMode::Html);
-
-            if let Some(tid) = thread_id {
-                req = req
-                    .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(tid)));
+        match (msg.stream_id(), stream_phase) {
+            (Some(stream_id), Some(phase)) => {
+                self.handle_stream_message(bot, chat_id, &msg, stream_id, phase)
+                    .await?;
             }
-
-            // Only reply-thread the first chunk to the original message.
-            if i == 0 {
-                if let Some(id) = reply_msg_id {
-                    req = req.reply_parameters(
-                        ReplyParameters::new(MessageId(id)).allow_sending_without_reply(),
-                    );
-                }
-            }
-
-            if let Err(e) = req.await {
-                error!(
-                    "Failed to send Telegram chunk {}/{}: {}",
-                    i + 1,
-                    chunks.len(),
-                    e
-                );
-                // Send a plain-text error fallback so the user knows something went wrong.
-                let fallback = format!(
-                    "[Error: message could not be delivered (part {}/{}). Try asking for a shorter response.]",
-                    i + 1,
-                    chunks.len()
-                );
-                let mut fallback_req = bot.send_message(ChatId(chat_id), fallback);
-                if let Some(tid) = thread_id {
-                    fallback_req = fallback_req.message_thread_id(teloxide::types::ThreadId(
-                        teloxide::types::MessageId(tid),
-                    ));
-                }
-                let _ = fallback_req.await;
-                return Err(ZeptoError::Channel(format!(
-                    "Failed to send Telegram message: {}",
-                    e
-                )));
-            }
+            _ => self.send_complete_message(bot, chat_id, &msg).await?,
         }
 
-        // Replace 👀 with ✅ now that the reply was sent successfully.
-        if self.config.reactions {
-            if let Some(mid_str) = msg.metadata.get("telegram_message_id") {
-                if let Ok(mid) = mid_str.parse::<i32>() {
-                    if let Err(e) = bot
-                        .set_message_reaction(ChatId(chat_id), MessageId(mid))
-                        .reaction(vec![ReactionType::Emoji {
-                            emoji: "\u{2705}".to_string(),
-                        }])
-                        .await
-                    {
-                        debug!("Failed to set ✅ reaction: {}", e);
-                    }
-                }
-            }
+        if stream_phase != Some(OutboundStreamPhase::Update) {
+            self.mark_message_completed(bot, chat_id, &msg).await;
         }
 
         info!("Telegram: Message sent successfully to chat {}", chat_id);
@@ -1624,6 +1882,35 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.encode_utf16().count() <= 4096);
         }
+    }
+
+    #[test]
+    fn test_stream_preview_content_is_one_utf16_safe_message() {
+        let preview = stream_preview_content(&"😀".repeat(2_500));
+        assert!(preview.ends_with(STREAMING_CURSOR));
+        assert!(preview.encode_utf16().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+        assert!(preview.encode_utf16().count() > 4_000);
+    }
+
+    #[test]
+    fn test_stream_state_key_isolated_by_topic_and_stream() {
+        let first = OutboundMessage::new("telegram", "123", "partial")
+            .with_metadata("telegram_thread_id", "7");
+        let second = OutboundMessage::new("telegram", "123", "partial")
+            .with_metadata("telegram_thread_id", "8");
+
+        assert_eq!(
+            TelegramChannel::stream_state_key(&first, "run-a"),
+            "123:7:run-a"
+        );
+        assert_ne!(
+            TelegramChannel::stream_state_key(&first, "run-a"),
+            TelegramChannel::stream_state_key(&second, "run-a")
+        );
+        assert_ne!(
+            TelegramChannel::stream_state_key(&first, "run-a"),
+            TelegramChannel::stream_state_key(&first, "run-b")
+        );
     }
 
     #[test]

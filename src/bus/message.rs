@@ -6,6 +6,35 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const STREAM_ID_METADATA_KEY: &str = "zeptoclaw_stream_id";
+const STREAM_PHASE_METADATA_KEY: &str = "zeptoclaw_stream_phase";
+
+/// Lifecycle phase for a progressively delivered outbound response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundStreamPhase {
+    /// Replace the currently visible preview with newer cumulative content.
+    Update,
+    /// Finalize the preview, or send a regular message if no preview exists.
+    Final,
+}
+
+impl OutboundStreamPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Final => "final",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "update" => Some(Self::Update),
+            "final" => Some(Self::Final),
+            _ => None,
+        }
+    }
+}
+
 /// Represents an incoming message from a channel (e.g., Telegram, Discord, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
@@ -186,6 +215,35 @@ impl OutboundMessage {
         self
     }
 
+    /// Marks this message as one phase of a cumulative streamed response.
+    ///
+    /// Channels that support progressive delivery can use the stable stream ID
+    /// to update one visible response. Other channels may ignore these metadata
+    /// hints and continue handling ordinary outbound messages.
+    pub fn with_stream_phase(mut self, stream_id: &str, phase: OutboundStreamPhase) -> Self {
+        self.metadata
+            .insert(STREAM_ID_METADATA_KEY.to_string(), stream_id.to_string());
+        self.metadata.insert(
+            STREAM_PHASE_METADATA_KEY.to_string(),
+            phase.as_str().to_string(),
+        );
+        self
+    }
+
+    /// Returns the stable ID for a progressively delivered response.
+    pub fn stream_id(&self) -> Option<&str> {
+        self.metadata
+            .get(STREAM_ID_METADATA_KEY)
+            .map(String::as_str)
+    }
+
+    /// Returns the requested progressive-delivery phase.
+    pub fn stream_phase(&self) -> Option<OutboundStreamPhase> {
+        self.metadata
+            .get(STREAM_PHASE_METADATA_KEY)
+            .and_then(|value| OutboundStreamPhase::parse(value))
+    }
+
     /// Creates an outbound message as a response to an inbound message.
     ///
     /// # Example
@@ -339,6 +397,25 @@ mod tests {
             msg.metadata.get("discord_thread_auto_archive_minutes"),
             Some(&"60".to_string())
         );
+    }
+
+    #[test]
+    fn test_outbound_message_stream_phase_round_trip() {
+        let msg = OutboundMessage::new("telegram", "chat1", "partial")
+            .with_stream_phase("run-123", OutboundStreamPhase::Update);
+
+        assert_eq!(msg.stream_id(), Some("run-123"));
+        assert_eq!(msg.stream_phase(), Some(OutboundStreamPhase::Update));
+    }
+
+    #[test]
+    fn test_outbound_message_rejects_unknown_stream_phase() {
+        let msg = OutboundMessage::new("telegram", "chat1", "partial")
+            .with_metadata(STREAM_ID_METADATA_KEY, "run-123")
+            .with_metadata(STREAM_PHASE_METADATA_KEY, "unknown");
+
+        assert_eq!(msg.stream_id(), Some("run-123"));
+        assert_eq!(msg.stream_phase(), None);
     }
 
     #[test]

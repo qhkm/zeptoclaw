@@ -1201,6 +1201,23 @@ pub struct TelegramConfig {
     /// Whether to show processing reactions (👀 on receipt, ✅ on completion).
     #[serde(default = "default_telegram_reactions")]
     pub reactions: bool,
+    /// Whether gateway responses are progressively edited into Telegram while generated.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Minimum delay between progressive Telegram edits.
+    #[serde(default = "default_telegram_streaming_edit_interval_ms")]
+    pub streaming_edit_interval_ms: u64,
+    /// Characters buffered before the first preview may be sent ahead of the interval.
+    #[serde(default = "default_telegram_streaming_buffer_chars")]
+    pub streaming_buffer_chars: usize,
+}
+
+const fn default_telegram_streaming_edit_interval_ms() -> u64 {
+    800
+}
+
+const fn default_telegram_streaming_buffer_chars() -> usize {
+    24
 }
 
 impl Default for TelegramConfig {
@@ -1212,6 +1229,9 @@ impl Default for TelegramConfig {
             deny_by_default: false,
             allow_usernames: default_telegram_allow_usernames(),
             reactions: default_telegram_reactions(),
+            streaming: false,
+            streaming_edit_interval_ms: default_telegram_streaming_edit_interval_ms(),
+            streaming_buffer_chars: default_telegram_streaming_buffer_chars(),
         }
     }
 }
@@ -1245,6 +1265,12 @@ impl<'de> Deserialize<'de> for TelegramConfig {
             allow_usernames: bool,
             #[serde(default = "default_telegram_reactions")]
             reactions: bool,
+            #[serde(default)]
+            streaming: bool,
+            #[serde(default = "default_telegram_streaming_edit_interval_ms")]
+            streaming_edit_interval_ms: u64,
+            #[serde(default = "default_telegram_streaming_buffer_chars")]
+            streaming_buffer_chars: usize,
         }
 
         let raw = RawTelegramConfig::deserialize(deserializer)?;
@@ -1257,6 +1283,9 @@ impl<'de> Deserialize<'de> for TelegramConfig {
             deny_by_default: raw.deny_by_default,
             allow_usernames: raw.allow_usernames,
             reactions: raw.reactions,
+            streaming: raw.streaming,
+            streaming_edit_interval_ms: raw.streaming_edit_interval_ms,
+            streaming_buffer_chars: raw.streaming_buffer_chars,
         })
     }
 }

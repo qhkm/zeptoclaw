@@ -31,6 +31,7 @@ Project-level guidance for coding agents working in this repository.
 - Telegram config compatibility: `channels.telegram` accepts legacy `bot_token`, `allowed_senders`, and `allowed_chats` keys, and auto-enables when `enabled` is omitted but a Telegram token is present
 - Email allowlist limitation surfaced: `channels.email.allowed_senders` matches the parsed `From` header only and now emits config/runtime warnings so authenticated-mail enforcement is pushed upstream
 - Telegram outbound formatting: sends HTML parse mode with `||spoiler||` → `<tg-spoiler>` conversion
+- Telegram response streaming: opt-in `channels.telegram.streaming` routes provider deltas through cumulative outbound stream phases, edits UTF-16-safe previews at a bounded cadence, preserves reply/topic routing, and falls back to a fresh final HTML message after preview failures
 - Discord outbound delivery: supports reply references and thread-create metadata (`discord_thread_*`) in `OutboundMessage`
 - Cron scheduling hardening: dispatch timeout + exponential error backoff + one-shot delete-after-run only on success
 - Model switching: Telegram `/model` supports per-chat overrides (in-memory + long-term)
@@ -59,7 +60,7 @@ Project-level guidance for coding agents working in this repository.
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3438 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
+- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3512 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
 
 ## Task Tracking Protocol
 

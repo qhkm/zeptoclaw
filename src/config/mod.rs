@@ -988,6 +988,15 @@ impl Config {
                 channel.enabled = enabled;
             }
         }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_TELEGRAM_STREAMING") {
+            if let Ok(enabled) = val.parse() {
+                let channel = self
+                    .channels
+                    .telegram
+                    .get_or_insert_with(TelegramConfig::default);
+                channel.streaming = enabled;
+            }
+        }
 
         // Discord
         if let Ok(val) = std::env::var("ZEPTOCLAW_CHANNELS_DISCORD_TOKEN") {
@@ -1933,6 +1942,24 @@ mod tests {
         assert!(telegram.enabled);
         assert_eq!(telegram.token, "bot123:ABC");
         assert_eq!(telegram.allow_from, vec!["123456789"]);
+    }
+
+    #[test]
+    fn test_telegram_streaming_config_deserializes_with_safe_defaults() {
+        let json = r#"{
+            "channels": {
+                "telegram": {
+                    "token": "bot123:ABC",
+                    "streaming": true
+                }
+            }
+        }"#;
+
+        let config: Config = serde_json::from_str(json).unwrap();
+        let telegram = config.channels.telegram.unwrap();
+        assert!(telegram.streaming);
+        assert_eq!(telegram.streaming_edit_interval_ms, 800);
+        assert_eq!(telegram.streaming_buffer_chars, 24);
     }
 
     #[test]
