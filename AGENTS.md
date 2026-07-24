@@ -55,7 +55,7 @@ Project-level guidance for coding agents working in this repository.
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
 - Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and `r8r_bridge`, plus agent defaults such as `timezone`, `tool_timeout_secs`, and `system_prompt`
 - CI feature gates now compile `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap` in addition to the lighter baseline feature matrix; `memory-bm25` and `peripheral-esp32` stay covered by dedicated test/clippy jobs
-- Dependency audit baseline: `cargo deny check` passes with patched `anyhow` 1.0.103, `crossbeam-epoch` 0.9.20, `quick-xml` 0.41, and `lopdf` 0.42
+- Dependency audit baseline: `cargo deny check` passes with patched `anyhow` 1.0.103, `bcrypt` 0.19.2, `crossbeam-epoch` 0.9.20, `quinn-proto` 0.11.15, `quick-xml` 0.41, and `lopdf` 0.42
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
