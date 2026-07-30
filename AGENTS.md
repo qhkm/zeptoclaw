@@ -48,6 +48,7 @@ Project-level guidance for coding agents working in this repository.
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
 - In-memory audit hash-chain: `src/audit.rs` appends SHA-256-linked entries (`record_audit_chain_event`, `verify_audit_chain_integrity`, `recent_audit_entries`, `audit_tip_hash`), and `kernel::execute_tool()` now emits tool execution chain events with shell/network/spawn classification
 - Tool execution hardening: per-tool-call timeout + panic capture in both `process_message` and `process_message_streaming` tool `join_all` paths
+- Runtime subprocess hardening: Native, Docker, Apple Container, Landlock, Firejail, and Bubblewrap scrub secret-like inherited environment variables by default; `runtime.env_passthrough` explicitly opts names back in, Unix timeouts terminate/reap the process group, and timed-out Docker containers are force-removed
 - Streaming tool parity: `process_message_streaming()` now mirrors non-streaming hook callbacks, usage-metric accounting, success/failure logging, thinking/response feedback, and malformed tool-argument parse preservation
 - Context trimming: normal/emergency/critical compaction tiers (70%/90%/95%)
 - Session repair: auto-fixes orphan tool results, empty/duplicate messages, alternation issues
@@ -55,12 +56,13 @@ Project-level guidance for coding agents working in this repository.
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
 - Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and `r8r_bridge`, plus agent defaults such as `timezone`, `tool_timeout_secs`, and `system_prompt`
 - CI feature gates now compile `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap` in addition to the lighter baseline feature matrix; `memory-bm25` and `peripheral-esp32` stay covered by dedicated test/clippy jobs
+- Dependency audit baseline: `cargo deny check` passes with patched `anyhow` 1.0.103, `bcrypt` 0.19.2, `crossbeam-epoch` 0.9.20, `quinn-proto` 0.11.15, `quick-xml` 0.41, and `lopdf` 0.42
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3512 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
+- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3519 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
 
 ## Task Tracking Protocol
 

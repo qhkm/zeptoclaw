@@ -15,7 +15,9 @@ use super::apple::AppleContainerRuntime;
 /// Create a container runtime from configuration
 pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn ContainerRuntime>> {
     match config.runtime_type {
-        RuntimeType::Native => Ok(Arc::new(NativeRuntime::new())),
+        RuntimeType::Native => Ok(Arc::new(
+            NativeRuntime::new().with_env_passthrough(config.env_passthrough.clone()),
+        )),
         RuntimeType::Docker => {
             let extra_mounts =
                 validate_extra_mounts(&config.docker.extra_mounts, &config.mount_allowlist_path)
@@ -24,6 +26,7 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
             let runtime = DockerRuntime::new(&config.docker.image)
                 .with_network(&config.docker.network)
                 .with_extra_mounts(extra_mounts)
+                .with_env_passthrough(config.env_passthrough.clone())
                 .with_stop_timeout(config.docker.stop_timeout_secs);
 
             let runtime = if let Some(ref mem) = config.docker.memory_limit {
@@ -70,7 +73,9 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
                     AppleContainerRuntime::with_image(&config.apple.image)
                 };
 
-                let runtime = runtime.with_extra_mounts(extra_mounts);
+                let runtime = runtime
+                    .with_extra_mounts(extra_mounts)
+                    .with_env_passthrough(config.env_passthrough.clone());
 
                 if !runtime.is_available().await {
                     return Err(RuntimeError::NotAvailable(
@@ -91,7 +96,10 @@ pub async fn create_runtime(config: &RuntimeConfig) -> RuntimeResult<Arc<dyn Con
         #[cfg(target_os = "linux")]
         RuntimeType::Landlock => {
             use super::landlock::LandlockRuntime;
-            Ok(Arc::new(LandlockRuntime::new(config.landlock.clone())))
+            Ok(Arc::new(
+                LandlockRuntime::new(config.landlock.clone())
+                    .with_env_passthrough(config.env_passthrough.clone()),
+            ))
         }
 
         #[cfg(target_os = "linux")]
@@ -118,7 +126,8 @@ async fn create_firejail_runtime(
     #[cfg(feature = "sandbox-firejail")]
     {
         use super::firejail::FirejailRuntime;
-        let runtime = FirejailRuntime::new(config.firejail.clone());
+        let runtime = FirejailRuntime::new(config.firejail.clone())
+            .with_env_passthrough(config.env_passthrough.clone());
         if !runtime.is_available().await {
             return Err(RuntimeError::NotAvailable(
                 "firejail binary not found on PATH. Install with: apt install firejail".to_string(),
@@ -144,7 +153,8 @@ async fn create_bubblewrap_runtime(
     #[cfg(feature = "sandbox-bubblewrap")]
     {
         use super::bubblewrap::BubblewrapRuntime;
-        let runtime = BubblewrapRuntime::new(config.bubblewrap.clone());
+        let runtime = BubblewrapRuntime::new(config.bubblewrap.clone())
+            .with_env_passthrough(config.env_passthrough.clone());
         if !runtime.is_available().await {
             return Err(RuntimeError::NotAvailable(
                 "bwrap binary not found on PATH. Install with: apt install bubblewrap".to_string(),

@@ -76,6 +76,28 @@ Streaming is opt-in. After an optional early first preview at the character thre
 - `ZEPTOCLAW_SAFETY_LEAK_DETECTION_ENABLED` (default: true)
 - `ZEPTOCLAW_MASTER_KEY` — hex-encoded 32-byte encryption key
 
+### Runtime Subprocess Environment
+
+Shell runtimes remove inherited environment variables whose names look sensitive (for example `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_AUTH_*`, credential URLs, and service-account values). Commands still receive ordinary environment values such as `PATH`, plus values set explicitly through the runtime API.
+
+If a command intentionally needs a credential or another scrubbed variable, opt it in by name:
+
+```json
+{
+  "runtime": {
+    "env_passthrough": ["GH_TOKEN", "DOCKER_AUTH_CONFIG"]
+  }
+}
+```
+
+The equivalent environment override is a comma-separated list:
+
+```bash
+export ZEPTOCLAW_RUNTIME_ENV_PASSTHROUGH=GH_TOKEN,DOCKER_AUTH_CONFIG
+```
+
+Passthrough values reach native/sandbox commands and the command environment inside Docker or Apple Container. Only add variables required by trusted workflows.
+
 ### Features
 - `ZEPTOCLAW_COMPACTION_ENABLED` (default: false)
 - `ZEPTOCLAW_COMPACTION_CONTEXT_LIMIT` (default: 100000)

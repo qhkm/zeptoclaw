@@ -175,10 +175,9 @@ pub fn parse_model_command(text: &str) -> Option<ModelCommand> {
     // Must be exactly "/model" or "/model " followed by args
     let rest = if trimmed == "/model" {
         ""
-    } else if let Some(after) = trimmed.strip_prefix("/model ") {
-        after.trim()
     } else {
-        return None;
+        let after = trimmed.strip_prefix("/model ")?;
+        after.trim()
     };
 
     if rest.is_empty() {

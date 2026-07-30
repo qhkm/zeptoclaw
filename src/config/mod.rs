@@ -1126,6 +1126,16 @@ impl Config {
             channel.session_ttl_secs = Some(ttl);
         }
 
+        // Runtime: shared subprocess policy
+        if let Ok(value) = std::env::var("ZEPTOCLAW_RUNTIME_ENV_PASSTHROUGH") {
+            self.runtime.env_passthrough = value
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+
         // Runtime: Apple Container
         if let Ok(val) = std::env::var("ZEPTOCLAW_RUNTIME_APPLE_ALLOW_EXPERIMENTAL") {
             if let Ok(v) = val.parse() {

@@ -262,7 +262,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
 fn configured_api_key(provider: Option<&ProviderConfig>) -> Option<&str> {
     provider
         .and_then(|p| p.api_key.as_deref())
-        .and_then(|k| if k.is_empty() { None } else { Some(k) })
+        .filter(|key| !key.is_empty())
 }
 
 /// Returns all configured provider ids in registry order.
@@ -454,13 +454,9 @@ pub fn resolve_runtime_providers(config: &Config) -> Vec<RuntimeProviderSelectio
                 None => continue, // No credential available for this provider
             };
 
-        let user_base = provider.and_then(|p| p.api_base.clone()).and_then(|base| {
-            if base.is_empty() {
-                None
-            } else {
-                Some(base)
-            }
-        });
+        let user_base = provider
+            .and_then(|p| p.api_base.clone())
+            .filter(|base| !base.is_empty());
         let api_base = user_base.or_else(|| spec.default_base_url.map(String::from));
 
         let effective_auth_header = provider

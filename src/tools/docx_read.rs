@@ -117,7 +117,7 @@ impl DocxReadTool {
         }
 
         use quick_xml::events::Event;
-        use quick_xml::Reader;
+        use quick_xml::{Reader, XmlVersion};
 
         let mut reader = Reader::from_str(&xml_content);
         reader.config_mut().trim_text(false);
@@ -146,14 +146,14 @@ impl DocxReadTool {
                 }
                 Ok(Event::Text(ref e))
                     if in_t => {
-                        e.xml_content()
+                        e.xml_content(XmlVersion::Implicit1_0)
                             .map(|d| output.push_str(&d))
                             .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
                     }
                 Ok(Event::GeneralRef(ref e))
                     // Remove escaped entities if they can't be resolved
                     if in_t => {
-                        e.xml_content()
+                        e.xml_content(XmlVersion::Implicit1_0)
                             .map(|d| resolve_xml_entity(d.as_ref()).map(|r| output.push_str(r)))
                             .map_err(|e| ZeptoError::Tool(format!("XML decode error: {e}")))?;
                     }

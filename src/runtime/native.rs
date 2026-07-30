@@ -4,20 +4,27 @@
 //! This is the fallback when no container runtime is configured.
 
 use async_trait::async_trait;
-use std::process::Stdio;
-use std::time::Duration;
 use tokio::process::Command;
 
-use super::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeError, RuntimeResult};
+use super::process::{configure_environment, run_command};
+use super::types::{CommandOutput, ContainerConfig, ContainerRuntime, RuntimeResult};
 
 /// Native runtime that executes commands directly on the host
 #[derive(Debug, Clone, Default)]
-pub struct NativeRuntime;
+pub struct NativeRuntime {
+    env_passthrough: Vec<String>,
+}
 
 impl NativeRuntime {
     /// Create a new native runtime
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Allow named parent environment variables to reach shell commands.
+    pub fn with_env_passthrough(mut self, names: Vec<String>) -> Self {
+        self.env_passthrough = names;
+        self
     }
 }
 
@@ -45,31 +52,15 @@ impl ContainerRuntime for NativeRuntime {
             cmd.current_dir(workdir);
         }
 
-        // Set environment variables
-        for (key, value) in &config.env {
-            cmd.env(key, value);
-        }
-
-        // Capture output
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        // Execute with timeout
-        let output = tokio::time::timeout(Duration::from_secs(config.timeout_secs), cmd.output())
-            .await
-            .map_err(|_| RuntimeError::Timeout(config.timeout_secs))?
-            .map_err(|e| RuntimeError::ExecutionFailed(e.to_string()))?;
-
-        Ok(CommandOutput::new(
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-            output.status.code(),
-        ))
+        configure_environment(&mut cmd, &config.env, &self.env_passthrough);
+        run_command(cmd, config.timeout_secs).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::RuntimeError;
 
     #[tokio::test]
     async fn test_native_runtime_available() {
