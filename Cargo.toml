@@ -166,7 +166,7 @@ base64 = "0.22"
 # Temp directory creation for container env files
 tempfile = "3.10"
 # Secure password input (hidden terminal echo)
-rpassword = "7.3"
+rpassword = "7.5"
 # Zip archive extraction for ClawHub skill installs.
 # Pick the flate2+zlib-rs backend explicitly — the umbrella "deflate" feature also
 # pulls zopfli (a high-ratio compression *encoder*) which we never use (read-only
