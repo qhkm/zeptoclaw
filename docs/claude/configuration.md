@@ -23,6 +23,7 @@ Environment variables override config with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 
 ### Channels
 - `ZEPTOCLAW_CHANNELS_TELEGRAM_BOT_TOKEN`
+- `ZEPTOCLAW_CHANNELS_TELEGRAM_STREAMING` — progressively edit Telegram replies while the model generates (default: false)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_ENABLED` (default: false)
 - `ZEPTOCLAW_CHANNELS_WHATSAPP_WEB_AUTH_DIR` (default: ~/.zeptoclaw/state/whatsapp_web)
 - `ZEPTOCLAW_CHANNELS_ACP_ENABLED` (default: false)
@@ -31,6 +32,25 @@ Environment variables override config with pattern `ZEPTOCLAW_<SECTION>_<KEY>`.
 - `ZEPTOCLAW_CHANNELS_ACP_HTTP_BIND` (default: 127.0.0.1)
 - `ZEPTOCLAW_CHANNELS_ACP_HTTP_AUTH_TOKEN` — Bearer auth token (default: none)
 - `ZEPTOCLAW_CHANNELS_ACP_SESSION_TTL_SECS` — session idle TTL in seconds; expired sessions are reaped on next session/new (default: none/unlimited)
+
+#### Telegram response streaming
+
+Telegram gateway responses can be streamed through cumulative message edits:
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "token": "123456:bot-token",
+      "streaming": true,
+      "streaming_edit_interval_ms": 800,
+      "streaming_buffer_chars": 24
+    }
+  }
+}
+```
+
+Streaming is opt-in. After an optional early first preview at the character threshold, updates are limited to one edit every 250–5,000 ms (configured values are clamped). Preview text is sent without parse mode so incomplete Markdown cannot break delivery; the final edit uses the normal Telegram HTML renderer. Forum topic and reply routing are preserved. If a preview send or edit fails, intermediate updates stop and the completed response is delivered as a fresh message.
 
 ### Retry & Fallback
 - `ZEPTOCLAW_PROVIDERS_RETRY_ENABLED` (default: false)

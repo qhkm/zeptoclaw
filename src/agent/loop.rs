@@ -15,12 +15,12 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::agent::context_monitor::{CompactionUrgency, ContextMonitor, PreflightAction};
 use crate::agent::loop_guard::{truncate_utf8, LoopGuard, LoopGuardAction, ToolCallSig};
-use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
+use crate::bus::{InboundMessage, MessageBus, OutboundMessage, OutboundStreamPhase};
 use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::error::{ProviderError, Result, ZeptoError};
 use crate::health::UsageMetrics;
-use crate::providers::{ChatOptions, LLMProvider, LLMToolCall};
+use crate::providers::{ChatOptions, LLMProvider, LLMToolCall, StreamEvent};
 use crate::safety::SafetyLayer;
 use crate::session::{Message, Role, SessionManager, ToolCall};
 use crate::tools::approval::{ApprovalGate, ApprovalRequest, ApprovalResponse};
@@ -52,6 +52,17 @@ const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
 
 type ApprovalFuture = Pin<Box<dyn Future<Output = ApprovalResponse> + Send>>;
 type ApprovalHandler = Arc<dyn Fn(ApprovalRequest) -> ApprovalFuture + Send + Sync>;
+
+#[derive(Clone, Copy)]
+struct GatewayStreamSettings {
+    edit_interval: std::time::Duration,
+    buffer_chars: usize,
+}
+
+enum InboundProcessResult {
+    Complete(String),
+    Streamed { response_len: usize },
+}
 
 fn is_trusted_local_session(msg: &InboundMessage) -> bool {
     msg.channel == "cli"
@@ -3097,6 +3108,117 @@ impl AgentLoop {
         }
     }
 
+    fn gateway_stream_settings(&self, msg: &InboundMessage) -> Option<GatewayStreamSettings> {
+        if msg.channel != "telegram" || !self.streaming.load(Ordering::SeqCst) {
+            return None;
+        }
+        let telegram = self.config.channels.telegram.as_ref()?;
+        if !telegram.streaming {
+            return None;
+        }
+
+        Some(GatewayStreamSettings {
+            edit_interval: std::time::Duration::from_millis(
+                telegram.streaming_edit_interval_ms.clamp(250, 5_000),
+            ),
+            buffer_chars: telegram.streaming_buffer_chars.clamp(1, 4_096),
+        })
+    }
+
+    async fn publish_stream_phase(
+        &self,
+        msg: &InboundMessage,
+        stream_id: &str,
+        content: &str,
+        phase: OutboundStreamPhase,
+    ) -> Result<()> {
+        let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, content)
+            .with_stream_phase(stream_id, phase);
+        propagate_routing_metadata(&mut outbound, msg);
+        self.bus.publish_outbound(outbound).await
+    }
+
+    async fn process_message_to_stream(
+        &self,
+        msg: &InboundMessage,
+        stream_id: &str,
+        settings: GatewayStreamSettings,
+    ) -> Result<usize> {
+        let mut receiver = self.process_message_streaming(msg).await?;
+        let mut accumulated = String::new();
+        let mut chars_since_update = 0usize;
+        let mut last_published = String::new();
+        let mut ticker = tokio::time::interval(settings.edit_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                event = receiver.recv() => {
+                    match event {
+                        Some(StreamEvent::Delta(delta)) => {
+                            chars_since_update = chars_since_update.saturating_add(delta.chars().count());
+                            accumulated.push_str(&delta);
+                            if last_published.is_empty()
+                                && chars_since_update >= settings.buffer_chars
+                                && accumulated != last_published
+                            {
+                                self.publish_stream_phase(
+                                    msg,
+                                    stream_id,
+                                    &accumulated,
+                                    OutboundStreamPhase::Update,
+                                ).await?;
+                                last_published.clone_from(&accumulated);
+                                chars_since_update = 0;
+                                ticker.reset();
+                            }
+                        }
+                        Some(StreamEvent::Done { content, .. }) => {
+                            let final_content = if content.is_empty() {
+                                accumulated
+                            } else {
+                                content
+                            };
+                            let response_len = final_content.len();
+                            self.publish_stream_phase(
+                                msg,
+                                stream_id,
+                                &final_content,
+                                OutboundStreamPhase::Final,
+                            ).await?;
+                            return Ok(response_len);
+                        }
+                        Some(StreamEvent::Error(error)) => return Err(error),
+                        Some(StreamEvent::ToolCalls(tool_calls)) => {
+                            return Err(ZeptoError::Provider(format!(
+                                "Unexpected tool calls in final response stream: {}",
+                                tool_calls.len()
+                            )));
+                        }
+                        None => {
+                            return Err(ZeptoError::Provider(
+                                "Response stream ended without a final event".to_string(),
+                            ));
+                        }
+                    }
+                }
+                _ = ticker.tick() => {
+                    if !accumulated.is_empty() && accumulated != last_published {
+                        self.publish_stream_phase(
+                            msg,
+                            stream_id,
+                            &accumulated,
+                            OutboundStreamPhase::Update,
+                        ).await?;
+                        last_published.clone_from(&accumulated);
+                        chars_since_update = 0;
+                    }
+                }
+            }
+        }
+    }
+
     async fn process_inbound_message(
         &self,
         msg: &InboundMessage,
@@ -3112,29 +3234,48 @@ impl AgentLoop {
 
         let timeout_duration =
             std::time::Duration::from_secs(self.config.agents.defaults.agent_timeout_secs);
-        let process_result =
-            tokio::time::timeout(timeout_duration, self.process_message(msg)).await;
+        let stream_settings = self.gateway_stream_settings(msg);
+        let stream_id = stream_settings.map(|_| uuid::Uuid::new_v4().to_string());
+        let process_result = tokio::time::timeout(timeout_duration, async {
+            match (stream_settings, stream_id.as_deref()) {
+                (Some(settings), Some(stream_id)) => self
+                    .process_message_to_stream(msg, stream_id, settings)
+                    .await
+                    .map(|response_len| InboundProcessResult::Streamed { response_len }),
+                _ => self
+                    .process_message(msg)
+                    .await
+                    .map(InboundProcessResult::Complete),
+            }
+        })
+        .await;
 
         let agent_completed = match process_result {
-            Ok(Ok(response)) => {
+            Ok(Ok(result)) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 let (input_tokens, output_tokens) =
                     Self::token_delta(usage_metrics.as_ref(), tokens_before);
+                let response_len = match &result {
+                    InboundProcessResult::Complete(response) => response.len(),
+                    InboundProcessResult::Streamed { response_len } => *response_len,
+                };
 
                 info!(
                     latency_ms = latency_ms,
-                    response_len = response.len(),
+                    response_len = response_len,
                     input_tokens = input_tokens,
                     output_tokens = output_tokens,
                     "Request completed"
                 );
 
-                let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
-                propagate_routing_metadata(&mut outbound, msg);
-                if let Err(e) = self.bus.publish_outbound(outbound).await {
-                    error!("Failed to publish outbound message: {}", e);
-                    if let Some(metrics) = usage_metrics.as_ref() {
-                        metrics.record_error();
+                if let InboundProcessResult::Complete(response) = result {
+                    let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &response);
+                    propagate_routing_metadata(&mut outbound, msg);
+                    if let Err(e) = self.bus.publish_outbound(outbound).await {
+                        error!("Failed to publish outbound message: {}", e);
+                        if let Some(metrics) = usage_metrics.as_ref() {
+                            metrics.record_error();
+                        }
                     }
                 }
                 true
@@ -3148,6 +3289,9 @@ impl AgentLoop {
 
                 let mut error_msg =
                     OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("Error: {}", e));
+                if let Some(stream_id) = stream_id.as_deref() {
+                    error_msg = error_msg.with_stream_phase(stream_id, OutboundStreamPhase::Final);
+                }
                 propagate_routing_metadata(&mut error_msg, msg);
                 self.bus.publish_outbound(error_msg).await.ok();
                 false
@@ -3167,6 +3311,10 @@ impl AgentLoop {
                         timeout_secs
                     ),
                 );
+                if let Some(stream_id) = stream_id.as_deref() {
+                    timeout_msg =
+                        timeout_msg.with_stream_phase(stream_id, OutboundStreamPhase::Final);
+                }
                 propagate_routing_metadata(&mut timeout_msg, msg);
                 self.bus.publish_outbound(timeout_msg).await.ok();
                 false
@@ -3459,7 +3607,7 @@ impl AgentLoop {
 mod tests {
     use super::*;
     use crate::hooks::{HookAction, HookRule};
-    use crate::providers::{LLMResponse, StreamEvent, ToolDefinition, Usage};
+    use crate::providers::{LLMResponse, ToolDefinition, Usage};
     use async_trait::async_trait;
 
     #[derive(Debug)]
@@ -3935,6 +4083,114 @@ mod tests {
                 .is_some_and(|msg| msg.contains("Invalid arguments JSON")),
             "streaming path should preserve parse errors for downstream policy and tooling"
         );
+    }
+
+    #[tokio::test]
+    async fn test_gateway_telegram_stream_publishes_updates_and_final() {
+        let mut config = Config::default();
+        config.channels.telegram = Some(crate::config::TelegramConfig {
+            streaming: true,
+            streaming_buffer_chars: 1,
+            ..Default::default()
+        });
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, Arc::clone(&bus));
+        agent
+            .set_provider(Box::new(TestProvider {
+                name: "test",
+                model: "test-model",
+            }))
+            .await;
+
+        let msg = InboundMessage::new("telegram", "user", "123", "hello")
+            .with_metadata("telegram_thread_id", "7")
+            .with_metadata("telegram_message_id", "99");
+        agent.process_inbound_message(&msg, None).await;
+
+        let update = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            bus.consume_outbound(),
+        )
+        .await
+        .expect("stream update should be published")
+        .expect("outbound bus should remain open");
+        let final_message = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            bus.consume_outbound(),
+        )
+        .await
+        .expect("stream final should be published")
+        .expect("outbound bus should remain open");
+
+        assert_eq!(update.stream_phase(), Some(OutboundStreamPhase::Update));
+        assert_eq!(
+            final_message.stream_phase(),
+            Some(OutboundStreamPhase::Final)
+        );
+        assert_eq!(update.stream_id(), final_message.stream_id());
+        assert_eq!(update.content, "ok");
+        assert_eq!(final_message.content, "ok");
+        assert_eq!(
+            final_message.metadata.get("telegram_thread_id"),
+            Some(&"7".to_string())
+        );
+        assert_eq!(
+            final_message.metadata.get("telegram_message_id"),
+            Some(&"99".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gateway_telegram_streaming_is_opt_in() {
+        let mut config = Config::default();
+        config.channels.telegram = Some(crate::config::TelegramConfig::default());
+        let session_manager = SessionManager::new_memory();
+        let bus = Arc::new(MessageBus::new());
+        let agent = AgentLoop::new(config, session_manager, Arc::clone(&bus));
+        agent
+            .set_provider(Box::new(TestProvider {
+                name: "test",
+                model: "test-model",
+            }))
+            .await;
+
+        let msg = InboundMessage::new("telegram", "user", "123", "hello");
+        agent.process_inbound_message(&msg, None).await;
+        let outbound = bus
+            .consume_outbound()
+            .await
+            .expect("regular response should be published");
+
+        assert_eq!(outbound.content, "ok");
+        assert_eq!(outbound.stream_id(), None);
+        assert_eq!(outbound.stream_phase(), None);
+    }
+
+    #[test]
+    fn test_gateway_telegram_stream_settings_are_clamped() {
+        let mut config = Config::default();
+        config.channels.telegram = Some(crate::config::TelegramConfig {
+            streaming: true,
+            streaming_edit_interval_ms: 0,
+            streaming_buffer_chars: 0,
+            ..Default::default()
+        });
+        let agent = AgentLoop::new(
+            config,
+            SessionManager::new_memory(),
+            Arc::new(MessageBus::new()),
+        );
+        let msg = InboundMessage::new("telegram", "user", "123", "hello");
+
+        let settings = agent
+            .gateway_stream_settings(&msg)
+            .expect("Telegram streaming should be enabled");
+        assert_eq!(
+            settings.edit_interval,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(settings.buffer_chars, 1);
     }
 
     #[tokio::test]
