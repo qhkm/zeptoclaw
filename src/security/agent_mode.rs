@@ -147,16 +147,17 @@ impl Default for AgentModeConfig {
 impl AgentModeConfig {
     /// Parse the configured mode string into an `AgentMode`.
     ///
-    /// Returns `Autonomous` if the string is invalid (with a tracing warning).
+    /// Returns the safe default (`Assistant`) if the string is invalid
+    /// (with a tracing warning). Never elevates to `Autonomous` on bad input.
     pub fn resolve(&self) -> AgentMode {
         self.mode.parse::<AgentMode>().unwrap_or_else(|_| {
             tracing::warn!(
                 mode = %self.mode,
-                "Unknown agent mode '{}', falling back to Autonomous. \
+                "Unknown agent mode '{}', falling back to the safe default 'assistant'. \
                  Valid values: observer, assistant, autonomous.",
                 self.mode
             );
-            AgentMode::Autonomous
+            AgentMode::Assistant
         })
     }
 }
@@ -369,9 +370,78 @@ mod tests {
         cfg.mode = "assistant".to_string();
         assert_eq!(cfg.resolve(), AgentMode::Assistant);
 
-        // Invalid falls back to Autonomous
-        cfg.mode = "garbage".to_string();
+        cfg.mode = "autonomous".to_string();
         assert_eq!(cfg.resolve(), AgentMode::Autonomous);
+
+        // Invalid values must fall back to the safe default (Assistant),
+        // never escalate to Autonomous. Regression: P0 fail-open.
+        for bad in [
+            "garbage",
+            "",
+            "ADMIN",
+            "freedom",
+            "auto",
+            "assistant ",
+            " autonomous",
+            "autonomous\n",
+            "🦀",
+        ] {
+            cfg.mode = bad.to_string();
+            assert_eq!(
+                cfg.resolve(),
+                AgentMode::Assistant,
+                "invalid mode {bad:?} must resolve to Assistant, not Autonomous"
+            );
+        }
+    }
+
+    /// Regression test for the P0 fail-open finding: no unknown agent mode
+    /// value may ever resolve to `Autonomous`.
+    #[test]
+    fn test_invalid_modes_never_resolve_to_autonomous() {
+        // Every reserved/powerful string that an attacker or typo might try.
+        let unknowns = [
+            "autonomous ",
+            "autonomousx",
+            "xautonomous",
+            "AUTONOMOUS ",
+            "full_access",
+            "full-access",
+            "superuser",
+            "root",
+            "god",
+            "unrestricted",
+            "admin",
+            "AGENT",
+            "null",
+            "none",
+            "unknown",
+            "default",
+            "random",
+            "0",
+            "1",
+            "true",
+            "false",
+            "  ",
+        ];
+        for bad in unknowns {
+            let cfg = AgentModeConfig {
+                mode: bad.to_string(),
+            };
+            assert_eq!(
+                cfg.resolve(),
+                AgentMode::Assistant,
+                "mode {bad:?} must fail closed to Assistant"
+            );
+        }
+        // And the empty-string case from a truncated config.
+        assert_eq!(
+            AgentModeConfig {
+                mode: String::new()
+            }
+            .resolve(),
+            AgentMode::Assistant
+        );
     }
 
     #[test]
