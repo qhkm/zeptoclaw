@@ -160,12 +160,10 @@ impl Tool for BinaryPluginTool {
                 cmd.current_dir(workspace);
             }
 
-            // Set environment variables from tool def
-            if let Some(env_vars) = &self.def.env {
-                for (key, value) in env_vars {
-                    cmd.env(key, value);
-                }
-            }
+            // Scrub the inherited environment: never leak parent secrets
+            // (API keys, tokens, database URLs) into plugin subprocesses.
+            // Only the explicitly configured tool env vars are applied.
+            crate::security::env::configure_environment(&mut cmd, self.def.env.as_ref(), &[]);
 
             match cmd.spawn() {
                 Ok(child) => break child,
@@ -300,6 +298,13 @@ impl Tool for BinaryPluginTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Template for a plugin script that echoes the value of a named env var
+    /// in its JSON-RPC result. The env var name is substituted for
+    /// `__SECRET_NAME__`. Used to verify that secrets set in the parent env
+    /// do not leak into plugin subprocesses.
+    const TEMPLATE_SECRET_ECHO: &str = r#"read input
+echo "{\"jsonrpc\":\"2.0\",\"result\":{\"output\":\"seen=$__SECRET_NAME__\"},\"id\":1}""#;
 
     /// Returns true when running as UID 0 (root).
     ///
@@ -612,6 +617,33 @@ echo "{\"jsonrpc\":\"2.0\",\"result\":{\"output\":\"FOO=$MY_TEST_VAR\"},\"id\":1
         let result = tool.execute(json!({}), &ctx).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
         assert_eq!(result.unwrap().for_llm, "FOO=bar_value");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_scrubs_inherited_secret_env() {
+        // A secret set in the parent process must never leak into the
+        // plugin subprocess's environment.
+        let secret_name = "ZC_CONTRACT_SECRET_BINARY_KEY";
+        let secret_value = "hunter2-do-not-leak";
+        std::env::set_var(secret_name, secret_value);
+
+        // The plugin script echoes the value of $ZC_CONTRACT_SECRET_API_KEY
+        // into its JSON-RPC output. A scrubbed child sees an empty string.
+        let script = TEMPLATE_SECRET_ECHO.replace("__SECRET_NAME__", secret_name);
+        let (_dir, script_path) = create_test_script(&script);
+
+        let tool = BinaryPluginTool::new(test_tool_def(), "test-plugin", script_path, 30);
+        let ctx = ToolContext::new();
+        let result = tool.execute(json!({}), &ctx).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        // If the secret leaked, the output would contain the secret value.
+        let output = result.unwrap().for_llm;
+        assert_eq!(output, "seen=", "secret leaked into plugin env: {output}");
+        assert!(!output.contains(secret_value));
+
+        std::env::remove_var(secret_name);
     }
 
     #[cfg(unix)]

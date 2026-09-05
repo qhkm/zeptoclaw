@@ -113,9 +113,10 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        // Scrub the inherited environment: never leak parent secrets into
+        // the MCP server subprocess; only the explicitly configured env
+        // vars are applied on top of a scrubbed snapshot.
+        crate::security::env::configure_environment(&mut cmd, Some(env), &[]);
 
         let mut child = cmd
             .spawn()
@@ -346,6 +347,63 @@ done
         )
         .await;
         assert!(result.is_err(), "Spawning nonexistent binary should fail");
+    }
+
+    #[tokio::test]
+    async fn test_stdio_transport_scrubs_inherited_secret_env() {
+        // A secret set in the parent process must never leak into the MCP
+        // server subprocess's environment.
+        let secret_name = "ZC_CONTRACT_SECRET_MCP_KEY";
+        let secret_value = "hunter2-do-not-leak";
+        std::env::set_var(secret_name, secret_value);
+
+        // The child expands the env var inside the framed response body.
+        // A scrubbed child sees an empty value.
+        let script = r#"
+while IFS= read -r line; do
+  line="${line%%$'\r'}"
+  if [[ "$line" == Content-Length:* ]]; then
+    cl="${line#Content-Length: }"
+  fi
+  if [[ -z "$line" ]]; then
+    body=$(dd bs=1 count="$cl" 2>/dev/null)
+    out="seen=${__SECRET__}"
+    resp="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"output\":\"$out\"}}"
+    printf "Content-Length: %d\r\n\r\n%s" "${#resp}" "$resp"
+  fi
+done
+"#
+        .replace("__SECRET__", secret_name);
+        let transport =
+            StdioTransport::spawn("bash", &["-c".to_string(), script], &HashMap::new(), 10).await;
+        assert!(
+            transport.is_ok(),
+            "bash echo should spawn: {:?}",
+            transport.err()
+        );
+        let t = transport.unwrap();
+
+        let req = McpRequest::new(1, "initialize", None);
+        let resp = t.send(&req).await;
+        assert!(resp.is_ok(), "roundtrip should succeed: {:?}", resp.err());
+        let resp = resp.unwrap();
+
+        // If the secret leaked, the child's output would contain the secret
+        // value inside the result.output field.
+        let output = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.get("output"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            output, "seen=",
+            "secret leaked into MCP subprocess env: {output}"
+        );
+        assert!(!output.contains(secret_value));
+
+        std::env::remove_var(secret_name);
+        let _ = t.shutdown().await;
     }
 
     #[tokio::test]

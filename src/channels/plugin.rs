@@ -209,10 +209,10 @@ impl Channel for ChannelPluginAdapter {
             .stderr(std::process::Stdio::piped())
             .current_dir(&self.plugin_dir);
 
-        // Set environment variables from manifest
-        for (key, value) in &self.manifest.env {
-            cmd.env(key, value);
-        }
+        // Scrub the inherited environment: never leak parent secrets into
+        // channel plugin subprocesses. Only the manifest-configured env
+        // vars are applied on top of a scrubbed snapshot.
+        crate::security::env::configure_environment(&mut cmd, Some(&self.manifest.env), &[]);
 
         let mut child = cmd.spawn().map_err(|e| {
             self.running.store(false, Ordering::SeqCst);
@@ -897,6 +897,79 @@ mod tests {
     }
 
     // ---- Start and stop with real binary ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_start_scrubs_inherited_secret_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Distinct var name so parallel tests don't clobber each other's
+        // process-global env.
+        let secret_name = "ZC_CONTRACT_SECRET_CHANNEL_TOKEN";
+        let secret_value = "hunter2-do-not-leak";
+        std::env::set_var(secret_name, secret_value);
+
+        let dir = TempDir::new().unwrap();
+        let marker_path = dir.path().join("marker.txt");
+        let binary_path = dir.path().join("channel-plugin-scrub");
+
+        // The plugin writes the value of the secret env var to a marker file
+        // on startup, then stays alive echoing JSON-RPC responses. Explicit
+        // manifest env (MARKER_FILE) is applied on top of the scrubbed env.
+        let script = format!(
+            "#!/bin/sh\nprintenv {secret} > \"$MARKER_FILE\"\nwhile read line; do echo '{{\"jsonrpc\":\"2.0\",\"result\":{{\"status\":\"ok\"}},\"id\":1}}'; done\n",
+            secret = secret_name
+        );
+        std::fs::write(&binary_path, script).unwrap();
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut manifest_env = HashMap::new();
+        manifest_env.insert("MARKER_FILE".to_string(), marker_path.display().to_string());
+
+        let manifest = ChannelPluginManifest {
+            name: "scrub-test".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Scrub test".to_string(),
+            binary: "channel-plugin-scrub".to_string(),
+            env: manifest_env,
+            timeout_secs: 30,
+        };
+
+        let mut adapter = ChannelPluginAdapter::new(
+            manifest,
+            dir.path().to_path_buf(),
+            BaseChannelConfig::new("scrub-test"),
+        );
+
+        let result = adapter.start().await;
+        assert!(result.is_ok(), "start failed: {:?}", result);
+        assert!(adapter.is_running());
+
+        // Wait for the child to write the marker file (bounded wait).
+        // `printenv` with an unset var writes an empty file, so existence is
+        // the signal that the child has started and inspected its env.
+        let mut marker_found = false;
+        for _ in 0..100 {
+            if std::fs::read_to_string(&marker_path).is_ok() {
+                marker_found = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(marker_found, "child did not write marker file");
+        // A scrubbed child sees an empty/absent secret; the marker contains
+        // whatever the child's `printenv` returned.
+        let marker = std::fs::read_to_string(&marker_path).unwrap_or_default();
+        assert!(
+            !marker.contains(secret_value),
+            "secret leaked into channel plugin env: {marker:?}"
+        );
+
+        let _ = adapter.stop().await;
+        assert!(!adapter.is_running());
+
+        std::env::remove_var(secret_name);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

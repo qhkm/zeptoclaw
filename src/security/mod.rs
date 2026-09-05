@@ -5,6 +5,7 @@
 
 pub mod agent_mode;
 pub mod encryption;
+pub mod env;
 pub mod mount;
 pub mod pairing;
 pub mod path;
