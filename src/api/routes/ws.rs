@@ -144,7 +144,7 @@ mod tests {
     async fn test_ws_upgrade_consumes_ticket_once() {
         let bus = EventBus::new(8);
         let state = AppState::new("static-token".into(), bus);
-        let ticket = state.ws_tickets.issue().await;
+        let ticket = state.ws_tickets.issue().await.expect("store has capacity");
         let addr = spawn_ws_app(state).await;
         let url = format!("ws://{addr}/ws/events?ticket={ticket}");
 

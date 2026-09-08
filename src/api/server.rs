@@ -212,6 +212,7 @@ pub async fn start_server(
     state: AppState,
     static_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    state.ws_tickets.start_cleanup();
     let cors_origin = format!("http://{}:{}", config.bind, config.port);
     let app = build_router(state, static_dir, Some(cors_origin));
     let addr = format!("{}:{}", config.bind, config.api_port);

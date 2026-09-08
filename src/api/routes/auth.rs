@@ -77,13 +77,23 @@ pub async fn login(
 ///
 /// The normal auth and CSRF middleware protect this endpoint. This exchange
 /// prevents the caller's long-lived API token or JWT from appearing in a URL.
-pub async fn issue_ws_ticket(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(WsTicketResponse {
-            ticket: state.ws_tickets.issue().await,
-        }),
-    )
+pub async fn issue_ws_ticket(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    match state.ws_tickets.issue().await {
+        Some(ticket) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(WsTicketResponse { ticket }),
+        )
+            .into_response(),
+        None => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::RETRY_AFTER, "30"),
+            ],
+            "Too many pending WebSocket tickets",
+        )
+            .into_response(),
+    }
 }
 
 // ============================================================================
@@ -199,5 +209,29 @@ mod tests {
         let ticket = json["ticket"].as_str().expect("ticket must be present");
         assert!(state.ws_tickets.consume(ticket).await);
         assert!(!state.ws_tickets.consume(ticket).await);
+    }
+
+    #[tokio::test]
+    async fn test_issue_ws_ticket_returns_429_when_store_is_full() {
+        let state = make_state_no_password();
+        for _ in 0..crate::api::auth::MAX_PENDING_WS_TICKETS {
+            assert!(state.ws_tickets.issue().await.is_some());
+        }
+        let app = Router::new()
+            .route("/api/auth/ws-ticket", post(issue_ws_ticket))
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/ws-ticket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers().get(header::RETRY_AFTER).unwrap(), "30");
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
     }
 }

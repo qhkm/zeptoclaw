@@ -6,6 +6,7 @@
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
@@ -80,6 +81,8 @@ pub fn verify_bearer_token(header: &str, expected: &str) -> Result<()> {
 
 /// Lifetime of a one-time WebSocket authentication ticket.
 pub const WS_TICKET_TTL: Duration = Duration::from_secs(30);
+/// Maximum number of issued WebSocket tickets awaiting consumption.
+pub const MAX_PENDING_WS_TICKETS: usize = 64;
 
 /// In-memory store for short-lived, single-use WebSocket tickets.
 ///
@@ -92,23 +95,50 @@ pub struct WsTicketStore {
 }
 
 impl WsTicketStore {
-    /// Issue a fresh ticket and discard any expired entries.
-    pub async fn issue(&self) -> String {
+    /// Issue a fresh ticket, or return `None` when the bounded store is full.
+    pub async fn issue(&self) -> Option<String> {
         let now = Instant::now();
-        let ticket = generate_api_token();
         let mut tickets = self.tickets.lock().await;
         tickets.retain(|_, expires_at| *expires_at > now);
+        if tickets.len() >= MAX_PENDING_WS_TICKETS {
+            return None;
+        }
+
+        let ticket = generate_api_token();
         tickets.insert(ticket.clone(), now + WS_TICKET_TTL);
-        ticket
+        Some(ticket)
     }
 
     /// Consume a ticket exactly once, returning whether it was still valid.
     pub async fn consume(&self, ticket: &str) -> bool {
-        self.tickets
-            .lock()
-            .await
+        let now = Instant::now();
+        let mut tickets = self.tickets.lock().await;
+        let is_valid = tickets
             .remove(ticket)
-            .is_some_and(|expires_at| expires_at > Instant::now())
+            .is_some_and(|expires_at| expires_at > now);
+        tickets.retain(|_, expires_at| *expires_at > now);
+        is_valid
+    }
+
+    /// Periodically remove expired tickets while the owning server is alive.
+    pub fn start_cleanup(self: &Arc<Self>) {
+        let store = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(WS_TICKET_TTL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(store) = store.upgrade() else {
+                    break;
+                };
+                let now = Instant::now();
+                store
+                    .tickets
+                    .lock()
+                    .await
+                    .retain(|_, expires_at| *expires_at > now);
+            }
+        });
     }
 }
 
@@ -294,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn test_ws_ticket_is_single_use() {
         let store = WsTicketStore::default();
-        let ticket = store.issue().await;
+        let ticket = store.issue().await.expect("store has capacity");
 
         assert!(store.consume(&ticket).await);
         assert!(!store.consume(&ticket).await);
@@ -309,6 +339,16 @@ mod tests {
         );
 
         assert!(!store.consume("expired").await);
+    }
+
+    #[tokio::test]
+    async fn test_ws_ticket_store_enforces_capacity() {
+        let store = WsTicketStore::default();
+        for _ in 0..MAX_PENDING_WS_TICKETS {
+            assert!(store.issue().await.is_some());
+        }
+
+        assert!(store.issue().await.is_none());
     }
 
     // ------------------------------------------------------------------

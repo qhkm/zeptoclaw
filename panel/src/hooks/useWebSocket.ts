@@ -15,19 +15,17 @@ export function useWebSocket(maxEvents = 50) {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Track mount state to prevent reconnect after unmount
-  const mounted = useRef(true)
 
   useEffect(() => {
-    mounted.current = true
+    let cancelled = false
 
     async function connect() {
-      if (!mounted.current) return
+      if (cancelled) return
       try {
         const { ticket } = await apiFetch<{ ticket: string }>('/api/auth/ws-ticket', {
           method: 'POST',
         })
-        if (!mounted.current) return
+        if (cancelled) return
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
         const url = `${protocol}//${window.location.host}/ws/events?ticket=${encodeURIComponent(ticket)}`
@@ -35,11 +33,11 @@ export function useWebSocket(maxEvents = 50) {
         wsRef.current = ws
 
         ws.onopen = () => {
-          if (mounted.current) setConnected(true)
+          if (!cancelled) setConnected(true)
         }
 
         ws.onclose = () => {
-          if (!mounted.current) return
+          if (cancelled) return
           setConnected(false)
           reconnectTimer.current = setTimeout(() => void connect(), 3_000)
         }
@@ -49,7 +47,7 @@ export function useWebSocket(maxEvents = 50) {
         }
 
         ws.onmessage = (msg) => {
-          if (!mounted.current) return
+          if (cancelled) return
           try {
             const event = JSON.parse(msg.data as string) as PanelEvent
             // Inject a client-side timestamp if the server omits one
@@ -60,7 +58,7 @@ export function useWebSocket(maxEvents = 50) {
           }
         }
       } catch {
-        if (!mounted.current) return
+        if (cancelled) return
         setConnected(false)
         reconnectTimer.current = setTimeout(() => void connect(), 3_000)
       }
@@ -68,7 +66,7 @@ export function useWebSocket(maxEvents = 50) {
 
     void connect()
     return () => {
-      mounted.current = false
+      cancelled = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       wsRef.current?.close()
     }
