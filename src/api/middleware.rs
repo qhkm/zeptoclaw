@@ -98,7 +98,7 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> bool {
 /// - `GET /api/health` — liveness probe, no auth required
 /// - `GET /api/csrf-token` — must be public so the caller can bootstrap
 /// - `POST /api/auth/login` — exchanges password for JWT
-/// - Any path starting with `/ws/` — WebSocket upgrade handshake
+/// - Any path starting with `/ws/` — the handler validates a one-time ticket
 ///
 /// Accepts two token forms:
 /// 1. Static API token configured at startup (`state.api_token`)
@@ -135,7 +135,7 @@ pub async fn auth_middleware(
             let token = &header[7..];
 
             // Accept static API token OR a valid JWT.
-            let is_valid = token == state.api_token
+            let is_valid = crate::api::auth::constant_time_eq(token, &state.api_token)
                 || crate::api::auth::validate_jwt(token, &state.jwt_secret).is_ok();
 
             if !is_valid {
@@ -200,6 +200,7 @@ mod tests {
             .route("/api/protected", get(|| async { "secret" }))
             .route("/api/protected", post(|| async { "mutate" }))
             .route("/api/auth/login", post(|| async { "login" }))
+            .route("/api/auth/ws-ticket", post(|| async { "ticket" }))
             .route("/ws/events", get(|| async { "ws" }))
             .route("/v1/models", get(|| async { "models" }))
             .route("/v1/chat/completions", post(|| async { "completions" }))
@@ -238,6 +239,34 @@ mod tests {
         let req = Request::builder()
             .method(Method::POST)
             .uri("/api/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ws_ticket_requires_auth() {
+        let app = make_app(make_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/ws-ticket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_ws_ticket_accepts_authenticated_csrf_request() {
+        let state = make_state();
+        let csrf = generate_csrf_token(&state.jwt_secret);
+        let app = make_app(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/ws-ticket")
+            .header("authorization", "Bearer static-test-token")
+            .header("x-csrf-token", csrf)
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

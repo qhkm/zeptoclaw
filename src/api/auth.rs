@@ -5,6 +5,10 @@
 
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::error::{Result, ZeptoError};
@@ -40,11 +44,18 @@ pub fn generate_api_token() -> String {
 // Bearer token verification
 // ============================================================================
 
+/// Compare two security-sensitive strings without data-dependent early exits.
+///
+/// Length is not secret for the tokens compared by the panel API.
+pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
+    bool::from(left.as_bytes().ct_eq(right.as_bytes()))
+}
+
 /// Verifies an `Authorization: Bearer <token>` header value against the
 /// expected token.
 ///
 /// Strips the `"Bearer "` prefix (case-sensitive, with a trailing space),
-/// then performs a constant-time-like string comparison via `==`.
+/// then performs a constant-time comparison.
 ///
 /// # Errors
 ///
@@ -56,10 +67,48 @@ pub fn verify_bearer_token(header: &str, expected: &str) -> Result<()> {
         .strip_prefix("Bearer ")
         .ok_or_else(|| ZeptoError::Unauthorized("missing Bearer prefix".to_string()))?;
 
-    if token == expected {
+    if constant_time_eq(token, expected) {
         Ok(())
     } else {
         Err(ZeptoError::Unauthorized("invalid API token".to_string()))
+    }
+}
+
+// ============================================================================
+// WebSocket tickets
+// ============================================================================
+
+/// Lifetime of a one-time WebSocket authentication ticket.
+pub const WS_TICKET_TTL: Duration = Duration::from_secs(30);
+
+/// In-memory store for short-lived, single-use WebSocket tickets.
+///
+/// Tickets are issued only through an authenticated HTTP endpoint. Their short
+/// lifetime and single-use behavior limit exposure in URL logs while keeping
+/// the long-lived API token or JWT out of them entirely.
+#[derive(Debug, Default)]
+pub struct WsTicketStore {
+    tickets: Mutex<HashMap<String, Instant>>,
+}
+
+impl WsTicketStore {
+    /// Issue a fresh ticket and discard any expired entries.
+    pub async fn issue(&self) -> String {
+        let now = Instant::now();
+        let ticket = generate_api_token();
+        let mut tickets = self.tickets.lock().await;
+        tickets.retain(|_, expires_at| *expires_at > now);
+        tickets.insert(ticket.clone(), now + WS_TICKET_TTL);
+        ticket
+    }
+
+    /// Consume a ticket exactly once, returning whether it was still valid.
+    pub async fn consume(&self, ticket: &str) -> bool {
+        self.tickets
+            .lock()
+            .await
+            .remove(ticket)
+            .is_some_and(|expires_at| expires_at > Instant::now())
     }
 }
 
@@ -233,6 +282,33 @@ mod tests {
             matches!(result, Err(ZeptoError::Unauthorized(_))),
             "lowercase 'bearer' prefix must be rejected"
         );
+    }
+
+    #[test]
+    fn test_constant_time_eq_rejects_mismatches() {
+        assert!(constant_time_eq("same-token", "same-token"));
+        assert!(!constant_time_eq("same-token", "other-token"));
+        assert!(!constant_time_eq("short", "longer"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_ticket_is_single_use() {
+        let store = WsTicketStore::default();
+        let ticket = store.issue().await;
+
+        assert!(store.consume(&ticket).await);
+        assert!(!store.consume(&ticket).await);
+    }
+
+    #[tokio::test]
+    async fn test_expired_ws_ticket_is_rejected() {
+        let store = WsTicketStore::default();
+        store.tickets.lock().await.insert(
+            "expired".to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+
+        assert!(!store.consume("expired").await);
     }
 
     // ------------------------------------------------------------------

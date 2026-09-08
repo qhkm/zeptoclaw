@@ -44,6 +44,7 @@ Project-level guidance for coding agents working in this repository.
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows; safety pre-scan keeps full path scanning while scanning file bodies with a narrow `shell_injection` carve-out instead of skipping content wholesale
 - Secret storage hardening: config and panel token writes use user-only permissions on Unix (0600 files and 0700 ZeptoClaw directories) and repair permissions left by older versions
+- Panel auth hardening: static bearer tokens use constant-time comparison, WebSocket connections exchange them for 30-second single-use tickets, and CLI output points to the token file instead of printing the secret
 - Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop

@@ -218,7 +218,7 @@ async fn cmd_start(
             panel_config.bind, panel_config.port
         );
     }
-    println!("API token: {api_token}");
+    println!("API token file: {}", tp.display());
     println!("Press Ctrl+C to stop.");
 
     start_server(&panel_config, state, static_dir)
@@ -368,10 +368,10 @@ async fn cmd_install(download: bool, rebuild: bool) -> Result<()> {
     // 7. Ensure an API token exists (generate + persist if missing)
     // ------------------------------------------------------------------
     let tp = token_path();
-    let token = ensure_api_token(&tp).await?;
+    ensure_api_token(&tp).await?;
 
     println!("\n  Panel installed successfully!");
-    println!("  API token: {token}");
+    println!("  API token file: {}", tp.display());
     println!("\n  Start with: zeptoclaw panel");
 
     Ok(())

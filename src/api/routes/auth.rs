@@ -4,7 +4,12 @@
 //! short-lived HS256 JWT.  The JWT is subsequently accepted by the auth
 //! middleware on all protected endpoints.
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -25,6 +30,13 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     /// HS256 JWT valid for 24 hours.
     pub token: String,
+}
+
+/// Successful response from `POST /api/auth/ws-ticket`.
+#[derive(Debug, Serialize)]
+pub struct WsTicketResponse {
+    /// Random ticket accepted once by `/ws/events` for 30 seconds.
+    pub ticket: String,
 }
 
 // ============================================================================
@@ -59,6 +71,19 @@ pub async fn login(
         // Password auth is not configured — callers must use a static API token.
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// `POST /api/auth/ws-ticket` — issue a short-lived, single-use WebSocket ticket.
+///
+/// The normal auth and CSRF middleware protect this endpoint. This exchange
+/// prevents the caller's long-lived API token or JWT from appearing in a URL.
+pub async fn issue_ws_ticket(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(WsTicketResponse {
+            ticket: state.ws_tickets.issue().await,
+        }),
+    )
 }
 
 // ============================================================================
@@ -147,5 +172,32 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_issue_ws_ticket_returns_single_use_ticket() {
+        let state = make_state_no_password();
+        let app = Router::new()
+            .route("/api/auth/ws-ticket", post(issue_ws_ticket))
+            .with_state(state.clone());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/ws-ticket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ticket = json["ticket"].as_str().expect("ticket must be present");
+        assert!(state.ws_tickets.consume(ticket).await);
+        assert!(!state.ws_tickets.consume(ticket).await);
     }
 }

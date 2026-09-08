@@ -9,11 +9,10 @@ use std::sync::Arc;
 
 /// GET /ws/events — upgrades to WebSocket, streams PanelEvents as JSON.
 ///
-/// Authentication: Browsers cannot set custom headers during the WebSocket
-/// upgrade handshake, so the `/ws/` path is exempt from the auth middleware.
-/// Instead, this handler validates the auth token from a `?auth=<token>`
-/// query parameter before upgrading.  Both static API tokens and valid JWTs
-/// are accepted.
+/// Authentication: Browsers first obtain a short-lived, single-use ticket from
+/// the authenticated `POST /api/auth/ws-ticket` endpoint, then supply it as the
+/// `?ticket=<ticket>` query parameter. The long-lived API token or JWT never
+/// appears in the WebSocket URL.
 ///
 /// Enforces a hard cap of [`AppState::MAX_WS_CONNECTIONS`] concurrent
 /// WebSocket connections via a semaphore stored in [`AppState`].  When the
@@ -24,19 +23,18 @@ pub async fn ws_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
-    // Validate auth token from query param (browsers can't set headers for WS).
-    let is_authenticated = params
-        .get("auth")
-        .map(|token| {
-            token == &state.api_token
-                || crate::api::auth::validate_jwt(token, &state.jwt_secret).is_ok()
-        })
-        .unwrap_or(false);
+    // Consume the one-time ticket before upgrading.
+    let is_authenticated = match params.get("ticket") {
+        Some(ticket) => state.ws_tickets.consume(ticket).await,
+        None => false,
+    };
 
     if !is_authenticated {
         return axum::response::Response::builder()
             .status(axum::http::StatusCode::UNAUTHORIZED)
-            .body(axum::body::Body::from("Missing or invalid auth token"))
+            .body(axum::body::Body::from(
+                "Missing or invalid WebSocket ticket",
+            ))
             .expect("response build is infallible");
     }
 
@@ -95,11 +93,27 @@ async fn handle_ws(
 
 #[cfg(test)]
 mod tests {
-    // WebSocket handlers are hard to unit test directly.
-    // Integration tests will cover the WS upgrade + event flow.
-    // Here we test that the handler function exists and compiles.
+    // Exercise the authentication handshake against a real loopback server;
+    // the extractor requires Hyper's live connection-upgrade extension.
     use super::*;
     use crate::api::server::AppState;
+    use axum::http::StatusCode;
+
+    async fn spawn_ws_app(state: AppState) -> std::net::SocketAddr {
+        let app = crate::api::server::build_router(state, None, None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener must bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener must have an address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server must run");
+        });
+        addr
+    }
 
     #[test]
     fn test_ws_handler_compiles() {
@@ -124,5 +138,48 @@ mod tests {
         // Releasing one permit makes room again.
         drop(permits.pop());
         assert_eq!(sem.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ws_upgrade_consumes_ticket_once() {
+        let bus = EventBus::new(8);
+        let state = AppState::new("static-token".into(), bus);
+        let ticket = state.ws_tickets.issue().await;
+        let addr = spawn_ws_app(state).await;
+        let url = format!("ws://{addr}/ws/events?ticket={ticket}");
+
+        let (mut socket, response) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("valid ticket must upgrade");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        socket.close(None).await.expect("socket must close");
+
+        let replay = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect_err("consumed ticket must be rejected");
+        match replay {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("expected HTTP rejection, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_upgrade_rejects_long_lived_token_query() {
+        let bus = EventBus::new(8);
+        let state = AppState::new("static-token".into(), bus);
+        let addr = spawn_ws_app(state).await;
+
+        let result =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events?auth=static-token"))
+                .await
+                .expect_err("long-lived token query must be rejected");
+        match result {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("expected HTTP rejection, got {other}"),
+        }
     }
 }
