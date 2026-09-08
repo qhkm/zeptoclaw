@@ -13,7 +13,7 @@ pub use types::*;
 use crate::error::{Result, ZeptoError};
 use once_cell::sync::OnceCell;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tracing::{error, warn};
 use url::Url;
@@ -1568,18 +1568,19 @@ impl Config {
 
     /// Save configuration to the default path
     pub fn save(&self) -> Result<()> {
+        crate::utils::secure_fs::ensure_private_dir(&Self::dir())?;
         self.save_to_path(&Self::path())
     }
 
     /// Save configuration to a specific path
-    pub fn save_to_path(&self, path: &PathBuf) -> Result<()> {
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        crate::utils::secure_fs::write_private_file(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -2248,6 +2249,24 @@ mod tests {
 
         // Clean up
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_to_path_repairs_config_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(&config_path, "{}").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        Config::default().save_to_path(&config_path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(config_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

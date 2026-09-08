@@ -43,6 +43,7 @@ Project-level guidance for coding agents working in this repository.
 - Coding tool hardening: `grep` now surfaces subprocess failures instead of silently returning "No matches"; `shell` truncates output at 2,000 lines / 50KB; `edit_file` rejects empty `old_text` and supports optional `expected_replacements` for safer surgical edits
 - Tool composition: natural language tool creation with `{{param}}` template interpolation
 - Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows; safety pre-scan keeps full path scanning while scanning file bodies with a narrow `shell_injection` carve-out instead of skipping content wholesale
+- Secret storage hardening: config and panel token writes use user-only permissions on Unix (0600 files and 0700 ZeptoClaw directories) and repair permissions left by older versions
 - Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
@@ -62,7 +63,7 @@ Project-level guidance for coding agents working in this repository.
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3519 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
+- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3531 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
 
 ## Task Tracking Protocol
 

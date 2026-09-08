@@ -1,7 +1,7 @@
 //! `zeptoclaw panel` command — install, start, auth management.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zeptoclaw::api::auth::generate_api_token;
 use zeptoclaw::api::config::PanelConfig;
@@ -9,6 +9,7 @@ use zeptoclaw::api::events::EventBus;
 use zeptoclaw::api::server::{start_server, AppState};
 use zeptoclaw::config::Config;
 use zeptoclaw::providers::openai::OpenAIProvider;
+use zeptoclaw::utils::secure_fs::{ensure_private_dir, restrict_private_file, write_private_file};
 
 /// Panel subcommands.
 #[derive(clap::Subcommand, Debug)]
@@ -114,8 +115,15 @@ fn token_path() -> PathBuf {
 ///
 /// If the token file already contains a non-empty token, it is returned as-is.
 /// Otherwise a fresh 64-char hex token is generated, persisted, and returned.
-async fn ensure_api_token(token_path: &PathBuf) -> Result<String> {
+async fn ensure_api_token(token_path: &Path) -> Result<String> {
+    if let Some(parent) = token_path.parent() {
+        ensure_private_dir(parent)
+            .with_context(|| format!("Failed to secure directory: {}", parent.display()))?;
+    }
+
     if token_path.exists() {
+        restrict_private_file(token_path)
+            .with_context(|| format!("Failed to secure token file: {}", token_path.display()))?;
         let token = tokio::fs::read_to_string(token_path)
             .await
             .with_context(|| format!("Failed to read token file: {}", token_path.display()))?;
@@ -126,15 +134,7 @@ async fn ensure_api_token(token_path: &PathBuf) -> Result<String> {
     }
 
     let token = generate_api_token();
-
-    if let Some(parent) = token_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    tokio::fs::write(token_path, &token)
-        .await
+    write_private_file(token_path, token.as_bytes())
         .with_context(|| format!("Failed to write token file: {}", token_path.display()))?;
 
     Ok(token)
@@ -565,6 +565,32 @@ mod tests {
             token.len(),
             64,
             "must generate a new token when file is empty"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_ensure_api_token_repairs_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let token_dir = dir.path().join(".zeptoclaw");
+        std::fs::create_dir(&token_dir).unwrap();
+        std::fs::set_permissions(&token_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tp = token_dir.join("panel.token");
+        std::fs::write(&tp, "existing-token").unwrap();
+        std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let token = ensure_api_token(&tp).await.unwrap();
+
+        assert_eq!(token, "existing-token");
+        assert_eq!(
+            std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&tp).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 }

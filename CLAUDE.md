@@ -75,7 +75,7 @@ src/
 ├── security/    # Shell blocklist, path validation, secret encryption
 ├── session/     # Session persistence, history, auto-repair
 ├── tools/       # 33 built-in + MCP + plugins + android
-├── utils/       # sanitize, metrics, telemetry, cost
+├── utils/       # sanitize, secure filesystem writes, metrics, telemetry, cost
 └── main.rs      # Entry point → cli::run()
 
 panel/           # React + Vite dashboard
