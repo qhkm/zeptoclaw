@@ -55,7 +55,7 @@ cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo tes
 ```
 src/
 ├── agent/       # Agent loop, context builder, token budget, compaction
-├── api/         # Panel API server + OpenAI-compatible serve routes (axum)
+├── api/         # Panel API, one-time WebSocket auth tickets, and OpenAI-compatible routes (axum)
 ├── auth/        # OAuth (PKCE), token refresh, Claude CLI import
 ├── bus/         # Async message bus
 ├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp Web/Cloud, Lark, Email, Serial, ACP; MQTT parked

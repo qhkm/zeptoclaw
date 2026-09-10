@@ -35,6 +35,8 @@ pub struct AppState {
     /// holds it for the lifetime of the connection; once the semaphore is
     /// exhausted the handler returns HTTP 503.
     pub ws_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Short-lived, single-use tickets accepted by the WebSocket endpoint.
+    pub ws_tickets: Arc<crate::api::auth::WsTicketStore>,
     // ── Real data stores (all optional — set when wired from gateway/CLI) ───
     /// Session manager for reading and deleting conversation sessions.
     pub session_manager: Option<Arc<crate::session::SessionManager>>,
@@ -64,6 +66,7 @@ impl AppState {
             password_hash: None,
             jwt_secret: uuid::Uuid::new_v4().to_string(),
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(Self::MAX_WS_CONNECTIONS)),
+            ws_tickets: Arc::new(crate::api::auth::WsTicketStore::default()),
             session_manager: None,
             task_store: None,
             health_registry: None,
@@ -119,6 +122,10 @@ pub fn build_router(
     let api = Router::new()
         // Auth
         .route("/api/auth/login", post(super::routes::auth::login))
+        .route(
+            "/api/auth/ws-ticket",
+            post(super::routes::auth::issue_ws_ticket),
+        )
         // CSRF bootstrap — public, no auth required
         .route("/api/csrf-token", get(csrf_token_handler))
         // Health & metrics
@@ -205,6 +212,7 @@ pub async fn start_server(
     state: AppState,
     static_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    state.ws_tickets.start_cleanup();
     let cors_origin = format!("http://{}:{}", config.bind, config.port);
     let app = build_router(state, static_dir, Some(cors_origin));
     let addr = format!("{}:{}", config.bind, config.api_port);
