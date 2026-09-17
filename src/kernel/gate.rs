@@ -19,6 +19,7 @@ use crate::safety::taint::TaintEngine;
 use crate::safety::{CheckDirection, SafetyLayer, SafetyResult, ScanOptions};
 use crate::tools::{ToolContext, ToolOutput, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
+use crate::utils::tool_schema::{coerce_tool_args, unrename_tool_args};
 
 const FILE_BODY_IGNORED_POLICY_RULES: &[&str] = &["shell_injection"];
 
@@ -140,6 +141,21 @@ pub async fn execute_tool(
     let start = Instant::now();
     let actor_id = audit_actor_id(ctx);
 
+    // Step 0: Repair model-emitted arguments against the tool's own schema.
+    //
+    // The model saw the *sanitized* schema, so illegal property keys it was
+    // shown must be mapped back to their wire names before anything else reads
+    // them; then string-typed scalars ("42", "true", JSON-encoded containers)
+    // that small local models emit are coerced to their declared types. Both
+    // steps are conservative: anything ambiguous is left exactly as it arrived.
+    let input = match registry.get(name) {
+        Some(tool) => {
+            let schema = tool.parameters();
+            coerce_tool_args(&schema, unrename_tool_args(&schema, input))
+        }
+        None => input,
+    };
+
     // Step 1: Safety check on input
     //
     // Filesystem write tools use field-aware scanning so paths still get the
@@ -225,6 +241,105 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(EchoTool));
         registry
+    }
+
+    /// Reflects the args it received, so a test can assert what reached the tool.
+    struct ReflectTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for ReflectTool {
+        fn name(&self) -> &str {
+            "reflect"
+        }
+        fn description(&self) -> &str {
+            "reflects its arguments"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "n": { "type": "integer" },
+                    "bad key!": { "type": "string" }
+                }
+            })
+        }
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> crate::error::Result<crate::tools::ToolOutput> {
+            Ok(crate::tools::ToolOutput::llm_only(args.to_string()))
+        }
+    }
+
+    fn reflect_registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ReflectTool));
+        registry
+    }
+
+    #[tokio::test]
+    async fn execute_tool_coerces_string_typed_args() {
+        let registry = reflect_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::default();
+
+        let output = execute_tool(
+            &registry,
+            "reflect",
+            json!({ "n": "42" }),
+            &ctx,
+            None,
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.for_llm, r#"{"n":42}"#);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_restores_renamed_property_keys() {
+        let registry = reflect_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::default();
+
+        // The model saw the sanitized schema, so it emits the renamed key.
+        let output = execute_tool(
+            &registry,
+            "reflect",
+            json!({ "bad_key_": "v" }),
+            &ctx,
+            None,
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.for_llm, r#"{"bad key!":"v"}"#);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_leaves_well_formed_args_untouched() {
+        let registry = reflect_registry();
+        let metrics = MetricsCollector::new();
+        let ctx = ToolContext::default();
+
+        let output = execute_tool(
+            &registry,
+            "reflect",
+            json!({ "n": 7 }),
+            &ctx,
+            None,
+            &metrics,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.for_llm, r#"{"n":7}"#);
     }
 
     fn setup_filesystem_registry() -> ToolRegistry {
