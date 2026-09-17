@@ -5,7 +5,7 @@ Project-level guidance for coding agents working in this repository.
 ## Project Snapshot
 
 - Language: Rust (edition 2021)
-- Core binary: `zeptoclaw` (`src/main.rs` thin entrypoint; CLI handlers in `src/cli/`); stripped release size is gated at **11MB on linux-x86_64** by the `binary-size` CI job (runs on every PR); the "fits on a robot" 6MB moat is the **aarch64** target where the binary is ~7MB — follow-up issue adds aarch64 to CI with a 7MB gate; escape valve for genuine new heavy deps is feature-gating, not bumping the budget
+- Core binary: `zeptoclaw` (`src/main.rs` thin entrypoint; CLI handlers in `src/cli/`); stripped release size budgets are **11MB on linux-x86_64** and **7MB on aarch64**, checked locally when relevant; escape valve for genuine new heavy deps is feature-gating, not bumping the budget
 - Extra binary: `benchmark` (`src/bin/benchmark.rs`)
 - Benchmarks: `benches/message_bus.rs`
 - Integration tests: `tests/integration.rs`
@@ -57,7 +57,7 @@ Project-level guidance for coding agents working in this repository.
 - r8r bridge: optional WebSocket client for workflow approvals, health updates, and replay-safe duplicate-event acknowledgments
 - Config hot-reload: gateway polls config mtime every 30s and applies provider/channel/safety updates
 - Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and `r8r_bridge`, plus agent defaults such as `timezone`, `tool_timeout_secs`, and `system_prompt`
-- CI feature gates now compile `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap` in addition to the lighter baseline feature matrix; `memory-bm25` and `peripheral-esp32` stay covered by dedicated test/clippy jobs
+- Validation runs locally; GitHub Actions CI, E2E, and PR hygiene workflows are removed. Optional feature paths require local checks when changed; tag-triggered release and Docker publishing remain enabled
 - Dependency audit baseline: `cargo deny check` passes with patched `anyhow` 1.0.103, `bcrypt` 0.19.2, `chacha20` 0.10.2, `crossbeam-epoch` 0.9.20, `h2` 0.4.19, `quinn-proto` 0.11.15, `quick-xml` 0.41, `lopdf` 0.42, and `rustls` 0.23.45 (RUSTSEC-2026-0285)
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
@@ -73,7 +73,7 @@ Project-level guidance for coding agents working in this repository.
 1. **Start of session** — Run `gh issue list --state open --limit 20` and present open issues
 2. **New work** — If no issue exists for the requested work, create one with `gh issue create` before writing code. Use labels: type (`bug`/`feat`/`rfc`/`chore`/`docs`), area (`area:tools`/`area:channels`/etc.), priority (`P1`/`P2`/`P3`)
 3. **End of work** — Create PR with `Closes #N` in body, or `gh issue close N` for direct commits
-4. **NEVER merge PRs** — Only the user merges PRs. After creating a PR, wait for CI, present the URL to the user, and only merge after explicit user approval
+4. **NEVER merge PRs** — Only the user merges PRs. After creating a PR, present the URL and local validation results to the user, and only merge after explicit user approval
 
 Skip issue creation only for trivial changes (typo fixes, one-line tweaks).
 
