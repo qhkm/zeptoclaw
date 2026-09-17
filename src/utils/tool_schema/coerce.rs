@@ -4,7 +4,10 @@
 //! Small local models emit `"42"` for integers, `"true"` for booleans,
 //! JSON-encoded strings for arrays/objects (also nested inside containers),
 //! and bare scalars where an array is expected. Coercion is schema-guided and
-//! conservative: the original value is kept whenever a repair is not unambiguous.
+//! conservative: the original value is kept whenever a repair is not
+//! unambiguous — in particular a string is never rewritten when the schema
+//! already permits a string, so identifiers like `"07030"` survive a
+//! `["string", "integer"]` union intact.
 
 use serde_json::Value;
 
@@ -26,7 +29,7 @@ pub fn coerce_tool_args(params_schema: &Value, args: Value) -> Value {
             continue;
         };
         let Some(value) = map.get(&key) else { continue };
-        if let Some(fixed) = coerce_property(&key, value, prop) {
+        if let Some(fixed) = coerce_at(value, prop, &key) {
             map.insert(key, fixed);
         }
     }
@@ -34,110 +37,67 @@ pub fn coerce_tool_args(params_schema: &Value, args: Value) -> Value {
     Value::Object(map)
 }
 
-/// Repair one property value against its schema; `None` means "leave as is".
-fn coerce_property(key: &str, value: &Value, prop: &Value) -> Option<Value> {
-    let expected = prop.get("type");
-    let wants_array = type_names(expected).contains(&"array");
+/// Repair `value` against `schema` at any depth; `None` means "leave as is".
+///
+/// `path` names the position for logging only.
+fn coerce_at(value: &Value, schema: &Value, path: &str) -> Option<Value> {
+    if !schema.is_object() {
+        return None;
+    }
+    let accepted = accepted_types(schema);
+    let wants_array = accepted.contains(&"array");
 
-    // A bare, non-array value where an array is expected. Strings go through
-    // `coerce_value` first, so a JSON-encoded array parses and a nullable
-    // "null" becomes null rather than ["null"]. An explicit null is preserved:
-    // the tool's own default handling decides between "omit" and "empty list".
-    if wants_array && !value.is_null() && !value.is_array() {
-        if let Value::String(s) = value {
-            if let Some(coerced) = coerce_value(s, expected, prop) {
-                return Some(coerced);
-            }
+    if let Value::String(s) = value {
+        // A nullable position spelled as the literal string "null".
+        if allows_null(schema, &accepted) && s.trim().eq_ignore_ascii_case("null") {
+            return Some(Value::Null);
+        }
+        // The schema already permits a string, so nothing here is broken and
+        // any rewrite would be a guess. Keeps `"07030"` a zip code.
+        if accepted.contains(&"string") {
+            return None;
+        }
+        // A JSON-encoded container, which may itself hold more repairable values.
+        if let Some(parsed) = parse_container(s, &accepted) {
+            return Some(coerce_at(&parsed, schema, path).unwrap_or(parsed));
+        }
+        if let Some(scalar) = coerce_scalar(s, &accepted) {
+            return Some(scalar);
+        }
+        if wants_array {
             if s.trim_start().starts_with('[') {
                 tracing::warn!(
-                    property = key,
+                    property = path,
                     "tool arg looks like a JSON array string but could not be parsed; \
                      wrapping it as a single-element list"
                 );
             }
+            tracing::debug!(property = path, "wrapped bare tool arg in a list");
+            return Some(Value::Array(vec![value.clone()]));
         }
-        tracing::debug!(property = key, "wrapped bare tool arg in a list");
-        return Some(Value::Array(vec![value.clone()]));
-    }
-
-    let Value::String(s) = value else {
-        // Native container: still normalize JSON-encoded elements and sub-fields.
-        let normalize = (wants_array && value.is_array())
-            || (type_names(expected).contains(&"object") && value.is_object());
-        return normalize
-            .then(|| normalize_json_strings(value, prop))
-            .flatten();
-    };
-
-    if expected.is_none() && !schema_allows_null(prop) {
         return None;
     }
 
-    let coerced = coerce_value(s, expected, prop)?;
-    Some(normalize_json_strings(&coerced, prop).unwrap_or(coerced))
-}
-
-/// The JSON type names a `type` entry declares (`"x"` or `["x", "y"]`).
-fn type_names(expected: Option<&Value>) -> Vec<&str> {
-    match expected {
-        Some(Value::String(s)) => vec![s.as_str()],
-        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// True when `schema` permits JSON type `kind` via `type` or any combinator branch.
-fn schema_accepts_kind(schema: &Value, kind: &str) -> bool {
-    let Some(obj) = schema.as_object() else {
-        return false;
-    };
-    if type_names(obj.get("type")).contains(&kind) {
-        return true;
-    }
-    ["anyOf", "oneOf", "allOf"].iter().any(|union_key| {
-        obj.get(*union_key)
-            .and_then(Value::as_array)
-            .is_some_and(|branches| branches.iter().any(|b| schema_accepts_kind(b, kind)))
-    })
-}
-
-/// Recursively parse JSON-encoded strings where the schema expects array/object.
-///
-/// Schema-guided: a string is only parsed when its schema position expects a
-/// container, so legitimate JSON-looking `type: string` fields survive.
-/// `None` means nothing changed.
-fn normalize_json_strings(value: &Value, schema: &Value) -> Option<Value> {
-    if !schema.is_object() {
-        return None;
+    // A bare, non-array value where an array is declared. An explicit null is
+    // preserved: the tool's own default handling decides between "omit" and
+    // "empty list".
+    if wants_array && !value.is_null() && !value.is_array() {
+        tracing::debug!(property = path, "wrapped bare tool arg in a list");
+        let item = schema
+            .get("items")
+            .and_then(|items| coerce_at(value, items, path))
+            .unwrap_or_else(|| value.clone());
+        return Some(Value::Array(vec![item]));
     }
 
-    let mut current = None;
-    if let Value::String(s) = value {
-        let trimmed = s.trim();
-        let expects_array = schema_accepts_kind(schema, "array");
-        let expects_object = schema_accepts_kind(schema, "object");
-        let plausible = (expects_array && trimmed.starts_with('['))
-            || (expects_object && trimmed.starts_with('{'));
-        if !plausible {
-            return None;
-        }
-        let parsed: Value = serde_json::from_str(trimmed).ok()?;
-        let matches =
-            (parsed.is_array() && expects_array) || (parsed.is_object() && expects_object);
-        if !matches {
-            return None;
-        }
-        current = Some(parsed);
-    }
-
-    let target = current.as_ref().unwrap_or(value);
-    let deeper = match target {
+    // Native containers: repair each position against its own schema.
+    match value {
         Value::Array(items) => {
             let item_schema = schema.get("items")?;
             let mut changed = false;
             let out: Vec<Value> = items
                 .iter()
-                .map(|item| match normalize_json_strings(item, item_schema) {
+                .map(|item| match coerce_at(item, item_schema, path) {
                     Some(fixed) => {
                         changed = true;
                         fixed
@@ -151,10 +111,10 @@ fn normalize_json_strings(value: &Value, schema: &Value) -> Option<Value> {
             let props = schema.get("properties").and_then(Value::as_object)?;
             let mut out = fields.clone();
             let mut changed = false;
-            for (k, prop_schema) in props {
-                if let Some(field) = fields.get(k) {
-                    if let Some(fixed) = normalize_json_strings(field, prop_schema) {
-                        out.insert(k.clone(), fixed);
+            for (name, prop_schema) in props {
+                if let Some(field) = fields.get(name) {
+                    if let Some(fixed) = coerce_at(field, prop_schema, name) {
+                        out.insert(name.clone(), fixed);
                         changed = true;
                     }
                 }
@@ -162,52 +122,63 @@ fn normalize_json_strings(value: &Value, schema: &Value) -> Option<Value> {
             changed.then_some(Value::Object(out))
         }
         _ => None,
-    };
-
-    deeper.or(current)
+    }
 }
 
-/// Coerce string `s` to `expected` (a name or a union list); `None` on failure.
-fn coerce_value(s: &str, expected: Option<&Value>, schema: &Value) -> Option<Value> {
-    if schema_allows_null(schema) && s.trim().eq_ignore_ascii_case("null") {
-        return Some(Value::Null);
+/// Every JSON type name the schema permits, following `anyOf`/`oneOf`/`allOf`.
+fn accepted_types(schema: &Value) -> Vec<&str> {
+    let mut out = type_names(schema.get("type"));
+    for union_key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = schema.get(union_key).and_then(Value::as_array) {
+            for branch in branches {
+                out.extend(accepted_types(branch));
+            }
+        }
     }
-    type_names(expected).into_iter().find_map(|t| match t {
+    out
+}
+
+/// The JSON type names a `type` entry declares (`"x"` or `["x", "y"]`).
+fn type_names(expected: Option<&Value>) -> Vec<&str> {
+    match expected {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// True when the schema explicitly permits null, via `type`, a union branch, or
+/// the OpenAPI-style `nullable` flag.
+fn allows_null(schema: &Value, accepted: &[&str]) -> bool {
+    accepted.contains(&"null") || schema.get("nullable") == Some(&Value::Bool(true))
+}
+
+/// Parse a JSON-encoded container when the schema expects one at this position.
+///
+/// Schema-guided, so a legitimately JSON-looking `type: string` value is never
+/// parsed (that case returns earlier, before this is reached).
+fn parse_container(s: &str, accepted: &[&str]) -> Option<Value> {
+    let trimmed = s.trim();
+    let expects_array = accepted.contains(&"array");
+    let expects_object = accepted.contains(&"object");
+    let plausible =
+        (expects_array && trimmed.starts_with('[')) || (expects_object && trimmed.starts_with('{'));
+    if !plausible {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    ((parsed.is_array() && expects_array) || (parsed.is_object() && expects_object))
+        .then_some(parsed)
+}
+
+/// Coerce a string to the first scalar type the schema accepts it as.
+fn coerce_scalar(s: &str, accepted: &[&str]) -> Option<Value> {
+    accepted.iter().find_map(|t| match *t {
         "integer" => coerce_number(s, true),
         "number" => coerce_number(s, false),
         "boolean" => coerce_boolean(s),
-        "array" => coerce_json(s, Value::is_array),
-        "object" => coerce_json(s, Value::is_object),
         _ => None,
     })
-}
-
-/// True when a JSON Schema fragment explicitly permits null.
-fn schema_allows_null(schema: &Value) -> bool {
-    let Some(obj) = schema.as_object() else {
-        return false;
-    };
-    if type_names(obj.get("type")).contains(&"null") {
-        return true;
-    }
-    if obj.get("nullable") == Some(&Value::Bool(true)) {
-        return true;
-    }
-    ["anyOf", "oneOf"].iter().any(|union_key| {
-        obj.get(*union_key)
-            .and_then(Value::as_array)
-            .is_some_and(|variants| {
-                variants
-                    .iter()
-                    .any(|v| type_names(v.get("type")).contains(&"null"))
-            })
-    })
-}
-
-/// `serde_json::from_str` when the parsed value is the container kind wanted.
-fn coerce_json(s: &str, wanted: fn(&Value) -> bool) -> Option<Value> {
-    let parsed: Value = serde_json::from_str(s).ok()?;
-    wanted(&parsed).then_some(parsed)
 }
 
 /// Parse `s` as a number. Rejects non-finite values (not JSON-serializable)
@@ -341,8 +312,9 @@ mod tests {
 
     #[test]
     fn union_type_picks_first_unambiguous_branch() {
+        // No `string` branch, so "7" cannot have been meant as a string.
         let out = coerce(
-            json!({ "v": { "type": ["integer", "string"] } }),
+            json!({ "v": { "type": ["integer", "boolean"] } }),
             json!({ "v": "7" }),
         );
         assert_eq!(out, json!({ "v": 7 }));
@@ -372,7 +344,59 @@ mod tests {
         assert_eq!(out, json!({ "o": { "xs": [1, 2] } }));
     }
 
+    #[test]
+    fn coerces_scalar_string_inside_nested_object() {
+        let out = coerce(
+            json!({ "o": { "type": "object", "properties": { "n": { "type": "integer" } } } }),
+            json!({ "o": { "n": "42" } }),
+        );
+        assert_eq!(out, json!({ "o": { "n": 42 } }));
+    }
+
+    #[test]
+    fn coerces_scalar_string_inside_array_items() {
+        let out = coerce(
+            json!({ "xs": { "type": "array", "items": { "type": "integer" } } }),
+            json!({ "xs": ["42"] }),
+        );
+        assert_eq!(out, json!({ "xs": [42] }));
+    }
+
+    #[test]
+    fn coerces_scalar_string_two_levels_deep() {
+        let out = coerce(
+            json!({ "o": {
+                "type": "object",
+                "properties": { "inner": {
+                    "type": "object",
+                    "properties": { "flag": { "type": "boolean" } }
+                } }
+            } }),
+            json!({ "o": { "inner": { "flag": "true" } } }),
+        );
+        assert_eq!(out, json!({ "o": { "inner": { "flag": true } } }));
+    }
+
     // ---- regression guards: must NOT touch -----------------------------
+
+    #[test]
+    fn preserves_string_when_schema_also_permits_string() {
+        // "7" already satisfies `string`, so the intended type is ambiguous.
+        let out = coerce(
+            json!({ "v": { "type": ["integer", "string"] } }),
+            json!({ "v": "7" }),
+        );
+        assert_eq!(out, json!({ "v": "7" }));
+    }
+
+    #[test]
+    fn preserves_leading_zero_identifier_for_string_or_integer_union() {
+        let out = coerce(
+            json!({ "zip": { "type": ["string", "integer"] } }),
+            json!({ "zip": "07030" }),
+        );
+        assert_eq!(out, json!({ "zip": "07030" }));
+    }
 
     #[test]
     fn does_not_truncate_decimal_for_integer_schema() {
