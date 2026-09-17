@@ -185,7 +185,7 @@ mail-parser  = { version = "0.11",  optional = true }
 # TLS adapter for Tokio async streams (IMAP over TLS)
 tokio-rustls = { version = "0.26", optional = true }
 # Pure-Rust TLS implementation (shared with reqwest, but needs explicit dep for rustls API)
-rustls       = { version = "0.23", optional = true }
+rustls       = { version = "0.23.45", optional = true }
 # Mozilla TLS root certificates for rustls
 webpki-roots = { version = "1.0", optional = true }
 
