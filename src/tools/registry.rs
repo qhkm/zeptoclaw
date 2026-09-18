@@ -11,6 +11,7 @@ use tracing::{error, info};
 
 use crate::error::Result;
 use crate::providers::ToolDefinition;
+use crate::utils::tool_schema::sanitize_schema;
 
 use super::{Tool, ToolContext, ToolOutput};
 
@@ -228,7 +229,7 @@ impl ToolRegistry {
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                parameters: t.parameters(),
+                parameters: sanitize_schema(&t.parameters()),
             })
             .collect()
     }
@@ -247,7 +248,7 @@ impl ToolRegistry {
                 } else {
                     t.description().to_string()
                 },
-                parameters: t.parameters(),
+                parameters: sanitize_schema(&t.parameters()),
             })
             .collect()
     }
@@ -284,7 +285,7 @@ impl ToolRegistry {
             .map(|(_, t)| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                parameters: t.parameters(),
+                parameters: sanitize_schema(&t.parameters()),
             })
             .collect()
     }
@@ -388,6 +389,104 @@ mod tests {
     use super::*;
     use crate::tools::EchoTool;
     use serde_json::json;
+
+    /// A tool whose hand-written schema carries shapes strict backends reject:
+    /// a property key outside `^[a-zA-Z0-9_.-]{1,64}$` and a `type` array.
+    struct HostileSchemaTool;
+
+    #[async_trait::async_trait]
+    impl Tool for HostileSchemaTool {
+        fn name(&self) -> &str {
+            "hostile"
+        }
+        fn description(&self) -> &str {
+            "tool whose schema strict backends reject"
+        }
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": { "bad key!": { "type": ["string", "null"] } }
+            })
+        }
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+            Ok(ToolOutput::llm_only("ok"))
+        }
+    }
+
+    /// A tool with a bare object schema, the shape llama.cpp's grammar
+    /// converter rejects. MCP servers and plugins ship these.
+    struct BareObjectSchemaTool;
+
+    #[async_trait::async_trait]
+    impl Tool for BareObjectSchemaTool {
+        fn name(&self) -> &str {
+            "bare"
+        }
+        fn description(&self) -> &str {
+            "tool with a bare object schema"
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+            Ok(ToolOutput::llm_only("ok"))
+        }
+    }
+
+    fn hostile_registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(HostileSchemaTool));
+        registry
+    }
+
+    #[test]
+    fn definitions_sanitize_illegal_property_keys() {
+        let defs = hostile_registry().definitions();
+        let props = defs[0].parameters["properties"].as_object().unwrap();
+        assert!(
+            !props.contains_key("bad key!"),
+            "illegal key must be renamed: {props:?}"
+        );
+        assert!(props.contains_key("bad_key_"), "got {props:?}");
+    }
+
+    #[test]
+    fn definitions_collapse_type_arrays() {
+        let defs = hostile_registry().definitions();
+        let prop = &defs[0].parameters["properties"]["bad_key_"];
+        assert_eq!(prop["type"], json!("string"));
+        assert_eq!(prop["nullable"], json!(true));
+    }
+
+    #[test]
+    fn definitions_add_properties_to_bare_object_schema() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(BareObjectSchemaTool));
+        let defs = registry.definitions();
+        assert_eq!(defs[0].parameters["properties"], json!({}));
+    }
+
+    #[test]
+    fn definitions_with_options_sanitize_schemas() {
+        let defs = hostile_registry().definitions_with_options(true);
+        let props = defs[0].parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("bad_key_"), "got {props:?}");
+    }
+
+    #[test]
+    fn definitions_for_tools_sanitize_schemas() {
+        let defs = hostile_registry().definitions_for_tools(&["hostile"]);
+        let props = defs[0].parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("bad_key_"), "got {props:?}");
+    }
+
+    #[test]
+    fn definitions_leave_conforming_schemas_byte_identical() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool));
+        let defs = registry.definitions();
+        assert_eq!(defs[0].parameters, EchoTool.parameters());
+    }
 
     #[test]
     fn test_registry_new() {

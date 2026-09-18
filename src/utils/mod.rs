@@ -8,3 +8,4 @@ pub mod secure_fs;
 pub mod slo;
 pub mod string;
 pub mod telemetry;
+pub mod tool_schema;
