@@ -30,6 +30,7 @@ pub mod providers;
 pub mod routines;
 pub mod runtime;
 pub mod safety;
+pub mod spill;
 pub use agent::{CompactionStrategy, ContextMonitor};
 pub use config::CompactionConfig;
 pub use safety::taint::{TaintConfig, TaintEngine, TaintLabel, TaintViolation};
