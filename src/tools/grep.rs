@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::error::{Result, ZeptoError};
 use crate::security::validate_path_in_workspace;
 
-use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::output::spill_or_truncate;
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for searching file contents by pattern.
@@ -158,10 +158,8 @@ impl Tool for GrepTool {
             ));
         }
 
-        Ok(ToolOutput::llm_only(truncate_tool_output(
-            &result,
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
+        Ok(ToolOutput::llm_only(spill_or_truncate(
+            &result, "grep", ctx,
         )))
     }
 }

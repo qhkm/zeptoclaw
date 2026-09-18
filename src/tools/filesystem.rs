@@ -20,7 +20,7 @@ use crate::security::check_hardlink_write;
 use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
 use crate::tools::diff::apply_unified_diff;
 
-use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::output::spill_or_truncate;
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Resolve and validate a path relative to the workspace.
@@ -222,10 +222,10 @@ impl Tool for ReadFileTool {
             content
         };
 
-        Ok(ToolOutput::llm_only(truncate_tool_output(
+        Ok(ToolOutput::llm_only(spill_or_truncate(
             &sliced,
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
+            "read_file",
+            ctx,
         )))
     }
 }
@@ -400,10 +400,8 @@ impl Tool for ListDirTool {
 
         items.sort();
         let joined = items.join("\n");
-        Ok(ToolOutput::llm_only(truncate_tool_output(
-            &joined,
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
+        Ok(ToolOutput::llm_only(spill_or_truncate(
+            &joined, "list_dir", ctx,
         )))
     }
 }

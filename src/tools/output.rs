@@ -94,6 +94,33 @@ pub fn truncate_tool_output(output: &str, max_lines: usize, max_bytes: usize) ->
     result
 }
 
+use crate::spill::{format_with_locator, needs_spill, preview, SpillStore};
+use crate::tools::ToolContext;
+
+/// Spill oversized output and return a preview plus locator; otherwise
+/// truncate as before.
+///
+/// Falls back to [`truncate_tool_output`] whenever spill is unavailable or
+/// the write fails, so a broken spill backend never costs more than the
+/// previous behavior.
+pub fn spill_or_truncate(text: &str, tool: &str, ctx: &ToolContext) -> String {
+    let Some(settings) = ctx.spill.as_ref() else {
+        return truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    };
+    let cfg = &settings.config;
+    if !cfg.enabled || !needs_spill(text, cfg) {
+        return truncate_tool_output(text, cfg.max_inline_lines, cfg.max_inline_bytes);
+    }
+
+    match SpillStore::with_root(settings.root.clone()).write(tool, text, cfg) {
+        Ok(spilled) => format_with_locator(&preview(text, cfg), &spilled),
+        Err(e) => {
+            tracing::warn!(tool, error = %e, "spill write failed; truncating instead");
+            truncate_tool_output(text, cfg.max_inline_lines, cfg.max_inline_bytes)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +209,57 @@ mod tests {
             "Expected '12 bytes omitted' in: {}",
             result
         );
+    }
+
+    use crate::config::SpillConfig;
+    use crate::tools::SpillSettings;
+    use crate::tools::ToolContext;
+
+    fn spilling_ctx(dir: &tempfile::TempDir) -> ToolContext {
+        ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root: dir.path().to_path_buf(),
+                config: SpillConfig {
+                    max_inline_lines: 2,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn spill_or_truncate_without_settings_matches_truncate() {
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        let ctx = ToolContext::default();
+        assert_eq!(
+            spill_or_truncate(&body, "shell", &ctx),
+            truncate_tool_output(&body, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn spill_or_truncate_small_output_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = spill_or_truncate("a\n", "shell", &spilling_ctx(&dir));
+        assert_eq!(out, "a\n");
+    }
+
+    #[test]
+    fn spill_or_truncate_emits_locator_for_large_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+
+        let out = spill_or_truncate(&body, "shell", &spilling_ctx(&dir));
+
+        assert!(out.starts_with("line 1\nline 2\n"));
+        assert!(out.contains("read_file"));
+        let path = out
+            .split("saved to ")
+            .nth(1)
+            .and_then(|s| s.lines().next())
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path.trim()).unwrap(), body);
     }
 }

@@ -13,10 +13,8 @@ use crate::config::CustomToolDef;
 use crate::error::{Result, ZeptoError};
 use crate::security::ShellSecurityConfig;
 
+use super::output::spill_or_truncate;
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
-
-/// Maximum output bytes to capture from custom tool stdout (50KB).
-const MAX_OUTPUT_BYTES: usize = 50_000;
 
 /// Minimum timeout in seconds for custom tool execution.
 const MIN_TIMEOUT_SECS: u64 = 1;
@@ -249,20 +247,11 @@ impl Tool for CustomTool {
         };
 
         if output.status.success() {
-            let mut stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // Truncate oversized output to prevent blowing up the LLM context
-            if stdout.len() > MAX_OUTPUT_BYTES {
-                let mut end = MAX_OUTPUT_BYTES;
-                while !stdout.is_char_boundary(end) {
-                    end -= 1;
-                }
-                stdout.truncate(end);
-                stdout.push_str("\n... (output truncated)");
-            }
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             Ok(ToolOutput::llm_only(if stdout.is_empty() {
                 "(no output)".to_string()
             } else {
-                stdout
+                spill_or_truncate(&stdout, "custom", ctx)
             }))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -635,13 +624,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_output_truncated() {
-        // Generate output larger than MAX_OUTPUT_BYTES
-        let repeat = MAX_OUTPUT_BYTES + 1000;
+        use crate::tools::output::DEFAULT_MAX_BYTES;
+
+        // Generate output larger than DEFAULT_MAX_BYTES. test_ctx() has no
+        // spill settings, so this falls back to truncate_tool_output.
+        let repeat = DEFAULT_MAX_BYTES + 1000;
         let cmd = format!("printf '%0.s-' $(seq 1 {})", repeat);
         let tool = CustomTool::new(simple_def("test", &cmd));
         let result = tool.execute(json!({}), &test_ctx()).await.unwrap().for_llm;
-        assert!(result.contains("(output truncated)"));
-        // Output should be capped near MAX_OUTPUT_BYTES
-        assert!(result.len() <= MAX_OUTPUT_BYTES + 100);
+        assert!(result.contains("[output truncated"));
+        // Output should be capped near DEFAULT_MAX_BYTES
+        assert!(result.len() <= DEFAULT_MAX_BYTES + 100);
     }
 }
