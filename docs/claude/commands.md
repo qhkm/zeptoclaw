@@ -95,6 +95,19 @@ zeptoclaw gateway --containerized [docker|apple]
 zeptoclaw gateway --tunnel [cloudflare|ngrok|tailscale|auto]
 ```
 
+## Panel Password Login
+
+`POST /api/auth/login` allows five attempts per socket peer IP within a rolling
+60-second window. Successful logins and malformed requests also count. Further
+attempts receive HTTP 429 with `Retry-After: 60`; wait 60 seconds before retrying.
+Static API-token access remains available, and password login returns 404 when
+no password is configured.
+
+The limiter ignores forwarded IP headers. Clients behind the same reverse proxy
+share its bucket; use a trusted proxy's own rate limiter if individual client
+limits are needed. At most 1024 IPs are tracked; new IPs are rejected while all
+slots are active, and expired slots are reclaimed without resetting active limits.
+
 ## Release
 
 ```bash

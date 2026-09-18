@@ -94,7 +94,7 @@ Provider stack assembly in `create_agent()`: base providers → optional Fallbac
 - **Auth** (`src/auth/`): OAuth PKCE, CSRF, encrypted token store, Claude CLI credential import (Keychain/json)
 - **Deps** (`src/deps/`): `HasDependencies` trait, `DepKind` (Binary/Docker/Npm/Pip), registry at `~/.zeptoclaw/deps/registry.json`
 - **Health** (`src/health.rs`): `/health` (version, uptime, RSS, metrics, checks), `/ready`, raw TCP server
-- **API** (`src/api/`): axum, EventBus (broadcast), AppState, JWT + Bearer auth, CSRF, WebSocket streaming, TaskStore
+- **API** (`src/api/`): axum, EventBus (broadcast), AppState, JWT + Bearer auth, per-peer-IP password login limits (shared bounded `SlidingWindowRateLimiter`), CSRF, WebSocket streaming, TaskStore
 - **Session** (`src/session/`): `SessionManager`, `ConversationHistory` (fuzzy search), `repair.rs`
 - **Routines** (`src/routines/`): Trigger (Cron/Event/Webhook/Manual), `RoutineStore`, `RoutineEngine` with regex cache
 - **R8r Bridge** (`src/r8r_bridge/`): WebSocket bridge for r8r workflow approvals, health pings, event deduplication

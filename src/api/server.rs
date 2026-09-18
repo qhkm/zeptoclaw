@@ -2,13 +2,16 @@
 
 use crate::api::config::PanelConfig;
 use crate::api::events::EventBus;
+use crate::gateway::SlidingWindowRateLimiter;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, Method};
 use axum::middleware as axum_mw;
 use axum::routing::{get, post, put};
 use axum::{extract::State, Json, Router};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Shared state for all API handlers.
@@ -24,6 +27,8 @@ pub struct AppState {
     /// password for a short-lived HS256 JWT.  When `None`, the login endpoint
     /// returns 404 and callers must use the static `api_token` directly.
     pub password_hash: Option<String>,
+    /// Bounded per-peer-IP limiter for password login attempts.
+    pub login_rate_limiter: Arc<SlidingWindowRateLimiter>,
     /// Secret used to sign and verify HS256 JWTs.
     ///
     /// Generated randomly at startup via `uuid::Uuid::new_v4()` so it rotates
@@ -58,12 +63,22 @@ pub struct AppState {
 impl AppState {
     /// Maximum number of concurrent WebSocket connections.
     pub const MAX_WS_CONNECTIONS: usize = 5;
+    /// Allowed password login attempts per IP within the sliding window.
+    pub const LOGIN_ATTEMPTS: u32 = 5;
+    /// Password login sliding window and conservative retry delay.
+    pub const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+    /// Maximum number of IP addresses tracked by the login limiter.
+    pub const MAX_LOGIN_IPS: usize = 1024;
 
     pub fn new(api_token: String, event_bus: EventBus) -> Self {
         Self {
             api_token,
             event_bus,
             password_hash: None,
+            login_rate_limiter: Arc::new(
+                SlidingWindowRateLimiter::new(Self::LOGIN_ATTEMPTS, Self::LOGIN_WINDOW)
+                    .with_max_entries(Self::MAX_LOGIN_IPS),
+            ),
             jwt_secret: uuid::Uuid::new_v4().to_string(),
             ws_semaphore: Arc::new(tokio::sync::Semaphore::new(Self::MAX_WS_CONNECTIONS)),
             ws_tickets: Arc::new(crate::api::auth::WsTicketStore::default()),
@@ -92,6 +107,8 @@ async fn csrf_token_handler(State(state): State<Arc<AppState>>) -> Json<serde_js
 ///
 /// `cors_origin` is the `http://{bind}:{port}` origin of the panel frontend.
 /// When `None`, defaults to `http://localhost:9092`.
+/// Password login requires `ConnectInfo<SocketAddr>` on requests; serve with
+/// `into_make_service_with_connect_info::<SocketAddr>()` to supply peer IPs.
 pub fn build_router(
     state: AppState,
     static_dir: Option<PathBuf>,
@@ -121,7 +138,13 @@ pub fn build_router(
 
     let api = Router::new()
         // Auth
-        .route("/api/auth/login", post(super::routes::auth::login))
+        .route(
+            "/api/auth/login",
+            post(super::routes::auth::login).layer(axum_mw::from_fn_with_state(
+                shared_state.clone(),
+                super::middleware::login_rate_limit,
+            )),
+        )
         .route(
             "/api/auth/ws-ticket",
             post(super::routes::auth::issue_ws_ticket),
@@ -218,7 +241,11 @@ pub async fn start_server(
     let addr = format!("{}:{}", config.bind, config.api_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Panel API server listening on {addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

@@ -45,6 +45,7 @@ Project-level guidance for coding agents working in this repository.
 - Filesystem hardening: filesystem write/edit tools now create parent directories one component at a time inside the workspace and use secure no-follow writes; mount validation rejects Unix regular-file mounts with multiple hard links in both blocked-path and allowlist flows; safety pre-scan keeps full path scanning while scanning file bodies with a narrow `shell_injection` carve-out instead of skipping content wholesale
 - Secret storage hardening: config and panel token writes use user-only permissions on Unix (0600 files and 0700 ZeptoClaw directories) and repair permissions left by older versions
 - Panel auth hardening: static bearer tokens use constant-time comparison, WebSocket connections exchange them for bounded 30-second single-use tickets, and CLI output points to the token file instead of printing the secret
+- Panel password login: five attempts per socket peer IP in a rolling 60-second window, enforced before JSON parsing/bcrypt; excess attempts return 429 with `Retry-After: 60`. Tracking is capped at 1024 IPs without evicting active buckets; forwarded headers are ignored, so proxy clients share a bucket. Static-token access and disabled password login are unaffected.
 - Safer default execution posture: fresh configs now start in `agent_mode = "assistant"` with approvals enabled under the `require_for_dangerous` policy
 - Gateway startup guard: degrade after N crashes to prevent crash loops
 - Loop guard: SHA256 tool-call repetition detection with warn + circuit-breaker stop
@@ -65,7 +66,7 @@ Project-level guidance for coding agents working in this repository.
 - Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
-- Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib` (3531 passed, 6 skipped), and `cargo test --doc` (128 passed, 27 ignored)
+- Tests: current local validation passes `cargo fmt -- --check`, clippy with `-D warnings` for default and `panel` builds, and library nextest runs (3589 default / 3797 with `panel` passed, 6 skipped each); `CARGO_INCREMENTAL=0 cargo test --doc` passes 128 examples with 27 ignored (incremental compilation disabled after macOS linker cache errors)
 
 ## Task Tracking Protocol
 
