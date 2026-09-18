@@ -251,7 +251,7 @@ impl Tool for CustomTool {
             Ok(ToolOutput::llm_only(if stdout.is_empty() {
                 "(no output)".to_string()
             } else {
-                spill_or_truncate(&stdout, "custom", ctx)
+                spill_or_truncate(&stdout, self.name(), ctx)
             }))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

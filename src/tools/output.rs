@@ -262,4 +262,38 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(path.trim()).unwrap(), body);
     }
+
+    #[test]
+    fn spill_or_truncate_falls_back_to_truncate_when_spill_write_fails() {
+        // Point `root` at a path nested under a regular file, so
+        // `ensure_private_dir`'s `create_dir_all` can never succeed —
+        // exercising the write-failure fallback without touching the
+        // filesystem's actual error surface (permissions, disk space, etc).
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("a-file");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let root = blocker.join("sub");
+
+        let cfg = SpillConfig {
+            max_inline_lines: 2,
+            ..Default::default()
+        };
+        let ctx = ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root,
+                config: cfg.clone(),
+            }),
+            ..Default::default()
+        };
+
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        let out = spill_or_truncate(&body, "shell", &ctx);
+
+        assert_eq!(
+            out,
+            truncate_tool_output(&body, cfg.max_inline_lines, cfg.max_inline_bytes)
+        );
+        assert!(!out.contains("saved to"));
+    }
 }
