@@ -201,20 +201,22 @@ impl ConversationHistory {
     ///
     /// # Returns
     ///
-    /// The number of conversations deleted.
+    /// The session keys of the conversations deleted, so callers can clean
+    /// up other session-scoped state (e.g. spill directories) that this
+    /// module doesn't know about.
     ///
     /// # Errors
     ///
     /// Returns an error if listing or deleting session files fails.
-    pub fn cleanup_old(&self, keep_count: usize) -> Result<usize> {
+    pub fn cleanup_old(&self, keep_count: usize) -> Result<Vec<String>> {
         let conversations = self.list_conversations()?;
 
         if conversations.len() <= keep_count {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let to_delete = &conversations[keep_count..];
-        let mut deleted = 0;
+        let mut deleted = Vec::new();
 
         for entry in to_delete {
             let sanitized = Self::sanitize_key(&entry.session_key);
@@ -227,7 +229,7 @@ impl ConversationHistory {
                         e
                     ))
                 })?;
-                deleted += 1;
+                deleted.push(entry.session_key.clone());
             }
         }
 
@@ -555,7 +557,7 @@ mod tests {
 
         // Cleanup, keeping only the 2 newest
         let deleted = history.cleanup_old(2).unwrap();
-        assert_eq!(deleted, 3);
+        assert_eq!(deleted.len(), 3);
 
         // Verify only 2 remain (the newest ones)
         let remaining = history.list_conversations().unwrap();
@@ -585,7 +587,7 @@ mod tests {
 
         // keep_count >= total conversations, nothing deleted
         let deleted = history.cleanup_old(5).unwrap();
-        assert_eq!(deleted, 0);
+        assert_eq!(deleted.len(), 0);
         assert_eq!(history.list_conversations().unwrap().len(), 2);
     }
 }

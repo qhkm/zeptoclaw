@@ -38,6 +38,19 @@ impl SpillStore {
             .join("spill")
     }
 
+    /// Remove a spill directory and everything in it. Missing is not an error.
+    pub fn remove_root(root: &Path) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(root) {
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Remove the spill directory belonging to a session.
+    pub fn remove_session(session_id: &str) -> std::io::Result<()> {
+        Self::remove_root(&Self::session_root(session_id))
+    }
+
     /// Persist `text` and return its locator. Enforces retention afterwards.
     ///
     /// `tool` is sanitized before it becomes part of the filename: MCP and
@@ -428,5 +441,18 @@ mod tests {
             "sanitized name must not contain a separator"
         );
         assert!(!name.contains(".."), "sanitized name must not contain '..'");
+    }
+
+    #[test]
+    fn remove_session_deletes_the_spill_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("spill");
+        let s = SpillStore::with_root(root.clone());
+        s.write("shell", "a\n", &SpillConfig::default()).unwrap();
+        assert!(root.exists());
+
+        SpillStore::remove_root(&root).unwrap();
+
+        assert!(!root.exists());
     }
 }
