@@ -284,9 +284,7 @@ mod tests {
     fn test_ctx() -> ToolContext {
         ToolContext {
             workspace: Some(std::env::temp_dir().to_string_lossy().to_string()),
-            channel: None,
-            chat_id: None,
-            is_batch: false,
+            ..Default::default()
         }
     }
 
