@@ -372,6 +372,31 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PANEL_BIND") {
             self.panel.bind = val;
         }
+
+        // Spill
+        if let Ok(v) = std::env::var("ZEPTOCLAW_SPILL_ENABLED") {
+            self.spill.enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_SPILL_MAX_INLINE_BYTES") {
+            if let Ok(n) = v.parse() {
+                self.spill.max_inline_bytes = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_SPILL_MAX_INLINE_LINES") {
+            if let Ok(n) = v.parse() {
+                self.spill.max_inline_lines = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_SPILL_SESSION_MAX_BYTES") {
+            if let Ok(n) = v.parse() {
+                self.spill.session_max_bytes = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ZEPTOCLAW_SPILL_MAX_FILES_PER_SESSION") {
+            if let Ok(n) = v.parse() {
+                self.spill.max_files_per_session = n;
+            }
+        }
     }
 
     /// Apply provider-specific environment variable overrides
