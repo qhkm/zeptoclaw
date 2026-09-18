@@ -103,8 +103,9 @@ pub async fn issue_ws_ticket(State(state): State<Arc<AppState>>) -> axum::respon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{auth as panel_auth, events::EventBus};
-    use axum::{body::Body, http::Request, routing::post, Router};
+    use crate::api::{auth as panel_auth, events::EventBus, server::build_router};
+    use axum::{body::Body, extract::ConnectInfo, http::Request, routing::post, Router};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use tower::util::ServiceExt;
 
@@ -122,9 +123,19 @@ mod tests {
     }
 
     fn make_app(state: Arc<AppState>) -> Router {
-        Router::new()
-            .route("/api/auth/login", post(login))
-            .with_state(state)
+        build_router((*state).clone(), None, None)
+    }
+
+    fn login_request(peer: SocketAddr, password: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(peer))
+            .body(Body::from(
+                serde_json::json!({ "password": password }).to_string(),
+            ))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -136,6 +147,7 @@ mod tests {
             .method("POST")
             .uri("/api/auth/login")
             .header("content-type", "application/json")
+            .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))))
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -163,6 +175,7 @@ mod tests {
             .method("POST")
             .uri("/api/auth/login")
             .header("content-type", "application/json")
+            .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))))
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -182,6 +195,117 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_login_limit_uses_peer_ip_and_preserves_static_auth() {
+        let state = make_state_with_password("hunter2");
+        let app = make_app(state);
+        for attempt in 0..AppState::LOGIN_ATTEMPTS {
+            let peer = SocketAddr::from(([127, 0, 0, 1], 4000 + attempt as u16));
+            let mut req = login_request(peer, "wrong");
+            let spoofed_ip = format!("198.51.100.{}", attempt + 1);
+            req.headers_mut()
+                .insert("x-forwarded-for", spoofed_ip.parse().unwrap());
+            req.headers_mut()
+                .insert("x-real-ip", spoofed_ip.parse().unwrap());
+            req.headers_mut()
+                .insert("forwarded", format!("for={spoofed_ip}").parse().unwrap());
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let req = login_request(SocketAddr::from(([127, 0, 0, 1], 5000)), "hunter2");
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "60");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+
+        let req = login_request(SocketAddr::from(([127, 0, 0, 2], 5000)), "hunter2");
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for (token, expected) in [
+            ("tok", StatusCode::OK),
+            ("invalid", StatusCode::UNAUTHORIZED),
+        ] {
+            let req = Request::builder()
+                .uri("/api/channels")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_successful_logins_consume_attempts() {
+        let mut state = AppState::new("tok".into(), EventBus::new(8));
+        state.password_hash = Some(bcrypt::hash("hunter2", 4).unwrap());
+        let app = make_app(Arc::new(state));
+        for attempt in 0..=AppState::LOGIN_ATTEMPTS {
+            let req = login_request(SocketAddr::from(([127, 0, 0, 1], 4000)), "hunter2");
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let expected = if attempt < AppState::LOGIN_ATTEMPTS {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            assert_eq!(resp.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_malformed_login_is_limited_before_body_parsing() {
+        let mut state = AppState::new("tok".into(), EventBus::new(8));
+        state.password_hash = Some("unused".into());
+        let app = make_app(Arc::new(state));
+        for attempt in 0..=AppState::LOGIN_ATTEMPTS {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))))
+                .body(Body::from("not json"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let expected = if attempt < AppState::LOGIN_ATTEMPTS {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            assert_eq!(resp.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_password_login_without_peer_fails_closed() {
+        let mut state = AppState::new("tok".into(), EventBus::new(8));
+        state.password_hash = Some("unused".into());
+        let app = make_app(Arc::new(state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_disabled_login_remains_not_found_without_peer() {
+        let app = make_app(make_state_no_password());
+        for _ in 0..=AppState::LOGIN_ATTEMPTS {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"password":"anything"}"#))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

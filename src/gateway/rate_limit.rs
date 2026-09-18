@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 pub struct SlidingWindowRateLimiter {
     limit: u32,
     window: Duration,
+    max_entries: usize,
     entries: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
 }
 
@@ -15,8 +16,15 @@ impl SlidingWindowRateLimiter {
         Self {
             limit,
             window,
+            max_entries: usize::MAX,
             entries: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Bound tracked IPs, rejecting new IPs while all slots are active.
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     /// Returns true if the request is allowed, false if rate-limited.
@@ -29,6 +37,18 @@ impl SlidingWindowRateLimiter {
         let now = Instant::now();
         let cutoff = now - self.window;
         let mut entries = self.entries.lock().unwrap();
+
+        if !entries.contains_key(&ip) && entries.len() >= self.max_entries {
+            entries.retain(|_, timestamps| {
+                while timestamps.front().is_some_and(|&t| t <= cutoff) {
+                    timestamps.pop_front();
+                }
+                !timestamps.is_empty()
+            });
+            if entries.len() >= self.max_entries {
+                return false;
+            }
+        }
 
         let timestamps = entries.entry(ip).or_default();
 
@@ -164,5 +184,29 @@ mod tests {
         assert!(grl.check_webhook(localhost()));
         assert!(grl.check_webhook(localhost()));
         assert!(!grl.check_webhook(localhost())); // webhook limit = 2
+    }
+
+    #[test]
+    fn test_entry_cap_preserves_active_limits() {
+        let limiter = SlidingWindowRateLimiter::new(2, Duration::from_secs(60)).with_max_entries(1);
+        assert!(limiter.check(localhost()));
+        assert!(!limiter.check(other_ip()));
+        assert!(limiter.check(localhost()));
+        assert!(!limiter.check(localhost()));
+        assert_eq!(limiter.entry_count(), 1);
+    }
+
+    #[test]
+    fn test_entry_cap_reclaims_expired_ips() {
+        let window = Duration::from_secs(60);
+        let limiter = SlidingWindowRateLimiter::new(1, window).with_max_entries(1);
+        assert!(limiter.check(localhost()));
+        limiter.entries.lock().unwrap().insert(
+            localhost(),
+            VecDeque::from([Instant::now() - window - Duration::from_secs(1)]),
+        );
+        assert!(limiter.check(other_ip()));
+        assert!(!limiter.check(other_ip()));
+        assert_eq!(limiter.entry_count(), 1);
     }
 }

@@ -56,7 +56,7 @@ cargo fmt && cargo clippy -- -D warnings && cargo nextest run --lib && cargo tes
 ```
 src/
 ├── agent/       # Agent loop, context builder, token budget, compaction
-├── api/         # Panel API, one-time WebSocket auth tickets, and OpenAI-compatible routes (axum)
+├── api/         # Panel API, rate-limited password login, one-time WebSocket auth tickets, OpenAI-compatible routes (axum)
 ├── auth/        # OAuth (PKCE), token refresh, Claude CLI import
 ├── bus/         # Async message bus
 ├── channels/    # Telegram, Slack, Discord, Webhook, WhatsApp Web/Cloud, Lark, Email, Serial, ACP; MQTT parked
@@ -92,6 +92,7 @@ For detailed module docs see `docs/claude/architecture.md`.
 - Embedded `ZeptoAgent` tool calls use the same `kernel::execute_tool()` path as the main agent loop and MCP server, so safety scanning, taint checks, and tool metrics stay aligned across entry points.
 - Embedded `ZeptoAgent` also supports per-tool timeout, panic capture, and configurable approval gating via the builder for safer embedded coding-agent execution.
 - The `panel` CLI namespace is always parsed, but panel-backed behavior still requires the optional Cargo `panel` feature; feature-disabled builds now fail with explicit build/install guidance instead of a Clap unknown-subcommand error.
+- Panel password login uses the shared `SlidingWindowRateLimiter` before JSON parsing and bcrypt: five attempts per socket peer IP per rolling 60 seconds, with 429 and `Retry-After: 60` after exhaustion. It tracks at most 1024 IPs, rejecting new IPs at capacity until expired slots can be reclaimed. Forwarded headers are ignored; reverse-proxy clients share the proxy's bucket. `start_server()` supplies `ConnectInfo<SocketAddr>` automatically; embedded password-login routers must serve with `into_make_service_with_connect_info::<SocketAddr>()` or login fails closed with 500. Static-token access remains independent.
 - Model-driven provider inference treats vendor-prefixed gateway IDs like `anthropic/...` as OpenRouter models only when OpenRouter is actually available, and live provider model discovery now carries `api-version` while normalizing Azure deployment bases to `/openai/models`.
 - The OpenAI-compatible `/v1/chat/completions` serve path forwards request tools, returns OpenAI-style tool-call payloads for assistant/tool messages, and the default provider streaming adapter now emits a text delta plus tool-call events before `Done` so non-native streaming providers are not silently flattened.
 - Telegram gateway responses support opt-in cumulative streaming (`channels.telegram.streaming`): the agent loop rate-limits outbound stream phases, Telegram progressively edits UTF-16-safe previews, preserves replies/forum topics, and falls back to a fresh final HTML message after preview failures.
@@ -133,6 +134,6 @@ cargo nextest run --test cli_smoke | e2e | integration
 cargo nextest run test_name                # Specific test
 ```
 
-Current validation: `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo nextest run --lib`, and `cargo test --doc` pass.
+Current validation: `cargo fmt -- --check`, `cargo clippy -- -D warnings` (default and `--features panel`), and `cargo nextest run --lib` pass (3589 default / 3797 with `panel`, 6 skipped each). `CARGO_INCREMENTAL=0 cargo test --doc` passes 128 examples with 27 ignored; incremental compilation was disabled after macOS linker cache errors.
 
 For smoke checklist and benchmarks see `docs/claude/testing.md`.

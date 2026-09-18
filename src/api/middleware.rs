@@ -10,12 +10,13 @@
 //! exempt because it runs before the caller has a token.
 
 use axum::{
-    extract::State,
-    http::{Request, StatusCode},
+    extract::{ConnectInfo, State},
+    http::{header, Method, Request, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use ring::hmac;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -91,6 +92,40 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Auth middleware
 // ---------------------------------------------------------------------------
+
+/// Limit password login before body parsing and bcrypt verification.
+/// Only the socket peer IP is trusted; forwarded headers cannot reset a bucket.
+pub async fn login_rate_limit(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != Method::POST || state.password_hash.is_none() {
+        return next.run(request).await;
+    }
+
+    let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+        tracing::error!("Panel password login is missing connection peer information");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    if !state.login_rate_limiter.check(peer.ip()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (
+                    header::RETRY_AFTER,
+                    AppState::LOGIN_WINDOW.as_secs().to_string(),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            "Too many login attempts",
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
 
 /// Middleware that checks for `Authorization: Bearer <token>` header.
 ///
