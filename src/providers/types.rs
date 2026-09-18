@@ -155,6 +155,23 @@ pub trait LLMProvider: Send + Sync {
     }
 }
 
+/// How much thinking a reasoning model should spend before answering.
+///
+/// Sent as `reasoning_effort` by OpenAI-compatible endpoints. Providers that
+/// do not understand it omit it entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Least thinking; fastest and cheapest.
+    Minimal,
+    /// Light thinking.
+    Low,
+    /// Balanced thinking.
+    Medium,
+    /// Most thinking; slowest and most expensive.
+    High,
+}
+
 /// Options for chat completion requests.
 ///
 /// Use the builder pattern to construct options.
@@ -170,6 +187,8 @@ pub struct ChatOptions {
     pub stop: Option<Vec<String>>,
     /// Output format (text, JSON, or JSON schema)
     pub output_format: OutputFormat,
+    /// Thinking budget for reasoning models; omitted when `None`.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ChatOptions {
@@ -184,6 +203,20 @@ impl ChatOptions {
     /// ```
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the thinking budget for reasoning models.
+    ///
+    /// # Example
+    /// ```
+    /// use zeptoclaw::providers::{ChatOptions, ReasoningEffort};
+    ///
+    /// let options = ChatOptions::new().with_reasoning_effort(ReasoningEffort::Low);
+    /// assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Low));
+    /// ```
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
     }
 
     /// Set the maximum number of tokens to generate.

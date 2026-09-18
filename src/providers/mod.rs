@@ -81,7 +81,8 @@ pub use retry::RetryProvider;
 pub use rotation::{RotationProvider, RotationStrategy};
 pub use structured::{validate_json_response, OutputFormat};
 pub use types::{
-    ChatOptions, LLMProvider, LLMResponse, LLMToolCall, StreamEvent, ToolDefinition, Usage,
+    ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ReasoningEffort, StreamEvent,
+    ToolDefinition, Usage,
 };
 #[cfg(feature = "provider-vertex")]
 pub use vertex::VertexProvider;

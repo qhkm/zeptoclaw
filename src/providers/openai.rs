@@ -31,13 +31,14 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{Result, ZeptoError};
 use crate::session::{ContentPart, ImageSource, Message, Role};
 
 use super::{
-    parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ToolDefinition, Usage,
+    parse_provider_error, ChatOptions, LLMProvider, LLMResponse, LLMToolCall, ReasoningEffort,
+    ToolDefinition, Usage,
 };
 
 /// The OpenAI API endpoint URL.
@@ -70,6 +71,9 @@ struct OpenAIRequest {
     /// Maximum completion tokens for newer OpenAI reasoning models
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u32>,
+    /// Thinking budget for reasoning models
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
     /// Temperature for sampling
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -195,6 +199,10 @@ struct OpenAIResponse {
 struct OpenAIChoice {
     /// The message content
     message: OpenAIResponseMessage,
+    /// Why generation stopped ("stop", "length", "tool_calls", ...).
+    /// `length` on an empty message means the budget went to reasoning.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 /// A message in the response.
@@ -202,6 +210,10 @@ struct OpenAIChoice {
 struct OpenAIResponseMessage {
     /// Text content (may be null if tool_calls present)
     content: Option<String>,
+    /// Reasoning-model chain of thought. Served by DeepSeek, Qwen, and
+    /// LiteLLM/Ollama fronting them; absent from the OpenAI spec itself.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     /// Tool calls made by the model
     tool_calls: Option<Vec<OpenAIToolCallResponse>>,
 }
@@ -249,6 +261,9 @@ struct OpenAIStreamDelta {
     /// Incremental text content
     #[serde(default)]
     content: Option<String>,
+    /// Incremental reasoning-model chain of thought
+    #[serde(default)]
+    reasoning_content: Option<String>,
     /// Incremental tool call fragments
     #[serde(default)]
     tool_calls: Option<Vec<OpenAIStreamToolCallDelta>>,
@@ -608,14 +623,54 @@ fn convert_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAITool> {
         .collect()
 }
 
+/// Pick the assistant text, falling back to a reasoning model's chain of thought.
+///
+/// Reasoning models served over OpenAI-compatible endpoints (DeepSeek, Qwen,
+/// and LiteLLM/Ollama fronting them) put their thinking in `reasoning_content`
+/// and may leave `content` null — commonly when the token budget ran out before
+/// the answer. Returning the thinking beats returning nothing, and the warning
+/// names the cause so an empty reply is never silent.
+///
+/// A tool-call turn legitimately has empty content, so reasoning is never
+/// substituted there: doing so would put the chain of thought in the transcript
+/// as assistant text.
+fn resolve_assistant_text(
+    content: String,
+    reasoning: Option<String>,
+    tool_calls: &[LLMToolCall],
+    finish_reason: Option<&str>,
+) -> String {
+    if !content.trim().is_empty() || !tool_calls.is_empty() {
+        return content;
+    }
+
+    match reasoning.filter(|r| !r.trim().is_empty()) {
+        Some(reasoning) => {
+            warn!(
+                finish_reason = finish_reason.unwrap_or("unknown"),
+                "model returned only reasoning_content; using it as the reply. \
+                 Raise max_tokens so the model can answer after thinking."
+            );
+            reasoning
+        }
+        None => {
+            warn!(
+                finish_reason = finish_reason.unwrap_or("unknown"),
+                "model returned no content, no reasoning, and no tool calls"
+            );
+            content
+        }
+    }
+}
+
 /// Convert OpenAI API response to ZeptoClaw LLMResponse.
 fn convert_response(response: OpenAIResponse) -> LLMResponse {
     let choice = response.choices.into_iter().next();
 
     let (content, tool_calls) = match choice {
         Some(c) => {
-            let content = c.message.content.unwrap_or_default();
-            let tool_calls = c
+            let finish_reason = c.finish_reason;
+            let tool_calls: Vec<LLMToolCall> = c
                 .message
                 .tool_calls
                 .map(|tcs| {
@@ -626,6 +681,12 @@ fn convert_response(response: OpenAIResponse) -> LLMResponse {
                         .collect()
                 })
                 .unwrap_or_default();
+            let content = resolve_assistant_text(
+                c.message.content.unwrap_or_default(),
+                c.message.reasoning_content,
+                &tool_calls,
+                finish_reason.as_deref(),
+            );
             (content, tool_calls)
         }
         None => (String::new(), Vec::new()),
@@ -668,6 +729,7 @@ fn build_request(
         },
         max_tokens,
         max_completion_tokens,
+        reasoning_effort: options.reasoning_effort,
         temperature: options.temperature,
         top_p: options.top_p,
         stop: options.stop.clone(),
@@ -679,6 +741,7 @@ fn build_request(
 fn apply_stream_chunk(
     chunk: OpenAIStreamChunk,
     assembled_content: &mut String,
+    assembled_reasoning: &mut String,
     pending_tool_calls: &mut Vec<PendingToolCall>,
     usage: &mut Option<Usage>,
 ) -> Vec<String> {
@@ -695,6 +758,13 @@ fn apply_stream_chunk(
         if let Some(content) = choice.delta.content {
             assembled_content.push_str(&content);
             deltas.push(content);
+        }
+
+        // Accumulated but never pushed to `deltas`: the chain of thought is
+        // kept only as a fallback for a model that never emits real content,
+        // so it is not streamed to the user as if it were the reply.
+        if let Some(reasoning) = choice.delta.reasoning_content {
+            assembled_reasoning.push_str(&reasoning);
         }
 
         if let Some(tool_call_deltas) = choice.delta.tool_calls {
@@ -885,6 +955,7 @@ impl LLMProvider for OpenAIProvider {
 
                 tokio::spawn(async move {
                     let mut assembled_content = String::new();
+                    let mut assembled_reasoning = String::new();
                     let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
                     let mut usage: Option<Usage> = None;
                     let mut line_buffer = String::new();
@@ -938,6 +1009,7 @@ impl LLMProvider for OpenAIProvider {
                             let deltas = apply_stream_chunk(
                                 stream_chunk,
                                 &mut assembled_content,
+                                &mut assembled_reasoning,
                                 &mut pending_tool_calls,
                                 &mut usage,
                             );
@@ -955,16 +1027,22 @@ impl LLMProvider for OpenAIProvider {
                     }
 
                     let tool_calls = finalize_tool_calls(pending_tool_calls);
+                    let streamed_tool_calls = tool_calls.clone();
                     if !tool_calls.is_empty() {
                         let _ = tx.send(StreamEvent::ToolCalls(tool_calls)).await;
                     }
 
-                    let _ = tx
-                        .send(StreamEvent::Done {
-                            content: assembled_content,
-                            usage,
-                        })
-                        .await;
+                    // Same fallback as the non-streaming path: a reasoning model
+                    // that spent its budget thinking would otherwise end the
+                    // stream with an empty reply and no explanation.
+                    let content = resolve_assistant_text(
+                        assembled_content,
+                        Some(assembled_reasoning),
+                        &streamed_tool_calls,
+                        None,
+                    );
+
+                    let _ = tx.send(StreamEvent::Done { content, usage }).await;
                 });
 
                 return Ok(rx);
@@ -1312,11 +1390,200 @@ mod tests {
         assert_eq!(converted[0].function.description, "Search the web");
     }
 
+    // ---- reasoning models -------------------------------------------
+
+    #[test]
+    fn apply_stream_chunk_accumulates_reasoning_content() {
+        let chunk: OpenAIStreamChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":null,"reasoning_content":"thinking"}}]}"#,
+        )
+        .unwrap();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut pending = Vec::new();
+        let mut usage = None;
+
+        apply_stream_chunk(
+            chunk,
+            &mut content,
+            &mut reasoning,
+            &mut pending,
+            &mut usage,
+        );
+
+        assert_eq!(reasoning, "thinking");
+        assert!(content.is_empty(), "reasoning must not land in content");
+    }
+
+    #[test]
+    fn reasoning_deltas_are_not_streamed_to_the_user_as_text() {
+        // Streaming the chain of thought as if it were the reply would show
+        // the user thinking they never asked for.
+        let chunk: OpenAIStreamChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":null,"reasoning_content":"thinking"}}]}"#,
+        )
+        .unwrap();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut pending = Vec::new();
+        let mut usage = None;
+
+        let deltas = apply_stream_chunk(
+            chunk,
+            &mut content,
+            &mut reasoning,
+            &mut pending,
+            &mut usage,
+        );
+
+        assert!(deltas.is_empty(), "got {deltas:?}");
+    }
+
+    #[test]
+    fn stream_falls_back_to_reasoning_when_no_content_arrived() {
+        // Mirrors what the stream task does at Done.
+        let resolved = resolve_assistant_text(
+            String::new(),
+            Some("the answer".to_string()),
+            &[],
+            Some("length"),
+        );
+        assert_eq!(resolved, "the answer");
+    }
+
+    fn reasoning_response(
+        content: Option<&str>,
+        reasoning: Option<&str>,
+        finish_reason: Option<&str>,
+    ) -> OpenAIResponse {
+        OpenAIResponse {
+            choices: vec![OpenAIChoice {
+                finish_reason: finish_reason.map(str::to_string),
+                message: OpenAIResponseMessage {
+                    content: content.map(str::to_string),
+                    reasoning_content: reasoning.map(str::to_string),
+                    tool_calls: None,
+                },
+            }],
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn convert_response_falls_back_to_reasoning_when_content_is_null() {
+        // DeepSeek/Qwen via LiteLLM: the answer lands in reasoning_content
+        // and `content` is null. Surfacing nothing is strictly worse.
+        let converted =
+            convert_response(reasoning_response(None, Some("the answer"), Some("stop")));
+        assert_eq!(converted.content, "the answer");
+    }
+
+    #[test]
+    fn convert_response_falls_back_to_reasoning_when_content_is_blank() {
+        let converted = convert_response(reasoning_response(
+            Some("   "),
+            Some("the answer"),
+            Some("stop"),
+        ));
+        assert_eq!(converted.content, "the answer");
+    }
+
+    #[test]
+    fn convert_response_prefers_real_content_over_reasoning() {
+        let converted = convert_response(reasoning_response(
+            Some("the answer"),
+            Some("thinking out loud"),
+            Some("stop"),
+        ));
+        assert_eq!(converted.content, "the answer");
+    }
+
+    #[test]
+    fn convert_response_keeps_content_empty_when_no_reasoning_either() {
+        let converted = convert_response(reasoning_response(None, None, Some("length")));
+        assert_eq!(converted.content, "");
+        assert!(!converted.has_tool_calls());
+    }
+
+    #[test]
+    fn convert_response_does_not_substitute_reasoning_when_tool_calls_present() {
+        // A tool-call turn legitimately has empty content; injecting the chain
+        // of thought as the assistant text would corrupt the transcript.
+        let response = OpenAIResponse {
+            choices: vec![OpenAIChoice {
+                finish_reason: Some("tool_calls".to_string()),
+                message: OpenAIResponseMessage {
+                    content: None,
+                    reasoning_content: Some("thinking out loud".to_string()),
+                    tool_calls: Some(vec![OpenAIToolCallResponse {
+                        id: "call_1".to_string(),
+                        function: OpenAIFunctionCall {
+                            name: "echo".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    }]),
+                },
+            }],
+            usage: None,
+        };
+        let converted = convert_response(response);
+        assert_eq!(converted.content, "");
+        assert!(converted.has_tool_calls());
+    }
+
+    #[test]
+    fn response_message_deserializes_reasoning_content_from_wire() {
+        let raw = r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":null,"reasoning_content":"the answer"}}]}"#;
+        let parsed: OpenAIResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.choices[0].message.reasoning_content.as_deref(),
+            Some("the answer")
+        );
+        assert_eq!(parsed.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn response_without_reasoning_content_still_deserializes() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#;
+        let parsed: OpenAIResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.choices[0].message.content.as_deref(), Some("hi"));
+        assert!(parsed.choices[0].message.reasoning_content.is_none());
+        assert!(parsed.choices[0].finish_reason.is_none());
+    }
+
+    #[test]
+    fn stream_delta_deserializes_reasoning_content() {
+        let raw = r#"{"content":null,"reasoning_content":"partial thought"}"#;
+        let delta: OpenAIStreamDelta = serde_json::from_str(raw).unwrap();
+        assert_eq!(delta.reasoning_content.as_deref(), Some("partial thought"));
+    }
+
+    #[test]
+    fn reasoning_effort_is_serialized_into_the_request() {
+        let options = ChatOptions::new().with_reasoning_effort(ReasoningEffort::Low);
+        let request = build_request("deepseek-r1", &[], &[], &options, MaxTokenField::MaxTokens);
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["reasoning_effort"], serde_json::json!("low"));
+    }
+
+    #[test]
+    fn reasoning_effort_is_omitted_when_unset() {
+        let options = ChatOptions::new();
+        let request = build_request("gpt-5.1", &[], &[], &options, MaxTokenField::MaxTokens);
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "must not send reasoning_effort to models that reject it: {body}"
+        );
+    }
+
     #[test]
     fn test_convert_response_text_only() {
         let response = OpenAIResponse {
             choices: vec![OpenAIChoice {
+                finish_reason: None,
                 message: OpenAIResponseMessage {
+                    reasoning_content: None,
                     content: Some("Hello!".to_string()),
                     tool_calls: None,
                 },
@@ -1342,7 +1609,9 @@ mod tests {
     fn test_convert_response_with_tool_calls() {
         let response = OpenAIResponse {
             choices: vec![OpenAIChoice {
+                finish_reason: None,
                 message: OpenAIResponseMessage {
+                    reasoning_content: None,
                     content: Some("".to_string()),
                     tool_calls: Some(vec![OpenAIToolCallResponse {
                         id: "call_123".to_string(),
@@ -1380,7 +1649,9 @@ mod tests {
     fn test_convert_response_null_content() {
         let response = OpenAIResponse {
             choices: vec![OpenAIChoice {
+                finish_reason: None,
                 message: OpenAIResponseMessage {
+                    reasoning_content: None,
                     content: None,
                     tool_calls: Some(vec![OpenAIToolCallResponse {
                         id: "call_1".to_string(),
@@ -1413,6 +1684,7 @@ mod tests {
             tools: None,
             max_tokens: Some(1000),
             max_completion_tokens: None,
+            reasoning_effort: None,
             temperature: Some(0.7),
             top_p: None,
             stop: None,
@@ -1448,6 +1720,7 @@ mod tests {
             }]),
             max_tokens: None,
             max_completion_tokens: None,
+            reasoning_effort: None,
             temperature: None,
             top_p: None,
             stop: None,
@@ -1558,6 +1831,7 @@ mod tests {
         let chunk = OpenAIStreamChunk {
             choices: vec![OpenAIStreamChoice {
                 delta: OpenAIStreamDelta {
+                    reasoning_content: None,
                     content: Some("Hello".to_string()),
                     tool_calls: None,
                 },
@@ -1572,7 +1846,13 @@ mod tests {
         let mut pending_tool_calls = Vec::new();
         let mut usage = None;
 
-        let deltas = apply_stream_chunk(chunk, &mut assembled, &mut pending_tool_calls, &mut usage);
+        let deltas = apply_stream_chunk(
+            chunk,
+            &mut assembled,
+            &mut String::new(),
+            &mut pending_tool_calls,
+            &mut usage,
+        );
 
         assert_eq!(deltas, vec!["Hello".to_string()]);
         assert_eq!(assembled, "Hello");
@@ -1696,6 +1976,7 @@ mod tests {
         let first = OpenAIStreamChunk {
             choices: vec![OpenAIStreamChoice {
                 delta: OpenAIStreamDelta {
+                    reasoning_content: None,
                     content: None,
                     tool_calls: Some(vec![OpenAIStreamToolCallDelta {
                         index: 0,
@@ -1713,6 +1994,7 @@ mod tests {
         let second = OpenAIStreamChunk {
             choices: vec![OpenAIStreamChoice {
                 delta: OpenAIStreamDelta {
+                    reasoning_content: None,
                     content: None,
                     tool_calls: Some(vec![OpenAIStreamToolCallDelta {
                         index: 0,
@@ -1727,8 +2009,20 @@ mod tests {
             usage: None,
         };
 
-        let _ = apply_stream_chunk(first, &mut assembled, &mut pending_tool_calls, &mut usage);
-        let _ = apply_stream_chunk(second, &mut assembled, &mut pending_tool_calls, &mut usage);
+        let _ = apply_stream_chunk(
+            first,
+            &mut assembled,
+            &mut String::new(),
+            &mut pending_tool_calls,
+            &mut usage,
+        );
+        let _ = apply_stream_chunk(
+            second,
+            &mut assembled,
+            &mut String::new(),
+            &mut pending_tool_calls,
+            &mut usage,
+        );
 
         let tool_calls = finalize_tool_calls(pending_tool_calls);
         assert_eq!(tool_calls.len(), 1);
