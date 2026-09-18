@@ -8,7 +8,7 @@ pub use policy::{format_with_locator, needs_spill, preview, SpillRef};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::config::SpillConfig;
+use crate::config::{Config, SpillConfig};
 use crate::utils::secure_fs::{ensure_private_dir, write_private_file_exclusive};
 
 /// Bound on retries when writers race for a sequence number. Contenders
@@ -25,9 +25,17 @@ pub struct SpillStore {
 
 impl SpillStore {
     /// Store rooted at an explicit directory. Callers resolve the path —
-    /// see `SpillStore::session_root` (Task 7) for the canonical location.
+    /// see `SpillStore::session_root` for the canonical location.
     pub fn with_root(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// Canonical spill directory for a session.
+    pub fn session_root(session_id: &str) -> PathBuf {
+        Config::dir()
+            .join("sessions")
+            .join(session_id)
+            .join("spill")
     }
 
     /// Persist `text` and return its locator. Enforces retention afterwards.
@@ -177,6 +185,16 @@ mod tests {
 
     fn store(dir: &tempfile::TempDir) -> SpillStore {
         SpillStore::with_root(dir.path().to_path_buf())
+    }
+
+    #[test]
+    fn session_root_is_under_the_session_directory() {
+        let root = SpillStore::session_root("abc123");
+        assert!(
+            root.ends_with("sessions/abc123/spill"),
+            "got {}",
+            root.display()
+        );
     }
 
     #[test]

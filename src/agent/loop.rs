@@ -23,8 +23,9 @@ use crate::health::UsageMetrics;
 use crate::providers::{ChatOptions, LLMProvider, LLMToolCall, StreamEvent};
 use crate::safety::SafetyLayer;
 use crate::session::{Message, Role, SessionManager, ToolCall};
+use crate::spill::SpillStore;
 use crate::tools::approval::{ApprovalGate, ApprovalRequest, ApprovalResponse};
-use crate::tools::{Tool, ToolCategory, ToolContext, ToolRegistry};
+use crate::tools::{SpillSettings, Tool, ToolCategory, ToolContext, ToolRegistry};
 use crate::utils::metrics::MetricsCollector;
 
 use super::budget::TokenBudget;
@@ -1349,10 +1350,17 @@ impl AgentLoop {
             // Execute tool calls in parallel
             let workspace = self.config.workspace_path();
             let workspace_str = workspace.to_string_lossy();
-            let tool_ctx = ToolContext::new()
+            let mut tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
                 .with_workspace(&workspace_str)
                 .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
+            if self.config.spill.enabled {
+                tool_ctx = tool_ctx.with_spill(SpillSettings {
+                    session_id: msg.session_key.clone(),
+                    root: SpillStore::session_root(&msg.session_key),
+                    config: self.config.spill.clone(),
+                });
+            }
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let approval_handler = self.approval_handler.read().await.clone();
@@ -2278,10 +2286,17 @@ impl AgentLoop {
 
             let workspace = self.config.workspace_path();
             let workspace_str = workspace.to_string_lossy();
-            let tool_ctx = ToolContext::new()
+            let mut tool_ctx = ToolContext::new()
                 .with_channel(&msg.channel, &msg.chat_id)
                 .with_workspace(&workspace_str)
                 .with_batch(msg.metadata.get("is_batch").is_some_and(|v| v == "true"));
+            if self.config.spill.enabled {
+                tool_ctx = tool_ctx.with_spill(SpillSettings {
+                    session_id: msg.session_key.clone(),
+                    root: SpillStore::session_root(&msg.session_key),
+                    config: self.config.spill.clone(),
+                });
+            }
 
             let approval_gate = Arc::clone(&self.approval_gate);
             let approval_handler = self.approval_handler.read().await.clone();
