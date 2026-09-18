@@ -7,6 +7,7 @@ Fast, small, secure, local-first personal AI assistant infrastructure. Fresh con
 ```bash
 cargo build --release                      # Build
 cargo nextest run --lib                    # Test (use nextest to avoid OOM)
+cargo deny check                          # Dependency security and policy checks
 cargo clippy -- -D warnings && cargo fmt   # Lint & format
 ./target/release/zeptoclaw agent -m "Hello"  # Run agent
 ./target/release/zeptoclaw config check      # Validate config
@@ -37,7 +38,7 @@ Labels: `bug`, `feat`, `rfc`, `chore`, `docs` + `area:tools`, `area:channels`, `
 ### 3. Session End — Link and close
 - Follow the PR guidelines in `docs/claude/pr.md` and use the template at `.github/PULL_REQUEST_TEMPLATE.md`
 - PR body: include `Closes #N`
-- **NEVER merge PRs without explicit user approval.** Wait for CI, present URL, merge only after user says to
+- **NEVER merge PRs without explicit user approval.** Present local validation results and the PR URL, merge only after user says to
 - Merge: `gh pr merge <number> --squash --delete-branch --admin`
 - Direct commit: `gh issue close N --comment "Done in <commit-sha>"`
 - Update `CLAUDE.md` and `AGENTS.md` per the post-implementation checklist
@@ -86,8 +87,8 @@ For detailed module docs see `docs/claude/architecture.md`.
 
 ## Coding Core Notes
 
-- The dependency audit baseline passes `cargo deny check` with patched `anyhow` 1.0.103, `bcrypt` 0.19.2, `crossbeam-epoch` 0.9.20, `quinn-proto` 0.11.15, `quick-xml` 0.41, and `lopdf` 0.42.
-- Outbound tool schemas pass through `utils::tool_schema::sanitize_schema()` in every `ToolRegistry::definitions*()` path, so MCP- and plugin-supplied schemas cannot 400 a whole provider request (illegal property keys, `type` arrays, bare-string schemas, `default` beside `$ref`, top-level combinators) or break llama.cpp's GBNF grammar converter (an object schema with no `properties`). Inbound, `kernel::execute_tool()` runs `unrename_tool_args()` then `coerce_tool_args()`, so renamed keys round-trip to their wire names and the string-typed scalars small local models emit (`"42"`, `"true"`, JSON-encoded containers) reach tools as their declared types. Both layers are conservative: anything ambiguous is passed through untouched.
+- The dependency audit baseline passes `cargo deny check` with patched `anyhow` 1.0.103, `bcrypt` 0.19.2, `crossbeam-epoch` 0.9.20, `quinn-proto` 0.11.15, `quick-xml` 0.41, `lopdf` 0.42, and `rustls` 0.23.45 (RUSTSEC-2026-0285).
+- Outbound tool schemas pass through `utils::tool_schema::sanitize_schema()` in every `ToolRegistry::definitions*()` path, so MCP- and plugin-supplied schemas cannot 400 a whole provider request (illegal property keys, `type` arrays, bare-string schemas, `default` beside `$ref`, top-level combinators) or break llama.cpp's GBNF grammar converter (an object schema with no `properties`). Inbound, `kernel::execute_tool()` runs `unrename_tool_args()` then `coerce_tool_args()`, so renamed keys round-trip to their wire names and the string-typed scalars small local models emit (`"42"`, `"true"`, JSON-encoded containers) reach tools as their declared types at every nesting depth. Both layers are conservative: a string is never rewritten when the schema already permits `string`, so an identifier like `"07030"` survives a `["string", "integer"]` union intact.
 - Embedded `ZeptoAgent` tool calls use the same `kernel::execute_tool()` path as the main agent loop and MCP server, so safety scanning, taint checks, and tool metrics stay aligned across entry points.
 - Embedded `ZeptoAgent` also supports per-tool timeout, panic capture, and configurable approval gating via the builder for safer embedded coding-agent execution.
 - The `panel` CLI namespace is always parsed, but panel-backed behavior still requires the optional Cargo `panel` feature; feature-disabled builds now fail with explicit build/install guidance instead of a Clap unknown-subcommand error.
@@ -96,8 +97,8 @@ For detailed module docs see `docs/claude/architecture.md`.
 - Telegram gateway responses support opt-in cumulative streaming (`channels.telegram.streaming`): the agent loop rate-limits outbound stream phases, Telegram progressively edits UTF-16-safe previews, preserves replies/forum topics, and falls back to a fresh final HTML message after preview failures.
 - The serve API only accepts omitted, `null`, or `"auto"` for `tool_choice`; unsupported values are rejected with `400` instead of being ignored.
 - `src/audit.rs` now includes an in-memory SHA-256 hash chain (`record_audit_chain_event`, `verify_audit_chain_integrity`, `recent_audit_entries`, `audit_tip_hash`), and `kernel::execute_tool()` records per-call audit entries including shell/network/spawn classifications.
-- The CI feature-matrix job now checks `memory-embedding`, `screenshot`, `channel-email`, `google`, `provider-vertex`, `whatsapp-web`, `hardware`, `peripheral-rpi`, `probe`, `android`, `sandbox-landlock`, `sandbox-firejail`, and `sandbox-bubblewrap`, while `memory-bm25` and `peripheral-esp32` remain covered by dedicated test/clippy jobs; optional feature paths now fail fast before merge instead of drifting behind the default build.
-- **Binary size budget: 11MB linux-x86_64 ceiling (PR gate), 7MB aarch64 strategic target (follow-up)** — the `binary-size` CI job now runs on every PR (not just main pushes) and fails if stripped `target/release/zeptoclaw` exceeds 11MB on linux-x86_64. The "fits on a robot" 6MB moat is the aarch64 target (Pi/Jetson/Apple silicon), where the binary is ~7MB; Linux x86_64 reality has always been ~10MB even with `profile.release.strip = true` due to encoding/linker differences. Follow-up issue adds an aarch64 CI build gated at 7MB. Escape valve if a feature genuinely earns the bytes: gate its heavy deps behind a Cargo feature flag — do not bump either ceiling without team sign-off.
+- GitHub Actions CI, E2E, and PR hygiene workflows are removed. Run quality gates locally and check optional features when changing them, for example `cargo check --features channel-email` or `cargo nextest run --lib --features memory-bm25`. Tag-triggered release and Docker publishing remain enabled.
+- **Binary size budgets: 11MB linux-x86_64, 7MB aarch64** — measure stripped release binaries locally when relevant. Gate heavy dependencies behind a Cargo feature flag rather than increasing the budgets.
 - `shell` tool output is truncated at 2,000 lines / 50KB before it reaches the model context.
 - Runtime subprocesses scrub secret-like inherited environment variables by default and terminate/reap their process group on Unix timeouts; `runtime.env_passthrough` is the explicit compatibility escape hatch.
 - `grep` reports subprocess failures instead of collapsing them into "No matches found".

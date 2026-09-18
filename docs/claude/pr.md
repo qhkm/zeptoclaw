@@ -49,5 +49,5 @@ The PR template at `.github/PULL_REQUEST_TEMPLATE.md` is the source of truth. Ke
 ## After Creating
 
 - CodeRabbit will automatically review the PR — address its feedback before requesting maintainer review
-- **NEVER merge without explicit user approval** — wait for CI, present the URL, merge only after user says to
+- **NEVER merge without explicit user approval** — present local validation results and the PR URL, merge only after user says to
 - Merge command: `gh pr merge <number> --squash --delete-branch --admin`
