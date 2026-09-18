@@ -169,6 +169,14 @@ impl Tool for ReadFileTool {
                 "path": {
                     "type": "string",
                     "description": "The path to the file to read"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based line number to start reading from. Omit to start at the beginning."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return. Omit to read to the end."
                 }
             },
             "required": ["path"]
@@ -189,8 +197,33 @@ impl Tool for ReadFileTool {
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
+
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+
+        let sliced = if offset > 1 || limit.is_some() {
+            let mut out = String::new();
+            for segment in content
+                .split_inclusive('\n')
+                .skip(offset - 1)
+                .take(limit.unwrap_or(usize::MAX))
+            {
+                out.push_str(segment);
+            }
+            out
+        } else {
+            content
+        };
+
         Ok(ToolOutput::llm_only(truncate_tool_output(
-            &content,
+            &sliced,
             DEFAULT_MAX_LINES,
             DEFAULT_MAX_BYTES,
         )))
@@ -952,6 +985,69 @@ mod tests {
         let result = tool.execute(json!({"path": "test.txt"}), &ctx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().for_llm, "workspace content");
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_requested_line_slice() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let body: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "big.txt", "offset": 10, "limit": 3 }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "line 10\nline 11\nline 12\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_reaches_past_the_truncation_limit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let body: String = (1..=3000).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(
+                json!({ "path": "huge.txt", "offset": 2500, "limit": 1 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "line 2500\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_without_offset_is_unchanged() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("s.txt"), "a\nb\n").unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "s.txt" }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "a\nb\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_past_end_returns_empty_not_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("s.txt"), "a\nb\n").unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "s.txt", "offset": 99 }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "");
     }
 
     #[tokio::test]
