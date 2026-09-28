@@ -3,7 +3,9 @@
 
 pub mod policy;
 
-pub use policy::{format_with_locator, needs_spill, preview, SpillRef};
+pub use policy::{
+    format_with_locator, needs_spill, preview, sanitize_preserving_locator, split_locator, SpillRef,
+};
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

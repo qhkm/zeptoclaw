@@ -1628,11 +1628,12 @@ impl AgentLoop {
                             }
                         }
 
-                        // Sanitize the result with dynamic budget
-                        let sanitized = crate::utils::sanitize::sanitize_tool_result(
-                            &result,
-                            budget,
-                        );
+                        // Sanitize the result with dynamic budget. Spill
+                        // locators are reserved out of the budget rather
+                        // than cut off the tail; see
+                        // `spill::sanitize_preserving_locator`.
+                        let sanitized =
+                            crate::spill::sanitize_preserving_locator(&result, budget);
 
                         (id, sanitized, pause)
                     }
@@ -2557,7 +2558,7 @@ impl AgentLoop {
                             }
                         }
                         let sanitized =
-                            crate::utils::sanitize::sanitize_tool_result(&result, budget);
+                            crate::spill::sanitize_preserving_locator(&result, budget);
 
                         (id, sanitized, pause)
                     }

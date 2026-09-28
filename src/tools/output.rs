@@ -127,7 +127,13 @@ pub fn spill_or_truncate(text: &str, tool: &str, ctx: &ToolContext) -> String {
         return truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
     };
     let cfg = &settings.config;
-    if !cfg.enabled || !needs_spill(text, cfg) {
+    // `enabled: false` must reproduce pre-spill behavior byte for byte, so it
+    // uses the historical constants rather than the configured inline budget
+    // (which is now derived from the tool-result ceiling and is smaller).
+    if !cfg.enabled {
+        return truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    }
+    if !needs_spill(text, cfg) {
         return truncate_tool_output(text, cfg.max_inline_lines, cfg.max_inline_bytes);
     }
 
@@ -280,6 +286,33 @@ mod tests {
             .and_then(|s| s.lines().next())
             .unwrap();
         assert_eq!(std::fs::read_to_string(path.trim()).unwrap(), body);
+    }
+
+    // IMPORTANT #7: `max_inline_bytes` is now derived from the tool-result
+    // ceiling (20,480) rather than the historical 50,000, so the
+    // `enabled: false` path must name the historical constants explicitly to
+    // stay byte-identical to pre-spill behavior.
+    #[test]
+    fn spill_disabled_is_byte_identical_to_previous_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=4_000).map(|i| format!("line {i}\n")).collect();
+        let ctx = ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root: dir.path().to_path_buf(),
+                config: SpillConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            spill_or_truncate(&body, "shell", &ctx),
+            truncate_tool_output(&body, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
