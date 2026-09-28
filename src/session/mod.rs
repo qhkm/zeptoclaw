@@ -359,10 +359,11 @@ impl SessionManager {
         }
 
         // Reclaim the session's spill directory. This is the canonical
-        // deletion path -- the panel API and the gateway both route through
-        // it -- so doing it here is what makes the design's "a session's
-        // spill directory is removed when the session is deleted" hold for
-        // every caller instead of only `history cleanup`. Spill is written
+        // deletion path -- the panel API (`api::routes::sessions`) and the
+        // CLI agent (`cli::agent`) both route through it -- so doing it here
+        // is what makes the design's "a session's spill directory is removed
+        // when the session is deleted" hold for every caller instead of only
+        // `history cleanup`. Spill is written
         // whether or not session persistence is on, so this runs
         // unconditionally.
         //
