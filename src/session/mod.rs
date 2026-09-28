@@ -38,6 +38,64 @@ pub use types::{ContentPart, ImageSource, Message, Role, Session, ToolCall};
 use crate::config::Config;
 use crate::error::Result;
 use std::collections::HashMap;
+
+/// Sanitize a session key so it is safe as a single filesystem name.
+///
+/// Percent-encodes the characters that are problematic in filenames across
+/// platforms, including `%` itself, so the mapping is bijective and
+/// reversible — different keys can never collide on one file.
+///
+/// This is the single source of truth for the encoding. `SessionManager`,
+/// `ConversationHistory` and `SpillStore::session_root` all route through it
+/// so a session's JSON file and its spill directory are always named from the
+/// same key the same way; otherwise deletion by key would silently miss.
+///
+/// Session keys are `"{channel}:{chat_id}"` and `chat_id` can come straight
+/// from a caller-supplied webhook payload (`trust_payload_identity`), so an
+/// unsanitized key is an attacker-controlled path fragment: `../../../tmp/x`
+/// would have `ensure_private_dir` create that directory and write tool
+/// output into it.
+///
+/// # Example
+/// ```
+/// use zeptoclaw::session::sanitize_session_key;
+///
+/// assert_eq!(sanitize_session_key("telegram:chat123"), "telegram%3Achat123");
+/// assert_eq!(
+///     sanitize_session_key("webhook:../../etc"),
+///     "webhook%3A..%2F..%2Fetc"
+/// );
+/// ```
+pub fn sanitize_session_key(key: &str) -> String {
+    let mut result = String::with_capacity(key.len() * 3);
+    for c in key.chars() {
+        match c {
+            '/' => result.push_str("%2F"),
+            '\\' => result.push_str("%5C"),
+            ':' => result.push_str("%3A"),
+            '*' => result.push_str("%2A"),
+            '?' => result.push_str("%3F"),
+            '"' => result.push_str("%22"),
+            '<' => result.push_str("%3C"),
+            '>' => result.push_str("%3E"),
+            '|' => result.push_str("%7C"),
+            '%' => result.push_str("%25"), // Escape % itself to make it reversible
+            c => result.push(c),
+        }
+    }
+
+    // Separators are encoded above, so the result is always a single path
+    // component. Encode a leading '.' as well, so it can never be `.` or
+    // `..` -- the two components that name a *different* directory. Real
+    // keys are "{channel}:{chat_id}" and so always contain an encoded ':',
+    // but this function is public and must not rely on that. Nothing else
+    // emits a leading "%2E" (a literal '%' encodes to "%25"), so the
+    // mapping stays bijective.
+    match result.strip_prefix('.') {
+        Some(rest) => format!("%2E{rest}"),
+        None => result,
+    }
+}
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -418,25 +476,7 @@ impl SessionManager {
     ///
     /// This is reversible via `unsanitize_key`, ensuring keys round-trip correctly.
     fn sanitize_key(key: &str) -> String {
-        // Characters that are problematic in filenames across platforms
-        // We percent-encode them to make the mapping reversible
-        let mut result = String::with_capacity(key.len() * 3);
-        for c in key.chars() {
-            match c {
-                '/' => result.push_str("%2F"),
-                '\\' => result.push_str("%5C"),
-                ':' => result.push_str("%3A"),
-                '*' => result.push_str("%2A"),
-                '?' => result.push_str("%3F"),
-                '"' => result.push_str("%22"),
-                '<' => result.push_str("%3C"),
-                '>' => result.push_str("%3E"),
-                '|' => result.push_str("%7C"),
-                '%' => result.push_str("%25"), // Escape % itself to make it reversible
-                c => result.push(c),
-            }
-        }
-        result
+        sanitize_session_key(key)
     }
 
     /// Reverse the sanitization to recover the original key.

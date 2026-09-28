@@ -236,25 +236,13 @@ impl ConversationHistory {
         Ok(deleted)
     }
 
-    /// Sanitize a session key for use as a filename (matches `SessionManager::sanitize_key`).
+    /// Sanitize a session key for use as a filename.
+    ///
+    /// Delegates to [`crate::session::sanitize_session_key`], the single
+    /// source of truth shared with `SessionManager` and
+    /// `SpillStore::session_root`.
     fn sanitize_key(key: &str) -> String {
-        let mut result = String::with_capacity(key.len() * 3);
-        for c in key.chars() {
-            match c {
-                '/' => result.push_str("%2F"),
-                '\\' => result.push_str("%5C"),
-                ':' => result.push_str("%3A"),
-                '*' => result.push_str("%2A"),
-                '?' => result.push_str("%3F"),
-                '"' => result.push_str("%22"),
-                '<' => result.push_str("%3C"),
-                '>' => result.push_str("%3E"),
-                '|' => result.push_str("%7C"),
-                '%' => result.push_str("%25"),
-                c => result.push(c),
-            }
-        }
-        result
+        crate::session::sanitize_session_key(key)
     }
 }
 

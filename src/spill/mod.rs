@@ -33,10 +33,31 @@ impl SpillStore {
     }
 
     /// Canonical spill directory for a session.
+    ///
+    /// `session_id` is sanitized with
+    /// [`crate::session::sanitize_session_key`] before it becomes a path
+    /// component, for the same reason `sanitize_tool_name` exists below: the
+    /// value is externally sourced. A session key is `"{channel}:{chat_id}"`,
+    /// and `WebhookChannel` takes `chat_id` straight from the POST body when
+    /// `trust_payload_identity` is on — so an unsanitized `chat_id` of
+    /// `../../../../tmp/x` would have `ensure_private_dir` create that
+    /// directory and write tool output into it.
+    ///
+    /// Reusing the session layer's encoder rather than inventing one keeps
+    /// the writer and [`SpillStore::remove_session`] in agreement, and keeps
+    /// a session's spill directory named from the same key, the same way, as
+    /// its session file.
     pub fn session_root(session_id: &str) -> PathBuf {
-        Config::dir()
-            .join("sessions")
-            .join(session_id)
+        Self::session_root_in(&Config::dir(), session_id)
+    }
+
+    /// [`SpillStore::session_root`] against an explicit base directory.
+    ///
+    /// Exists so the key-to-path agreement can be exercised in a temp dir
+    /// rather than against the caller's real home directory.
+    pub fn session_root_in(base: &Path, session_id: &str) -> PathBuf {
+        base.join("sessions")
+            .join(crate::session::sanitize_session_key(session_id))
             .join("spill")
     }
 
@@ -51,6 +72,11 @@ impl SpillStore {
     /// Remove the spill directory belonging to a session.
     pub fn remove_session(session_id: &str) -> std::io::Result<()> {
         Self::remove_root(&Self::session_root(session_id))
+    }
+
+    /// [`SpillStore::remove_session`] against an explicit base directory.
+    pub fn remove_session_in(base: &Path, session_id: &str) -> std::io::Result<()> {
+        Self::remove_root(&Self::session_root_in(base, session_id))
     }
 
     /// Persist `text` and return its locator. Enforces retention afterwards.
@@ -209,6 +235,116 @@ mod tests {
             root.ends_with("sessions/abc123/spill"),
             "got {}",
             root.display()
+        );
+    }
+
+    // Regression: IMPORTANT #3 — a session key is "{channel}:{chat_id}" and
+    // `WebhookChannel` accepts a caller-supplied `chat_id` from the POST body
+    // when `trust_payload_identity` is on. An unsanitized key is therefore an
+    // attacker-controlled path fragment. Mirrors
+    // `tool_name_is_sanitized_to_prevent_path_escape`.
+    #[test]
+    fn session_id_is_sanitized_to_prevent_path_escape() {
+        let base = tempfile::tempdir().unwrap();
+        let sessions = base.path().join("sessions");
+
+        let root = SpillStore::session_root_in(base.path(), "webhook:../../../../tmp/x");
+
+        assert_eq!(
+            root.parent().and_then(|p| p.parent()),
+            Some(sessions.as_path()),
+            "spill root must stay one level under sessions/: {}",
+            root.display()
+        );
+        // `..` may survive as literal characters inside the component --
+        // what matters is that the separators around it are encoded, so it
+        // cannot split into traversing components.
+        let component = root
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !component.contains('/') && !component.contains('\\'),
+            "sanitized component must not contain a separator: {component}"
+        );
+        assert_eq!(
+            std::path::Path::new(component).components().count(),
+            1,
+            "sanitized key must be exactly one path component: {component}"
+        );
+
+        // And the directory that actually gets created is inside it.
+        SpillStore::with_root(root.clone())
+            .write("shell", "payload\n", &SpillConfig::default())
+            .unwrap();
+        assert!(root.is_dir());
+        assert!(!base.path().join("tmp").exists());
+        assert!(!std::path::Path::new("/tmp/x/spill").exists());
+    }
+
+    #[test]
+    fn session_id_with_leading_dots_cannot_name_a_parent_directory() {
+        let base = tempfile::tempdir().unwrap();
+        for key in ["..", ".", "../..", ".hidden"] {
+            let root = SpillStore::session_root_in(base.path(), key);
+            let component = root
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(
+                component != "." && component != "..",
+                "key {key:?} produced component {component:?}"
+            );
+        }
+    }
+
+    // The writer and the remover must agree on the encoding, or deletion
+    // silently misses and spill files outlive their session.
+    #[test]
+    fn remove_session_finds_the_directory_the_writer_created() {
+        let base = tempfile::tempdir().unwrap();
+        let key = "telegram:chat 123:weird%/path";
+
+        let root = SpillStore::session_root_in(base.path(), key);
+        SpillStore::with_root(root.clone())
+            .write("shell", "payload\n", &SpillConfig::default())
+            .unwrap();
+        assert!(root.is_dir());
+
+        SpillStore::remove_session_in(base.path(), key).unwrap();
+        assert!(!root.exists(), "remove_session must reach the same path");
+    }
+
+    // The spill directory and the session file are named from the same key
+    // the same way, so `cleanup_old`'s returned keys resolve to both.
+    #[test]
+    fn session_root_uses_the_session_layers_encoding() {
+        let base = tempfile::tempdir().unwrap();
+        let key = "cli:cli";
+        let root = SpillStore::session_root_in(base.path(), key);
+        assert_eq!(
+            root.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            crate::session::sanitize_session_key(key)
+        );
+        assert_eq!(
+            root.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "cli%3Acli"
         );
     }
 
