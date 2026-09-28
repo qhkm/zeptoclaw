@@ -545,7 +545,9 @@ mod tests {
 
         // Cleanup, keeping only the 2 newest
         let deleted = history.cleanup_old(2).unwrap();
-        assert_eq!(deleted.len(), 3);
+        // The keys themselves matter, not just the count: callers use them
+        // to reclaim session-scoped state this module doesn't know about.
+        assert_eq!(deleted, vec!["cli:3000", "cli:2000", "cli:1000"]);
 
         // Verify only 2 remain (the newest ones)
         let remaining = history.list_conversations().unwrap();
@@ -575,7 +577,54 @@ mod tests {
 
         // keep_count >= total conversations, nothing deleted
         let deleted = history.cleanup_old(5).unwrap();
-        assert_eq!(deleted.len(), 0);
+        assert!(deleted.is_empty(), "got {deleted:?}");
         assert_eq!(history.list_conversations().unwrap().len(), 2);
+    }
+
+    // IMPORTANT #6 regression: nothing exercised `cleanup_old` together with
+    // the spill removal its return value exists for, so the agreement
+    // between `entry.session_key` and the component `session_root` joins
+    // rested on inspection alone. A key with a `:` is the ordinary case and
+    // would break a naive `join(session_key)`.
+    #[test]
+    fn cleanup_old_keys_resolve_to_the_spill_directories_they_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let sessions = base.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let keys = ["cli:1000", "cli:2000", "cli:3000", "cli:4000"];
+        for (i, key) in keys.iter().enumerate() {
+            write_test_session(
+                &sessions,
+                key,
+                "title",
+                &format!("2025-0{}-01T00:00:00Z", i + 1),
+            );
+            let root = crate::spill::SpillStore::session_root_in(base, key);
+            crate::spill::SpillStore::with_root(root.clone())
+                .write("shell", "payload\n", &crate::config::SpillConfig::default())
+                .unwrap();
+            assert!(root.is_dir(), "spill dir for {key} should exist");
+        }
+
+        let history = ConversationHistory::with_path(sessions.clone()).unwrap();
+        let deleted = history.cleanup_old(2).unwrap();
+        assert_eq!(deleted, vec!["cli:2000", "cli:1000"]);
+
+        crate::spill::SpillStore::remove_sessions_in(base, &deleted);
+
+        for key in ["cli:1000", "cli:2000"] {
+            assert!(
+                !crate::spill::SpillStore::session_root_in(base, key).exists(),
+                "spill dir for deleted session {key} should be reclaimed"
+            );
+        }
+        for key in ["cli:3000", "cli:4000"] {
+            assert!(
+                crate::spill::SpillStore::session_root_in(base, key).is_dir(),
+                "spill dir for surviving session {key} must be kept"
+            );
+        }
     }
 }

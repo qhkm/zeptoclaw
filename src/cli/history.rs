@@ -57,11 +57,7 @@ pub(crate) async fn cmd_history(action: HistoryAction) -> Result<()> {
         }
         HistoryAction::Cleanup { keep } => {
             let deleted = history.cleanup_old(keep)?;
-            for session_id in &deleted {
-                if let Err(e) = zeptoclaw::spill::SpillStore::remove_session(session_id) {
-                    tracing::warn!(session_id, error = %e, "failed to remove spill directory");
-                }
-            }
+            zeptoclaw::spill::SpillStore::remove_sessions(&deleted);
             println!(
                 "Cleanup complete: deleted {} old conversation(s), kept {} most recent.",
                 deleted.len(),

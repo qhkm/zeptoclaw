@@ -358,6 +358,21 @@ impl SessionManager {
             }
         }
 
+        // Reclaim the session's spill directory. This is the canonical
+        // deletion path -- the panel API and the gateway both route through
+        // it -- so doing it here is what makes the design's "a session's
+        // spill directory is removed when the session is deleted" hold for
+        // every caller instead of only `history cleanup`. Spill is written
+        // whether or not session persistence is on, so this runs
+        // unconditionally.
+        //
+        // A removal failure is logged and never fatal: the session itself is
+        // already gone, and failing the call would turn a disk-space problem
+        // into a user-visible error.
+        if let Err(e) = crate::spill::SpillStore::remove_session(key) {
+            tracing::warn!(session_key = key, error = %e, "failed to remove spill directory");
+        }
+
         Ok(())
     }
 
@@ -871,5 +886,64 @@ mod tests {
         let manager = SessionManager::default();
         let session = manager.get_or_create("test").await.unwrap();
         assert!(session.is_empty());
+    }
+
+    #[test]
+    fn sanitize_session_key_is_bijective_and_single_component() {
+        assert_eq!(sanitize_session_key("cli:cli"), "cli%3Acli");
+        assert_eq!(sanitize_session_key("a%b"), "a%25b");
+        // Never `.` or `..`, which would name a different directory.
+        assert_eq!(sanitize_session_key("."), "%2E");
+        assert_eq!(sanitize_session_key(".."), "%2E.");
+        assert_eq!(sanitize_session_key("../x"), "%2E.%2Fx");
+        for key in ["cli:cli", "webhook:../../tmp/x", ".", "..", "a%b"] {
+            let encoded = sanitize_session_key(key);
+            assert_eq!(
+                std::path::Path::new(&encoded).components().count(),
+                1,
+                "{key:?} encoded to {encoded:?}"
+            );
+        }
+    }
+
+    // IMPORTANT #5 regression: `delete` is the canonical deletion path (the
+    // panel API and the gateway both route through it) and left the
+    // session's spill directory behind, so the design's "a session's spill
+    // directory is removed when the session is deleted" held only for
+    // `history cleanup` -- which itself only ever sees `cli:` sessions.
+    #[tokio::test]
+    async fn delete_removes_the_sessions_spill_directory() {
+        let key = format!("test-spill-delete:{}", std::process::id());
+        let root = crate::spill::SpillStore::session_root(&key);
+        let _ = crate::spill::SpillStore::remove_session(&key);
+
+        crate::spill::SpillStore::with_root(root.clone())
+            .write("shell", "payload\n", &crate::config::SpillConfig::default())
+            .unwrap();
+        assert!(root.is_dir());
+
+        let temp = TempDir::new().unwrap();
+        let manager = SessionManager::with_path(temp.path().to_path_buf()).unwrap();
+        manager.get_or_create(&key).await.unwrap();
+        manager.delete(&key).await.unwrap();
+
+        assert!(
+            !root.exists(),
+            "spill directory must be reclaimed with the session: {}",
+            root.display()
+        );
+        let _ = std::fs::remove_dir(root.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_succeeds_when_there_is_no_spill_directory() {
+        let temp = TempDir::new().unwrap();
+        let manager = SessionManager::with_path(temp.path().to_path_buf()).unwrap();
+        let key = format!("test-spill-absent:{}", std::process::id());
+        manager.get_or_create(&key).await.unwrap();
+        manager
+            .delete(&key)
+            .await
+            .expect("missing spill is not an error");
     }
 }

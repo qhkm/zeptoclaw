@@ -79,6 +79,26 @@ impl SpillStore {
         Self::remove_root(&Self::session_root_in(base, session_id))
     }
 
+    /// Reclaim the spill directories of several sessions, e.g. the keys
+    /// [`crate::session::ConversationHistory::cleanup_old`] returns.
+    ///
+    /// Failures are logged per session and never propagate: a session file
+    /// is already gone by this point, and failing the sweep would turn a
+    /// disk problem into a user-visible error.
+    pub fn remove_sessions<S: AsRef<str>>(session_ids: &[S]) {
+        Self::remove_sessions_in(&Config::dir(), session_ids)
+    }
+
+    /// [`SpillStore::remove_sessions`] against an explicit base directory.
+    pub fn remove_sessions_in<S: AsRef<str>>(base: &Path, session_ids: &[S]) {
+        for id in session_ids {
+            let id = id.as_ref();
+            if let Err(e) = Self::remove_session_in(base, id) {
+                tracing::warn!(session_id = id, error = %e, "failed to remove spill directory");
+            }
+        }
+    }
+
     /// Persist `text` and return its locator. Enforces retention afterwards.
     ///
     /// `tool` is sanitized before it becomes part of the filename: MCP and
