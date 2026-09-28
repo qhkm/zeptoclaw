@@ -97,6 +97,25 @@ pub fn truncate_tool_output(output: &str, max_lines: usize, max_bytes: usize) ->
 use crate::spill::{format_with_locator, needs_spill, preview, SpillStore};
 use crate::tools::ToolContext;
 
+/// Apply the inline output budget **without** writing a spill file.
+///
+/// Used when the source is already a spill file. `read_file` and `grep` are
+/// the advertised retrieval mechanism for spill, and they are also spill
+/// producers: paging a large spill file back through `spill_or_truncate`
+/// would write a second copy of the same bytes under a new sequence number,
+/// and that write runs `enforce_retention` — which can evict the very file
+/// the model is part-way through reading.
+pub fn truncate_inline(text: &str, ctx: &ToolContext) -> String {
+    match ctx.spill.as_ref() {
+        Some(settings) if settings.config.enabled => truncate_tool_output(
+            text,
+            settings.config.max_inline_lines,
+            settings.config.max_inline_bytes,
+        ),
+        _ => truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES),
+    }
+}
+
 /// Spill oversized output and return a preview plus locator; otherwise
 /// truncate as before.
 ///

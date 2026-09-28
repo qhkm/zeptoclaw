@@ -129,6 +129,53 @@ pub fn validate_path_in_workspace(path: &str, workspace: &str) -> Result<SafePat
     })
 }
 
+/// Resolve `path` for **read-only** access inside `root`, an allowed
+/// directory that is *not* the workspace.
+///
+/// This exists for the session's spill root. Spill files hold tool output the
+/// agent itself produced moments earlier, so handing it back is not a
+/// privilege escalation and discloses nothing the agent has not already seen.
+/// The alternative — relocating spill under the workspace — was rejected
+/// twice over: `grep` across the workspace would then match the agent's own
+/// stale output on every future search, and spill files would land inside
+/// users' git repositories.
+///
+/// The exception is deliberately narrow:
+/// - **Read-only.** Only `read_file` and `grep` consult it. Writing, editing
+///   and directory listing keep using [`validate_path_in_workspace`], so the
+///   spill root stays unwritable through the tool surface.
+/// - **One root.** `root` is *this* session's spill directory. Another
+///   session's spill directory, and `~/.zeptoclaw` at large, are not inside
+///   it and so are not reachable.
+///
+/// Returns `None` when `path` does not resolve inside `root`. The caller then
+/// falls back to workspace validation, which is what logs the audit event —
+/// so a genuine escape attempt is still recorded exactly as before.
+pub fn resolve_path_in_read_root(path: &str, root: &Path) -> Option<SafePath> {
+    if contains_traversal_pattern(path) {
+        return None;
+    }
+
+    // Spill locators are always absolute. A relative path belongs to the
+    // workspace, so it must not be reinterpreted against this root.
+    let target = Path::new(path);
+    if !target.is_absolute() {
+        return None;
+    }
+
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| normalize_path(root));
+
+    // `normalize_path` canonicalizes whenever the path exists, so a symlink
+    // planted inside the root that points outside it resolves to its target
+    // here and fails the prefix check below.
+    let resolved = normalize_path(target);
+    if !resolved.starts_with(&canonical_root) {
+        return None;
+    }
+
+    Some(SafePath { path: resolved })
+}
+
 /// Checks if any path component WITHIN the workspace is a symlink that resolves
 /// outside the workspace. This prevents symlink-based escape attacks.
 ///
@@ -836,6 +883,83 @@ mod tests {
     }
 
     // ==================== REVALIDATE_PATH TESTS ====================
+
+    // CRITICAL #1 regression: spill hands the model an absolute path outside
+    // the workspace. Without a read-only allowance for that one root, both
+    // retrieval tools reject it and raise a Critical `path_escape` event.
+    #[test]
+    fn read_root_admits_a_file_inside_it() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("spill");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("001-shell.txt");
+        fs::write(&file, "payload\n").unwrap();
+
+        let safe = resolve_path_in_read_root(file.to_str().unwrap(), &root)
+            .expect("a file inside the read root must resolve");
+        assert_eq!(
+            safe.as_path().canonicalize().unwrap(),
+            file.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn read_root_rejects_another_sessions_spill_directory() {
+        let temp = tempdir().unwrap();
+        let mine = temp.path().join("sessions/cli%3Aone/spill");
+        let theirs = temp.path().join("sessions/cli%3Atwo/spill");
+        fs::create_dir_all(&mine).unwrap();
+        fs::create_dir_all(&theirs).unwrap();
+        let other_file = theirs.join("001-shell.txt");
+        fs::write(&other_file, "secret\n").unwrap();
+
+        assert!(resolve_path_in_read_root(other_file.to_str().unwrap(), &mine).is_none());
+    }
+
+    #[test]
+    fn read_root_rejects_the_config_directory_at_large() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("sessions/cli%3Aone/spill");
+        fs::create_dir_all(&root).unwrap();
+        let config = temp.path().join("config.json");
+        fs::write(&config, "{}").unwrap();
+
+        assert!(resolve_path_in_read_root(config.to_str().unwrap(), &root).is_none());
+        assert!(resolve_path_in_read_root(temp.path().to_str().unwrap(), &root).is_none());
+        assert!(
+            resolve_path_in_read_root(temp.path().join("sessions").to_str().unwrap(), &root)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_root_rejects_relative_and_traversal_paths() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("spill");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("001-shell.txt"), "payload\n").unwrap();
+
+        // A relative path belongs to the workspace and must not be
+        // reinterpreted against the spill root.
+        assert!(resolve_path_in_read_root("001-shell.txt", &root).is_none());
+        assert!(
+            resolve_path_in_read_root(&format!("{}/../../etc/passwd", root.display()), &root)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_root_rejects_a_symlink_that_escapes_it() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("spill");
+        fs::create_dir_all(&root).unwrap();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "secret\n").unwrap();
+        let link = root.join("001-shell.txt");
+        symlink(&outside, &link).unwrap();
+
+        assert!(resolve_path_in_read_root(link.to_str().unwrap(), &root).is_none());
+    }
 
     #[test]
     fn test_revalidate_path_valid_file() {

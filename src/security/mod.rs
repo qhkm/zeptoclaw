@@ -16,7 +16,7 @@ pub use encryption::{is_secret_field, resolve_master_key, SecretEncryption};
 pub use mount::{validate_extra_mounts, validate_mount_not_blocked, DEFAULT_BLOCKED_PATTERNS};
 pub use pairing::{DeviceInfo, PairedDevice, PairingManager};
 pub use path::{
-    check_hardlink_write, ensure_directory_chain_secure, revalidate_path,
-    validate_path_in_workspace, SafePath,
+    check_hardlink_write, ensure_directory_chain_secure, resolve_path_in_read_root,
+    revalidate_path, validate_path_in_workspace, SafePath,
 };
 pub use shell::{ShellAllowlistMode, ShellSecurityConfig};

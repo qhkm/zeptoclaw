@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::error::{Result, ZeptoError};
-use crate::security::validate_path_in_workspace;
 
-use super::output::spill_or_truncate;
+use super::filesystem::resolve_read_path;
+use super::output::{spill_or_truncate, truncate_inline};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for searching file contents by pattern.
@@ -74,12 +74,15 @@ impl Tool for GrepTool {
             )
         })?;
 
-        let search_path = match args.get("path").and_then(|v| v.as_str()) {
+        // Reads may also reach this session's spill root; see
+        // `resolve_read_path`. Omitting `path` still searches the workspace
+        // only, so spill files never pollute an ordinary workspace search.
+        let (search_path, searching_spill) = match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => {
-                let safe = validate_path_in_workspace(p, workspace)?;
-                safe.as_path().to_string_lossy().to_string()
+                let target = resolve_read_path(p, ctx)?;
+                (target.path, target.from_spill)
             }
-            None => workspace.clone(),
+            None => (workspace.clone(), false),
         };
 
         let ignore_case = args
@@ -158,9 +161,13 @@ impl Tool for GrepTool {
             ));
         }
 
-        Ok(ToolOutput::llm_only(spill_or_truncate(
-            &result, "grep", ctx,
-        )))
+        // Searching a spill file must not spill again; see `truncate_inline`.
+        let rendered = if searching_spill {
+            truncate_inline(&result, ctx)
+        } else {
+            spill_or_truncate(&result, "grep", ctx)
+        };
+        Ok(ToolOutput::llm_only(rendered))
     }
 }
 
