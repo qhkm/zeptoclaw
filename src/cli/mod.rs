@@ -279,6 +279,13 @@ enum Commands {
         /// Bind address
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+        /// Require `Authorization: Bearer <KEY>` on every request
+        /// (defaults to $ZEPTOCLAW_SERVE_API_KEY; prefer the env var, flags show up in `ps`)
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Allow a non-loopback bind without an API key
+        #[arg(long)]
+        insecure_no_auth: bool,
     },
     /// Start MCP server (expose tools to Claude Desktop, VS Code, Cursor)
     McpServer {
@@ -757,8 +764,13 @@ pub async fn run() -> Result<()> {
             cmd_hardware(action);
         }
         #[cfg(feature = "panel")]
-        Some(Commands::Serve { port, bind }) => {
-            serve::cmd_serve(port, bind).await?;
+        Some(Commands::Serve {
+            port,
+            bind,
+            api_key,
+            insecure_no_auth,
+        }) => {
+            serve::cmd_serve(port, bind, api_key, insecure_no_auth).await?;
         }
         Some(Commands::McpServer { http }) => {
             cmd_mcp_server(http).await?;
