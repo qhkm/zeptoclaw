@@ -41,7 +41,7 @@ Provider stack assembly in `create_agent()`: base providers → optional Fallbac
 
 - `AgentLoop` — core message loop with tool execution + pre-compaction memory flush + per-message LTM injection
 - `process_message_streaming()` mirrors non-streaming loop for hooks, metrics, logging
-- `ContextBuilder` — system prompt + conversation context + optional per-message memory override
+- `ContextBuilder` — byte-stable system prompt + conversation context; volatile per-turn facts (clock, query memory) go in a `<turn-context>` block on the latest user message (`build_turn_context()` / `build_messages_with_turn_context()`, #661)
 - `TokenBudget` — atomic per-session tracker (lock-free `AtomicU64`)
 - `ContextMonitor` — token estimation (`words * 1.3 + 4/msg`), threshold-based compaction
 - `LoopGuard` — SHA256 tool-call repetition detection with warning + circuit breaker

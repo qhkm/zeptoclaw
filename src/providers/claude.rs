@@ -29,7 +29,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::{Result, ZeptoError};
 use crate::session::{ContentPart, ImageSource, Message, Role, ToolCall};
@@ -201,7 +201,7 @@ impl LLMProvider for ClaudeProvider {
             .headers(self.auth_headers())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
-            .json(&request)
+            .json(&cache_marked_body(&request)?)
             .send()
             .await?;
 
@@ -225,6 +225,10 @@ impl LLMProvider for ClaudeProvider {
         }
 
         let claude_response: ClaudeResponse = response.json().await?;
+        log_cache_usage(
+            claude_response.usage.cache_read_input_tokens,
+            claude_response.usage.cache_creation_input_tokens,
+        );
         Ok(convert_response(claude_response))
     }
 
@@ -269,7 +273,7 @@ impl LLMProvider for ClaudeProvider {
             .headers(self.auth_headers())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
-            .json(&request)
+            .json(&cache_marked_body(&request)?)
             .send()
             .await?;
 
@@ -351,6 +355,10 @@ impl LLMProvider for ClaudeProvider {
                             if let Some(msg) = &sse.message {
                                 if let Some(usage) = &msg.usage {
                                     input_tokens = usage.input_tokens.unwrap_or(0);
+                                    log_cache_usage(
+                                        usage.cache_read_input_tokens.unwrap_or(0),
+                                        usage.cache_creation_input_tokens.unwrap_or(0),
+                                    );
                                 }
                             }
                         }
@@ -588,6 +596,12 @@ struct ClaudeUsage {
     input_tokens: u32,
     /// Tokens in the output
     output_tokens: u32,
+    /// Prompt tokens served from the prompt cache
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    /// Prompt tokens written to the prompt cache
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
 }
 
 // ============================================================================
@@ -643,6 +657,10 @@ struct SseUsage {
     #[serde(default)]
     input_tokens: Option<u32>,
     #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
     output_tokens: Option<u32>,
 }
 
@@ -672,21 +690,28 @@ fn convert_messages(messages: Vec<Message>) -> Result<(Option<String>, Vec<Claud
 
     // Group consecutive tool results together
     let mut pending_tool_results: Vec<ClaudeContentBlock> = Vec::new();
+    // Mid-conversation system notices (e.g. loop-guard warnings). They are
+    // sent as user-turn text after any tool results, because Claude has a
+    // single system field and it must stay the stable cacheable prefix.
+    let mut pending_notices: Vec<ClaudeContentBlock> = Vec::new();
 
     for msg in messages {
         match msg.role {
             Role::System => {
-                // Claude uses a separate system field
-                system = Some(msg.content);
+                if system.is_none() {
+                    // Claude uses a separate system field
+                    system = Some(msg.content);
+                } else if !msg.content.is_empty() {
+                    pending_notices.push(ClaudeContentBlock::Text { text: msg.content });
+                }
             }
             Role::User => {
                 // Flush any pending tool results first as a user message
-                if !pending_tool_results.is_empty() {
-                    claude_messages.push(ClaudeMessage {
-                        role: "user".to_string(),
-                        content: ClaudeContent::Blocks(std::mem::take(&mut pending_tool_results)),
-                    });
-                }
+                flush_pending_user_blocks(
+                    &mut claude_messages,
+                    &mut pending_tool_results,
+                    &mut pending_notices,
+                );
 
                 // Add user message — use content blocks when images are present
                 if msg.has_images() {
@@ -727,12 +752,11 @@ fn convert_messages(messages: Vec<Message>) -> Result<(Option<String>, Vec<Claud
             }
             Role::Assistant => {
                 // Flush any pending tool results first
-                if !pending_tool_results.is_empty() {
-                    claude_messages.push(ClaudeMessage {
-                        role: "user".to_string(),
-                        content: ClaudeContent::Blocks(std::mem::take(&mut pending_tool_results)),
-                    });
-                }
+                flush_pending_user_blocks(
+                    &mut claude_messages,
+                    &mut pending_tool_results,
+                    &mut pending_notices,
+                );
 
                 // Check if this message has tool calls
                 if let Some(tool_calls) = msg.tool_calls {
@@ -782,14 +806,108 @@ fn convert_messages(messages: Vec<Message>) -> Result<(Option<String>, Vec<Claud
     }
 
     // Flush any remaining tool results
-    if !pending_tool_results.is_empty() {
-        claude_messages.push(ClaudeMessage {
-            role: "user".to_string(),
-            content: ClaudeContent::Blocks(pending_tool_results),
-        });
-    }
+    flush_pending_user_blocks(
+        &mut claude_messages,
+        &mut pending_tool_results,
+        &mut pending_notices,
+    );
 
     Ok((system, claude_messages))
+}
+
+/// Push pending tool results, then pending system notices, as one user message.
+///
+/// Claude requires `tool_result` blocks to lead their user message, so
+/// notices always follow them.
+fn flush_pending_user_blocks(
+    claude_messages: &mut Vec<ClaudeMessage>,
+    tool_results: &mut Vec<ClaudeContentBlock>,
+    notices: &mut Vec<ClaudeContentBlock>,
+) {
+    if tool_results.is_empty() && notices.is_empty() {
+        return;
+    }
+    let mut blocks = std::mem::take(tool_results);
+    blocks.append(notices);
+    claude_messages.push(ClaudeMessage {
+        role: "user".to_string(),
+        content: ClaudeContent::Blocks(blocks),
+    });
+}
+
+/// Maximum `cache_control` breakpoints Anthropic accepts per request.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// Serialize a request and attach prompt-cache breakpoints to the copy.
+///
+/// Breakpoints go on the system prompt (or the last tool when there is no
+/// system prompt) and on the last content block of the trailing messages,
+/// up to Anthropic's limit of four. The agent keeps the system prompt and
+/// tool order byte-stable (#661), so the cached prefix is reused across
+/// tool-loop iterations and turns. Prefixes below the model's minimum
+/// cacheable length are ignored by the API, so marking is always safe.
+fn cache_marked_body(request: &ClaudeRequest) -> Result<serde_json::Value> {
+    let mut body = serde_json::to_value(request)?;
+    let marker = || serde_json::json!({ "type": "ephemeral" });
+    let mut used = 0;
+
+    match body.get_mut("system") {
+        Some(serde_json::Value::String(text)) if !text.is_empty() => {
+            let text = std::mem::take(text);
+            body["system"] = serde_json::json!([
+                { "type": "text", "text": text, "cache_control": marker() }
+            ]);
+            used += 1;
+        }
+        _ => {
+            if let Some(last_tool) = body
+                .get_mut("tools")
+                .and_then(|t| t.as_array_mut())
+                .and_then(|t| t.last_mut())
+            {
+                last_tool["cache_control"] = marker();
+                used += 1;
+            }
+        }
+    }
+
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages.iter_mut().rev() {
+            if used >= MAX_CACHE_BREAKPOINTS {
+                break;
+            }
+            let content = &mut message["content"];
+            if let serde_json::Value::String(text) = content {
+                if text.is_empty() {
+                    continue;
+                }
+                let text = std::mem::take(text);
+                *content = serde_json::json!([{ "type": "text", "text": text }]);
+            }
+            // Empty text blocks cannot carry a cache breakpoint.
+            let target = content.as_array_mut().and_then(|blocks| {
+                blocks.iter_mut().rev().find(|b| {
+                    b.get("type").and_then(|t| t.as_str()) != Some("text")
+                        || b.get("text")
+                            .and_then(|t| t.as_str())
+                            .is_some_and(|t| !t.is_empty())
+                })
+            });
+            if let Some(block) = target {
+                block["cache_control"] = marker();
+                used += 1;
+            }
+        }
+    }
+
+    Ok(body)
+}
+
+/// Log prompt-cache effectiveness for a response.
+fn log_cache_usage(cache_read: u32, cache_creation: u32) {
+    if cache_read > 0 || cache_creation > 0 {
+        debug!(cache_read, cache_creation, "Claude prompt cache usage");
+    }
 }
 
 /// Convert ZeptoClaw tool definitions to Claude API format.
@@ -1010,6 +1128,8 @@ mod tests {
             usage: ClaudeUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: Some("end_turn".to_string()),
         };
@@ -1042,6 +1162,8 @@ mod tests {
             usage: ClaudeUsage {
                 input_tokens: 20,
                 output_tokens: 30,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: Some("tool_use".to_string()),
         };
@@ -1072,6 +1194,8 @@ mod tests {
             usage: ClaudeUsage {
                 input_tokens: 10,
                 output_tokens: 10,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             stop_reason: Some("end_turn".to_string()),
         };
@@ -1369,5 +1493,150 @@ mod tests {
         } else {
             panic!("Expected Blocks content");
         }
+    }
+
+    // ---- Prompt cache envelope (#661) ----
+
+    fn request_for(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ClaudeRequest {
+        let (system, claude_messages) = convert_messages(messages).unwrap();
+        ClaudeRequest {
+            model: "claude-test".to_string(),
+            max_tokens: 100,
+            messages: claude_messages,
+            system,
+            tools: if tools.is_empty() {
+                None
+            } else {
+                Some(convert_tools(tools))
+            },
+            temperature: None,
+            top_p: None,
+            stop_sequences: None,
+            stream: None,
+        }
+    }
+
+    fn count_markers(body: &serde_json::Value) -> usize {
+        body.to_string().matches("\"cache_control\"").count()
+    }
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: "d".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    #[test]
+    fn test_later_system_messages_do_not_replace_system_prompt() {
+        let messages = vec![
+            Message::system("You are ZeptoClaw."),
+            Message::user("run it"),
+            Message::assistant_with_tools("", vec![ToolCall::new("c1", "shell", "{}")]),
+            Message::tool_result("c1", "output"),
+            Message::system("[LoopGuard] blocked: repeated call."),
+            Message::assistant("ok"),
+        ];
+        let (system, claude_msgs) = convert_messages(messages).unwrap();
+        assert_eq!(system.as_deref(), Some("You are ZeptoClaw."));
+        // The notice rides after the tool result in the same user message.
+        let ClaudeContent::Blocks(blocks) = &claude_msgs[2].content else {
+            panic!("expected blocks");
+        };
+        assert!(matches!(&blocks[0], ClaudeContentBlock::ToolResult { .. }));
+        assert!(
+            matches!(&blocks[1], ClaudeContentBlock::Text { text } if text.contains("LoopGuard"))
+        );
+        assert_eq!(claude_msgs[3].role, "assistant");
+    }
+
+    #[test]
+    fn test_cache_markers_on_system_and_trailing_messages() {
+        let request = request_for(
+            vec![
+                Message::system("stable"),
+                Message::user("one"),
+                Message::assistant("two"),
+                Message::user("three"),
+                Message::assistant("four"),
+                Message::user("five"),
+            ],
+            vec![tool_def("a"), tool_def("b")],
+        );
+        let body = cache_marked_body(&request).unwrap();
+        assert_eq!(count_markers(&body), MAX_CACHE_BREAKPOINTS);
+        assert_eq!(body["system"][0]["text"], "stable");
+        assert!(body["system"][0]["cache_control"].is_object());
+        // System covers the tools prefix, so tools stay unmarked.
+        assert!(body["tools"][1].get("cache_control").is_none());
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(msgs[0]["content"].is_string(), "older messages untouched");
+        assert!(msgs[1]["content"].is_string());
+        for m in &msgs[2..] {
+            assert!(m["content"][0]["cache_control"].is_object(), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_cache_marker_falls_back_to_last_tool_without_system() {
+        let request = request_for(
+            vec![Message::user("hi")],
+            vec![tool_def("a"), tool_def("b")],
+        );
+        let body = cache_marked_body(&request).unwrap();
+        assert!(body.get("system").is_none());
+        assert!(body["tools"][1]["cache_control"].is_object());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert!(body["messages"][0]["content"][0]["cache_control"].is_object());
+        assert_eq!(count_markers(&body), 2);
+    }
+
+    #[test]
+    fn test_cache_marker_targets_last_tool_result_block() {
+        let request = request_for(
+            vec![
+                Message::system("s"),
+                Message::user("go"),
+                Message::assistant_with_tools("", vec![ToolCall::new("c1", "shell", "{}")]),
+                Message::tool_result("c1", "out"),
+            ],
+            vec![],
+        );
+        let body = cache_marked_body(&request).unwrap();
+        let last = &body["messages"][2]["content"][0];
+        assert_eq!(last["type"], "tool_result");
+        assert!(last["cache_control"].is_object());
+        let tool_use = &body["messages"][1]["content"][0];
+        assert_eq!(tool_use["type"], "tool_use");
+        assert!(tool_use["cache_control"].is_object());
+    }
+
+    #[test]
+    fn test_cache_marked_body_does_not_mark_empty_text() {
+        let request = request_for(
+            vec![
+                Message::system("s"),
+                Message::user("q"),
+                Message::assistant(""),
+            ],
+            vec![],
+        );
+        let body = cache_marked_body(&request).unwrap();
+        assert_eq!(body["messages"][1]["content"], "");
+        assert!(body["messages"][0]["content"][0]["cache_control"].is_object());
+    }
+
+    #[test]
+    fn test_cache_usage_fields_deserialize_with_defaults() {
+        let usage: ClaudeUsage =
+            serde_json::from_str(r#"{"input_tokens":3,"output_tokens":4}"#).unwrap();
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        let usage: ClaudeUsage = serde_json::from_str(
+            r#"{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":900,"cache_creation_input_tokens":12}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.cache_read_input_tokens, 900);
+        assert_eq!(usage.cache_creation_input_tokens, 12);
     }
 }

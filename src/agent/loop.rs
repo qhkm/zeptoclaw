@@ -754,19 +754,24 @@ impl AgentLoop {
         }
     }
 
-    async fn build_memory_override(&self, user_input: &str) -> Option<String> {
-        let ltm = self.ltm.as_ref()?;
-        let guard = ltm.lock().await;
-        let memory = crate::memory::build_memory_injection(
-            &guard,
-            user_input,
-            crate::memory::MEMORY_INJECTION_BUDGET,
-        );
-        if memory.is_empty() {
-            None
-        } else {
-            Some(memory)
-        }
+    /// Build this turn's volatile context (live clock + query-selected memory).
+    ///
+    /// Computed once per turn and reused for every provider call in the tool
+    /// loop, so the request prefix stays byte-identical within the turn.
+    async fn build_turn_context(&self, user_input: &str) -> Option<String> {
+        let memory = match self.ltm.as_ref() {
+            Some(ltm) => {
+                let guard = ltm.lock().await;
+                crate::memory::build_memory_injection(
+                    &guard,
+                    user_input,
+                    crate::memory::MEMORY_INJECTION_BUDGET,
+                )
+            }
+            None => String::new(),
+        };
+        self.context_builder
+            .build_turn_context(Some(memory.as_str()).filter(|m| !m.is_empty()))
     }
 
     /// Check if the agent loop is currently running.
@@ -1094,9 +1099,9 @@ impl AgentLoop {
         // Pass an empty user_input string: the current user message is already
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
-        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
+        let turn_context = self.build_turn_context(&resolved_user_prompt).await;
         let mut messages = self
-            .build_resolved_messages(&session, memory_override.as_deref())
+            .build_resolved_messages(&session, turn_context.as_deref())
             .await;
 
         // Get tool definitions (short-lived read lock)
@@ -1128,7 +1133,7 @@ impl AgentLoop {
                         );
                     session.messages = recovered;
                     messages = self
-                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .build_resolved_messages(&session, turn_context.as_deref())
                         .await;
                 }
             }
@@ -1150,17 +1155,24 @@ impl AgentLoop {
             )));
         }
 
-        // Build cache key from (model, system_prompt, user_prompt) for the
-        // initial LLM call only. Tool follow-up calls are never cached.
+        // Build cache key from (model, system_prompt + turn context, user_prompt)
+        // for the initial LLM call only. Tool follow-up calls are never cached.
+        // The turn context (clock, memory) is keyed explicitly because it no
+        // longer lives in the system prompt.
         let cache_key = self.cache.as_ref().map(|_| {
             let system_prompt = messages
                 .first()
                 .filter(|m| m.role == Role::System)
                 .map(|m| m.content.as_str())
                 .unwrap_or("");
+            let keyed_context = format!(
+                "{}\n{}",
+                system_prompt,
+                turn_context.as_deref().unwrap_or("")
+            );
             ResponseCache::cache_key(
                 self.config.agents.defaults.model.as_str(),
-                system_prompt,
+                &keyed_context,
                 &resolved_user_prompt,
             )
         });
@@ -1229,7 +1241,7 @@ impl AgentLoop {
                 );
                 session.messages = recovered;
                 last_messages = self
-                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .build_resolved_messages(&session, turn_context.as_deref())
                     .await;
                 last_tool_defs = {
                     let tools = self.tools.read().await;
@@ -1701,7 +1713,7 @@ impl AgentLoop {
                     break;
                 }
                 let mut messages = self
-                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .build_resolved_messages(&session, turn_context.as_deref())
                     .await;
                 // Pre-flight guard for synthesis call
                 if let Some(ref monitor) = self.context_monitor {
@@ -1721,7 +1733,7 @@ impl AgentLoop {
                             );
                         session.messages = recovered;
                         messages = self
-                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .build_resolved_messages(&session, turn_context.as_deref())
                             .await;
                     }
                 }
@@ -1758,7 +1770,7 @@ impl AgentLoop {
                             );
                         session.messages = recovered;
                         last_messages = self
-                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .build_resolved_messages(&session, turn_context.as_deref())
                             .await;
                         result = provider
                             .chat(last_messages.clone(), vec![], model, options.clone())
@@ -1820,7 +1832,7 @@ impl AgentLoop {
 
             // Call LLM again with tool results -- provider lock NOT held
             let mut messages = self
-                .build_resolved_messages(&session, memory_override.as_deref())
+                .build_resolved_messages(&session, turn_context.as_deref())
                 .await;
 
             // Pre-flight context guard (tool loop)
@@ -1846,7 +1858,7 @@ impl AgentLoop {
                             );
                         session.messages = recovered;
                         messages = self
-                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .build_resolved_messages(&session, turn_context.as_deref())
                             .await;
                     }
                 }
@@ -1899,7 +1911,7 @@ impl AgentLoop {
                     );
                     session.messages = recovered;
                     last_messages = self
-                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .build_resolved_messages(&session, turn_context.as_deref())
                         .await;
                     last_tool_defs = {
                         let tools = self.tools.read().await;
@@ -2079,9 +2091,9 @@ impl AgentLoop {
         }
 
         // Pass an empty user_input: the current user message is already in session.
-        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
+        let turn_context = self.build_turn_context(&resolved_user_prompt).await;
         let mut messages = self
-            .build_resolved_messages(&session, memory_override.as_deref())
+            .build_resolved_messages(&session, turn_context.as_deref())
             .await;
 
         let tool_definitions = {
@@ -2112,7 +2124,7 @@ impl AgentLoop {
                         );
                     session.messages = recovered;
                     messages = self
-                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .build_resolved_messages(&session, turn_context.as_deref())
                         .await;
                 }
             }
@@ -2180,7 +2192,7 @@ impl AgentLoop {
                 );
                 session.messages = recovered;
                 last_messages = self
-                    .build_resolved_messages(&session, memory_override.as_deref())
+                    .build_resolved_messages(&session, turn_context.as_deref())
                     .await;
                 last_tool_defs = {
                     let tools = self.tools.read().await;
@@ -2655,7 +2667,7 @@ impl AgentLoop {
             }
 
             let mut messages = self
-                .build_resolved_messages(&session, memory_override.as_deref())
+                .build_resolved_messages(&session, turn_context.as_deref())
                 .await;
 
             // Pre-flight context guard (streaming tool loop)
@@ -2681,7 +2693,7 @@ impl AgentLoop {
                             );
                         session.messages = recovered;
                         messages = self
-                            .build_resolved_messages(&session, memory_override.as_deref())
+                            .build_resolved_messages(&session, turn_context.as_deref())
                             .await;
                     }
                 }
@@ -2733,7 +2745,7 @@ impl AgentLoop {
                     );
                     session.messages = recovered;
                     last_messages = self
-                        .build_resolved_messages(&session, memory_override.as_deref())
+                        .build_resolved_messages(&session, turn_context.as_deref())
                         .await;
                     last_tool_defs = {
                         let tools = self.tools.read().await;
@@ -2784,7 +2796,7 @@ impl AgentLoop {
             // If the tool call limit was hit, pass empty tools so the model
             // cannot emit further tool calls after the cap was enforced.
             let messages = self
-                .build_resolved_messages(&session, memory_override.as_deref())
+                .build_resolved_messages(&session, turn_context.as_deref())
                 .await;
 
             let tool_definitions = if tool_limit_hit {
@@ -3004,13 +3016,11 @@ impl AgentLoop {
     async fn build_resolved_messages(
         &self,
         session: &crate::session::Session,
-        memory_override: Option<&str>,
+        turn_context: Option<&str>,
     ) -> Vec<Message> {
-        let mut msgs = self.context_builder.build_messages_with_memory_override(
-            &session.messages,
-            "",
-            memory_override,
-        );
+        let mut msgs = self
+            .context_builder
+            .build_messages_with_turn_context(&session.messages, turn_context);
 
         // Resolve image file paths to base64 before filtering
         if let Some(dir) = self.session_manager.sessions_dir() {
@@ -4753,6 +4763,112 @@ mod tests {
         ) -> std::result::Result<crate::tools::ToolOutput, crate::error::ZeptoError> {
             Ok(crate::tools::ToolOutput::llm_only("ok"))
         }
+    }
+
+    /// Records every request; odd calls ask for a tool, even calls answer.
+    struct CapturingProvider {
+        requests: Arc<std::sync::Mutex<Vec<(Vec<Message>, Vec<ToolDefinition>)>>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for CapturingProvider {
+        fn name(&self) -> &str {
+            "capture"
+        }
+
+        fn default_model(&self) -> &str {
+            "capture-model"
+        }
+
+        async fn chat(
+            &self,
+            messages: Vec<Message>,
+            tools: Vec<ToolDefinition>,
+            _model: Option<&str>,
+            _options: ChatOptions,
+        ) -> Result<LLMResponse> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push((messages, tools));
+            if requests.len() % 2 == 1 {
+                let id = format!("call_{}", requests.len());
+                Ok(LLMResponse::with_tools(
+                    "",
+                    vec![LLMToolCall::new(&id, "alpha_read", "{}")],
+                ))
+            } else {
+                Ok(LLMResponse::text("done"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_prefix_is_byte_stable_across_tool_loop_and_turns() {
+        let context_builder = ContextBuilder::new().with_runtime_context(
+            crate::agent::RuntimeContext::new()
+                .with_timezone("UTC")
+                .with_os_info(),
+        );
+        let agent = AgentLoop::with_context_builder(
+            Config::default(),
+            SessionManager::new_memory(),
+            Arc::new(MessageBus::new()),
+            context_builder,
+        );
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent
+            .set_provider(Box::new(CapturingProvider {
+                requests: Arc::clone(&requests),
+            }))
+            .await;
+        for name in ["zeta_read", "alpha_read", "mid_read"] {
+            agent
+                .register_tool(Box::new(StubTool {
+                    name,
+                    category: ToolCategory::FilesystemRead,
+                }))
+                .await;
+        }
+
+        for text in ["first question", "second question"] {
+            let msg = InboundMessage::new("cli", "user", "cli", text);
+            assert_eq!(agent.process_message(&msg).await.unwrap(), "done");
+        }
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4, "two turns x (tool call + answer)");
+        let json = |m: &[Message]| serde_json::to_string(m).unwrap();
+
+        // Stable envelope: identical system message and tool list on every call.
+        let (first_msgs, first_tools) = &requests[0];
+        assert!(!first_msgs[0].content.contains("Current time:"));
+        let tool_names: Vec<&str> = first_tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(tool_names, ["alpha_read", "mid_read", "zeta_read"]);
+        for (msgs, tools) in requests.iter() {
+            assert_eq!(json(&msgs[..1]), json(&first_msgs[..1]));
+            assert_eq!(
+                serde_json::to_string(tools).unwrap(),
+                serde_json::to_string(first_tools).unwrap()
+            );
+        }
+
+        // Within a turn, each tool-loop call extends the previous request.
+        for turn in [0, 2] {
+            let (prev, _) = &requests[turn];
+            let (next, _) = &requests[turn + 1];
+            assert_eq!(json(&next[..prev.len()]), json(prev), "turn {turn}");
+        }
+
+        // The turn context sits on the newest user message only; history is clean.
+        let (second_turn, _) = &requests[2];
+        let users: Vec<&Message> = second_turn
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .collect();
+        assert_eq!(users[0].content, "first question");
+        assert!(users[1]
+            .content
+            .starts_with(crate::agent::context::TURN_CONTEXT_OPEN));
+        assert!(users[1].content.ends_with("second question"));
     }
 
     #[derive(Debug)]

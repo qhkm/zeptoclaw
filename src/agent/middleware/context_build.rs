@@ -43,16 +43,13 @@ impl Middleware for ContextBuildMiddleware {
     }
 
     async fn handle(&self, ctx: &mut PipelineContext, next: Next<'_>) -> Result<PipelineOutput> {
-        // Build messages from session history + system prompt + memory override.
+        // Build messages from session history + stable system prompt, with the
+        // per-turn context (clock + memory) on the latest user message.
         if let Some(ref session) = ctx.session {
-            let mut msgs = ctx
-                .subsystems
-                .context_builder
-                .build_messages_with_memory_override(
-                    &session.messages,
-                    "", // user input already in session
-                    ctx.memory_override.as_deref(),
-                );
+            let builder = &ctx.subsystems.context_builder;
+            let turn_context = builder.build_turn_context(ctx.memory_override.as_deref());
+            let mut msgs = builder
+                .build_messages_with_turn_context(&session.messages, turn_context.as_deref());
 
             // TODO(phase-4): Resolve image file paths to base64.
             // The `resolve_images_to_base64` utility currently lives as a
@@ -188,12 +185,14 @@ mod tests {
         let _ = pipeline.execute(&mut ctx).await.unwrap();
 
         let messages = ctx.messages.as_ref().expect("messages should be set");
-        // The system message should contain the memory override
-        let system_content = &messages[0].content;
+        // Memory rides in the per-turn context, not the cacheable system prompt.
+        assert!(!messages[0].content.contains("dark mode"));
+        let user_content = &messages[1].content;
         assert!(
-            system_content.contains("dark mode"),
-            "System prompt should include memory override, got: {}",
-            &system_content[..system_content.len().min(200)]
+            user_content.contains("dark mode")
+                && user_content.ends_with("What are my preferences?"),
+            "Latest user message should carry the memory override, got: {}",
+            user_content
         );
     }
 }

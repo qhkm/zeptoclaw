@@ -3,7 +3,7 @@
 //! This module provides the `ToolRegistry` struct for managing and executing tools.
 //! Tools can be registered, looked up by name, and executed with context.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -47,7 +47,9 @@ fn opt_in_tool_hint(name: &str) -> &'static str {
 /// # });
 /// ```
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    /// Ordered by name so tool definitions reach providers in a stable,
+    /// cache-friendly order (#661).
+    tools: BTreeMap<String, Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -62,7 +64,7 @@ impl ToolRegistry {
     /// ```
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
         }
     }
 
@@ -431,6 +433,25 @@ mod tests {
         async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
             Ok(ToolOutput::llm_only("ok"))
         }
+    }
+
+    #[test]
+    fn definitions_are_sorted_by_name() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(HostileSchemaTool));
+        registry.register(Box::new(EchoTool));
+        registry.register(Box::new(BareObjectSchemaTool));
+        let expected = {
+            let mut names = registry.names();
+            names.sort_unstable();
+            names.into_iter().map(String::from).collect::<Vec<_>>()
+        };
+        let names =
+            |defs: Vec<ToolDefinition>| defs.into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(names(registry.definitions()), expected);
+        assert_eq!(names(registry.definitions_with_options(true)), expected);
+        let all: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(names(registry.definitions_for_tools(&all)), expected);
     }
 
     fn hostile_registry() -> ToolRegistry {
