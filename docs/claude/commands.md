@@ -36,6 +36,11 @@ Note: `/trust` and approval prompts only active when both stdin and stdout are r
 ## CLI Commands
 
 ```bash
+# OpenAI-compatible API server (requires --features panel)
+zeptoclaw serve [--port 8080] [--bind 127.0.0.1]
+ZEPTOCLAW_SERVE_API_KEY=... zeptoclaw serve --bind 0.0.0.0   # clients send Authorization: Bearer <key>
+zeptoclaw serve --bind 0.0.0.0 --insecure-no-auth          # explicit opt-out; non-loopback needs a key otherwise
+
 # History
 zeptoclaw history list [--limit 20]
 zeptoclaw history show <query>

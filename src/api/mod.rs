@@ -7,5 +7,6 @@ pub mod events;
 pub mod middleware;
 pub mod openai_types;
 pub mod routes;
+pub mod serve;
 pub mod server;
 pub mod tasks;
