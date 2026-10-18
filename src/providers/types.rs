@@ -451,12 +451,22 @@ impl LLMToolCall {
 /// Token usage information from a completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
-    /// Number of tokens in the prompt
+    /// Number of tokens in the prompt, including any cache reads and writes
     pub prompt_tokens: u32,
     /// Number of tokens in the completion
     pub completion_tokens: u32,
     /// Total tokens used (prompt + completion)
     pub total_tokens: u32,
+    /// Prompt tokens served from the provider's prompt cache (part of `prompt_tokens`)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written to the provider's prompt cache (part of `prompt_tokens`)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_tokens: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Usage {
@@ -478,7 +488,42 @@ impl Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }
+    }
+
+    /// Add prompt-cache token counts reported separately from the uncached prompt.
+    ///
+    /// Providers such as Anthropic exclude cached tokens from their input count;
+    /// this folds them into `prompt_tokens` and `total_tokens` so budgets see the
+    /// full prompt size, while keeping the split for cost estimation.
+    ///
+    /// # Example
+    /// ```
+    /// use zeptoclaw::providers::Usage;
+    ///
+    /// let usage = Usage::new(10, 5).with_cache(900, 100);
+    /// assert_eq!(usage.prompt_tokens, 1010);
+    /// assert_eq!(usage.total_tokens, 1015);
+    /// assert_eq!(usage.uncached_prompt_tokens(), 10);
+    /// ```
+    pub fn with_cache(mut self, cache_read_tokens: u32, cache_creation_tokens: u32) -> Self {
+        let cached = cache_read_tokens.saturating_add(cache_creation_tokens);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(cached);
+        self.total_tokens = self.total_tokens.saturating_add(cached);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(cache_read_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(cache_creation_tokens);
+        self
+    }
+
+    /// Prompt tokens billed at the normal input rate (neither read from nor written to cache).
+    pub fn uncached_prompt_tokens(&self) -> u32 {
+        self.prompt_tokens
+            .saturating_sub(self.cache_read_tokens)
+            .saturating_sub(self.cache_creation_tokens)
     }
 }
 

@@ -118,6 +118,43 @@ pub fn estimate_cost(
     })
 }
 
+/// Price multiplier for prompt tokens read from cache, relative to the input rate.
+///
+/// Matches Anthropic's published cache-hit pricing (0.1x base input).
+pub const CACHE_READ_PRICE_MULTIPLIER: f64 = 0.1;
+
+/// Price multiplier for prompt tokens written to cache, relative to the input rate.
+///
+/// Matches Anthropic's 5-minute ephemeral cache-write pricing (1.25x base input).
+pub const CACHE_WRITE_PRICE_MULTIPLIER: f64 = 1.25;
+
+/// Estimate the cost of a single LLM call from its reported [`Usage`], in USD.
+///
+/// Like [`estimate_cost`], but bills prompt-cache reads and writes at
+/// [`CACHE_READ_PRICE_MULTIPLIER`] and [`CACHE_WRITE_PRICE_MULTIPLIER`] times
+/// the model's input rate. Usage without cache counters costs the same as
+/// [`estimate_cost`].
+///
+/// [`Usage`]: crate::providers::Usage
+pub fn estimate_usage_cost(
+    model: &str,
+    usage: &crate::providers::Usage,
+    custom_pricing: &HashMap<String, ModelPricing>,
+) -> Option<f64> {
+    let defaults = default_pricing();
+    let pricing = custom_pricing.get(model).or_else(|| defaults.get(model));
+
+    pricing.map(|p| {
+        let per_input = p.input_cost_per_million / 1_000_000.0;
+        let input_cost = usage.uncached_prompt_tokens() as f64 * per_input
+            + usage.cache_read_tokens as f64 * per_input * CACHE_READ_PRICE_MULTIPLIER
+            + usage.cache_creation_tokens as f64 * per_input * CACHE_WRITE_PRICE_MULTIPLIER;
+        let output_cost =
+            (usage.completion_tokens as f64 / 1_000_000.0) * p.output_cost_per_million;
+        input_cost + output_cost
+    })
+}
+
 /// Internal mutable state guarded by the `CostTracker` mutex.
 #[derive(Debug, Default)]
 struct CostState {
@@ -337,6 +374,33 @@ mod tests {
         );
         let cost = estimate_cost("my-custom-model", 1_000_000, 1_000_000, &custom).unwrap();
         assert!((cost - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_estimate_usage_cost_without_cache_matches_estimate_cost() {
+        let usage = crate::providers::Usage::new(1_000_000, 1_000_000);
+        let plain = estimate_cost("claude-sonnet-4-6", 1_000_000, 1_000_000, &HashMap::new());
+        let from_usage = estimate_usage_cost("claude-sonnet-4-6", &usage, &HashMap::new());
+        assert_eq!(plain, from_usage);
+    }
+
+    #[test]
+    fn test_estimate_usage_cost_prices_cache_reads_and_writes() {
+        // Sonnet input is $3/M: 1M uncached = $3, 1M cache read = $0.30,
+        // 1M cache write = $3.75, plus 1M output at $15.
+        let usage =
+            crate::providers::Usage::new(1_000_000, 1_000_000).with_cache(1_000_000, 1_000_000);
+        let cost = estimate_usage_cost("claude-sonnet-4-6", &usage, &HashMap::new()).unwrap();
+        assert!(
+            (cost - (3.0 + 0.3 + 3.75 + 15.0)).abs() < 1e-9,
+            "cost = {cost}"
+        );
+    }
+
+    #[test]
+    fn test_estimate_usage_cost_unknown_model_returns_none() {
+        let usage = crate::providers::Usage::new(10, 10).with_cache(10, 10);
+        assert!(estimate_usage_cost("nope", &usage, &HashMap::new()).is_none());
     }
 
     #[test]

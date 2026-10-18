@@ -385,18 +385,17 @@ impl QuotaProvider {
 
     /// Record token usage from a successful `chat()` response.
     ///
-    /// Uses [`crate::utils::cost::estimate_cost`] to convert token counts to a
-    /// USD cost estimate. Falls back to 0.0 for unknown models (still records
-    /// the token count).
+    /// Uses [`crate::utils::cost::estimate_usage_cost`] to convert token counts
+    /// (including prompt-cache reads and writes) to a USD cost estimate. Falls
+    /// back to 0.0 for unknown models (still records the token count).
     fn record_usage(&self, response: &crate::providers::LLMResponse) {
         let Some(usage) = &response.usage else {
             return;
         };
         let tokens = u64::from(usage.total_tokens);
-        let cost_usd = crate::utils::cost::estimate_cost(
+        let cost_usd = crate::utils::cost::estimate_usage_cost(
             self.inner.default_model(),
-            usage.prompt_tokens,
-            usage.completion_tokens,
+            usage,
             &HashMap::new(),
         )
         .unwrap_or(0.0);

@@ -304,6 +304,8 @@ impl LLMProvider for ClaudeProvider {
             let mut current_tool_json = String::new();
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
+            let mut cache_read_tokens: u32 = 0;
+            let mut cache_creation_tokens: u32 = 0;
             let mut line_buffer = String::new();
 
             tokio::pin!(byte_stream);
@@ -355,10 +357,10 @@ impl LLMProvider for ClaudeProvider {
                             if let Some(msg) = &sse.message {
                                 if let Some(usage) = &msg.usage {
                                     input_tokens = usage.input_tokens.unwrap_or(0);
-                                    log_cache_usage(
-                                        usage.cache_read_input_tokens.unwrap_or(0),
-                                        usage.cache_creation_input_tokens.unwrap_or(0),
-                                    );
+                                    cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+                                    cache_creation_tokens =
+                                        usage.cache_creation_input_tokens.unwrap_or(0);
+                                    log_cache_usage(cache_read_tokens, cache_creation_tokens);
                                 }
                             }
                         }
@@ -418,7 +420,8 @@ impl LLMProvider for ClaudeProvider {
                                     .send(StreamEvent::ToolCalls(std::mem::take(&mut tool_calls)))
                                     .await;
                             }
-                            let usage = super::Usage::new(input_tokens, output_tokens);
+                            let usage = super::Usage::new(input_tokens, output_tokens)
+                                .with_cache(cache_read_tokens, cache_creation_tokens);
                             let _ = tx
                                 .send(StreamEvent::Done {
                                     content: assembled_content.clone(),
@@ -437,7 +440,8 @@ impl LLMProvider for ClaudeProvider {
                     .send(StreamEvent::ToolCalls(std::mem::take(&mut tool_calls)))
                     .await;
             }
-            let usage = super::Usage::new(input_tokens, output_tokens);
+            let usage = super::Usage::new(input_tokens, output_tokens)
+                .with_cache(cache_read_tokens, cache_creation_tokens);
             let _ = tx
                 .send(StreamEvent::Done {
                     content: assembled_content,
@@ -949,7 +953,10 @@ fn convert_response(response: ClaudeResponse) -> LLMResponse {
         }
     }
 
-    let usage = Usage::new(response.usage.input_tokens, response.usage.output_tokens);
+    let usage = Usage::new(response.usage.input_tokens, response.usage.output_tokens).with_cache(
+        response.usage.cache_read_input_tokens,
+        response.usage.cache_creation_input_tokens,
+    );
 
     LLMResponse {
         content,
@@ -1144,6 +1151,30 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn test_convert_response_folds_cache_tokens_into_usage() {
+        let response = ClaudeResponse {
+            content: vec![ClaudeContentBlock::Text {
+                text: "cached".to_string(),
+            }],
+            usage: ClaudeUsage {
+                input_tokens: 12,
+                output_tokens: 8,
+                cache_read_input_tokens: 4000,
+                cache_creation_input_tokens: 300,
+            },
+            stop_reason: Some("end_turn".to_string()),
+        };
+
+        let usage = convert_response(response).usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 4312);
+        assert_eq!(usage.completion_tokens, 8);
+        assert_eq!(usage.total_tokens, 4320);
+        assert_eq!(usage.cache_read_tokens, 4000);
+        assert_eq!(usage.cache_creation_tokens, 300);
+        assert_eq!(usage.uncached_prompt_tokens(), 12);
     }
 
     #[test]
