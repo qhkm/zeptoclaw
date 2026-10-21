@@ -162,7 +162,7 @@ dashmap = "6"
 # Cancellation tokens for async task lifecycle
 tokio-util = { version = "0.7", features = ["rt"] }
 # Integration helpers
-base64 = "0.22"
+base64 = "0.23"
 # Temp directory creation for container env files
 tempfile = "3.10"
 # Secure password input (hidden terminal echo)
