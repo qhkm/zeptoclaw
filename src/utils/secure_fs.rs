@@ -66,6 +66,45 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 }
 
+/// Create a file with user-only permissions, failing instead of silently
+/// overwriting if it already exists.
+///
+/// `write_private_file` opens with `create(true).truncate(true)`, so two
+/// writers racing to the same generated path have the second silently
+/// truncate the first's contents. This uses `create_new` so the loser gets
+/// `ErrorKind::AlreadyExists` back and can retry under a different path
+/// instead of destroying data.
+pub fn write_private_file_exclusive(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)?;
+        restrict_private_file(path)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(contents)
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -103,5 +142,17 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn exclusive_write_fails_without_clobbering_when_path_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secret");
+
+        write_private_file_exclusive(&path, b"first").unwrap();
+        let err = write_private_file_exclusive(&path, b"second").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"first");
     }
 }

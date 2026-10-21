@@ -245,6 +245,22 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Per-execution spill settings: where spill files go, and the budgets.
+///
+/// `None` on [`ToolContext`] means spill is unavailable — no session, or
+/// disabled by config — and tool output truncates as it did before spill.
+#[derive(Debug, Clone)]
+pub struct SpillSettings {
+    /// Session these spill files belong to. Used for logging and cleanup.
+    pub session_id: String,
+    /// Directory spill files are written into. The caller resolves this so
+    /// the store never has to guess a location, and tests can point it at a
+    /// temp dir without a test-only constructor.
+    pub root: std::path::PathBuf,
+    /// Budgets and retention caps.
+    pub config: crate::config::SpillConfig,
+}
+
 /// Context provided to tools during execution.
 ///
 /// This struct contains information about the execution environment,
@@ -259,6 +275,8 @@ pub struct ToolContext {
     pub workspace: Option<String>,
     /// Whether the tool is running in batch mode (no interactive user).
     pub is_batch: bool,
+    /// Spill settings, or `None` to truncate without spilling.
+    pub spill: Option<SpillSettings>,
 }
 
 impl ToolContext {
@@ -320,6 +338,12 @@ impl ToolContext {
     /// user input should fall back to a sensible default.
     pub fn with_batch(mut self, is_batch: bool) -> Self {
         self.is_batch = is_batch;
+        self
+    }
+
+    /// Attach spill settings.
+    pub fn with_spill(mut self, settings: SpillSettings) -> Self {
+        self.spill = Some(settings);
         self
     }
 }
@@ -401,6 +425,21 @@ mod tests {
         assert_eq!(ctx1.channel, ctx2.channel);
         assert_eq!(ctx1.chat_id, ctx2.chat_id);
         assert_eq!(ctx1.workspace, ctx2.workspace);
+    }
+
+    #[test]
+    fn tool_context_spill_defaults_to_none() {
+        assert!(ToolContext::default().spill.is_none());
+    }
+
+    #[test]
+    fn tool_context_with_spill_sets_settings() {
+        let ctx = ToolContext::new().with_spill(SpillSettings {
+            session_id: "abc".to_string(),
+            root: std::path::PathBuf::from("/tmp/abc/spill"),
+            config: crate::config::SpillConfig::default(),
+        });
+        assert_eq!(ctx.spill.as_ref().unwrap().session_id, "abc");
     }
 
     #[test]

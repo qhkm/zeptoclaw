@@ -17,10 +17,13 @@ use unicode_normalization::UnicodeNormalization;
 use crate::error::{Result, ZeptoError};
 #[cfg(not(unix))]
 use crate::security::check_hardlink_write;
-use crate::security::{ensure_directory_chain_secure, revalidate_path, validate_path_in_workspace};
+use crate::security::{
+    ensure_directory_chain_secure, resolve_path_in_read_root, revalidate_path,
+    validate_path_in_workspace,
+};
 use crate::tools::diff::apply_unified_diff;
 
-use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::output::{spill_or_truncate, truncate_inline};
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Resolve and validate a path relative to the workspace.
@@ -41,6 +44,55 @@ fn resolve_path(path: &str, ctx: &ToolContext) -> Result<(String, String)> {
         safe_path.as_path().to_string_lossy().to_string(),
         workspace.clone(),
     ))
+}
+
+/// A path resolved for read-only access, plus the root it was validated
+/// against so the caller can re-validate immediately before I/O.
+pub(crate) struct ReadTarget {
+    /// Absolute, validated path.
+    pub path: String,
+    /// The root `path` was validated against: the workspace, or this
+    /// session's spill root.
+    pub root: String,
+    /// True when `path` lives inside this session's spill root.
+    pub from_spill: bool,
+}
+
+/// Resolve and validate a path for **read-only** access.
+///
+/// Like [`resolve_path`], except reads may also reach this session's spill
+/// root. Spill hands the model an absolute path under
+/// `~/.zeptoclaw/sessions/<key>/spill`, which is deliberately outside the
+/// workspace — keeping it out of users' git repositories, and keeping the
+/// agent's own stale output from matching every future workspace `grep`.
+/// Without this allowance the locator names two tools that reject it with a
+/// `SecurityViolation` and a Critical `path_escape` audit event, so the
+/// feature cannot deliver what it advertises.
+///
+/// Reading a spill file back is not an escalation: it is output this agent
+/// produced moments earlier and already saw a preview of.
+///
+/// The exception is read-only and single-rooted by construction —
+/// `write_file`, `edit_file` and `list_dir` keep calling [`resolve_path`],
+/// and [`resolve_path_in_read_root`] admits nothing outside the one root it
+/// is given, so another session's spill directory and the rest of
+/// `~/.zeptoclaw` stay rejected.
+pub(crate) fn resolve_read_path(path: &str, ctx: &ToolContext) -> Result<ReadTarget> {
+    if let Some(settings) = ctx.spill.as_ref() {
+        if let Some(safe) = resolve_path_in_read_root(path, &settings.root) {
+            return Ok(ReadTarget {
+                path: safe.as_path().to_string_lossy().to_string(),
+                root: settings.root.to_string_lossy().to_string(),
+                from_spill: true,
+            });
+        }
+    }
+    let (path, root) = resolve_path(path, ctx)?;
+    Ok(ReadTarget {
+        path,
+        root,
+        from_spill: false,
+    })
 }
 
 #[cfg(unix)]
@@ -169,6 +221,14 @@ impl Tool for ReadFileTool {
                 "path": {
                     "type": "string",
                     "description": "The path to the file to read"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based line number to start reading from. Omit to start at the beginning."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return. Omit to read to the end."
                 }
             },
             "required": ["path"]
@@ -181,19 +241,48 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ZeptoError::Tool("Missing 'path' argument".into()))?;
 
-        let (full_path, workspace) = resolve_path(path, ctx)?;
+        let target = resolve_read_path(path, ctx)?;
+        let full_path = target.path.clone();
 
         // TOCTOU: re-validate immediately before I/O
-        revalidate_path(Path::new(&full_path), &workspace)?;
+        revalidate_path(Path::new(&full_path), &target.root)?;
 
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .map_err(|e| ZeptoError::Tool(format!("Failed to read file '{}': {}", full_path, e)))?;
-        Ok(ToolOutput::llm_only(truncate_tool_output(
-            &content,
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
-        )))
+
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+
+        let sliced = if offset > 1 || limit.is_some() {
+            let mut out = String::new();
+            for segment in content
+                .split_inclusive('\n')
+                .skip(offset - 1)
+                .take(limit.unwrap_or(usize::MAX))
+            {
+                out.push_str(segment);
+            }
+            out
+        } else {
+            content
+        };
+
+        // Reading a spill file back must not spill again; see
+        // `truncate_inline`.
+        let rendered = if target.from_spill {
+            truncate_inline(&sliced, ctx)
+        } else {
+            spill_or_truncate(&sliced, "read_file", ctx)
+        };
+        Ok(ToolOutput::llm_only(rendered))
     }
 }
 
@@ -367,10 +456,8 @@ impl Tool for ListDirTool {
 
         items.sort();
         let joined = items.join("\n");
-        Ok(ToolOutput::llm_only(truncate_tool_output(
-            &joined,
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
+        Ok(ToolOutput::llm_only(spill_or_truncate(
+            &joined, "list_dir", ctx,
         )))
     }
 }
@@ -955,6 +1042,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_returns_requested_line_slice() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let body: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "big.txt", "offset": 10, "limit": 3 }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "line 10\nline 11\nline 12\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_reaches_past_the_truncation_limit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let body: String = (1..=3000).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(
+                json!({ "path": "huge.txt", "offset": 2500, "limit": 1 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "line 2500\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_without_offset_is_unchanged() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("s.txt"), "a\nb\n").unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "s.txt" }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "a\nb\n");
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_past_end_returns_empty_not_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("s.txt"), "a\nb\n").unwrap();
+
+        let ctx = ToolContext::new().with_workspace(dir.path().to_str().unwrap());
+        let result = ReadFileTool
+            .execute(json!({ "path": "s.txt", "offset": 99 }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.for_llm, "");
+    }
+
+    #[tokio::test]
     async fn test_write_file_tool() {
         let dir = tempdir().unwrap();
         // Use canonical path to avoid macOS /var -> /private/var mismatch
@@ -1253,6 +1403,168 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Provide either 'diff' or 'old_text'/'new_text'"));
+    }
+
+    /// Build the context the agent loop builds: a workspace, and a spill root
+    /// that is a genuinely different directory outside it — the production
+    /// shape (`~/.zeptoclaw/workspace` vs `~/.zeptoclaw/sessions/<key>/spill`).
+    fn spill_ctx(dir: &std::path::Path, session: &str) -> ToolContext {
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let root = dir.join("sessions").join(session).join("spill");
+        std::fs::create_dir_all(&root).unwrap();
+        ToolContext::new()
+            .with_workspace(workspace.to_str().unwrap())
+            .with_spill(crate::tools::SpillSettings {
+                session_id: session.to_string(),
+                root,
+                config: crate::config::SpillConfig::default(),
+            })
+    }
+
+    // CRITICAL #1 regression: the locator spill hands the model names
+    // `read_file` — which must therefore be able to read it.
+    #[tokio::test]
+    async fn read_file_can_read_the_spill_path_it_is_handed() {
+        let dir = tempdir().unwrap();
+        let ctx = spill_ctx(dir.path(), "cli%3Aone");
+        let spill_root = ctx.spill.as_ref().unwrap().root.clone();
+        let file = spill_root.join("001-shell.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+
+        let out = ReadFileTool
+            .execute(json!({ "path": file.to_str().unwrap() }), &ctx)
+            .await
+            .expect("spill path must be readable");
+        assert_eq!(out.for_llm, "alpha\nbeta\ngamma\n");
+
+        let slice = ReadFileTool
+            .execute(
+                json!({ "path": file.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(slice.for_llm, "beta\n");
+    }
+
+    // The exception is scoped to THIS session's spill root only.
+    #[tokio::test]
+    async fn read_file_rejects_another_sessions_spill_directory() {
+        let dir = tempdir().unwrap();
+        let ctx = spill_ctx(dir.path(), "cli%3Aone");
+        let theirs = dir.path().join("sessions/cli%3Atwo/spill");
+        std::fs::create_dir_all(&theirs).unwrap();
+        let other = theirs.join("001-shell.txt");
+        std::fs::write(&other, "someone else's output\n").unwrap();
+
+        let err = ReadFileTool
+            .execute(json!({ "path": other.to_str().unwrap() }), &ctx)
+            .await
+            .expect_err("another session's spill dir must stay rejected");
+        assert!(
+            matches!(err, ZeptoError::SecurityViolation(_)),
+            "expected SecurityViolation, got {err:?}"
+        );
+    }
+
+    // ... and not to the config directory at large.
+    #[tokio::test]
+    async fn read_file_rejects_arbitrary_paths_under_the_config_dir() {
+        let dir = tempdir().unwrap();
+        let ctx = spill_ctx(dir.path(), "cli%3Aone");
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{\"secret\": true}").unwrap();
+
+        for candidate in [
+            config,
+            dir.path().join("sessions"),
+            dir.path().to_path_buf(),
+        ] {
+            let err = ReadFileTool
+                .execute(json!({ "path": candidate.to_str().unwrap() }), &ctx)
+                .await
+                .expect_err("only the session's own spill root is allowed");
+            assert!(
+                matches!(err, ZeptoError::SecurityViolation(_)),
+                "expected SecurityViolation for {}, got {err:?}",
+                candidate.display()
+            );
+        }
+    }
+
+    // The exception is READ-ONLY: mutation through the spill root stays shut.
+    #[tokio::test]
+    async fn writes_and_edits_still_reject_the_spill_root() {
+        let dir = tempdir().unwrap();
+        let ctx = spill_ctx(dir.path(), "cli%3Aone");
+        let spill_root = ctx.spill.as_ref().unwrap().root.clone();
+        let existing = spill_root.join("001-shell.txt");
+        std::fs::write(&existing, "alpha\n").unwrap();
+
+        let err = WriteFileTool
+            .execute(
+                json!({ "path": spill_root.join("evil.txt").to_str().unwrap(), "content": "x" }),
+                &ctx,
+            )
+            .await
+            .expect_err("write_file must not reach the spill root");
+        assert!(matches!(err, ZeptoError::SecurityViolation(_)));
+
+        let err = EditFileTool
+            .execute(
+                json!({
+                    "path": existing.to_str().unwrap(),
+                    "old_text": "alpha",
+                    "new_text": "omega"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("edit_file must not reach the spill root");
+        assert!(matches!(err, ZeptoError::SecurityViolation(_)));
+
+        let err = ListDirTool
+            .execute(json!({ "path": spill_root.to_str().unwrap() }), &ctx)
+            .await
+            .expect_err("list_dir is not part of the read-only exception");
+        assert!(matches!(err, ZeptoError::SecurityViolation(_)));
+
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "alpha\n");
+        assert!(!spill_root.join("evil.txt").exists());
+    }
+
+    // IMPORTANT #4 regression: `read_file` is both the retrieval mechanism
+    // and a spill producer. Paging a spill file must not write a second copy
+    // whose retention sweep can evict the file being paged.
+    #[tokio::test]
+    async fn read_file_of_a_spill_file_does_not_spill_again() {
+        let dir = tempdir().unwrap();
+        let mut ctx = spill_ctx(dir.path(), "cli%3Aone");
+        if let Some(settings) = ctx.spill.as_mut() {
+            settings.config.max_inline_lines = 2;
+        }
+        let spill_root = ctx.spill.as_ref().unwrap().root.clone();
+        let file = spill_root.join("001-shell.txt");
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &body).unwrap();
+
+        let out = ReadFileTool
+            .execute(json!({ "path": file.to_str().unwrap() }), &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            !out.for_llm.contains("saved to"),
+            "re-reading a spill file must not produce a new spill: {}",
+            out.for_llm
+        );
+        assert!(out.for_llm.contains("[output truncated"));
+        let files: Vec<_> = std::fs::read_dir(&spill_root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(files.len(), 1, "no second copy may be written: {files:?}");
     }
 
     #[test]

@@ -136,6 +136,12 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    // No spill here: `ZeptoKernel` deliberately owns no per-session state (see
+    // its doc comment), and neither the stdio nor HTTP MCP transport tracks a
+    // per-connection/session identifier — every `tools/call` is handled
+    // independently with the same "mcp"/"mcp-server" channel/chat_id. Without
+    // a genuine session id there is no safe, non-shared directory to root a
+    // `SpillStore` in, so output continues to truncate as it did before spill.
     let ctx = ToolContext::new().with_channel("mcp", "mcp-server");
 
     let output = crate::kernel::execute_tool(

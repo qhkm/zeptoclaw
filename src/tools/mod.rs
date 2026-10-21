@@ -135,7 +135,7 @@ pub use stripe::StripeTool;
 #[cfg(feature = "panel")]
 pub use task::TaskTool;
 pub use transcribe::TranscribeTool;
-pub use types::{Tool, ToolCategory, ToolContext, ToolOutput};
+pub use types::{SpillSettings, Tool, ToolCategory, ToolContext, ToolOutput};
 pub use web::{
     is_blocked_host, resolve_and_check_host, DdgSearchTool, SearxngSearchTool, WebFetchTool,
     WebSearchTool,

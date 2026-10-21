@@ -94,6 +94,58 @@ pub fn truncate_tool_output(output: &str, max_lines: usize, max_bytes: usize) ->
     result
 }
 
+use crate::spill::{format_with_locator, needs_spill, preview, SpillStore};
+use crate::tools::ToolContext;
+
+/// Apply the inline output budget **without** writing a spill file.
+///
+/// Used when the source is already a spill file. `read_file` and `grep` are
+/// the advertised retrieval mechanism for spill, and they are also spill
+/// producers: paging a large spill file back through `spill_or_truncate`
+/// would write a second copy of the same bytes under a new sequence number,
+/// and that write runs `enforce_retention` — which can evict the very file
+/// the model is part-way through reading.
+pub fn truncate_inline(text: &str, ctx: &ToolContext) -> String {
+    match ctx.spill.as_ref() {
+        Some(settings) if settings.config.enabled => truncate_tool_output(
+            text,
+            settings.config.max_inline_lines,
+            settings.config.max_inline_bytes,
+        ),
+        _ => truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES),
+    }
+}
+
+/// Spill oversized output and return a preview plus locator; otherwise
+/// truncate as before.
+///
+/// Falls back to [`truncate_tool_output`] whenever spill is unavailable or
+/// the write fails, so a broken spill backend never costs more than the
+/// previous behavior.
+pub fn spill_or_truncate(text: &str, tool: &str, ctx: &ToolContext) -> String {
+    let Some(settings) = ctx.spill.as_ref() else {
+        return truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    };
+    let cfg = &settings.config;
+    // `enabled: false` must reproduce pre-spill behavior byte for byte, so it
+    // uses the historical constants rather than the configured inline budget
+    // (which is now derived from the tool-result ceiling and is smaller).
+    if !cfg.enabled {
+        return truncate_tool_output(text, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+    }
+    if !needs_spill(text, cfg) {
+        return truncate_tool_output(text, cfg.max_inline_lines, cfg.max_inline_bytes);
+    }
+
+    match SpillStore::with_root(settings.root.clone()).write(tool, text, cfg) {
+        Ok(spilled) => format_with_locator(&preview(text, cfg), &spilled),
+        Err(e) => {
+            tracing::warn!(tool, error = %e, "spill write failed; truncating instead");
+            truncate_tool_output(text, cfg.max_inline_lines, cfg.max_inline_bytes)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +234,118 @@ mod tests {
             "Expected '12 bytes omitted' in: {}",
             result
         );
+    }
+
+    use crate::config::SpillConfig;
+    use crate::tools::SpillSettings;
+    use crate::tools::ToolContext;
+
+    fn spilling_ctx(dir: &tempfile::TempDir) -> ToolContext {
+        ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root: dir.path().to_path_buf(),
+                config: SpillConfig {
+                    max_inline_lines: 2,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn spill_or_truncate_without_settings_matches_truncate() {
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        let ctx = ToolContext::default();
+        assert_eq!(
+            spill_or_truncate(&body, "shell", &ctx),
+            truncate_tool_output(&body, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn spill_or_truncate_small_output_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = spill_or_truncate("a\n", "shell", &spilling_ctx(&dir));
+        assert_eq!(out, "a\n");
+    }
+
+    #[test]
+    fn spill_or_truncate_emits_locator_for_large_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+
+        let out = spill_or_truncate(&body, "shell", &spilling_ctx(&dir));
+
+        assert!(out.starts_with("line 1\nline 2\n"));
+        assert!(out.contains("read_file"));
+        let path = out
+            .split("saved to ")
+            .nth(1)
+            .and_then(|s| s.lines().next())
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path.trim()).unwrap(), body);
+    }
+
+    // IMPORTANT #7: `max_inline_bytes` is now derived from the tool-result
+    // ceiling (20,480) rather than the historical 50,000, so the
+    // `enabled: false` path must name the historical constants explicitly to
+    // stay byte-identical to pre-spill behavior.
+    #[test]
+    fn spill_disabled_is_byte_identical_to_previous_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=4_000).map(|i| format!("line {i}\n")).collect();
+        let ctx = ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root: dir.path().to_path_buf(),
+                config: SpillConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            spill_or_truncate(&body, "shell", &ctx),
+            truncate_tool_output(&body, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_or_truncate_falls_back_to_truncate_when_spill_write_fails() {
+        // Point `root` at a path nested under a regular file, so
+        // `ensure_private_dir`'s `create_dir_all` can never succeed —
+        // exercising the write-failure fallback without touching the
+        // filesystem's actual error surface (permissions, disk space, etc).
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("a-file");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let root = blocker.join("sub");
+
+        let cfg = SpillConfig {
+            max_inline_lines: 2,
+            ..Default::default()
+        };
+        let ctx = ToolContext {
+            spill: Some(SpillSettings {
+                session_id: "test-session".to_string(),
+                root,
+                config: cfg.clone(),
+            }),
+            ..Default::default()
+        };
+
+        let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        let out = spill_or_truncate(&body, "shell", &ctx);
+
+        assert_eq!(
+            out,
+            truncate_tool_output(&body, cfg.max_inline_lines, cfg.max_inline_bytes)
+        );
+        assert!(!out.contains("saved to"));
     }
 }

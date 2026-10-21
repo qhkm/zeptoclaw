@@ -12,7 +12,7 @@ use crate::error::{Result, ZeptoError};
 use crate::runtime::{ContainerConfig, ContainerRuntime, NativeRuntime};
 use crate::security::ShellSecurityConfig;
 
-use super::output::{truncate_tool_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::output::spill_or_truncate;
 use super::{Tool, ToolCategory, ToolContext, ToolOutput};
 
 /// Tool for executing shell commands.
@@ -171,8 +171,7 @@ impl Tool for ShellTool {
             .await
             .map_err(|e| ZeptoError::Tool(e.to_string()))?;
 
-        let formatted =
-            truncate_tool_output(&output.format(), DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        let formatted = spill_or_truncate(&output.format(), "shell", ctx);
         Ok(ToolOutput::user_visible(formatted))
     }
 }

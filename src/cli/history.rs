@@ -57,9 +57,11 @@ pub(crate) async fn cmd_history(action: HistoryAction) -> Result<()> {
         }
         HistoryAction::Cleanup { keep } => {
             let deleted = history.cleanup_old(keep)?;
+            zeptoclaw::spill::SpillStore::remove_sessions(&deleted);
             println!(
                 "Cleanup complete: deleted {} old conversation(s), kept {} most recent.",
-                deleted, keep
+                deleted.len(),
+                keep
             );
         }
     }

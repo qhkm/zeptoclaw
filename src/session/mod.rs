@@ -38,6 +38,64 @@ pub use types::{ContentPart, ImageSource, Message, Role, Session, ToolCall};
 use crate::config::Config;
 use crate::error::Result;
 use std::collections::HashMap;
+
+/// Sanitize a session key so it is safe as a single filesystem name.
+///
+/// Percent-encodes the characters that are problematic in filenames across
+/// platforms, including `%` itself, so the mapping is bijective and
+/// reversible — different keys can never collide on one file.
+///
+/// This is the single source of truth for the encoding. `SessionManager`,
+/// `ConversationHistory` and `SpillStore::session_root` all route through it
+/// so a session's JSON file and its spill directory are always named from the
+/// same key the same way; otherwise deletion by key would silently miss.
+///
+/// Session keys are `"{channel}:{chat_id}"` and `chat_id` can come straight
+/// from a caller-supplied webhook payload (`trust_payload_identity`), so an
+/// unsanitized key is an attacker-controlled path fragment: `../../../tmp/x`
+/// would have `ensure_private_dir` create that directory and write tool
+/// output into it.
+///
+/// # Example
+/// ```
+/// use zeptoclaw::session::sanitize_session_key;
+///
+/// assert_eq!(sanitize_session_key("telegram:chat123"), "telegram%3Achat123");
+/// assert_eq!(
+///     sanitize_session_key("webhook:../../etc"),
+///     "webhook%3A..%2F..%2Fetc"
+/// );
+/// ```
+pub fn sanitize_session_key(key: &str) -> String {
+    let mut result = String::with_capacity(key.len() * 3);
+    for c in key.chars() {
+        match c {
+            '/' => result.push_str("%2F"),
+            '\\' => result.push_str("%5C"),
+            ':' => result.push_str("%3A"),
+            '*' => result.push_str("%2A"),
+            '?' => result.push_str("%3F"),
+            '"' => result.push_str("%22"),
+            '<' => result.push_str("%3C"),
+            '>' => result.push_str("%3E"),
+            '|' => result.push_str("%7C"),
+            '%' => result.push_str("%25"), // Escape % itself to make it reversible
+            c => result.push(c),
+        }
+    }
+
+    // Separators are encoded above, so the result is always a single path
+    // component. Encode a leading '.' as well, so it can never be `.` or
+    // `..` -- the two components that name a *different* directory. Real
+    // keys are "{channel}:{chat_id}" and so always contain an encoded ':',
+    // but this function is public and must not rely on that. Nothing else
+    // emits a leading "%2E" (a literal '%' encodes to "%25"), so the
+    // mapping stays bijective.
+    match result.strip_prefix('.') {
+        Some(rest) => format!("%2E{rest}"),
+        None => result,
+    }
+}
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -300,6 +358,22 @@ impl SessionManager {
             }
         }
 
+        // Reclaim the session's spill directory. This is the canonical
+        // deletion path -- the panel API (`api::routes::sessions`) and the
+        // CLI agent (`cli::agent`) both route through it -- so doing it here
+        // is what makes the design's "a session's spill directory is removed
+        // when the session is deleted" hold for every caller instead of only
+        // `history cleanup`. Spill is written
+        // whether or not session persistence is on, so this runs
+        // unconditionally.
+        //
+        // A removal failure is logged and never fatal: the session itself is
+        // already gone, and failing the call would turn a disk-space problem
+        // into a user-visible error.
+        if let Err(e) = crate::spill::SpillStore::remove_session(key) {
+            tracing::warn!(session_key = key, error = %e, "failed to remove spill directory");
+        }
+
         Ok(())
     }
 
@@ -418,25 +492,7 @@ impl SessionManager {
     ///
     /// This is reversible via `unsanitize_key`, ensuring keys round-trip correctly.
     fn sanitize_key(key: &str) -> String {
-        // Characters that are problematic in filenames across platforms
-        // We percent-encode them to make the mapping reversible
-        let mut result = String::with_capacity(key.len() * 3);
-        for c in key.chars() {
-            match c {
-                '/' => result.push_str("%2F"),
-                '\\' => result.push_str("%5C"),
-                ':' => result.push_str("%3A"),
-                '*' => result.push_str("%2A"),
-                '?' => result.push_str("%3F"),
-                '"' => result.push_str("%22"),
-                '<' => result.push_str("%3C"),
-                '>' => result.push_str("%3E"),
-                '|' => result.push_str("%7C"),
-                '%' => result.push_str("%25"), // Escape % itself to make it reversible
-                c => result.push(c),
-            }
-        }
-        result
+        sanitize_session_key(key)
     }
 
     /// Reverse the sanitization to recover the original key.
@@ -831,5 +887,64 @@ mod tests {
         let manager = SessionManager::default();
         let session = manager.get_or_create("test").await.unwrap();
         assert!(session.is_empty());
+    }
+
+    #[test]
+    fn sanitize_session_key_is_bijective_and_single_component() {
+        assert_eq!(sanitize_session_key("cli:cli"), "cli%3Acli");
+        assert_eq!(sanitize_session_key("a%b"), "a%25b");
+        // Never `.` or `..`, which would name a different directory.
+        assert_eq!(sanitize_session_key("."), "%2E");
+        assert_eq!(sanitize_session_key(".."), "%2E.");
+        assert_eq!(sanitize_session_key("../x"), "%2E.%2Fx");
+        for key in ["cli:cli", "webhook:../../tmp/x", ".", "..", "a%b"] {
+            let encoded = sanitize_session_key(key);
+            assert_eq!(
+                std::path::Path::new(&encoded).components().count(),
+                1,
+                "{key:?} encoded to {encoded:?}"
+            );
+        }
+    }
+
+    // IMPORTANT #5 regression: `delete` is the canonical deletion path (the
+    // panel API and the gateway both route through it) and left the
+    // session's spill directory behind, so the design's "a session's spill
+    // directory is removed when the session is deleted" held only for
+    // `history cleanup` -- which itself only ever sees `cli:` sessions.
+    #[tokio::test]
+    async fn delete_removes_the_sessions_spill_directory() {
+        let key = format!("test-spill-delete:{}", std::process::id());
+        let root = crate::spill::SpillStore::session_root(&key);
+        let _ = crate::spill::SpillStore::remove_session(&key);
+
+        crate::spill::SpillStore::with_root(root.clone())
+            .write("shell", "payload\n", &crate::config::SpillConfig::default())
+            .unwrap();
+        assert!(root.is_dir());
+
+        let temp = TempDir::new().unwrap();
+        let manager = SessionManager::with_path(temp.path().to_path_buf()).unwrap();
+        manager.get_or_create(&key).await.unwrap();
+        manager.delete(&key).await.unwrap();
+
+        assert!(
+            !root.exists(),
+            "spill directory must be reclaimed with the session: {}",
+            root.display()
+        );
+        let _ = std::fs::remove_dir(root.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_succeeds_when_there_is_no_spill_directory() {
+        let temp = TempDir::new().unwrap();
+        let manager = SessionManager::with_path(temp.path().to_path_buf()).unwrap();
+        let key = format!("test-spill-absent:{}", std::process::id());
+        manager.get_or_create(&key).await.unwrap();
+        manager
+            .delete(&key)
+            .await
+            .expect("missing spill is not an error");
     }
 }

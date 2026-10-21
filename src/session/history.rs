@@ -201,20 +201,22 @@ impl ConversationHistory {
     ///
     /// # Returns
     ///
-    /// The number of conversations deleted.
+    /// The session keys of the conversations deleted, so callers can clean
+    /// up other session-scoped state (e.g. spill directories) that this
+    /// module doesn't know about.
     ///
     /// # Errors
     ///
     /// Returns an error if listing or deleting session files fails.
-    pub fn cleanup_old(&self, keep_count: usize) -> Result<usize> {
+    pub fn cleanup_old(&self, keep_count: usize) -> Result<Vec<String>> {
         let conversations = self.list_conversations()?;
 
         if conversations.len() <= keep_count {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let to_delete = &conversations[keep_count..];
-        let mut deleted = 0;
+        let mut deleted = Vec::new();
 
         for entry in to_delete {
             let sanitized = Self::sanitize_key(&entry.session_key);
@@ -227,32 +229,20 @@ impl ConversationHistory {
                         e
                     ))
                 })?;
-                deleted += 1;
+                deleted.push(entry.session_key.clone());
             }
         }
 
         Ok(deleted)
     }
 
-    /// Sanitize a session key for use as a filename (matches `SessionManager::sanitize_key`).
+    /// Sanitize a session key for use as a filename.
+    ///
+    /// Delegates to [`crate::session::sanitize_session_key`], the single
+    /// source of truth shared with `SessionManager` and
+    /// `SpillStore::session_root`.
     fn sanitize_key(key: &str) -> String {
-        let mut result = String::with_capacity(key.len() * 3);
-        for c in key.chars() {
-            match c {
-                '/' => result.push_str("%2F"),
-                '\\' => result.push_str("%5C"),
-                ':' => result.push_str("%3A"),
-                '*' => result.push_str("%2A"),
-                '?' => result.push_str("%3F"),
-                '"' => result.push_str("%22"),
-                '<' => result.push_str("%3C"),
-                '>' => result.push_str("%3E"),
-                '|' => result.push_str("%7C"),
-                '%' => result.push_str("%25"),
-                c => result.push(c),
-            }
-        }
-        result
+        crate::session::sanitize_session_key(key)
     }
 }
 
@@ -555,7 +545,9 @@ mod tests {
 
         // Cleanup, keeping only the 2 newest
         let deleted = history.cleanup_old(2).unwrap();
-        assert_eq!(deleted, 3);
+        // The keys themselves matter, not just the count: callers use them
+        // to reclaim session-scoped state this module doesn't know about.
+        assert_eq!(deleted, vec!["cli:3000", "cli:2000", "cli:1000"]);
 
         // Verify only 2 remain (the newest ones)
         let remaining = history.list_conversations().unwrap();
@@ -585,7 +577,54 @@ mod tests {
 
         // keep_count >= total conversations, nothing deleted
         let deleted = history.cleanup_old(5).unwrap();
-        assert_eq!(deleted, 0);
+        assert!(deleted.is_empty(), "got {deleted:?}");
         assert_eq!(history.list_conversations().unwrap().len(), 2);
+    }
+
+    // IMPORTANT #6 regression: nothing exercised `cleanup_old` together with
+    // the spill removal its return value exists for, so the agreement
+    // between `entry.session_key` and the component `session_root` joins
+    // rested on inspection alone. A key with a `:` is the ordinary case and
+    // would break a naive `join(session_key)`.
+    #[test]
+    fn cleanup_old_keys_resolve_to_the_spill_directories_they_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let sessions = base.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let keys = ["cli:1000", "cli:2000", "cli:3000", "cli:4000"];
+        for (i, key) in keys.iter().enumerate() {
+            write_test_session(
+                &sessions,
+                key,
+                "title",
+                &format!("2025-0{}-01T00:00:00Z", i + 1),
+            );
+            let root = crate::spill::SpillStore::session_root_in(base, key);
+            crate::spill::SpillStore::with_root(root.clone())
+                .write("shell", "payload\n", &crate::config::SpillConfig::default())
+                .unwrap();
+            assert!(root.is_dir(), "spill dir for {key} should exist");
+        }
+
+        let history = ConversationHistory::with_path(sessions.clone()).unwrap();
+        let deleted = history.cleanup_old(2).unwrap();
+        assert_eq!(deleted, vec!["cli:2000", "cli:1000"]);
+
+        crate::spill::SpillStore::remove_sessions_in(base, &deleted);
+
+        for key in ["cli:1000", "cli:2000"] {
+            assert!(
+                !crate::spill::SpillStore::session_root_in(base, key).exists(),
+                "spill dir for deleted session {key} should be reclaimed"
+            );
+        }
+        for key in ["cli:3000", "cli:4000"] {
+            assert!(
+                crate::spill::SpillStore::session_root_in(base, key).is_dir(),
+                "spill dir for surviving session {key} must be kept"
+            );
+        }
     }
 }

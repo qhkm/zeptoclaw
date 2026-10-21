@@ -136,6 +136,9 @@ pub struct Config {
     /// r8r workflow-engine bridge configuration.
     #[serde(default)]
     pub r8r_bridge: R8rBridgeConfig,
+    /// Tool-output spill settings.
+    #[serde(default)]
+    pub spill: SpillConfig,
 }
 
 // ============================================================================
@@ -311,6 +314,46 @@ impl Default for R8rBridgeConfig {
             approval_routing: HashMap::new(),
             reconnect_max_interval_secs: 30,
             health_ping_interval_secs: 60,
+        }
+    }
+}
+
+// ============================================================================
+// Spill Configuration
+// ============================================================================
+
+/// Tool-output spill: keep oversized output on disk instead of discarding it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpillConfig {
+    /// Whether oversized tool output is spilled to disk.
+    pub enabled: bool,
+    /// Byte budget for output kept inline in the model's context.
+    ///
+    /// Derived from [`crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES`], the
+    /// ceiling the agent loop enforces on every tool result. Anything above
+    /// that ceiling is cut by sanitization before the model sees it, so an
+    /// inline budget larger than it would leave a band of output that is
+    /// still silently destroyed with no spill file to recover it — exactly
+    /// what spill exists to prevent. Keep the two aligned, or set this one
+    /// *lower*, never higher than `agents.defaults.max_tool_result_bytes`.
+    pub max_inline_bytes: usize,
+    /// Line budget for output kept inline in the model's context.
+    pub max_inline_lines: usize,
+    /// Total spill bytes retained per session before oldest-first eviction.
+    pub session_max_bytes: u64,
+    /// Spill files retained per session before oldest-first eviction.
+    pub max_files_per_session: usize,
+}
+
+impl Default for SpillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_inline_bytes: crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES,
+            max_inline_lines: 2_000,
+            session_max_bytes: 67_108_864,
+            max_files_per_session: 20,
         }
     }
 }
@@ -3319,6 +3362,38 @@ mod tests {
         assert_eq!(config.context_limit, 180_000);
         assert!((config.input_headroom_ratio - 0.75).abs() < f64::EPSILON);
         assert_eq!(config.overflow_retries, 3);
+    }
+
+    #[test]
+    fn spill_defaults_match_current_truncation_limits() {
+        let c = SpillConfig::default();
+        assert!(c.enabled);
+        assert_eq!(c.max_inline_lines, 2000);
+        assert_eq!(c.session_max_bytes, 67_108_864);
+        assert_eq!(c.max_files_per_session, 20);
+    }
+
+    // IMPORTANT #7 regression: an inline byte budget above the tool-result
+    // ceiling leaves a band of output (20,480..50,000 bytes before this fix)
+    // that never spills and is then cut by sanitization — destroyed with no
+    // file to recover it, which is the thing spill exists to prevent.
+    #[test]
+    fn spill_inline_byte_budget_is_derived_from_the_tool_result_ceiling() {
+        assert_eq!(
+            SpillConfig::default().max_inline_bytes,
+            crate::utils::sanitize::DEFAULT_MAX_RESULT_BYTES
+        );
+        assert!(
+            SpillConfig::default().max_inline_bytes
+                <= AgentDefaults::default().max_tool_result_bytes
+        );
+    }
+
+    #[test]
+    fn spill_is_a_known_top_level_key() {
+        let raw = serde_json::json!({ "spill": { "enabled": false } });
+        let cfg: Config = serde_json::from_value(raw).unwrap();
+        assert!(!cfg.spill.enabled);
     }
 }
 
