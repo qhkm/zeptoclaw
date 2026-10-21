@@ -43,7 +43,7 @@ RUN cargo build --release --bin zeptoclaw
 # =============================================================================
 # Stage 2: Runtime (minimal)
 # =============================================================================
-FROM debian:trixie-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e AS runtime
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
 
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \
