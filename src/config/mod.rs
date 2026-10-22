@@ -686,6 +686,22 @@ impl Config {
                 .api_base = Some(val);
         }
 
+        // Cheaper Inference
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_CHEAPERINFERENCE_API_KEY")
+            .or_else(|_| std::env::var("CHEAPERINFERENCE_API_KEY"))
+        {
+            self.providers
+                .cheaperinference
+                .get_or_insert_with(ProviderConfig::default)
+                .api_key = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_CHEAPERINFERENCE_API_BASE") {
+            self.providers
+                .cheaperinference
+                .get_or_insert_with(ProviderConfig::default)
+                .api_base = Some(val);
+        }
+
         // Per-provider model overrides
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_ANTHROPIC_MODEL") {
             self.providers
@@ -780,6 +796,12 @@ impl Config {
         if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_LIQUID_MODEL") {
             self.providers
                 .liquid
+                .get_or_insert_with(ProviderConfig::default)
+                .model = Some(val);
+        }
+        if let Ok(val) = std::env::var("ZEPTOCLAW_PROVIDERS_CHEAPERINFERENCE_MODEL") {
+            self.providers
+                .cheaperinference
                 .get_or_insert_with(ProviderConfig::default)
                 .model = Some(val);
         }
@@ -2563,6 +2585,25 @@ mod tests {
             Some("liquid-test-env-key")
         );
         std::env::remove_var("ZEPTOCLAW_PROVIDERS_LIQUID_API_KEY");
+    }
+
+    #[test]
+    fn test_cheaperinference_env_override_api_key() {
+        std::env::set_var(
+            "ZEPTOCLAW_PROVIDERS_CHEAPERINFERENCE_API_KEY",
+            "cheaperinference-test-env-key",
+        );
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config
+                .providers
+                .cheaperinference
+                .as_ref()
+                .and_then(|p| p.api_key.as_deref()),
+            Some("cheaperinference-test-env-key")
+        );
+        std::env::remove_var("ZEPTOCLAW_PROVIDERS_CHEAPERINFERENCE_API_KEY");
     }
 
     #[test]
