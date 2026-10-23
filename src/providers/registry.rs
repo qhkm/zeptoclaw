@@ -233,6 +233,16 @@ pub const PROVIDER_REGISTRY: &[ProviderSpec] = &[
         default_api_version: None,
         api_key_required: true,
     },
+    ProviderSpec {
+        name: "cheaperinference",
+        model_keywords: &["cheaperinference"],
+        runtime_supported: true,
+        default_base_url: Some("https://api.cheaperinference.com/v1"),
+        backend: "openai",
+        default_auth_header: None,
+        default_api_version: None,
+        api_key_required: true,
+    },
 ];
 
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
@@ -255,6 +265,7 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
         "qianfan" => config.providers.qianfan.as_ref(),
         "novita" => config.providers.novita.as_ref(),
         "liquid" => config.providers.liquid.as_ref(),
+        "cheaperinference" => config.providers.cheaperinference.as_ref(),
         _ => None,
     }
 }
@@ -1079,6 +1090,23 @@ mod tests {
         assert_eq!(
             selected.api_base.as_deref(),
             Some("https://api.novita.ai/openai")
+        );
+    }
+
+    #[test]
+    fn test_cheaperinference_resolves_with_default_base_url() {
+        let mut config = Config::default();
+        config.providers.cheaperinference = Some(ProviderConfig {
+            api_key: Some("cheaperinference-test-key".to_string()),
+            ..Default::default()
+        });
+
+        let selected = resolve_runtime_provider(&config).expect("provider should resolve");
+        assert_eq!(selected.name, "cheaperinference");
+        assert_eq!(selected.backend, "openai");
+        assert_eq!(
+            selected.api_base.as_deref(),
+            Some("https://api.cheaperinference.com/v1")
         );
     }
 

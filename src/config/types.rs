@@ -1608,6 +1608,9 @@ pub struct ProvidersConfig {
     /// Liquid AI configuration (OpenAI-compatible, LFM2 model family — edge-optimized).
     #[serde(default)]
     pub liquid: Option<ProviderConfig>,
+    /// Cheaper Inference configuration (OpenAI-compatible LLM gateway).
+    #[serde(default)]
+    pub cheaperinference: Option<ProviderConfig>,
     /// Retry behavior for runtime provider calls
     pub retry: RetryConfig,
     /// Fallback behavior across multiple configured runtime providers
