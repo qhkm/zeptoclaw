@@ -152,11 +152,10 @@ impl LLMProvider for MockBudgetExhaustingProvider {
         Ok(LLMResponse {
             content: "budget-test-response".to_string(),
             tool_calls: vec![],
-            usage: Some(zeptoclaw::providers::Usage {
-                prompt_tokens: self.tokens_per_call,
-                completion_tokens: self.tokens_per_call,
-                total_tokens: self.tokens_per_call * 2,
-            }),
+            usage: Some(zeptoclaw::providers::Usage::new(
+                self.tokens_per_call,
+                self.tokens_per_call,
+            )),
         })
     }
 }
@@ -313,11 +312,7 @@ impl LLMProvider for MockTokenCountingProvider {
         Ok(LLMResponse {
             content: format!("response {}", count),
             tool_calls: vec![],
-            usage: Some(zeptoclaw::providers::Usage {
-                prompt_tokens: 500,
-                completion_tokens: 200,
-                total_tokens: 700,
-            }),
+            usage: Some(zeptoclaw::providers::Usage::new(500, 200)),
         })
     }
 }

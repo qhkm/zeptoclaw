@@ -4,17 +4,31 @@
 //! - `POST /v1/chat/completions` (streaming + non-streaming)
 //! - `GET  /v1/models`
 //!
-//! No panel UI, no auth middleware — intended for local or trusted-network use.
+//! No panel UI. Requests need `Authorization: Bearer <key>` when an API key is
+//! set (`--api-key` or `ZEPTOCLAW_SERVE_API_KEY`); without one the server only
+//! binds to loopback unless `--insecure-no-auth` is passed.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::routing::{get, post};
-use axum::Router;
-use tracing::info;
+use tracing::{info, warn};
+use zeptoclaw::api::serve::{
+    build_serve_router, check_bind_security, resolve_api_key, SERVE_API_KEY_ENV,
+};
 
 /// Run the standalone OpenAI-compatible API server.
-pub async fn cmd_serve(port: u16, bind: String) -> Result<()> {
+pub async fn cmd_serve(
+    port: u16,
+    bind: String,
+    api_key: Option<String>,
+    insecure_no_auth: bool,
+) -> Result<()> {
+    let api_key = resolve_api_key(api_key, std::env::var(SERVE_API_KEY_ENV).ok());
+    check_bind_security(&bind, api_key.is_some(), insecure_no_auth).map_err(anyhow::Error::msg)?;
+    if api_key.is_none() && insecure_no_auth {
+        warn!("Serving on {bind} WITHOUT authentication (--insecure-no-auth)");
+    }
+
     let config = zeptoclaw::config::Config::load()
         .map_err(|e| anyhow::anyhow!("Failed to load configuration: {e}"))?;
 
@@ -35,21 +49,19 @@ pub async fn cmd_serve(port: u16, bind: String) -> Result<()> {
 
     let shared = Arc::new(state);
 
-    let app = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(zeptoclaw::api::routes::openai::chat_completions),
-        )
-        .route(
-            "/v1/models",
-            get(zeptoclaw::api::routes::openai::list_models),
-        )
-        .with_state(shared);
+    let auth_enabled = api_key.is_some();
+    let app = build_serve_router(shared, api_key);
 
     let addr = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("OpenAI-compatible API server listening on {addr}");
-    info!("Try: curl http://{addr}/v1/models");
+    if auth_enabled {
+        info!(
+            "API key required. Try: curl -H \"Authorization: Bearer $KEY\" http://{addr}/v1/models"
+        );
+    } else {
+        info!("Try: curl http://{addr}/v1/models");
+    }
 
     // Graceful shutdown on ctrl-c.
     let serve_result = axum::serve(listener, app)

@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+/// Maximum request body accepted by the API routers (1 MiB).
+pub const API_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
 /// Shared state for all API handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -183,7 +186,7 @@ pub fn build_router(
         )
         // WebSocket
         .route("/ws/events", get(super::routes::ws::ws_events))
-        // OpenAI-compatible API (auth skipped by auth_middleware for /v1/ prefix)
+        // OpenAI-compatible API (Bearer auth required; CSRF skipped for /v1/ prefix)
         .route(
             "/v1/chat/completions",
             post(super::routes::openai::chat_completions),
@@ -191,7 +194,7 @@ pub fn build_router(
         .route("/v1/models", get(super::routes::openai::list_models))
         // Body size limit: 1 MiB.  Applied before the auth middleware so we
         // reject oversized payloads cheaply before any token validation.
-        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(DefaultBodyLimit::max(API_BODY_LIMIT_BYTES))
         .layer(cors)
         .layer(axum_mw::from_fn_with_state(
             shared_state.clone(),
