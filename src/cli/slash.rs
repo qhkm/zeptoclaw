@@ -1,5 +1,7 @@
 //! Slash command registry, completer, and dispatch for CLI interactive mode.
 
+use std::borrow::Cow;
+
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -88,13 +90,21 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
 /// Rustyline helper that provides tab-completion for `/` commands.
 pub struct SlashHelper {
     commands: Vec<SlashCommand>,
+    color: bool,
 }
 
 impl SlashHelper {
     pub fn new() -> Self {
         Self {
             commands: builtin_commands(),
+            color: false,
         }
+    }
+
+    /// Color the prompt with the accent style.
+    pub fn with_color(mut self, color: bool) -> Self {
+        self.color = color;
+        self
     }
 }
 
@@ -137,7 +147,19 @@ impl Hinter for SlashHelper {
     type Hint = String;
 }
 
-impl Highlighter for SlashHelper {}
+impl Highlighter for SlashHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        if self.color {
+            Cow::Owned(format!("\x1b[1;38;5;117m{prompt}\x1b[0m"))
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
+}
 
 impl Validator for SlashHelper {}
 

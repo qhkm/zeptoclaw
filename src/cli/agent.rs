@@ -2,23 +2,27 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use tokio::sync::mpsc::UnboundedReceiver;
 
+use zeptoclaw::agent::{AgentLoop, ToolFeedback};
 use zeptoclaw::bus::{InboundMessage, MessageBus};
 use zeptoclaw::channels::model_switch::ModelOverride;
 use zeptoclaw::config::Config;
 use zeptoclaw::gateway::ipc::UsageSnapshot;
 use zeptoclaw::health::UsageMetrics;
 use zeptoclaw::providers::{
-    configured_provider_names, resolve_runtime_provider, RUNTIME_SUPPORTED_PROVIDERS,
+    configured_provider_names, resolve_runtime_provider, StreamEvent, RUNTIME_SUPPORTED_PROVIDERS,
 };
 use zeptoclaw::tools::approval::{ApprovalRequest, ApprovalResponse};
 
 use super::common::{create_agent, create_agent_with_template, resolve_template};
 use super::slash::SlashHelper;
+use super::ui::{format_approval_header, AgentUi};
 
 const CLI_CHANNEL: &str = "cli";
 const CLI_SENDER_ID: &str = "user";
@@ -64,18 +68,23 @@ fn format_tool_list(tool_names: &[&str]) -> String {
     out.trim_end().to_string()
 }
 
-fn prompt_cli_approval(request: ApprovalRequest) -> ApprovalResponse {
+fn prompt_cli_approval(request: ApprovalRequest, color: bool) -> ApprovalResponse {
     let args_display = serde_json::to_string_pretty(&request.arguments)
         .unwrap_or_else(|_| request.arguments.to_string());
 
     println!();
-    println!("[Approval Required]");
-    println!("Tool: {}", request.tool_name);
-    println!("Arguments:\n{}", args_display);
+    println!("{}", format_approval_header(&request.tool_name, color));
+    for line in args_display.lines() {
+        if color {
+            println!("    \x1b[38;5;245m{line}\x1b[0m");
+        } else {
+            println!("    {line}");
+        }
+    }
     println!();
 
     loop {
-        print!("Approve execution? [y/N]: ");
+        print!("  Allow? [y/N] ");
         let _ = io::stdout().flush();
 
         let mut input = String::new();
@@ -91,7 +100,7 @@ fn prompt_cli_approval(request: ApprovalRequest) -> ApprovalResponse {
                     return ApprovalResponse::Denied("Execution not approved.".to_string());
                 }
                 _ => {
-                    println!("Please answer 'yes' or 'no'.");
+                    println!("  Please answer 'yes' or 'no'.");
                 }
             },
             Err(e) => {
@@ -110,6 +119,118 @@ fn is_interactive_cli_terminal(stdin_terminal: bool, stdout_terminal: bool) -> b
 
 fn has_interactive_cli_terminal() -> bool {
     is_interactive_cli_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())
+}
+
+/// Await `fut` while rendering agent feedback in the order it arrives, so tool
+/// lines and the reply can never interleave.
+async fn with_feedback<F: std::future::Future>(
+    fut: F,
+    ui: &mut AgentUi,
+    feedback_rx: &mut UnboundedReceiver<ToolFeedback>,
+) -> F::Output {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            biased;
+            Some(fb) = feedback_rx.recv() => ui.on_feedback(fb),
+            out = &mut fut => {
+                while let Ok(fb) = feedback_rx.try_recv() {
+                    ui.on_feedback(fb);
+                }
+                return out;
+            }
+        }
+    }
+}
+
+/// Run one non-streaming turn. Returns `false` if it failed.
+async fn run_turn(
+    agent: &AgentLoop,
+    inbound: &InboundMessage,
+    ui: &mut AgentUi,
+    feedback_rx: &mut UnboundedReceiver<ToolFeedback>,
+) -> bool {
+    match with_feedback(agent.process_message(inbound), ui, feedback_rx).await {
+        Ok(response) => {
+            ui.print_reply(&response);
+            true
+        }
+        Err(e) => {
+            ui.print_error(&format_cli_error(&e));
+            false
+        }
+    }
+}
+
+/// Run one streaming turn. Returns `false` if it failed.
+async fn run_streaming_turn(
+    agent: &AgentLoop,
+    inbound: &InboundMessage,
+    ui: &mut AgentUi,
+    feedback_rx: &mut UnboundedReceiver<ToolFeedback>,
+) -> bool {
+    let mut stream =
+        match with_feedback(agent.process_message_streaming(inbound), ui, feedback_rx).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                ui.print_error(&format_cli_error(&e));
+                return false;
+            }
+        };
+    loop {
+        tokio::select! {
+            biased;
+            Some(fb) = feedback_rx.recv() => ui.on_feedback(fb),
+            event = stream.recv() => match event {
+                Some(StreamEvent::Delta(text)) => ui.stream_delta(&text),
+                Some(StreamEvent::Done { .. }) | None => break,
+                Some(StreamEvent::Error(e)) => {
+                    ui.stream_end();
+                    ui.print_error(&format_cli_error(&e));
+                    return false;
+                }
+                Some(StreamEvent::ToolCalls(_)) => {}
+            },
+        }
+    }
+    ui.stream_end();
+    true
+}
+
+/// Cumulative (tokens, tool calls) from the agent's metrics.
+fn usage_totals(agent: &AgentLoop) -> (u64, u64) {
+    let metrics = agent.metrics_collector();
+    let (tokens_in, tokens_out) = metrics.total_tokens();
+    (tokens_in + tokens_out, metrics.total_tool_calls())
+}
+
+/// Run a turn and print its footer. Returns `false` if the turn failed.
+async fn run_turn_with_footer(
+    agent: &AgentLoop,
+    inbound: &InboundMessage,
+    streaming: bool,
+    model: &str,
+    ui: &mut AgentUi,
+    feedback_rx: &mut UnboundedReceiver<ToolFeedback>,
+) -> bool {
+    let started = Instant::now();
+    let (tokens_before, tools_before) = usage_totals(agent);
+    ui.begin_turn();
+    let ok = if streaming {
+        run_streaming_turn(agent, inbound, ui, feedback_rx).await
+    } else {
+        run_turn(agent, inbound, ui, feedback_rx).await
+    };
+    if ok {
+        let (tokens, tools) = usage_totals(agent);
+        ui.print_footer(
+            model,
+            tokens.saturating_sub(tokens_before),
+            tools.saturating_sub(tools_before),
+            started.elapsed(),
+        );
+    }
+    ok
 }
 
 /// Interactive or single-message agent mode.
@@ -162,78 +283,8 @@ pub(crate) async fn cmd_agent(
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
     agent.set_tool_feedback(feedback_tx).await;
 
-    // Spawn feedback printer with shimmer + step tracking
-    tokio::spawn(async move {
-        use super::shimmer::{
-            extract_args_hint, format_tool_done, format_tool_failed, format_tool_start,
-            print_response_separator, ShimmerSpinner,
-        };
-        use zeptoclaw::agent::ToolFeedbackPhase;
-
-        let mut step: usize = 0;
-        let mut shimmer: Option<ShimmerSpinner> = None;
-        let mut had_tools = false;
-
-        while let Some(fb) = feedback_rx.recv().await {
-            match fb.phase {
-                ToolFeedbackPhase::Thinking => {
-                    shimmer = Some(ShimmerSpinner::start());
-                }
-                ToolFeedbackPhase::ThinkingDone => {
-                    if let Some(s) = shimmer.take() {
-                        s.stop();
-                    }
-                }
-                ToolFeedbackPhase::Starting => {
-                    // Stop shimmer if still running (LLM returned tool calls)
-                    if let Some(s) = shimmer.take() {
-                        s.stop();
-                    }
-                    step += 1;
-                    had_tools = true;
-                    let hint = fb
-                        .args_json
-                        .as_deref()
-                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
-                    let line = format_tool_start(step, &fb.tool_name, hint.as_deref());
-                    eprintln!("{}", line);
-                }
-                ToolFeedbackPhase::Done { elapsed_ms } => {
-                    let hint = fb
-                        .args_json
-                        .as_deref()
-                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
-                    // Move cursor up and overwrite the "Starting" line
-                    eprint!("\x1b[1A\x1b[2K");
-                    let line = format_tool_done(step, &fb.tool_name, hint.as_deref(), elapsed_ms);
-                    eprintln!("{}", line);
-                }
-                ToolFeedbackPhase::Failed { elapsed_ms, error } => {
-                    let hint = fb
-                        .args_json
-                        .as_deref()
-                        .and_then(|a| extract_args_hint(&fb.tool_name, a));
-                    eprint!("\x1b[1A\x1b[2K");
-                    let line = format_tool_failed(
-                        step,
-                        &fb.tool_name,
-                        hint.as_deref(),
-                        elapsed_ms,
-                        &error,
-                    );
-                    eprintln!("{}", line);
-                }
-                ToolFeedbackPhase::ResponseReady => {
-                    if let Some(s) = shimmer.take() {
-                        s.stop();
-                    }
-                    if had_tools {
-                        print_response_separator();
-                    }
-                }
-            }
-        }
-    });
+    // All terminal output for a turn is drawn by `ui` on this task.
+    let mut ui = AgentUi::new();
 
     // Check whether the runtime can use at least one configured provider.
     if resolve_runtime_provider(&config).is_none() {
@@ -275,57 +326,23 @@ pub(crate) async fn cmd_agent(
         // Config `streaming: false` also disables unless overridden.
         let streaming = !no_stream && config.agents.defaults.streaming;
 
-        let metrics = agent.metrics_collector();
-        let wall_start = std::time::Instant::now();
-
-        if streaming {
-            use zeptoclaw::providers::StreamEvent;
-            match agent.process_message_streaming(&inbound).await {
-                Ok(mut rx) => {
-                    while let Some(event) = rx.recv().await {
-                        match event {
-                            StreamEvent::Delta(text) => {
-                                print!("{}", text);
-                                let _ = io::stdout().flush();
-                            }
-                            StreamEvent::Done { .. } => break,
-                            StreamEvent::Error(e) => {
-                                eprintln!("{}", format_cli_error(&e));
-                                std::process::exit(1);
-                            }
-                            StreamEvent::ToolCalls(_) => {}
-                        }
-                    }
-                    println!(); // newline after streaming
-                }
-                Err(e) => {
-                    eprintln!("{}", format_cli_error(&e));
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            match agent.process_message(&inbound).await {
-                Ok(response) => {
-                    println!("{}", response);
-                }
-                Err(e) => {
-                    eprintln!("{}", format_cli_error(&e));
-                    std::process::exit(1);
-                }
-            }
+        let model = config.agents.defaults.model.clone();
+        let ok = run_turn_with_footer(
+            &agent,
+            &inbound,
+            streaming,
+            &model,
+            &mut ui,
+            &mut feedback_rx,
+        )
+        .await;
+        if !ok {
+            drop(ui);
+            std::process::exit(1);
         }
-
-        // Print response metadata footer
-        let wall_elapsed = wall_start.elapsed();
-        let (tokens_in, tokens_out) = metrics.total_tokens();
-        let total_tokens = tokens_in + tokens_out;
-        let tool_calls = metrics.total_tool_calls();
-        super::shimmer::print_metadata_footer(total_tokens, tool_calls, wall_elapsed);
     } else {
         // Interactive mode with rustyline (tab completion for slash commands)
-        println!("ZeptoClaw Interactive Agent");
-        println!("Type your message and press Enter. Type /help for commands, /quit to exit.");
-        println!();
+        ui.print_banner(&config.agents.defaults.model);
 
         // Track model/persona overrides set via /model and /persona commands.
         // Injected into InboundMessage metadata so the agent loop uses them.
@@ -338,7 +355,7 @@ pub(crate) async fn cmd_agent(
         let mut rl = if interactive_cli {
             match Editor::new() {
                 Ok(mut editor) => {
-                    editor.set_helper(Some(SlashHelper::new()));
+                    editor.set_helper(Some(SlashHelper::new().with_color(ui.color())));
                     // Persist history across sessions
                     let history_path =
                         dirs::home_dir().map(|h| h.join(".zeptoclaw/state/repl_history"));
@@ -355,14 +372,26 @@ pub(crate) async fn cmd_agent(
         let mut trusted_session = false;
 
         if interactive_cli {
+            let status = ui.status();
+            let color = ui.color();
             agent
-                .set_approval_handler(|request| async move {
-                    match tokio::task::spawn_blocking(move || prompt_cli_approval(request)).await {
-                        Ok(response) => response,
-                        Err(e) => ApprovalResponse::Denied(format!(
-                            "Interactive approval prompt failed: {}",
-                            e
-                        )),
+                .set_approval_handler(move |request| {
+                    let status = status.clone();
+                    async move {
+                        status.pause();
+                        let response = match tokio::task::spawn_blocking(move || {
+                            prompt_cli_approval(request, color)
+                        })
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(e) => ApprovalResponse::Denied(format!(
+                                "Interactive approval prompt failed: {}",
+                                e
+                            )),
+                        };
+                        status.resume();
+                        response
                     }
                 })
                 .await;
@@ -370,7 +399,7 @@ pub(crate) async fn cmd_agent(
 
         loop {
             let input = if let Some((ref mut editor, _)) = rl {
-                match editor.readline("> ") {
+                match editor.readline("❯ ") {
                     Ok(line) => line,
                     Err(ReadlineError::Eof | ReadlineError::Interrupted) => {
                         println!("Goodbye!");
@@ -644,46 +673,20 @@ pub(crate) async fn cmd_agent(
                 inbound = inbound.with_metadata("persona_override", persona);
             }
             let streaming = !no_stream && config.agents.defaults.streaming;
-
-            if streaming {
-                use zeptoclaw::providers::StreamEvent;
-                match agent.process_message_streaming(&inbound).await {
-                    Ok(mut rx) => {
-                        println!();
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                StreamEvent::Delta(text) => {
-                                    print!("{}", text);
-                                    let _ = io::stdout().flush();
-                                }
-                                StreamEvent::Done { .. } => break,
-                                StreamEvent::Error(e) => {
-                                    eprintln!("{}", format_cli_error(&e));
-                                }
-                                StreamEvent::ToolCalls(_) => {}
-                            }
-                        }
-                        println!();
-                        println!();
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format_cli_error(&e));
-                        eprintln!();
-                    }
-                }
-            } else {
-                match agent.process_message(&inbound).await {
-                    Ok(response) => {
-                        println!();
-                        println!("{}", response);
-                        println!();
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format_cli_error(&e));
-                        eprintln!();
-                    }
-                }
-            }
+            let turn_model = model_override
+                .as_ref()
+                .map(|(_, model)| model.clone())
+                .unwrap_or_else(|| config.agents.defaults.model.clone());
+            run_turn_with_footer(
+                &agent,
+                &inbound,
+                streaming,
+                &turn_model,
+                &mut ui,
+                &mut feedback_rx,
+            )
+            .await;
+            ui.end_turn();
         }
 
         // Save history on exit

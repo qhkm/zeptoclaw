@@ -7173,6 +7173,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "unicode-normalization",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "wa-rs",

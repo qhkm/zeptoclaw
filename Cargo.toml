@@ -252,6 +252,8 @@ jsonwebtoken = { version = "10", optional = true, features = ["aws_lc_rs"] }
 # Password hashing for panel password auth mode
 bcrypt = { version = "0.19", optional = true }
 unicode-normalization = "0.1.25"
+# Display width for wrapping CLI output (already in the tree via rustyline)
+unicode-width = "0.2"
 
 # =============================================================================
 # VERTEX PROVIDER (optional — feature-gated behind "provider-vertex")
