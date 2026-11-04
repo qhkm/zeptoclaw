@@ -112,7 +112,7 @@ docker compose -f docker-compose.multi-tenant.yml ps
 docker logs zc-shop-ahmad --tail 50 -f
 
 # Resource usage per tenant
-docker stats --no-stream $(docker ps --filter "name=zc-" -q)
+docker stats --stream $(docker ps --filter "name=zc-" -q)
 
 # Restart a tenant
 docker compose -f docker-compose.multi-tenant.yml restart tenant-shop-ahmad

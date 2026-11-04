@@ -42,7 +42,7 @@ description: What is ZeptoClaw and why should you use it?
 
 ```bash
 # One-shot CLI mode
-$ zeptoclaw agent --stream -m "Summarize the last 5 git commits"
+$ zeptoclaw agent -m "Summarize the last 5 git commits"
 
 # Gateway mode — serves Telegram, Slack, Discord, Webhook
 $ zeptoclaw gateway
