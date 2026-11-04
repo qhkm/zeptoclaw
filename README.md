@@ -16,7 +16,7 @@
 ---
 
 ```
-$ zeptoclaw agent --stream -m "Analyze our API for security issues"
+$ zeptoclaw agent -m "Analyze our API for security issues"
 
 🤖 ZeptoClaw — Streaming analysis...
 
@@ -118,10 +118,10 @@ cargo uninstall zeptoclaw
 zeptoclaw onboard
 
 # Talk to your agent
-zeptoclaw agent -m "Hello, set up my workspace"
+zeptoclaw agent --no-stream -m "Hello, set up my workspace"
 
 # Stream responses token-by-token
-zeptoclaw agent --stream -m "Explain async Rust"
+zeptoclaw agent -m "Explain async Rust"
 
 # Use a built-in template
 zeptoclaw agent --template researcher -m "Search for Rust agent frameworks"
@@ -279,8 +279,8 @@ ZeptoClaw is inspired by projects in the open-source AI agent ecosystem — Open
 
 ```bash
 # CLI agent (one-shot or streaming)
-zeptoclaw agent -m "Summarize this repo"
-zeptoclaw agent --stream -m "Explain async Rust"
+zeptoclaw agent --no-stream -m "Summarize this repo"
+zeptoclaw agent -m "Explain async Rust"
 zeptoclaw agent --template coder -m "Add error handling to main.rs"
 
 # Multi-channel gateway

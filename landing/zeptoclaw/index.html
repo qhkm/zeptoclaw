@@ -1541,7 +1541,7 @@
                     <h4>3. Start your assistant</h4>
                     <div class="install-code">
                         <span class="comment"># CLI mode with streaming</span><br>
-                        <span class="prompt">$</span> zeptoclaw agent --stream -m "Hello, set up my workspace"<br><br>
+                        <span class="prompt">$</span> zeptoclaw agent -m "Hello, set up my workspace"<br><br>
                         <span class="comment"># Use a built-in template</span><br>
                         <span class="prompt">$</span> zeptoclaw agent --template researcher -m "Analyze this API"<br><br>
                         <span class="comment"># Gateway mode — Telegram/Slack/Discord/Webhook</span><br>
@@ -1694,7 +1694,7 @@
 
             const scenes = [
                 {
-                    cmd: 'zeptoclaw agent --stream --template researcher -m "Analyze our API"',
+                    cmd: 'zeptoclaw agent --template researcher -m "Analyze our API"',
                     lines: [
                         { html: '<span class="terminal-ai">🤖 ZeptoClaw</span> — Streaming analysis with researcher template', delay: 400 },
                         { html: '<span class="terminal-tool">web_fetch</span> Fetching API docs...', delay: 600 },

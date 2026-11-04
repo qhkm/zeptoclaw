@@ -306,7 +306,7 @@ The fallback provider uses a circuit breaker: after 3 consecutive failures the p
 All providers support SSE streaming:
 
 ```bash
-zeptoclaw agent --stream -m "Tell me a story"
+zeptoclaw agent -m "Tell me a story"
 ```
 
 ## Environment variables

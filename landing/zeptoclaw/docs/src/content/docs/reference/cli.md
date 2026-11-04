@@ -29,19 +29,19 @@ zeptoclaw agent [OPTIONS] -m <MESSAGE>
 
 | Option | Description |
 |--------|-------------|
-| `-m, --message <TEXT>` | Message to send to the agent |
-| `--stream` | Enable streaming (token-by-token output) |
+| `-m, --message <TEXT>` | Message to send to the agent. Streaming is ON by default |
+| `--no-stream` | Disable streaming (token-by-token output) |
 | `--template <NAME>` | Use an agent template (coder, researcher, writer, analyst) |
 | `--workspace <PATH>` | Set workspace directory |
 
 ### Examples
 
 ```bash
-# Simple message
-zeptoclaw agent -m "Hello"
+# Simple message without streaming
+zeptoclaw agent --no-stream -m "Hello"
 
 # With streaming
-zeptoclaw agent --stream -m "Explain async Rust"
+zeptoclaw agent -m "Explain async Rust"
 
 # With template
 zeptoclaw agent --template coder -m "Write a CSV parser"
