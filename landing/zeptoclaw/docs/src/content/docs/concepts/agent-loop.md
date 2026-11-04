@@ -77,10 +77,10 @@ The budget is tracked atomically using lock-free `AtomicU64` counters. When the 
 
 ## Streaming
 
-When streaming is enabled (`--stream` flag or config), the agent loop uses SSE (Server-Sent Events) to deliver tokens in real-time:
+When streaming is enabled (Default value. `--no-stream` flag to disable), the agent loop uses SSE (Server-Sent Events) to deliver tokens in real-time:
 
 ```bash
-zeptoclaw agent --stream -m "Explain monads"
+zeptoclaw agent -m "Explain monads"
 ```
 
 Both Claude and OpenAI providers support streaming. Tool calls are still executed between streaming chunks.

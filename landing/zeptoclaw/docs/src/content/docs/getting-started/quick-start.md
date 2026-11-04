@@ -30,14 +30,14 @@ export ZEPTOCLAW_PROVIDERS_OPENAI_API_KEY=sk-...
 
 ## 3. Send your first message
 
+Streaming is ON by default. Use `--no-stream` to disable it.
+
 ```bash
-zeptoclaw agent -m "Hello! What can you help me with?"
+zeptoclaw agent --no-stream -m "Hello! What can you help me with?"
 ```
 
-Add `--stream` for real-time token-by-token output:
-
 ```bash
-zeptoclaw agent --stream -m "List the files in my current directory"
+zeptoclaw agent -m "List the files in my current directory"
 ```
 
 ## 4. Use a template
