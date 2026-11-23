@@ -2,6 +2,4 @@
 # Transitive dependency via probe-rs 0.31.0 — cannot upgrade directly
 ignore = [
     "RUSTSEC-2025-0141", # bincode 2.0.1 unmaintained (via probe-rs)
-    "RUSTSEC-2024-0370", # proc-macro-error 1.0.4 unmaintained (via teloxide → aquamarine)
-    "RUSTSEC-2025-0134", # rustls-pemfile 1.0.4 unmaintained (via teloxide-core → reqwest 0.11)
 ]
