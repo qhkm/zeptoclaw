@@ -170,6 +170,7 @@ Supports JSON and JSON5 config files (comments, trailing commas, unquoted keys).
   <a href="https://railway.com/deploy?template=https://github.com/qhkm/zeptoclaw"><img src="https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white" alt="Deploy to Railway"></a>
   <a href="https://render.com/deploy?repo=https://github.com/qhkm/zeptoclaw"><img src="https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render&logoColor=white" alt="Deploy to Render"></a>
   <a href="https://fly.io/docs/hands-on/"><img src="https://img.shields.io/badge/Fly.io-6E42C1?style=for-the-badge&logo=fly.io&logoColor=white" alt="Deploy to Fly.io"></a>
+  <a href="https://console.light-cloud.com/new?repo=https://github.com/qhkm/zeptoclaw"><img src="https://img.shields.io/badge/Light%20Cloud-0D141E?style=for-the-badge&logoColor=white" alt="Deploy to Light Cloud"></a>
 </p>
 
 ### Any VPS
